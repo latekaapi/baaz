@@ -274,6 +274,24 @@ pub struct FeedbackUi {
     /// and toggle/pause/resume/discard/steps are no-ops, so a second
     /// Done cannot start a second report.
     pub saving: bool,
+    /// The note count the in-flight Done write is saving. The draft moves
+    /// out with the write, so without this the header count would flash
+    /// `0 notes` until it lands; [`Self::notes_label`] reads this first
+    /// while [`Self::saving`].
+    pub saving_count: Option<usize>,
+    /// The header slot's window bounds, recorded every frame it paints
+    /// (the `on_children_prepainted` wrapper in
+    /// [`crate::app::Harness::render_feedback_header_slot`]): the
+    /// floating copy seats at these, and the capture layer ignores points
+    /// inside them.
+    pub slot_bounds: Option<gpui::Bounds<Pixels>>,
+    /// The toggle icon's window bounds, recorded the same way: tests click
+    /// the real control through the floating copy.
+    pub toggle_bounds: Option<gpui::Bounds<Pixels>>,
+    /// The Done icon's window bounds, recorded the same way.
+    pub done_bounds: Option<gpui::Bounds<Pixels>>,
+    /// The Discard icon's window bounds, recorded the same way.
+    pub discard_bounds: Option<gpui::Bounds<Pixels>>,
     /// The `feedback-mode:on` step verb parked the shell here for this
     /// run. Runtime-only, never `layout.feedback_mode`: [`Self::toggle`]
     /// treats it as the setting being on, and no layout save persists it.
@@ -309,6 +327,11 @@ impl FeedbackUi {
             discard_armed_at: None,
             discard_task: None,
             saving: false,
+            saving_count: None,
+            slot_bounds: None,
+            toggle_bounds: None,
+            done_bounds: None,
+            discard_bounds: None,
             forced_on: false,
             focus: cx.focus_handle(),
         }
@@ -368,14 +391,22 @@ impl FeedbackUi {
         self.draft.len()
     }
 
-    /// `N notes`, or `1 note`.
+    /// `N notes`, or `1 note`. While a Done write is in flight the count
+    /// being saved, never the emptied draft's `0 notes`.
     pub fn notes_label(&self) -> String {
-        let n = self.note_count();
+        let n = if self.saving { self.saving_count.unwrap_or(self.draft.len()) } else { self.draft.len() };
         if n == 1 {
             "1 note".to_owned()
         } else {
             format!("{n} notes")
         }
+    }
+
+    /// Whether `point` falls inside the header slot's recorded bounds:
+    /// the capture layer ignores such points (no hover outline, no note),
+    /// so the floating slot copy above it owns the click.
+    fn slot_contains(&self, point: Point<Pixels>) -> bool {
+        self.slot_bounds.is_some_and(|bounds| bounds.contains(&point))
     }
 
     /// Drop a stale arm: at or past [`DISCARD_ARM`].
@@ -394,9 +425,12 @@ impl FeedbackUi {
     }
 
     /// Whether the arm is live right now (stale arms read as off even
-    /// before [`Self::expire_discard`] runs).
+    /// before [`Self::expire_discard`] runs — and so do arms with nothing
+    /// left to drop, so every path that empties the draft disarms even
+    /// without saying so).
     pub fn discard_armed_live(&self) -> bool {
-        self.discard_armed
+        !self.draft.is_empty()
+            && self.discard_armed
             && self.discard_armed_at.is_some_and(|at| at.elapsed() <= DISCARD_ARM)
     }
 
@@ -543,6 +577,7 @@ impl FeedbackUi {
         self.step_queue.clear();
         self.disarm_discard();
         self.saving = false;
+        self.saving_count = None;
         self.phase = FeedbackPhase::Off;
         self.draft = Draft::new();
     }
@@ -930,6 +965,10 @@ impl crate::app::Harness {
         }
         self.feedback.saving = true;
         let note_count = self.feedback.note_count();
+        // The draft moves out below, emptying it: hold the count for the
+        // header (never a `0 notes` flash) and drop the Discard arm with it.
+        self.feedback.saving_count = Some(note_count);
+        self.feedback.disarm_discard();
         let draft = std::mem::take(&mut self.feedback.draft);
         let root = crate::feedback::feedback_root();
         let build = feedback_build_string();
@@ -975,6 +1014,7 @@ impl crate::app::Harness {
                     Err(err) => {
                         this.feedback.draft = draft;
                         this.feedback.saving = false;
+                        this.feedback.saving_count = None;
                         this.overlays.update(cx, |o, _| {
                             o.toast("Couldn't save feedback", format!("{err:#}"))
                         });
@@ -1354,6 +1394,7 @@ impl crate::app::Harness {
             || self.feedback.popover.is_some()
             || self.feedback.capture_pending.is_some()
             || self.feedback.press.is_some()
+            || self.feedback.slot_contains(point)
         {
             return;
         }
@@ -1386,6 +1427,14 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The per-frame poll lands here for the throttled trailing edge:
+        // a parked slot point never outlines, like the direct path above.
+        if self.feedback.slot_contains(point) {
+            self.feedback.hover = None;
+            self.feedback.hover_dirty = None;
+            cx.notify();
+            return;
+        }
         let hit = self.feedback.probe.hit(window, point);
         self.feedback.hover_point = Some(point);
         self.feedback.hover_tested_at = Some(Instant::now());
@@ -1416,6 +1465,11 @@ impl crate::app::Harness {
         cx: &mut Context<Self>,
     ) {
         if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+            return;
+        }
+        // Inside the header slot the floating copy owns the click: arm no
+        // press (and cancel no note), so the press never becomes one.
+        if self.feedback.slot_contains(point) {
             return;
         }
         if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
@@ -1492,6 +1546,13 @@ impl crate::app::Harness {
         cx: &mut Context<Self>,
     ) {
         if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+            self.feedback.press = None;
+            self.feedback.drag = None;
+            return;
+        }
+        // A release inside the header slot is the floating copy's click, not
+        // a note: drop the press without filing, like the popover path below.
+        if self.feedback.slot_contains(point) {
             self.feedback.press = None;
             self.feedback.drag = None;
             return;
@@ -2010,12 +2071,63 @@ impl crate::app::Harness {
     /// The header slot is the only chrome: setting off shows nothing, and
     /// nothing shows while capturing, when the window must read clean.
     /// The three header variants all call this just left of their icon
-    /// buttons — a region native pages never cover, so unlike a floating
-    /// pill its clicks always land. Setting on: always the toggle icon;
-    /// while Active or with notes in the draft, the `N notes` count plus
-    /// the Done and Discard icons follow it; a fresh Done flash replaces
-    /// the count and the actions for its ~4 s.
+    /// buttons — a region native pages never cover. While Active a second
+    /// copy floats above the capture layer at the slot's recorded bounds
+    /// (see [`Self::render_feedback_slot_overlay`]), so the toggle, Done
+    /// and Discard stay clickable under the layer; the in-header copy stays
+    /// for layout. Setting on: always the toggle icon; while Active or with
+    /// notes in the draft, the `N notes` count plus the Done and Discard
+    /// icons follow it; a fresh Done flash replaces the count and the
+    /// actions for its ~4 s.
     pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row = self.feedback_slot_row(cx)?;
+        // Record the slot's window bounds every frame it paints: the
+        // floating copy seats at these, and the capture layer ignores
+        // points inside them. The row is this wrapper's only child, so its
+        // first bounds are the slot's own rect — the `crumb_bounds` pattern.
+        let report = cx.entity().downgrade();
+        Some(
+            div()
+                .on_children_prepainted(move |bounds, _, cx| {
+                    if let Some(first) = bounds.first() {
+                        let bounds = *first;
+                        let _ = report.update(cx, |this, cx| {
+                            Self::note_trigger_bounds(&mut this.feedback.slot_bounds, bounds, cx);
+                        });
+                    }
+                })
+                .flex_none()
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
+    /// The floating slot copy: the same row, absolutely positioned at the
+    /// recorded bounds AFTER the capture layer, so it paints over the layer
+    /// — pixel-exactly over the in-header copy, which never shows through —
+    /// and owns the clicks while Active. Active only, and only with bounds
+    /// on record: Paused needs no cover, and before the first paint there is
+    /// nothing to seat at yet.
+    pub(crate) fn render_feedback_slot_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.feedback.phase != FeedbackPhase::Active {
+            return None;
+        }
+        let bounds = self.feedback.slot_bounds?;
+        let row = self.feedback_slot_row(cx)?;
+        Some(
+            div()
+                .absolute()
+                .left(px(f32::from(bounds.origin.x)))
+                .top(px(f32::from(bounds.origin.y)))
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
+    /// The slot's row: the toggle icon, then the count and the action icons
+    /// (or the Done flash). Both the in-header copy and the floating copy
+    /// build this, so the overlay covers the header copy pixel-exactly.
+    fn feedback_slot_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.feedback.capturing {
             return None;
         }
@@ -2039,14 +2151,18 @@ impl crate::app::Harness {
         if flashing {
             row = row.child(self.render_feedback_flash(cx));
         } else if active || !self.feedback.draft.is_empty() {
+            let count = self.feedback.notes_label();
             row = row
                 .child(
                     div()
+                        .id("feedback-count")
                         .flex_none()
                         .mono(11.5)
                         .text_color(cx.aui().colors.ink_3)
                         .whitespace_nowrap()
-                        .child(self.feedback.notes_label()),
+                        .role(gpui::Role::Status)
+                        .aria_label(count.clone())
+                        .child(count),
                 )
                 .child(self.render_feedback_done(cx))
                 .child(self.render_feedback_discard(cx));
@@ -2070,7 +2186,21 @@ impl crate::app::Harness {
             icon(IconName::MessagePlus).size(px(14.0))
         };
         let toggled = if active { gpui::Toggled::True } else { gpui::Toggled::False };
+        // One named element for the control: the wrapper owns the role, the
+        // label and the toggled state (the button has no toggled builder),
+        // and names itself for the label probe the way interactive divs do —
+        // the inner button stays silent, so the tree never nests two buttons.
+        aui::data::record_ax_label("Feedback mode");
+        let report = cx.entity().downgrade();
         div()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = report.update(cx, |this, cx| {
+                        Self::note_trigger_bounds(&mut this.feedback.toggle_bounds, bounds, cx);
+                    });
+                }
+            })
             .id("feedback-toggle")
             .flex_none()
             .flex()
@@ -2086,7 +2216,7 @@ impl crate::app::Harness {
                 icon_content_button("feedback-toggle-button", glyph)
                     .ghost()
                     .size(ButtonSize::Sm)
-                    .accessibility_label("Feedback mode")
+                    .disabled(self.feedback.saving)
                     .on_click(toggle),
             )
             .into_any_element()
@@ -2100,11 +2230,22 @@ impl crate::app::Harness {
         let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.finish_feedback(window, cx);
         });
+        // Flipped from the toggle: the button itself owns the role and the
+        // label (it already renders both), so the wrapper is a plain box —
+        // and the named element is the widget that actually disables while
+        // there is nothing to save.
+        let report = cx.entity().downgrade();
         div()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = report.update(cx, |this, cx| {
+                        Self::note_trigger_bounds(&mut this.feedback.done_bounds, bounds, cx);
+                    });
+                }
+            })
             .id("feedback-done")
             .flex_none()
-            .role(gpui::Role::Button)
-            .aria_label("Done — save feedback report")
             .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
             .child(
                 icon_content_button(
@@ -2125,6 +2266,11 @@ impl crate::app::Harness {
     /// inside the window clears the draft, staying in phase.
     fn render_feedback_discard(&self, cx: &mut Context<Self>) -> AnyElement {
         let armed = self.feedback.discard_armed_live();
+        let label = if armed {
+            format!("Confirm: discard {}", self.feedback.notes_label())
+        } else {
+            "Discard feedback notes".to_owned()
+        };
         let tip = if armed {
             format!("Click again to discard {}", self.feedback.notes_label())
         } else {
@@ -2136,17 +2282,26 @@ impl crate::app::Harness {
         let mut button = icon_content_button("feedback-discard-button", icon(IconName::Trash).size(px(14.0)))
             .ghost()
             .size(ButtonSize::Sm)
-            .accessibility_label("Discard feedback notes")
+            .accessibility_label(label)
             .disabled(!self.feedback.discard_enabled())
             .on_click(discard);
         if armed {
             button = button.danger();
         }
+        // Like Done: the button owns the role and the label, the wrapper is
+        // a plain box — while armed the label names the confirm.
+        let report = cx.entity().downgrade();
         div()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = report.update(cx, |this, cx| {
+                        Self::note_trigger_bounds(&mut this.feedback.discard_bounds, bounds, cx);
+                    });
+                }
+            })
             .id("feedback-discard")
             .flex_none()
-            .role(gpui::Role::Button)
-            .aria_label("Discard feedback notes")
             .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
             .child(button)
             .into_any_element()
@@ -2618,7 +2773,7 @@ mod tests {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
                     },
-                    "the bar overlaps the header".to_owned(),
+                    "an area note beside the header".to_owned(),
                     crate::feedback::test_context(),
                     None,
                     None,
@@ -2797,6 +2952,389 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
             "the icon resumes from Paused"
         );
+        restore_state(state);
+    }
+
+    /// A full-app harness drawn at the probe's 1440×900: signed in, so the
+    /// headers (and the feedback slot) paint instead of the login screen.
+    fn drawn_harness<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (gpui::Entity<crate::app::Harness>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| {
+                crate::app::Harness::new(
+                    test_args(dir),
+                    crate::shot::CaptureToken::default(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.layout.feedback_mode = true;
+            })
+        });
+        (baaz, vc)
+    }
+
+    /// One full-app frame at the probe size, like the AX test draws.
+    /// Probe-only: the painted tree is dropped, so this never carries
+    /// clicks — click tests use the live window below instead.
+    fn draw_app(baaz: &gpui::Entity<crate::app::Harness>, vc: &mut gpui::VisualTestContext) {
+        use gpui::IntoElement as _;
+        vc.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1440.), gpui::px(900.)),
+            |_, _| baaz.clone().into_any_element(),
+        );
+    }
+
+    /// A live root-view harness, signed in, with the feedback setting on:
+    /// real frames paint the real tree, so simulated clicks reach the real
+    /// header controls through the floating copy.
+    fn live_harness<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (gpui::Entity<crate::app::Harness>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                test_args(dir),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.layout.feedback_mode = true;
+            })
+        });
+        (baaz, vc)
+    }
+
+    /// One real frame through the live root view: paint runs (recording the
+    /// slot bounds) and the painted tree stays live for simulated clicks.
+    fn draw_window(vc: &mut gpui::VisualTestContext) {
+        vc.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    /// The centre of recorded control bounds: where the simulated click lands.
+    fn bounds_center(bounds: gpui::Bounds<gpui::Pixels>) -> gpui::Point<gpui::Pixels> {
+        gpui::point(
+            gpui::px(f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0),
+            gpui::px(f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0),
+        )
+    }
+
+    /// One area note straight into the draft, without images.
+    fn add_draft_note(
+        baaz: &gpui::Entity<crate::app::Harness>,
+        vc: &mut gpui::VisualTestContext,
+        text: &str,
+    ) {
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
+                        region: None,
+                    },
+                    text.to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+    }
+
+    /// While Active, a real click on the floating toggle pauses: two draws
+    /// (the first records the bounds, the second paints the overlay over the
+    /// layer), then `simulate_click` at the toggle's recorded centre — never
+    /// the toggle handler directly. The slot click files no note.
+    #[gpui::test]
+    fn header_slot_click_pauses_without_a_note(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-click-pause");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        draw_window(vc);
+        draw_window(vc);
+        let toggle = vc
+            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .expect("the toggle paints while Active");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
+            "the slot records its bounds"
+        );
+        vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the slot click pauses");
+            assert!(harness.feedback.popover.is_none(), "the slot click files no note");
+            assert!(harness.feedback.capture_pending.is_none(), "the slot click captures nothing");
+            assert!(harness.feedback.pending_click.is_none(), "the slot click parks no retry");
+        });
+        restore_state(state);
+    }
+
+    /// While Paused (no layer, no overlay), a real click on the in-header
+    /// toggle resumes: the control itself is clickable through a simulated
+    /// click — isolating the Active overlay from the button path.
+    #[gpui::test]
+    fn header_slot_click_resumes_from_paused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-click-resume");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "the handler pauses first"
+        );
+        draw_window(vc);
+        let toggle = vc
+            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .expect("the toggle paints while Paused");
+        vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            "the slot click resumes"
+        );
+        restore_state(state);
+    }
+
+    /// While Active with notes, a real click on the floating Done saves:
+    /// parking after the click lands Off with a report on disk — never the
+    /// Done handler directly.
+    #[gpui::test]
+    fn header_slot_done_click_saves(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-click-done");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        add_draft_note(&baaz, vc, "clicked done");
+        draw_window(vc);
+        draw_window(vc);
+        let done = vc
+            .update(|_, cx| baaz.read(cx).feedback.done_bounds)
+            .expect("Done paints while Active with notes");
+        vc.simulate_click(bounds_center(done), gpui::Modifiers::default());
+        // The click runs parked tasks on its way through, so the write may
+        // already have landed: park fully, then the only way to be Off with
+        // a report is the clicked Done having saved.
+        vc.run_until_parked();
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off),
+            "the clicked Done parks Off"
+        );
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            "the write clears the draft"
+        );
+        let report_root = crate::feedback::feedback_root();
+        let latest = std::fs::read_to_string(report_root.join("latest")).expect("Done writes latest");
+        assert!(
+            std::path::PathBuf::from(latest.trim()).join("report.md").is_file(),
+            "the clicked Done writes the report"
+        );
+        restore_state(state);
+    }
+
+    /// Points inside the recorded slot bounds never hover, press or release
+    /// into notes: the floating copy owns them. Points outside still arm.
+    #[gpui::test]
+    fn slot_bounds_silence_the_layer(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("slot-silence");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.feedback.slot_bounds = Some(gpui::Bounds {
+                    origin: gpui::point(gpui::px(10.), gpui::px(10.)),
+                    size: gpui::size(gpui::px(100.), gpui::px(30.)),
+                });
+                let inside = gpui::point(gpui::px(20.), gpui::px(20.));
+                let outside = gpui::point(gpui::px(400.), gpui::px(400.));
+                h.feedback_hover_at(inside, window, cx);
+                assert!(h.feedback.hover.is_none(), "no outline inside the slot");
+                h.feedback.hover_dirty = Some(inside);
+                h.hover_hit_test(inside, window, cx);
+                assert!(h.feedback.hover.is_none(), "no trailing outline inside the slot");
+                assert!(h.feedback.hover_dirty.is_none(), "the parked slot point is consumed");
+                h.feedback_press_at(inside, window, cx);
+                assert!(h.feedback.press.is_none(), "no press arms inside the slot");
+                h.feedback_press_at(outside, window, cx);
+                assert!(h.feedback.press.is_some(), "a press still arms outside the slot");
+                h.feedback_release_at(inside, window, cx);
+                assert!(h.feedback.press.is_none(), "the slot release drops the press");
+                assert!(
+                    h.feedback.capture_pending.is_none() && h.feedback.pending_click.is_none(),
+                    "the slot release files no note"
+                );
+            })
+        });
+        restore_state(state);
+    }
+
+    /// A click on a header element OUTSIDE the slot still comments: the guard
+    /// covers only the recorded bounds (here none — no draw ran).
+    #[gpui::test]
+    fn header_zone_click_outside_the_slot_still_notes(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-zone-note");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(270.0, 8.0, 60.0, 28.0, "Project")]);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
+            "no bounds on record without a draw"
+        );
+        f3_click(&baaz, vc, 297.0, 21.0);
+        match f3_popover_target(&baaz, vc) {
+            Some(Target::Element(hit)) => assert_eq!(hit.label, "Project"),
+            other => panic!("the header click notes its element, not {other:?}"),
+        }
+        restore_state(state);
+    }
+
+    /// Arming Discard renames it to the confirm in the accessibility tree,
+    /// replacing the idle label — one label per control, never nested.
+    #[gpui::test]
+    fn discard_arm_renames_its_label(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("discard-armed-label");
+        let (baaz, vc) = drawn_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        add_draft_note(&baaz, vc, "kept");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()),
+            "the first Discard press arms"
+        );
+        aui::data::arm_ax_probe(true);
+        draw_app(&baaz, vc);
+        let labels = aui::data::take_ax_labels();
+        aui::data::arm_ax_probe(false);
+        assert!(
+            labels.contains(&"Confirm: discard 1 note".to_owned()),
+            "the armed Discard names its confirm: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Discard feedback notes".to_owned()),
+            "the armed control owns one label: {labels:?}"
+        );
+        restore_state(state);
+    }
+
+    /// Starting Done holds the saved count for the header (never a `0
+    /// notes` flash), disarms Discard, and freezes the toggle until the
+    /// write lands.
+    #[gpui::test]
+    fn saving_holds_the_count_and_freezes_the_shell(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("saving-count");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
+                        region: None,
+                    },
+                    "saving".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()),
+            "the first Discard press arms"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.feedback.saving, "the write is in flight");
+            assert_eq!(harness.feedback.notes_label(), "1 note", "the count being saved shows");
+            assert!(!harness.feedback.discard_armed_live(), "Done disarms Discard");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            "the toggle waits out the save"
+        );
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Off, "the write parks Off");
+            assert!(!harness.feedback.saving, "the guard lifts");
+        });
+        restore_state(state);
+    }
+
+    /// Pausing — by toggle or by Escape — drops the Discard arm with the
+    /// phase, as does emptying the draft under a live arm.
+    #[gpui::test]
+    fn pause_and_escape_drop_the_discard_arm(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("pause-disarms");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
+                        region: None,
+                    },
+                    "arming".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the toggle pauses");
+            assert!(!harness.feedback.discard_armed_live(), "pausing disarms Discard");
+        });
+        // Escape through Active disarms the same way.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        vc.simulate_keystrokes("escape");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "Escape pauses");
+            assert!(!harness.feedback.discard_armed_live(), "Escape disarms Discard");
+        });
+        // And an emptied draft reads disarmed even with the flag still set.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.discard();
+                assert!(!h.feedback.discard_enabled(), "the draft is empty");
+                assert!(!h.feedback.discard_armed_live(), "no notes reads disarmed");
+            })
+        });
         restore_state(state);
     }
 

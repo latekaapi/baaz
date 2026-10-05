@@ -7409,10 +7409,16 @@ impl Render for Harness {
         // F2: the feedback capture layer (Active only); it paints above
         // the palette, dialog, settings and menus, with only toasts above
         // it (and toasts hide while a capture reads the window). The
-        // chrome lives in the header slot instead — no floating bar. F3
-        // adds the note popover as a sibling of the layer, never inside
-        // its key context, so typing and Escape reach the note.
+        // chrome lives in the header slot instead — no floating bar. R2b
+        // floats a second copy of that slot right above the layer while
+        // Active, so its clicks land. F3 adds the note popover as a sibling
+        // of the layer, never inside its key context, so typing and Escape
+        // reach the note.
         let feedback_layer = self.render_feedback_layer(window, cx);
+        // R2b: while Active the slot's second copy floats here, right above
+        // the capture layer (which would otherwise swallow its clicks), at
+        // the in-header copy's recorded bounds.
+        let feedback_slot_overlay = self.render_feedback_slot_overlay(cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
@@ -7776,9 +7782,12 @@ impl Render for Harness {
                 .children(tab_menu)
                 // F2: the feedback capture layer paints above the palette,
                 // dialog, settings and menus, so the layer truly covers
-                // them; only toasts stay above the shell. F3's note popover
-                // rides with it, as the layer's sibling.
+                // them; only toasts stay above the shell. R2b's slot copy
+                // rides right above the layer, so the header controls stay
+                // clickable. F3's note popover rides with it, as the
+                // layer's sibling.
                 .children(feedback_layer)
+                .children(feedback_slot_overlay)
                 .children(feedback_popover)
                 .children(toasts)
                 // Painted last: the whole-frame instrument's end. Zero-size,
