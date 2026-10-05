@@ -6424,6 +6424,7 @@ impl Render for Harness {
                 // while Sessions keeps its rail. The collapsed sidebar
                 // header cell above keeps the native-lights reservation, so
                 // the toolbar's first control still clears the lights.
+                .hide_rail(browse_minimal)
                 .rail(if browse_minimal {
                     div()
                         .id("browse-rail-hidden")
