@@ -98,7 +98,7 @@ impl Harness {
             self.projects.current = Some(id.clone());
             self.current_project = Some(id);
             projects::write(&self.projects);
-            cx.notify();
+            self.note_project_changed(cx);
         }
     }
 
@@ -110,6 +110,7 @@ impl Harness {
         self.projects.current = Some(id.clone());
         self.current_project = Some(id.clone());
         projects::write(&self.projects);
+        self.note_project_changed(cx);
         self.rejoin();
         self.invalidate_list();
         cx.notify();
@@ -121,6 +122,16 @@ impl Harness {
     /// What the project menu and the Projects palette both list.
     pub(crate) fn ordered_projects(&self) -> Vec<crate::projects::Project> {
         self.projects.sorted_available().into_iter().cloned().collect()
+    }
+
+    /// The current project just changed: unpark any carried Browse tab and
+    /// drop the address field (its tabs, sessions and rows belong to the
+    /// old project). The window-free twin of the `set_mode` clearing, for
+    /// the adoption paths that own no window.
+    pub(crate) fn note_project_changed(&mut self, cx: &mut Context<Self>) {
+        self.browser.centre_override = None;
+        self.drop_browse_address(cx);
+        cx.notify();
     }
 
     /// Pick a project from its menu row: when the active session is an
@@ -170,6 +181,7 @@ impl Harness {
         self.projects.current = Some(id.clone());
         self.current_project = Some(id.clone());
         projects::write(&self.projects);
+        self.note_project_changed(cx);
         self.rename.update(cx, |state, cx| state.set_value(project.name, window, cx));
         self.renaming_project = Some(id);
         window.focus(&self.rename.focus_handle(cx), cx);
@@ -226,6 +238,7 @@ impl Harness {
             let next = self.projects.most_recent_available().map(|p| p.id.clone());
             self.projects.current = next.clone();
             self.current_project = next;
+            self.note_project_changed(cx);
         }
         projects::write(&self.projects);
         // The rows re-resolve by root now, settled once for the whole batch.

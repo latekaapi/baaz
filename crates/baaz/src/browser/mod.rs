@@ -35,14 +35,17 @@ use aui::workbench::Annotation;
 use aui_tokens::ActiveAui;
 use aui_webview::{FakeWebBackend, WebBackend, WebviewIntent, WebviewState, WryBackend};
 use gpui::{AppContext as _, Bounds, Context, Entity, Pixels, Point, Window};
+use gpui_kit::base::input::{InputEvent, InputState};
 
 use crate::app::Harness;
 use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
 pub(crate) mod tabs;
+pub(crate) mod toolbar;
 
 pub(crate) use tabs::{Owner, StripTab, TabId, Tabs};
+pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
 const HOME_KEY: &str = "home";
@@ -91,6 +94,10 @@ pub(crate) struct BrowserVisibility {
     pub terminal_covering: bool,
     /// The window holds the keyboard focus (its last frame landed).
     pub window_active: bool,
+    /// The Browse omnibox suggestion list stands open. It drops down over
+    /// the page, so while it is open the page must be obscured (it shows
+    /// its screenshot stand-in, as with the palette).
+    pub omnibox_open: bool,
 }
 
 /// Whether `inputs`' native view may show: the pane open on the Browser
@@ -109,6 +116,7 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.dialog_open
         && !inputs.drop_cover
         && !inputs.terminal_covering
+        && !inputs.omnibox_open
         && inputs.window_active
 }
 
@@ -231,6 +239,12 @@ pub(crate) fn should_release_keyboard_on_mouse_down(
     page: Option<Bounds<Pixels>>,
 ) -> bool {
     holds_keyboard && page.is_some_and(|page| !page.contains(&position))
+}
+
+/// A session's last-activity time as ms since the epoch, for omnibox
+/// recency: `0` when the clock reads before it (never in practice).
+fn recency_ms(updated: &chrono::DateTime<chrono::Local>) -> u64 {
+    updated.timestamp_millis().max(0) as u64
 }
 
 /// The draft text a `SendAnnotations` intent appends: the URL plus one line
@@ -643,21 +657,35 @@ impl Harness {
         self.session_page(session_id).is_some()
     }
 
-    /// The Browse centre's shown tab, when Browse shows one (B2a-H2):
-    /// the current project's person-tab page. `None` in Sessions mode,
-    /// before the tabs load, or with no tab yet.
+    /// The Browse centre's shown tab, when Browse shows one (B2a-H2): the
+    /// carried session tab while one is parked (B2a-H4), else the current
+    /// project's person-tab page. `None` in Sessions mode, before the tabs
+    /// load, or with no tab yet.
     pub(crate) fn browse_centre_shown(&self) -> Option<TabId> {
         if self.mode != crate::layout::Mode::Browse || !self.browser.tabs_loaded {
             return None;
+        }
+        if let Some(id) = self.browser.centre_override {
+            if self.browser.tabs.get(id).is_some() {
+                return Some(id);
+            }
+        }
+        // A From-sessions show (B2a-H3): a session-owned tab the sidebar
+        // asked the centre to hold — ownership never moves, and any
+        // person-tab select clears it back to the project's own tab.
+        if let Some(id) = self.browse_session_tab {
+            if self.browser.tabs.get(id).is_some_and(|tab| matches!(tab.owner, Owner::Session(_))) {
+                return Some(id);
+            }
         }
         let space = self.current_project_id();
         self.browser.tabs.active_of(&Owner::Person, space.as_deref())
     }
 
     /// The Browse centre's live page, when one already exists — the
-    /// person tab's state — never creating. The mouse-down hand-back
+    /// shown tab's state — never creating. The mouse-down hand-back
     /// reads this instead of the pane's page while in Browse.
-    fn browse_centre_state(&self) -> Option<Entity<WebviewState>> {
+    pub(crate) fn browse_centre_state(&self) -> Option<Entity<WebviewState>> {
         let id = self.browse_centre_shown()?;
         self.browser.states.get(&id).cloned()
     }
@@ -696,22 +724,17 @@ impl Harness {
         browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
     }
 
-    /// The Browse centre page's rect for the window's `content` box:
-    /// the column above minus the webview's nav row. The single source
-    /// behind placement and release: `sync_browser` stores it every
-    /// frame ([`BrowserRegistry::centre_page_rect`]) and the mouse-down
+    /// The Browse centre page's rect for the window's `content` box: the
+    /// whole column above — the centre page draws with
+    /// [`WebviewPane::without_nav`](aui_webview::WebviewPane::without_nav),
+    /// so no nav row offsets it. The single source behind placement and
+    /// release: `sync_browser` stores it every frame
+    /// ([`BrowserRegistry::centre_page_rect`]) and the mouse-down
     /// hand-back reads the stored rect, so the slide — a translate
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
     fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
-        let centre = self.browse_centre_content_rect(content, window);
-        Bounds::new(
-            gpui::point(centre.origin.x, centre.origin.y + gpui::px(BROWSER_NAV_PX)),
-            gpui::size(
-                centre.size.width,
-                (centre.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.)),
-            ),
-        )
+        self.browse_centre_content_rect(content, window)
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -727,16 +750,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) -> Option<Entity<WebviewState>> {
         self.ensure_tabs_loaded(cx);
-        // A From-sessions show (B2a-H3): a session-owned tab the sidebar
-        // asked the centre to hold — ownership never moves, and any
-        // person-tab select clears it back to the project's own tab.
-        if let Some(id) = self.browse_session_tab {
-            if self.browser.tabs.get(id).is_some_and(|tab| matches!(tab.owner, Owner::Session(_))) {
-                return Some(self.ensure_tab_page(HOME_KEY, id, window, cx));
-            }
-        }
-        let space = self.current_project_id();
-        let id = self.browser.tabs.active_of(&Owner::Person, space.as_deref())?;
+        let id = self.browse_centre_shown()?;
         Some(self.ensure_tab_page(HOME_KEY, id, window, cx))
     }
 
@@ -754,23 +768,30 @@ impl Harness {
 
     /// Open a blank person tab in the current project and select it, with
     /// the address focused: the Browse sidebar's "New tab" row and the
-    /// entering-Browse ensure share this one path.
+    /// entering-Browse ensure share this one path. Clears any carried
+    /// session tab: ⌘T lands on the person's new tab, never the park.
     pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser.centre_override = None;
         self.ensure_tabs_loaded(cx);
         let space = self.current_project_id();
         let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
         let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
         self.browse_session_tab = None;
         self.schedule_tabs_write(cx);
-        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
-        state.update(cx, |state, cx| state.begin_editing(window, cx));
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        // ⌘T lands on the new-tab page with the field focused (B2a-H4):
+        // the Harness-owned address input, empty for a blank tab.
+        self.focus_browse_address_with("", window, cx);
         cx.notify();
     }
 
     /// Select the Browse sidebar's tab `id` (B2a-H2): the model
     /// activates and the page builds when discarded. A closed — or a
     /// session-owned — `id` is a no-op, so a × click racing the row's
-    /// own select never resurrects the tab. Selecting a person tab
+    /// own select never resurrects the tab. The selection moves first and
+    /// the address drops after, so focus lands on the newly shown page
+    /// (or the root) — never the old page.
+    /// Selecting a person tab
     /// clears a From-sessions show in the centre.
     pub(crate) fn select_browse_sidebar_tab(
         &mut self,
@@ -778,6 +799,9 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Selecting a person tab unparks any carried session tab: the
+        // centre shows the person's tab from here on.
+        self.browser.centre_override = None;
         self.ensure_tabs_loaded(cx);
         if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
@@ -791,6 +815,7 @@ impl Harness {
         self.browse_drop_target = None;
         self.browse_drop_at_end = false;
         self.ensure_tab_page(HOME_KEY, id, window, cx);
+        self.leave_browse_address(window, cx);
         cx.notify();
     }
 
@@ -1145,6 +1170,8 @@ impl Harness {
             self.schedule_tabs_write(cx);
         }
         self.browse_session_tab = Some(id);
+        // One route at a time: a From-sessions show replaces any carried tab.
+        self.browser.centre_override = None;
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         cx.notify();
     }
@@ -1351,6 +1378,11 @@ impl Harness {
         if url.is_empty() {
             crate::steps::record_step_failure("tab-new:");
             return;
+        }
+        // A real page opening ends any open address edit (the blank tab
+        // entering Browse opens one), exactly as selecting a tab does.
+        if url != BLANK {
+            self.leave_browse_address(window, cx);
         }
         self.ensure_tabs_loaded(cx);
         // B2a-H2b: in Browse a new tab is always the person's, even with
@@ -2004,6 +2036,15 @@ impl Harness {
         if tabs_dirty {
             self.schedule_tabs_write(cx);
         }
+        // The header toolbar's back/forward stacks follow every live page:
+        // whatever the page reports becomes the stack's current URL, so an
+        // outside navigation (a link) lands here and clears the forward
+        // stack exactly like a fresh one. Whether a load runs is the
+        // engine's own `WebviewState::loading`, read where the stop/reload
+        // control needs it — never tracked here.
+        for (id, url, _) in &live {
+            self.browser.histories.entry(*id).or_default().note_navigated(url);
+        }
         // A Screenshot whose bytes were not there yet attaches on arrival.
         // Stays pending across tab switches: it attaches when its own
         // session is active again, so a switch can never misattribute it.
@@ -2122,6 +2163,10 @@ impl Harness {
             dialog_open,
             drop_cover: self.browser.drop_cover,
             terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
+            // The omnibox drops down over the page, so while it renders
+            // rows the page must be obscured (its screenshot stand-in, as
+            // with the palette) — gpui never paints over it.
+            omnibox_open: self.browse_omnibox_open(cx),
             // A Chromium page is its own child window: clicking it makes
             // the page key and the gpui window inactive. Counting that as
             // inactive hid the page, which handed the keyboard back, so a
@@ -2163,6 +2208,19 @@ impl Harness {
             window_active: shown_window_active(window.is_window_active(), centre_shown, &holds),
             ..base
         });
+        // Editing ends when the page takes the keyboard (B2a-H4 7b): a click
+        // into a Chromium page moves no gpui focus, so the address input
+        // never blurs and would keep its editing look. The per-frame sync
+        // ends it instead — on the rising edge only, so typing in the field
+        // (which the page never holds through) never cancels itself.
+        let centre_holds = centre_shown.and_then(|id| holds.get(&id).copied()).unwrap_or(false);
+        if in_browse && centre_holds && !self.browse_last_holds {
+            // The page just took the keyboard: drop the field with no
+            // refocus (the sync owns no `&mut Window`, and handing focus
+            // anywhere would steal it straight back from the page).
+            self.drop_browse_address(cx);
+        }
+        self.browse_last_holds = centre_holds;
         self.apply_page_visibility(shown, frame_live, centre_shown, centre_live, cx);
         // The shown pages stamp their tabs when they really show (never a
         // blank), so discard measures real hiding — in memory only, never
@@ -2264,12 +2322,23 @@ impl Harness {
     /// it ([`aui_webview::FocusAddress`]). Already editing is a no-op, so
     /// a press that already reached the pane does not restart the edit.
     pub(crate) fn focus_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // In Browse ⌘L reaches the centre page, which needs no open pane.
+        // In Browse ⌘L reaches the centre toolbar's own field, which needs
+        // no open pane: the Harness-owned input, prefilled with the shown
+        // URL (empty on a blank tab, where the new-tab field takes it).
         if self.mode == crate::layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
-            if let Some(state) = self.browse_centre_page(window, cx) {
-                state.update(cx, |state, cx| state.begin_editing(window, cx));
-            }
+            let url = self
+                .browse_centre_shown()
+                .and_then(|id| {
+                    self.browser
+                        .states
+                        .get(&id)
+                        .map(|state| state.read(cx).url().to_string())
+                        .or_else(|| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+                })
+                .unwrap_or_default();
+            let prefill = if url.is_empty() || url == BLANK { "" } else { url.as_str() };
+            self.focus_browse_address_with(prefill, window, cx);
             return;
         }
         if !browser_pane_showing(
@@ -2290,6 +2359,640 @@ impl Harness {
         // blurs and stays "editing" — returning early made every later ⌘L a
         // no-op (B1b, live). `begin_editing` reuses the open input.
         state.update(cx, |state, cx| state.begin_editing(window, cx));
+    }
+
+    /// Whether the Browse omnibox suggestion list stands open (B2a-H4):
+    /// Browse shows the centre page and the field actually ranks rows —
+    /// merely editing with no rows obscures nothing. The covering input
+    /// in `sync_browser`: the list drops down over the page.
+    pub(crate) fn browse_omnibox_open(&self, cx: &gpui::App) -> bool {
+        self.mode == crate::layout::Mode::Browse && !self.browse_suggestions(cx).is_empty()
+    }
+
+    /// The address field's current text, or empty at rest.
+    pub(crate) fn browse_address_text(&self, cx: &gpui::App) -> String {
+        self.browse_address
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Focus the Browse address field with `text` selected (⌘L, a click on
+    /// the resting field, ⌘T on a blank tab): the one Harness-owned input
+    /// the toolbar and the new-tab field share — only one ever renders it
+    /// per frame — so the omnibox reads one value everywhere. Reuses the
+    /// open input when one exists. Records whether the page held the
+    /// keyboard, so leaving the field can hand focus back to it.
+    pub(crate) fn focus_browse_address_with(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browse_omnibox_selected = 0;
+        self.browse_omnibox_moved = false;
+        self.browse_completed = None;
+        self.browse_completed_text = None;
+        self.browse_address_page_focus =
+            self.browse_centre_state().is_some_and(|state| state.read(cx).holds_keyboard());
+        let text = text.to_owned();
+        match self.browse_address.clone() {
+            Some(input) => {
+                input.update(cx, |input, cx| {
+                    input.set_value(text, window, cx);
+                    input.select_all(window, cx);
+                    input.focus(window, cx);
+                });
+            }
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |input, cx| {
+                    input.set_placeholder("Search, open a page, or ask", window, cx);
+                    input.set_value(text, window, cx);
+                    input.select_all(window, cx);
+                    input.focus(window, cx);
+                });
+                let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+                    // ⌘↵ arrives here (not through the commit below): the
+                    // input's own `secondary-enter` binding emits
+                    // `PressEnter { secondary: true }` in the input context,
+                    // so Ask never also fires the plain-enter commit.
+                    InputEvent::PressEnter { secondary: true, .. } => this.ask_from_browse_address(window, cx),
+                    InputEvent::PressEnter { .. } => this.commit_browse_address(window, cx),
+                    // Blur only ends editing — never moves focus (the user
+                    // clicked something focusable). Focus restore belongs
+                    // only to Escape / Enter / row activation.
+                    InputEvent::Blur => this.drop_browse_address(cx),
+                    InputEvent::Focus => {
+                        this.browse_omnibox_selected = 0;
+                        this.browse_omnibox_moved = false;
+                        this.browse_completed = None;
+                        this.browse_completed_text = None;
+                        cx.notify();
+                    }
+                    InputEvent::Change => {
+                        // Typing resets the highlight. A Tab completion
+                        // survives only its own write: once the text differs
+                        // from what Tab wrote, the person is typing something
+                        // else and Enter must open that, not the old row.
+                        let typed = this.browse_address.as_ref().map(|input| input.read(cx).value().to_string());
+                        if this.browse_completed_text.is_some() && this.browse_completed_text != typed {
+                            this.browse_completed = None;
+                            this.browse_completed_text = None;
+                        }
+                        this.browse_omnibox_selected = 0;
+                        this.browse_omnibox_moved = false;
+                        cx.notify();
+                    }
+                });
+                self.browse_address = Some(input);
+                self.browse_address_sub = Some(sub);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drop the address input without navigating: the resting view falls
+    /// back to the page URL on the next frame. The window-free core of
+    /// [`Self::leave_browse_address`], for the project-adoption paths that
+    /// own no window.
+    pub(crate) fn drop_browse_address(&mut self, cx: &mut Context<Self>) {
+        if self.browse_address.is_some() {
+            self.browse_address = None;
+            self.browse_address_sub = None;
+            self.browse_omnibox_selected = 0;
+            self.browse_omnibox_moved = false;
+            self.browse_completed = None;
+            self.browse_completed_text = None;
+            cx.notify();
+        }
+    }
+
+    /// Leave the address field without navigating: the resting view falls
+    /// back to the page URL on the next frame. Runs on Escape, on Enter
+    /// (commit/Ask paths) and on row activation — never on blur, which
+    /// only ends editing without moving focus. While still
+    /// in Browse, focus returns to the page when it held the keyboard
+    /// before the edit, else to the root — never a destroyed handle (the
+    /// page counts only while its state still exists).
+    pub(crate) fn leave_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browse_address.is_none() {
+            return;
+        }
+        self.drop_browse_address(cx);
+        if self.mode != crate::layout::Mode::Browse {
+            return;
+        }
+        if self.browse_address_page_focus {
+            if let Some(state) = self.browse_centre_state() {
+                let focus = state.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                return;
+            }
+        }
+        window.focus(&self.focus_root, cx);
+    }
+
+    /// Navigate the Browse centre's shown tab to `url`: the model records
+    /// it first so a discarded page rebuilds there, then the live page
+    /// navigates when one exists. A navigation ends the address edit, like
+    /// committing it does. Whether a load runs is the engine's own
+    /// [`WebviewState::loading`](aui_webview::WebviewState::loading), never
+    /// a Baaz-tracked set.
+    pub(crate) fn navigate_browse_tab(
+        &mut self,
+        id: TabId,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_browse_address(window, cx);
+        self.ensure_tabs_loaded(cx);
+        let title = self.browser.tabs.get(id).map(|tab| tab.title.clone()).unwrap_or_default();
+        if self.browser.tabs.set_url_title(id, url, &title) {
+            self.schedule_tabs_write(cx);
+        }
+        match self.browser.states.get(&id).cloned() {
+            Some(state) => {
+                if state.read(cx).url().as_ref() != url {
+                    state.update(cx, |state, _cx| state.navigate(url));
+                }
+            }
+            None => {
+                self.ensure_tab_page(HOME_KEY, id, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Commit the address field (Enter): the highlighted omnibox row opens
+    /// once the highlight moved off the top Ask row — otherwise the typed
+    /// text navigates (a URL, or what looks like a host) or searches with
+    /// the default engine — and empty restores the field, never navigating.
+    /// Runs on the input's enter.
+    pub(crate) fn commit_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A Tab completion remembers its ROW: Enter opens that row even
+        // after the ranking moved under it — never an index into the
+        // re-ranked list.
+        if let Some(target) = self.browse_completed.clone() {
+            return self.activate_omnibox_target(target, window, cx);
+        }
+        if self.browse_omnibox_moved {
+            let rows = self.browse_suggestions(cx);
+            let index = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
+            return self.activate_omnibox_row(index, window, cx);
+        }
+        let typed = self.browse_address_text(cx);
+        self.leave_browse_address(window, cx);
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else {
+            return;
+        };
+        match toolbar::classify_address_input(&typed) {
+            toolbar::NavTarget::Url(url) => self.navigate_browse_tab(id, &url, window, cx),
+            toolbar::NavTarget::Search(url) => {
+                if !url.is_empty() {
+                    self.navigate_browse_tab(id, &url, window, cx);
+                } else {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Step the shown tab back within its Baaz-tracked history.
+    pub(crate) fn browse_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else {
+            return;
+        };
+        let url = self.browser.histories.entry(id).or_default().go_back();
+        if let Some(url) = url {
+            self.navigate_browse_tab(id, &url, window, cx);
+        }
+    }
+
+    /// Step the shown tab forward within its Baaz-tracked history.
+    pub(crate) fn browse_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else {
+            return;
+        };
+        let url = self.browser.histories.entry(id).or_default().go_forward();
+        if let Some(url) = url {
+            self.navigate_browse_tab(id, &url, window, cx);
+        }
+    }
+
+    /// Reload the shown tab — or stop its load while one is running (the
+    /// progress line's button). The button follows the engine's own
+    /// [`WebviewState::loading`](aui_webview::WebviewState::loading): stop
+    /// exactly while the engine reports a load, reload otherwise. The
+    /// library exposes no reload call, so a reload re-navigates the shown
+    /// URL.
+    pub(crate) fn browse_reload_or_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else {
+            return;
+        };
+        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
+        if state.read(cx).loading() {
+            state.update(cx, |state, _cx| state.stop());
+        } else {
+            let url = state.read(cx).url().to_string();
+            if !url.is_empty() {
+                state.update(cx, |state, _cx| state.navigate(&url));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Reset the shown tab's zoom to 100% (the zoom pill's click).
+    pub(crate) fn browse_reset_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else {
+            return;
+        };
+        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
+        state.update(cx, |state, _cx| state.set_zoom(100));
+        cx.notify();
+    }
+
+    /// The pane's "Browse" button (B2a-H4): the session's active tab shows
+    /// full-width in Browse mode with the ↩ chip. The tab stays
+    /// session-owned; the same `WebviewState` moves — no reload, the state
+    /// stays keyed by tab id and the centre renders it through
+    /// `browse_centre_page`.
+    pub(crate) fn carry_session_tab_to_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let owner = self.shown_tab_owner(cx);
+        if !matches!(owner, Owner::Session(_)) {
+            return;
+        }
+        let space = self.owner_space(&owner);
+        let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
+            return;
+        };
+        // `set_mode` clears the park, so the carry parks after the switch.
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.browser.centre_override = Some(id);
+        self.browse_session_tab = None;
+        cx.notify();
+    }
+
+    /// The ↩ chip (B2a-H4): the carried tab goes back to its session's pane
+    /// — Sessions mode with that session selected — with no reload: the
+    /// same `WebviewState` entity renders in the pane once its session
+    /// shows again.
+    pub(crate) fn browse_chip_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.browser.centre_override.take() else {
+            return;
+        };
+        let session = self.browser.tabs.get(id).and_then(|tab| match &tab.owner {
+            Owner::Session(session) => Some(session.clone()),
+            Owner::Person => None,
+        });
+        let Some(session) = session else {
+            cx.notify();
+            return;
+        };
+        self.set_mode(crate::layout::Mode::Sessions, window, cx);
+        self.resume(session, window, cx);
+    }
+
+    /// The session label behind the ↩ chip: the collapsed head label the
+    /// Sessions header wears, falling back to the id.
+    pub(crate) fn browse_chip_session_name(&self, session: &str, cx: &gpui::App) -> String {
+        self.collapsed_head_label(session, cx).unwrap_or_else(|| session.to_owned())
+    }
+
+    /// Ask the agent about `query` (the omnibox's Ask row, ⌘↵): a new
+    /// session in this project with the text as its first prompt draft —
+    /// never sent, never navigated. The draft rides
+    /// [`Self::pending_ask_draft`](crate::app::Harness::pending_ask_draft),
+    /// keyed by the session id `new_session_in` creates (or the draft id
+    /// it reuses) — and lands when that session's view lands (see
+    /// `activate`), never on whatever `self.active` happens to be right
+    /// now. Any early return in `new_session_in` drops it, so no unrelated
+    /// resume ever takes it.
+    pub(crate) fn browse_ask(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        self.leave_browse_address(window, cx);
+        self.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query });
+        self.new_session(window, cx);
+        cx.notify();
+    }
+
+    /// Key the armed Ask draft to `session`: the id `new_session_in`
+    /// created (or the draft id it reused). Called on every path that opens
+    /// the Ask's session, before its view lands — so `activate` takes the
+    /// draft only for this session.
+    pub(crate) fn key_pending_ask(&mut self, session: &str) {
+        if let Some(pending) = self.pending_ask_draft.as_mut() {
+            pending.target = Some(session.to_owned());
+        }
+    }
+
+    /// Drop the armed Ask draft: every early return in `new_session_in`
+    /// (a switch already pending, no params, a failed or async-never-landing
+    /// provider open) drops it, so no unrelated resume ever takes it.
+    pub(crate) fn drop_pending_ask(&mut self) {
+        self.pending_ask_draft = None;
+    }
+
+    /// ⌘↵ inside the address field: Ask about the field's text. Runs from
+    /// the input's own `secondary-enter` binding (see
+    /// [`Self::focus_browse_address_with`]), so the plain-enter commit
+    /// never also fires.
+    pub(crate) fn ask_from_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.browse_address_text(cx);
+        self.browse_ask(&query, window, cx);
+    }
+
+    /// The omnibox rows for the field's current text: this project's open
+    /// tabs (person tabs plus session tabs) and its sessions — history
+    /// stays empty until B2b fills it, which omits the section. Sessions
+    /// stay inside this project and out of the hidden list.
+    pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
+        let query = self.browse_address_text(cx);
+        if query.trim().is_empty() || !self.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = self.current_project_id();
+        let mut tabs: Vec<(TabId, String, String, u64)> = self
+            .browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .map(|tab| {
+                let label = tabs::tab_label(&tab.title, &tab.url);
+                (
+                    tab.id,
+                    if label.is_empty() { tab.url.clone() } else { label },
+                    tab.url.clone(),
+                    tab.last_shown.unwrap_or(0),
+                )
+            })
+            .collect();
+        for (_, group) in self.browser.tabs.session_tabs(space.as_deref()) {
+            for tab in group {
+                let label = tabs::tab_label(&tab.title, &tab.url);
+                tabs.push((
+                    tab.id,
+                    if label.is_empty() { tab.url.clone() } else { label },
+                    tab.url.clone(),
+                    tab.last_shown.unwrap_or(0),
+                ));
+            }
+        }
+        let current = self.current_project_id();
+        let sessions: Vec<(String, String, u64)> = self
+            .sessions
+            .iter()
+            .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
+            .map(|entry| (entry.id.clone(), entry.label.clone(), recency_ms(&entry.updated)))
+            .collect();
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &[])
+    }
+
+    /// Move the omnibox highlight by `delta`, wrapping over the rows the
+    /// field currently ranks. An explicit move supersedes any Tab
+    /// completion: the highlight, not the completed row, now owns Enter.
+    pub(crate) fn move_omnibox(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let rows = self.browse_suggestions(cx);
+        if rows.is_empty() {
+            return;
+        }
+        let len = rows.len() as isize;
+        let next = (self.browse_omnibox_selected as isize + delta).rem_euclid(len);
+        self.browse_omnibox_selected = next as usize;
+        self.browse_omnibox_moved = true;
+        self.browse_completed = None;
+        self.browse_completed_text = None;
+        cx.notify();
+    }
+
+    /// Complete the highlighted row's text into the field (Tab): tabs write
+    /// their URL, sessions their title; Ask and Search rows are not
+    /// completable and Tab leaves them alone. The selection is clamped to
+    /// the rows and kept, and the completed ROW's identity is remembered —
+    /// never an index into the re-ranked list — so Enter opens that row.
+    /// The row stays open for Enter or ⌘↵.
+    pub(crate) fn complete_omnibox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.browse_suggestions(cx);
+        if rows.is_empty() {
+            return;
+        }
+        let index = self.browse_omnibox_selected.min(rows.len() - 1);
+        let row = rows[index].clone();
+        let Some(text) = row.suggestion.complete.clone() else {
+            return;
+        };
+        if let Some(input) = self.browse_address.clone() {
+            self.browse_completed_text = Some(text.clone());
+            input.update(cx, |input, cx| {
+                input.set_value(text, window, cx);
+                input.select_all(window, cx);
+                input.focus(window, cx);
+            });
+        }
+        // The input's own Change arm resets the highlight (keeping the
+        // completion, which survives the re-rank); the completed row keeps
+        // the highlight too, and its identity owns Enter.
+        self.browse_omnibox_selected = index;
+        self.browse_omnibox_moved = true;
+        self.browse_completed = Some(row.target.clone());
+        cx.notify();
+    }
+
+    /// Activate an omnibox row (Enter opens): Ask asks, a person tab
+    /// selects in Browse (clearing any carried tab), a session tab opens
+    /// its session in Sessions (updating the sidebar selection there), a
+    /// session opens in Sessions, and history/search URLs load in the
+    /// shown tab. The index clamps to the rows, so a stale highlight can
+    /// never miss into nothing.
+    pub(crate) fn activate_omnibox_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.browse_suggestions(cx);
+        let index = index.min(rows.len().saturating_sub(1));
+        let Some(row) = rows.get(index).cloned() else {
+            return;
+        };
+        self.activate_omnibox_target(row.target, window, cx);
+    }
+
+    /// Activate an omnibox row by identity (a Tab completion's remembered
+    /// row): the same destinations as [`Self::activate_omnibox_row`],
+    /// without re-resolving an index into a re-ranked list.
+    pub(crate) fn activate_omnibox_target(
+        &mut self,
+        target: OmniTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            OmniTarget::Ask(query) => self.browse_ask(&query, window, cx),
+            OmniTarget::Tab(id) => {
+                let owner = self.browser.tabs.get(id).map(|tab| tab.owner.clone());
+                match owner {
+                    Some(Owner::Person) => self.select_browse_sidebar_tab(id, window, cx),
+                    Some(Owner::Session(session)) => {
+                        self.leave_browse_address(window, cx);
+                        // A mouse-down already opened it: the click that
+                        // follows is a no-op, never a second open.
+                        if self.active_id(cx).as_deref() != Some(session.as_str()) {
+                            self.set_mode(crate::layout::Mode::Sessions, window, cx);
+                            self.resume(session, window, cx);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            OmniTarget::Session(session) => {
+                self.leave_browse_address(window, cx);
+                // A mouse-down already opened it: the click that follows
+                // is a no-op, never a second open.
+                if self.active_id(cx).as_deref() != Some(session.as_str()) {
+                    self.set_mode(crate::layout::Mode::Sessions, window, cx);
+                    self.resume(session, window, cx);
+                }
+            }
+            OmniTarget::History(url) | OmniTarget::Search(url) => {
+                self.leave_browse_address(window, cx);
+                self.ensure_tabs_loaded(cx);
+                if let Some(id) = self.browse_centre_shown() {
+                    self.navigate_browse_tab(id, &url, window, cx);
+                }
+            }
+        }
+    }
+
+    /// The new-tab page's pick-up rows (B2a-H4) with what each opens: this
+    /// project's open tabs (blank ones excluded — the current empty tab is
+    /// not somewhere to pick up), then its recent sessions, then recently
+    /// closed tabs — capped at 5.
+    pub(crate) fn browse_pickup_full(&self) -> Vec<(toolbar::PickupRow, PickupTarget)> {
+        let space = self.current_project_id();
+        let project_name = self.current_project().map(|project| project.name.clone()).unwrap_or_default();
+        let tab_items: Vec<(TabId, String, String)> = if self.browser.tabs_loaded {
+            self.browser
+                .tabs
+                .person_tabs(space.as_deref())
+                .iter()
+                .filter(|tab| !tab.url.is_empty() && tab.url != BLANK)
+                .map(|tab| {
+                    let label = tabs::tab_label(&tab.title, &tab.url);
+                    (tab.id, if label.is_empty() { tab.url.clone() } else { label }, project_name.clone())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let current = self.current_project_id();
+        let session_items: Vec<(String, String, String)> = self
+            .sessions
+            .iter()
+            .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
+            .take(5)
+            .map(|entry| (entry.id.clone(), entry.label.clone(), project_name.clone()))
+            .collect();
+        // Recently closed tabs are this project's person tabs only — another
+        // project's tabs never offer here — newest first, and clickable:
+        // each row reopens exactly the tab it names.
+        let now = tabs::now_ms();
+        let closed_items: Vec<(TabId, String, String)> = self
+            .browser
+            .tabs
+            .closed
+            .iter()
+            .rev()
+            .filter(|tab| tab.owner == Owner::Person && tab.space == space)
+            .take(5)
+            .map(|tab| {
+                let ago = tab
+                    .last_shown
+                    .map(|shown| toolbar::relative_ago(now.saturating_sub(shown)))
+                    .unwrap_or_else(|| "a while ago".to_owned());
+                let label = tabs::tab_label(&tab.title, &tab.url);
+                (tab.id, if label.is_empty() { tab.url.clone() } else { label }, ago)
+            })
+            .collect();
+        let tab_pairs: Vec<(String, String)> =
+            tab_items.iter().map(|(_, title, project)| (title.clone(), project.clone())).collect();
+        let session_pairs: Vec<(String, String)> =
+            session_items.iter().map(|(_, label, project)| (label.clone(), project.clone())).collect();
+        let closed_pairs: Vec<(String, String)> =
+            closed_items.iter().map(|(_, title, ago)| (title.clone(), ago.clone())).collect();
+        let display = toolbar::pickup_rows(&tab_pairs, &session_pairs, &closed_pairs, 5);
+        let mut targets = Vec::new();
+        for (id, _, _) in &tab_items {
+            targets.push(PickupTarget::Tab(*id));
+        }
+        for (id, _, _) in &session_items {
+            targets.push(PickupTarget::Session(id.clone()));
+        }
+        for (id, _, _) in &closed_items {
+            targets.push(PickupTarget::Closed(*id));
+        }
+        targets.truncate(5);
+        display.into_iter().zip(targets).collect()
+    }
+
+    /// Reopen the closed tab `id` from a new-tab pick-up row and select it:
+    /// selecting clears any carried session tab, so the reopened person tab
+    /// shows. A no-op for an unknown id.
+    pub(crate) fn reopen_browse_closed_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.tabs.reopen(id).is_some() {
+            self.select_browse_sidebar_tab(id, window, cx);
+        }
+    }
+
+    /// `omnibox:<text>`: focus the Browse address field and type `text` —
+    /// the `browse-omnibox` capture aid. The dropdown stays open on the
+    /// typed text. Free: no turn, no wire.
+    pub(crate) fn step_omnibox(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.ensure_tabs_loaded(cx);
+        if self.browse_centre_page(window, cx).is_none() {
+            crate::steps::record_step_failure(&format!("omnibox:{rest}"));
+            return;
+        }
+        self.focus_browse_address_with(rest, window, cx);
+    }
+
+    /// `fixture-session:<name>`: park a local session row plus one session
+    /// tab carrying `https://example.com`, and carry it into Browse — the
+    /// offline `browse-from-session` capture aid. Free: no turn, no wire.
+    pub(crate) fn step_fixture_session(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = rest.trim();
+        let name = if name.is_empty() { "Fix ledger chart" } else { name };
+        let id = format!("fixture-{}", name.to_lowercase().replace(' ', "-"));
+        self.ensure_tabs_loaded(cx);
+        if !self.sessions.iter().any(|entry| entry.id == id) {
+            let now = chrono::Local::now();
+            let space = self.current_project_id();
+            let workspace =
+                self.current_project().map(|project| project.root.to_string_lossy().into_owned());
+            self.sessions.push(crate::sidebar::local_started_row(&id, name.to_owned(), space.clone(), workspace, now));
+            self.invalidate_list();
+        }
+        let space = self.current_project_id();
+        let tab_id = self.browser.tabs.open(space, Owner::Session(id), "https://example.com", None);
+        self.schedule_tabs_write(cx);
+        self.ensure_tab_page(HOME_KEY, tab_id, window, cx);
+        // `set_mode` clears the park, so the fixture parks after the switch.
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.browser.centre_override = Some(tab_id);
+        self.browse_session_tab = None;
+        cx.notify();
     }
 
     /// `page-focus`: give the active browser page the keyboard, focusing the
@@ -2448,6 +3151,26 @@ impl Harness {
     }
 }
 
+/// What a pick-up row opens: a tab selects, a session opens, and a
+/// closed tab reopens exactly the tab the row names.
+pub(crate) enum PickupTarget {
+    /// Select this person tab.
+    Tab(TabId),
+    /// Open this session.
+    Session(String),
+    /// Reopen this closed tab.
+    Closed(TabId),
+}
+
+/// Where an omnibox dropdown anchors: under the toolbar field (floating
+/// over the page top), or in flow under the new-tab page's centred field.
+pub(crate) enum OmniAnchor {
+    /// The toolbar field's list: absolute, under the toolbar.
+    Toolbar,
+    /// The new-tab field's list: in flow, under the centred field.
+    Newtab,
+}
+
 /// All webviews a [`Harness`](crate::app::Harness) holds. Kept here so the
 /// registry's shape lives beside the logic that drives it.
 pub(crate) struct BrowserRegistry {
@@ -2483,6 +3206,16 @@ pub(crate) struct BrowserRegistry {
     /// (see `browse_centre_page_rect`), never a second computation.
     /// `None` outside Browse and before the first sync.
     pub centre_page_rect: Option<Bounds<Pixels>>,
+    /// The session tab carried into Browse full-width (B2a-H4): the
+    /// pane's "Browse" button parks the session's active tab here and the
+    /// centre shows it — with the ↩ chip — instead of the project's
+    /// person tab. The tab stays session-owned; the chip clears this and
+    /// hands the same `WebviewState` back to the session's pane.
+    pub centre_override: Option<TabId>,
+    /// One back/forward stack per tab (B2a-H4): the header toolbar tracks
+    /// the URLs the sync reports, since the library exposes no back,
+    /// forward or reload calls to drive.
+    pub histories: HashMap<TabId, BackForward>,
 }
 
 impl BrowserRegistry {
@@ -2501,6 +3234,8 @@ impl BrowserRegistry {
             agent_tabs: HashMap::new(),
             middle_pressed: None,
             centre_page_rect: None,
+            centre_override: None,
+            histories: HashMap::new(),
         }
     }
 }
@@ -2533,6 +3268,7 @@ mod tests {
             drop_cover: false,
             terminal_covering: false,
             window_active: true,
+            omnibox_open: false,
         }
     }
 
@@ -2553,6 +3289,7 @@ mod tests {
             drop_cover: false,
             terminal_covering: false,
             window_active: true,
+            omnibox_open: false,
         }
     }
 
@@ -2593,6 +3330,19 @@ mod tests {
         let mut dead = centre_clear();
         dead.window_active = false;
         assert!(!browser_visible(dead), "a dead window hides the centre page");
+    }
+
+    #[test]
+    fn open_omnibox_obscures_pane_and_centre() {
+        // The suggestion list drops down over the page, so while it is open
+        // the page must be obscured (its screenshot stand-in, as with the
+        // palette) — on the pane and on the Browse centre alike.
+        let mut pane = all_clear();
+        pane.omnibox_open = true;
+        assert!(!browser_visible(pane), "the omnibox obscures the pane's page");
+        let mut centre = centre_clear();
+        centre.omnibox_open = true;
+        assert!(!browser_visible(centre), "the omnibox obscures the centre page");
     }
 
     #[test]

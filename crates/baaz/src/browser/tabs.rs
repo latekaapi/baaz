@@ -230,6 +230,20 @@ impl Tabs {
         }
     }
 
+    /// Reopen the closed tab `id`, selecting it for its owner: the new-tab
+    /// page's closed rows. Keeps its identity, space and URL; appended at
+    /// the strip's end. `None` for an unknown (or never-closed) id.
+    pub(crate) fn reopen(&mut self, id: TabId) -> Option<TabId> {
+        let ix = self.closed.iter().position(|tab| tab.id == id)?;
+        let tab = self.closed.remove(ix);
+        // A live tab can never carry the id: ids are never reused, and a
+        // reopened tab left the live set when it closed.
+        debug_assert!(!self.tabs.iter().any(|live| live.id == id));
+        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
+        self.tabs.push(tab);
+        Some(id)
+    }
+
     /// Reopen the most recently closed tab, selecting it for its owner.
     /// Keeps its identity, space and URL; appended at the strip's end.
     /// (Next tasks: the reopen control.)
@@ -915,6 +929,21 @@ mod tests {
             Some("https://24.example/")
         );
         assert_eq!(model.active_of(&session("s"), None), Some(newest));
+    }
+
+    #[test]
+    fn reopen_by_id_restores_the_named_tab() {
+        let mut model = tabs();
+        let first = model.open(Some("p".to_owned()), Owner::Person, "https://a.example/", None);
+        let second = model.open(Some("p".to_owned()), Owner::Person, "https://b.example/", None);
+        model.close(first);
+        model.close(second);
+        assert_eq!(model.reopen(TabId(404)), None, "an unknown id reopens nothing");
+        let back = model.reopen(first).expect("the named closed tab");
+        assert_eq!(back, first, "identity survives the round trip");
+        assert_eq!(model.get(back).map(|tab| tab.url.as_str()), Some("https://a.example/"));
+        assert_eq!(model.active_of(&Owner::Person, Some("p")), Some(first));
+        assert!(!model.closed.iter().any(|tab| tab.id == first), "reopened leaves the closed list");
     }
 
     #[test]
