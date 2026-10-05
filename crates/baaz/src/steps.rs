@@ -57,7 +57,7 @@
 //! | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
 //! | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
 //! | `choose:<n>` | the n-th choice of the newest pending approval |
-//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; an unknown sub records a step failure, free |
+//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done\\|hover:x,y\\|click:x,y\\|drag:x1,y1,x2,y2\\|note:text\\|cancel>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; `hover:`/`click:`/`drag:` point like the mouse through the same handlers (window-logical px, with the cold-tree retry), `note:` fills the open popover and saves (finishing an in-flight capture first), `cancel` closes it unsaved; an unknown sub records a step failure, free |
 //! | `feedback:<text>` | type into the open session's approval feedback or question clarify field, without sending, free |
 //! | `answer:<label>` | pick one option on the newest question and send |
 //! | `answers:<a\|b>` | pick several options on the newest question and send |

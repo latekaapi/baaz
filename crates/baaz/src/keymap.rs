@@ -150,6 +150,8 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "SettingsFind", keystroke: "cmd-f", context: Some(crate::app::SETTINGS_CONTEXT), category: "settings", label: "Search shortcuts" },
     KeymapEntry { action: "ToggleFeedback", keystroke: "ctrl-alt-cmd-f", context: Some(aui::keys::ROOT_CONTEXT), category: "window", label: "Feedback mode: start or pause" },
     KeymapEntry { action: "FeedbackEscape", keystroke: "escape", context: Some(crate::app::feedback_ui::FEEDBACK_CONTEXT), category: "window", label: "Pause feedback mode" },
+    KeymapEntry { action: "FeedbackNoteSave", keystroke: "enter", context: Some(crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT), category: "window", label: "Save feedback note" },
+    KeymapEntry { action: "FeedbackNoteCancel", keystroke: "escape", context: Some(crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT), category: "window", label: "Cancel feedback note" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
@@ -321,6 +323,8 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "SettingsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SettingsFind, context)),
         "ToggleFeedback" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleFeedback, context)),
         "FeedbackEscape" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackEscape, context)),
+        "FeedbackNoteSave" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackNoteSave, context)),
+        "FeedbackNoteCancel" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackNoteCancel, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }

@@ -20,16 +20,43 @@ use std::time::{Duration, Instant};
 use aui::data::button;
 use aui::overlay::popover_layer;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use gpui::{div, prelude::*, px, AnyElement, Context, FocusHandle, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
+use gpui_kit::base::input::TextareaState;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::input::Textarea;
+use image::RgbaImage;
 
-use crate::feedback::{Draft, ElementProbe, FakeProbe, MacProbe, ScreenContext};
+use crate::feedback::{
+    crop_with_outline, human_role, render_window, Draft, ElementHit, ElementProbe, MacProbe, Rect, ScreenContext,
+    Target,
+};
 use crate::wire::WireCall as _;
 
 /// The key context the capture layer carries while Active, so Escape
 /// reaches [`crate::app::FeedbackEscape`] instead of the composer and
 /// typing never lands in a field behind the layer.
 pub const FEEDBACK_CONTEXT: &str = "BaazFeedback";
+
+/// The key context the note popover carries: a sibling of the layer (never
+/// inside it), so typing shortcuts and Escape reach the note instead of
+/// pausing the mode.
+pub const FEEDBACK_NOTE_CONTEXT: &str = "BaazFeedbackNote";
+
+/// A press travels this far before it becomes a drag, and a hover must move
+/// this far before it re-hit-tests.
+pub(crate) const FEEDBACK_DRAG_PX: f32 = 6.0;
+/// A released box smaller than this in either axis counts as a click.
+pub(crate) const FEEDBACK_MIN_BOX: f32 = 6.0;
+/// A click with no hit falls back to this centred box.
+pub(crate) const FEEDBACK_CLICK_W: f32 = 60.0;
+/// A click with no hit falls back to this centred box.
+pub(crate) const FEEDBACK_CLICK_H: f32 = 40.0;
+/// The capture hides the overlay, repaints, then reads the window after two
+/// painted frames; the timer below bounds the wait when frames never come.
+pub(crate) const FEEDBACK_CAPTURE_TIMEOUT: Duration = Duration::from_millis(120);
+/// A cold accessibility tree gets this long to warm before hover and click
+/// fall back.
+pub(crate) const FEEDBACK_PROBE_WARM: Duration = Duration::from_secs(1);
 
 /// How long a first Discard click stays armed waiting for its confirm.
 const DISCARD_ARM: Duration = Duration::from_secs(4);
@@ -70,15 +97,64 @@ pub enum DiscardOutcome {
     Cleared,
 }
 
+/// The note being written: its target and images plus the field holding
+/// the owner's words. Open from a click or a drag once the capture lands.
+pub struct PendingNote {
+    /// What the note points at.
+    pub target: Target,
+    /// The outlined crop around the target, at device pixels, when the
+    /// capture produced one.
+    pub crop: Option<RgbaImage>,
+    /// The full window shot, at device pixels, when the capture produced one.
+    pub full: Option<RgbaImage>,
+    /// The field holding the owner's words.
+    pub field: Entity<TextareaState>,
+}
+
+/// A click that hit-tested nothing: the tree may still be cold, so the
+/// shell retries on later frames before falling back to an area.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingClick {
+    /// Where the owner clicked, in window-logical pixels.
+    pub point: Point<Pixels>,
+    /// When the click landed, bounding the warm retry.
+    pub since: Instant,
+}
+
 /// The feedback shell's state: one per window, on `Harness`.
 pub struct FeedbackUi {
     /// What the shell shows.
     pub phase: FeedbackPhase,
     /// The notes taken so far this session.
     pub draft: Draft,
-    /// Hit-tests the window; [`MacProbe`] in the app, [`FakeProbe`] for
-    /// captures and tests.
+    /// Hit-tests the window; [`MacProbe`] everywhere a real window exists,
+    /// [`FakeProbe`] only under unit tests (explicit injection).
     pub probe: Box<dyn ElementProbe>,
+    /// The element under the pointer while Active, for the hover outline.
+    pub hover: Option<ElementHit>,
+    /// Where the pointer was on the last hit-test, in window-logical
+    /// pixels; moves under 2 px skip the next one.
+    pub hover_point: Option<Point<Pixels>>,
+    /// When the current hover wait started, bounding the warm retry while
+    /// the accessibility tree is still cold.
+    pub hover_since: Option<Instant>,
+    /// Where the left button went down, while it is down.
+    pub press: Option<Point<Pixels>>,
+    /// Where the pointer is now, while a drag is live.
+    pub drag: Option<Point<Pixels>>,
+    /// While set, the layer draws nothing (no frame, outline, box, pins or
+    /// chrome) but still occludes input, so the capture reads a clean frame.
+    pub capturing: bool,
+    /// The capture's generation: a stale frame callback never opens a
+    /// popover for a note that has since been cancelled.
+    pub capture_seq: u64,
+    /// The target waiting for its capture to land, with the field already
+    /// built so opening the popover is synchronous when it does.
+    pub capture_pending: Option<(Target, Entity<TextareaState>)>,
+    /// The open note popover, if the owner is writing one.
+    pub popover: Option<PendingNote>,
+    /// A click that hit-tested nothing, waiting for the tree to warm.
+    pub pending_click: Option<PendingClick>,
     /// A first Discard click is waiting for its confirm.
     pub discard_armed: bool,
     /// When the arm started, for the 4 s window.
@@ -106,6 +182,16 @@ impl FeedbackUi {
             phase: FeedbackPhase::Off,
             draft: Draft::new(),
             probe,
+            hover: None,
+            hover_point: None,
+            hover_since: None,
+            press: None,
+            drag: None,
+            capturing: false,
+            capture_seq: 0,
+            capture_pending: None,
+            popover: None,
+            pending_click: None,
             discard_armed: false,
             discard_armed_at: None,
             discard_task: None,
@@ -115,14 +201,29 @@ impl FeedbackUi {
         }
     }
 
-    /// The probe for this run: scripted hits under captures/tests, the
-    /// real macOS probe in the app.
-    pub fn probe_for(fake: bool) -> Box<dyn ElementProbe> {
-        if fake {
-            Box::new(FakeProbe { hits: Vec::new() })
-        } else {
-            Box::new(MacProbe)
-        }
+    /// The probe for this run: the real macOS probe wherever a real window
+    /// exists — the app and `--shot`/`--steps` captures alike, whose
+    /// NSWindow carries a real accessibility tree. Unit tests inject a
+    /// [`FakeProbe`] explicitly instead.
+    pub fn probe_for() -> Box<dyn ElementProbe> {
+        Box::new(MacProbe)
+    }
+
+    /// Close the popover without saving, dropping any in-flight capture so
+    /// a stale frame callback never reopens it. Stays in phase.
+    pub fn cancel_note(&mut self) {
+        self.popover = None;
+        self.capture_pending = None;
+        self.capture_seq = self.capture_seq.wrapping_add(1);
+        self.capturing = false;
+        self.pending_click = None;
+    }
+
+    /// Clear the hover outline, for the bar's mouse-move catcher.
+    pub fn clear_hover(&mut self) {
+        self.hover = None;
+        self.hover_point = None;
+        self.hover_since = None;
     }
 
     /// Whether anything is shown.
@@ -210,16 +311,19 @@ impl FeedbackUi {
                 if self.draft.is_empty() {
                     self.draft = Draft::new();
                 }
+                self.cancel_note();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Active;
                 ToggleOutcome::EnteredActive
             }
             FeedbackPhase::Active => {
+                self.cancel_note();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Paused;
                 ToggleOutcome::Paused
             }
             FeedbackPhase::Paused => {
+                self.cancel_note();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Active;
                 ToggleOutcome::Resumed
@@ -231,6 +335,7 @@ impl FeedbackUi {
     /// and always a no-op while [`Self::saving`].
     pub fn pause(&mut self) {
         if self.phase == FeedbackPhase::Active && !self.saving {
+            self.cancel_note();
             self.disarm_discard();
             self.phase = FeedbackPhase::Paused;
         }
@@ -251,6 +356,7 @@ impl FeedbackUi {
     pub fn setting_off(&mut self) {
         self.forced_on = false;
         if self.phase != FeedbackPhase::Off {
+            self.cancel_note();
             self.disarm_discard();
             self.phase = FeedbackPhase::Off;
         }
@@ -289,10 +395,67 @@ impl FeedbackUi {
     /// A finished Done write: Off with a cleared draft, and the in-flight
     /// guard lifted.
     pub fn done_applied(&mut self) {
+        self.cancel_note();
         self.disarm_discard();
         self.saving = false;
         self.phase = FeedbackPhase::Off;
         self.draft = Draft::new();
+    }
+
+    /// The target for a press-release at `point`: the hit element, or a
+    /// 60×40 box centred on the point (clamped into `win`) when nothing
+    /// labelled is there.
+    pub(crate) fn click_target(
+        hit: Option<ElementHit>,
+        point: Point<Pixels>,
+        win: gpui::Size<Pixels>,
+    ) -> Target {
+        match hit {
+            Some(hit) => Target::Element(hit),
+            None => {
+                let w = FEEDBACK_CLICK_W.min(f32::from(win.width).max(1.0));
+                let h = FEEDBACK_CLICK_H.min(f32::from(win.height).max(1.0));
+                let x = (f32::from(point.x) - w / 2.0).clamp(0.0, (f32::from(win.width) - w).max(0.0));
+                let y = (f32::from(point.y) - h / 2.0).clamp(0.0, (f32::from(win.height) - h).max(0.0));
+                Target::Area { rect: Rect { x, y, w, h }, region: None }
+            }
+        }
+    }
+
+    /// The dragged box from `start` to `current`, normalised so dragging
+    /// up-left works. `None` when either axis runs under 6 px: the release
+    /// counts as a click instead.
+    pub(crate) fn drag_rect(start: Point<Pixels>, current: Point<Pixels>) -> Option<Rect> {
+        let (sx, sy) = (f32::from(start.x), f32::from(start.y));
+        let (cx, cy) = (f32::from(current.x), f32::from(current.y));
+        let (x0, x1) = if sx <= cx { (sx, cx) } else { (cx, sx) };
+        let (y0, y1) = if sy <= cy { (sy, cy) } else { (cy, sy) };
+        if x1 - x0 < FEEDBACK_MIN_BOX || y1 - y0 < FEEDBACK_MIN_BOX {
+            return None;
+        }
+        Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+
+    /// Whether the pointer moved far enough from `press` to be dragging.
+    pub(crate) fn is_drag(press: Point<Pixels>, current: Point<Pixels>) -> bool {
+        let dx = (f32::from(current.x) - f32::from(press.x)).abs();
+        let dy = (f32::from(current.y) - f32::from(press.y)).abs();
+        dx.max(dy) >= FEEDBACK_DRAG_PX
+    }
+
+    /// Whether a hover moved far enough to re-hit-test.
+    pub(crate) fn hover_moved(last: Point<Pixels>, point: Point<Pixels>) -> bool {
+        let dx = (f32::from(point.x) - f32::from(last.x)).abs();
+        let dy = (f32::from(point.y) - f32::from(last.y)).abs();
+        dx.max(dy) >= 2.0
+    }
+
+    /// The rect a note points at: the element's frame or the area's box.
+    pub(crate) fn target_rect(target: &Target) -> Rect {
+        match target {
+            Target::Element(hit) => hit.rect,
+            Target::Area { rect, .. } => *rect,
+        }
     }
 }
 
@@ -307,10 +470,8 @@ pub fn feedback_accent(cx: &gpui::App) -> gpui::Hsla {
 }
 
 /// Text on the feedback colour: near-black `#1A1206` on dark's amber,
-/// white on light's. F2's bar and pill keep the theme buttons, so only
-/// F3's note popover paints on the feedback colour — this waits for it,
-/// like F1's model waited for F2.
-#[allow(dead_code)]
+/// white on light's. F3's hover chip, pins and note popover paint on the
+/// feedback colour.
 pub fn feedback_on_accent(cx: &gpui::App) -> gpui::Hsla {
     if cx.aui().kind.is_dark() {
         gpui::Hsla { h: 0.1000, s: 0.6250, l: 0.0627, a: 1.0 }
@@ -327,6 +488,37 @@ pub fn feedback_build_string() -> String {
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) { "debug" } else { "release" }
     )
+}
+
+/// Parse an `x,y` window-logical point for the `hover:`/`click:` step
+/// subs. `None` on anything unparseable (or non-finite).
+fn parse_feedback_point(payload: &str) -> Option<Point<Pixels>> {
+    let (x, y) = payload.split_once(',')?;
+    let (x, y): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+    if x.is_finite() && y.is_finite() {
+        Some(gpui::point(gpui::px(x), gpui::px(y)))
+    } else {
+        None
+    }
+}
+
+/// Parse an `x1,y1,x2,y2` drag for the `drag:` step sub: corner to corner
+/// in window-logical pixels. `None` on anything unparseable (or
+/// non-finite).
+fn parse_feedback_drag(payload: &str) -> Option<(Point<Pixels>, Point<Pixels>)> {
+    let mut parts = payload.split(',');
+    let nums: Option<Vec<f32>> = parts
+        .by_ref()
+        .map(|part| part.trim().parse::<f32>().ok().filter(|n| n.is_finite()))
+        .collect();
+    let nums = nums?;
+    if nums.len() != 4 || parts.next().is_some() {
+        return None;
+    }
+    Some((
+        gpui::point(gpui::px(nums[0]), gpui::px(nums[1])),
+        gpui::point(gpui::px(nums[2]), gpui::px(nums[3])),
+    ))
 }
 
 impl crate::app::Harness {
@@ -508,11 +700,84 @@ impl crate::app::Harness {
     /// unknown sub records a step failure — there is no forwarding: the
     /// session verb `feedback:<text>` (the open approval/clarify field)
     /// is a different verb again and dispatches on its own.
+    ///
+    /// The F3 note-taking subs run through the same handlers as the
+    /// mouse: `hover:x,y` hovers, `click:x,y` presses and releases at one
+    /// point, `drag:x1,y1,x2,y2` drags corner to corner, `note:<text>`
+    /// fills the open popover and saves (completing an in-flight capture
+    /// first), `cancel` closes the popover unsaved. Coordinates are
+    /// window-logical pixels. A note sub with no popover and no pending
+    /// capture, an empty text, an unparseable coordinate, or a pointing
+    /// sub while not Active records a step failure.
     pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.saving {
             return;
         }
-        match rest.trim() {
+        let rest = rest.trim();
+        if let Some(payload) = rest.strip_prefix("hover:") {
+            match parse_feedback_point(payload) {
+                Some(point) if self.feedback.phase == FeedbackPhase::Active => {
+                    self.feedback_hover_at(point, window, cx);
+                }
+                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(payload) = rest.strip_prefix("click:") {
+            match parse_feedback_point(payload) {
+                Some(point) if self.feedback.phase == FeedbackPhase::Active => {
+                    self.feedback_press_at(point, window, cx);
+                    self.feedback_release_at(point, window, cx);
+                }
+                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(payload) = rest.strip_prefix("drag:") {
+            match parse_feedback_drag(payload) {
+                Some((start, end)) if self.feedback.phase == FeedbackPhase::Active => {
+                    self.feedback_press_at(start, window, cx);
+                    self.feedback_drag_at(end, cx);
+                    self.feedback_release_at(end, window, cx);
+                }
+                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(text) = rest.strip_prefix("note:") {
+            if self.feedback.phase != FeedbackPhase::Active || text.trim().is_empty() {
+                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
+            } else if self.feedback.popover.is_some() {
+                self.fill_feedback_note(text, window, cx);
+                self.save_feedback_note(window, cx);
+            } else if self.feedback.capture_pending.is_some() {
+                // The capture task (two painted frames) has not landed
+                // yet: steps run back-to-back with no frame between them,
+                // so finish it synchronously here instead of scripting a
+                // `wait:` around capture internals.
+                let seq = self.feedback.capture_seq;
+                self.finish_note_capture(window, cx, seq);
+                if self.feedback.popover.is_some() {
+                    self.fill_feedback_note(text, window, cx);
+                    self.save_feedback_note(window, cx);
+                } else {
+                    crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
+                }
+            } else {
+                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
+            }
+            cx.notify();
+            return;
+        }
+        if rest == "cancel" {
+            self.cancel_feedback_note(window, cx);
+            cx.notify();
+            return;
+        }
+        match rest {
             "on" => {
                 self.feedback.forced_on = true;
                 if self.feedback.phase == FeedbackPhase::Off {
@@ -555,9 +820,7 @@ impl crate::app::Harness {
     /// current project, the open session and its title, the right pane
     /// (only while open), the shown page's URL (only while a page shows),
     /// the settings section (only while Settings is open), the window
-    /// size and scale, and the theme. F3 calls this per note; F2 builds
-    /// it only in tests, so the non-test build parks it here.
-    #[allow(dead_code)]
+    /// size and scale, and the theme. F3 calls this per note.
     pub(crate) fn feedback_context(&self, window: &mut Window, cx: &gpui::App) -> ScreenContext {
         let mode = match self.mode {
             crate::layout::Mode::Sessions => "sessions".to_owned(),
@@ -596,59 +859,781 @@ impl crate::app::Harness {
         }
     }
 
+    /// The pointer moved while Active with nothing pressed: refresh the
+    /// hover outline. The mouse-move handler and the `hover:` step verb
+    /// both land here. Moves under 2 px skip the hit-test; while a popover
+    /// is open, while capturing, or with the button down, hovers stay off.
+    pub(crate) fn feedback_hover_at(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.feedback.phase != FeedbackPhase::Active
+            || self.feedback.capturing
+            || self.feedback.popover.is_some()
+            || self.feedback.capture_pending.is_some()
+            || self.feedback.press.is_some()
+        {
+            return;
+        }
+        if let Some(last) = self.feedback.hover_point {
+            if !FeedbackUi::hover_moved(last, point) {
+                return;
+            }
+        }
+        let hit = self.feedback.probe.hit(window, point);
+        self.feedback.hover_point = Some(point);
+        if hit.is_some() {
+            self.feedback.hover_since = None;
+            self.feedback.hover = hit;
+        } else {
+            // The tree may still be cold (it warms on a later frame after
+            // `activate`): remember when the wait started so the layer's
+            // per-frame poll can retry for up to a second.
+            if self.feedback.hover_since.is_none() {
+                self.feedback.hover_since = Some(Instant::now());
+            }
+            self.feedback.hover = None;
+        }
+        cx.notify();
+    }
+
+    /// The left button went down while Active: arm a press. With a popover
+    /// open (or a capture in flight) the press lands outside it — the
+    /// popover consumes its own events — so it cancels the note instead of
+    /// starting a new one, and stays Active.
+    pub(crate) fn feedback_press_at(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+            return;
+        }
+        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
+            self.feedback.cancel_note();
+            window.focus(&self.feedback.focus, cx);
+            cx.notify();
+            return;
+        }
+        self.feedback.press = Some(point);
+        self.feedback.drag = None;
+        self.feedback.pending_click = None;
+        cx.notify();
+    }
+
+    /// The pointer moved with the left button down: past 6 px it is a
+    /// drag, and the layer draws the live box until release.
+    pub(crate) fn feedback_drag_at(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.feedback.phase != FeedbackPhase::Active
+            || self.feedback.capturing
+            || self.feedback.popover.is_some()
+            || self.feedback.capture_pending.is_some()
+        {
+            return;
+        }
+        let Some(press) = self.feedback.press else {
+            return;
+        };
+        if FeedbackUi::is_drag(press, point) {
+            self.feedback.drag = Some(point);
+            self.feedback.hover = None;
+            cx.notify();
+        }
+    }
+
+    /// The left button came up while Active: a ≥ 6×6 box becomes an area
+    /// note (named after the centre hit when there is one), anything else
+    /// a click — an element note on a hit, a parked retry on a miss while
+    /// the tree may still be cold. Both capture first, then open the
+    /// popover; the 60×40 area fallback only runs when the retry expires.
+    pub(crate) fn feedback_release_at(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+            self.feedback.press = None;
+            self.feedback.drag = None;
+            return;
+        }
+        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
+            self.feedback.press = None;
+            self.feedback.drag = None;
+            return;
+        }
+        let press = self.feedback.press.take();
+        self.feedback.drag.take();
+        let Some(start) = press else {
+            return;
+        };
+        if FeedbackUi::is_drag(start, point) {
+            if let Some(rect) = FeedbackUi::drag_rect(start, point) {
+                let centre = gpui::point(
+                    gpui::px(rect.x + rect.w / 2.0),
+                    gpui::px(rect.y + rect.h / 2.0),
+                );
+                let region = self
+                    .feedback
+                    .probe
+                    .hit(window, centre)
+                    .and_then(|hit| {
+                        if hit.label.is_empty() { None } else { Some(format!("near {}", hit.label)) }
+                    });
+                self.begin_note_capture(Target::Area { rect, region }, window, cx);
+                return;
+            }
+        }
+        match self.feedback.probe.hit(window, point) {
+            Some(hit) => self.begin_note_capture(Target::Element(hit), window, cx),
+            None => {
+                self.feedback.pending_click =
+                    Some(PendingClick { point, since: Instant::now() });
+                cx.notify();
+            }
+        }
+    }
+
+    /// The layer's per-frame poll (it renders every frame while Active):
+    /// retry a parked click's hit-test while the tree may still be cold,
+    /// then fall back to the 60×40 area; and retry a cleared hover the
+    /// same way so the outline appears when the tree warms.
+    pub(crate) fn feedback_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.phase != FeedbackPhase::Active
+            || self.feedback.capturing
+            || self.feedback.popover.is_some()
+            || self.feedback.capture_pending.is_some()
+        {
+            return;
+        }
+        if let Some(pending) = self.feedback.pending_click {
+            if let Some(hit) = self.feedback.probe.hit(window, pending.point) {
+                self.feedback.pending_click = None;
+                self.begin_note_capture(Target::Element(hit), window, cx);
+                return;
+            }
+            if pending.since.elapsed() >= FEEDBACK_PROBE_WARM {
+                self.feedback.pending_click = None;
+                let win = window.viewport_size();
+                let target = FeedbackUi::click_target(None, pending.point, win);
+                self.begin_note_capture(target, window, cx);
+                return;
+            }
+        }
+        if self.feedback.hover.is_none() {
+            if let (Some(point), Some(since)) =
+                (self.feedback.hover_point, self.feedback.hover_since)
+            {
+                if since.elapsed() < FEEDBACK_PROBE_WARM {
+                    if let Some(hit) = self.feedback.probe.hit(window, point) {
+                        self.feedback.hover = Some(hit);
+                        self.feedback.hover_since = None;
+                        cx.notify();
+                    }
+                } else {
+                    self.feedback.hover_since = None;
+                }
+            }
+        }
+    }
+
+    /// Start the capture for `target`: hide every overlay pixel, repaint,
+    /// then read the window after two painted frames (a 120 ms timer bounds
+    /// the wait). The note field is built now, so opening the popover is
+    /// synchronous when the capture lands — or when it fails, in which
+    /// case the popover still opens, with no images.
+    pub(crate) fn begin_note_capture(
+        &mut self,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.feedback.hover = None;
+        self.feedback.hover_point = None;
+        self.feedback.hover_since = None;
+        self.feedback.press = None;
+        self.feedback.drag = None;
+        self.feedback.pending_click = None;
+        let field = cx.new(|cx| {
+            aui::composer::composer_state_rows("What should change?", 3, 8, window, cx)
+        });
+        self.feedback.capturing = true;
+        self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
+        let seq = self.feedback.capture_seq;
+        self.feedback.capture_pending = Some((target, field));
+        window.refresh();
+        cx.notify();
+        let weak = cx.entity().downgrade();
+        window.on_next_frame(move |window, _cx| {
+            let weak = weak.clone();
+            window.on_next_frame(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.finish_note_capture(window, cx, seq));
+            });
+        });
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FEEDBACK_CAPTURE_TIMEOUT).await;
+            let _ = this.update_in(cx, |this, window, cx| this.finish_note_capture(window, cx, seq));
+        });
+        self.wire_tasks().push(timer);
+    }
+
+    /// Finish the capture `seq` started: read the window, cut the outlined
+    /// crop, and open the popover (imageless when the render fails). A
+    /// no-op for a stale generation or an already-finished capture, so the
+    /// frame path and the timer bound never open the popover twice.
+    pub(crate) fn finish_note_capture(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        seq: u64,
+    ) {
+        if seq != self.feedback.capture_seq || self.feedback.capture_pending.is_none() {
+            return;
+        }
+        self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
+        let (target, field) = self.feedback.capture_pending.take().expect("pending checked");
+        self.feedback.capturing = false;
+        let rect = FeedbackUi::target_rect(&target);
+        let scale = window.scale_factor();
+        let (crop, full) = match render_window(window) {
+            Ok(full) => (Some(crop_with_outline(&full, scale, rect, 24.0)), Some(full)),
+            Err(err) => {
+                crate::baaz_log!("feedback capture failed: {err:#}");
+                (None, None)
+            }
+        };
+        self.feedback.popover = Some(PendingNote { target, crop, full, field });
+        if let Some(note) = &self.feedback.popover {
+            let focus = note.field.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Save the open popover's text as a note. Empty text keeps the
+    /// popover open; afterwards focus returns to the layer.
+    pub(crate) fn save_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.feedback.popover.as_ref() else {
+            return;
+        };
+        let text = note.field.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let note = self.feedback.popover.take().expect("popover checked");
+        let context = self.feedback_context(window, cx);
+        self.feedback.draft.add(note.target, text, context, note.crop, note.full);
+        self.feedback.hover = None;
+        window.focus(&self.feedback.focus, cx);
+        cx.notify();
+    }
+
+    /// Fill the open popover's field without saving, for the `note:` step.
+    pub(crate) fn fill_feedback_note(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.feedback.popover.as_ref() else {
+            return;
+        };
+        note.field.update(cx, |field, cx| field.set_value(text.to_owned(), window, cx));
+        cx.notify();
+    }
+
+    /// Close the open popover (or drop its in-flight capture) without
+    /// saving, staying Active. Escape and Cancel land here.
+    pub(crate) fn cancel_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.popover.is_none() && self.feedback.capture_pending.is_none() {
+            return;
+        }
+        self.feedback.cancel_note();
+        window.focus(&self.feedback.focus, cx);
+        cx.notify();
+    }
+
+    /// The popover's title: the element's label (its role when macOS named
+    /// nothing) or `Area W × H` for a dragged box.
+    pub(crate) fn feedback_note_title(target: &Target) -> String {
+        match target {
+            Target::Element(hit) if !hit.label.is_empty() => hit.label.clone(),
+            Target::Element(hit) => human_role(&hit.role).to_owned(),
+            Target::Area { rect, .. } => {
+                format!("Area {} × {}", rect.w.round() as i64, rect.h.round() as i64)
+            }
+        }
+    }
+
+    /// The popover's muted subtitle: `<human role> · in <nearest
+    /// ancestor> · <right pane or mode>` for an element, the region or the
+    /// pane for an area.
+    pub(crate) fn feedback_note_subtitle(&self, target: &Target) -> String {
+        let pane = if self.layout.right_open {
+            crate::layout::right_kind(&self.layout).label().to_owned()
+        } else {
+            match self.mode {
+                crate::layout::Mode::Sessions => "sessions".to_owned(),
+                crate::layout::Mode::Browse => "browse".to_owned(),
+            }
+        };
+        match target {
+            Target::Element(hit) => {
+                let role = human_role(&hit.role);
+                match hit.ancestors.first() {
+                    Some((_, ancestor)) => format!("{role} · in {ancestor} · {pane}"),
+                    None => format!("{role} · {pane}"),
+                }
+            }
+            Target::Area { region, .. } => region.clone().unwrap_or(pane),
+        }
+    }
+
     /// The capture layer while Active: nothing when Off or Paused. One
-    /// element, built here so F3 finds every pointer trap in one place.
-    pub(crate) fn render_feedback_layer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// element, and every pointer trap stays on it: hover, press, drag and
+    /// release drive the F3 note flow through the shared handlers (the
+    /// `hover:`/`click:`/`drag:` step verbs land on those same functions),
+    /// while right/middle/scroll stay plain swallows. The hover outline,
+    /// the live drag box and the pins render as its decorative children;
+    /// while capturing it draws nothing but still occludes input.
+    pub(crate) fn render_feedback_layer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.feedback.phase != FeedbackPhase::Active {
             return None;
         }
         self.feedback.expire_discard();
+        self.feedback_poll(window, cx);
         let accent = feedback_accent(cx);
-        // F3 hook: hover/click/drag note-taking handlers attach to this
-        // layer, beside the swallowing ones below — never scattered
-        // across the app.
+        let win = window.viewport_size();
+        let win_w = f32::from(win.width);
+        let win_h = f32::from(win.height);
         let layer = div()
             .id("feedback-layer")
             .absolute()
             .inset_0()
-            .border_2()
-            .border_color(accent)
             .cursor(gpui::CursorStyle::Crosshair)
             .occlude()
             .key_context(FEEDBACK_CONTEXT)
             .track_focus(&self.feedback.focus)
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(!self.feedback.capturing, |this| this.border_2().border_color(accent))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.feedback_press_at(event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.feedback_release_at(event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_up(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-            .on_mouse_move(|_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.pressed_button == Some(gpui::MouseButton::Left) {
+                        this.feedback_drag_at(event.position, cx);
+                    } else {
+                        this.feedback_hover_at(event.position, window, cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .children(self.render_feedback_hover(cx, win_w))
+            .children(self.render_feedback_dragbox(cx))
+            .children(self.render_feedback_pins(cx, win_w, win_h));
         Some(layer.into_any_element())
     }
 
+    /// The hover outline (3 px outside the hit rect, accent border plus a
+    /// 14 % accent fill) and its name chip (`<human role> · <label>`,
+    /// accent background, on-accent mono text), above the rect or below it
+    /// near the top. Decorative: no role, pointer-transparent.
+    fn render_feedback_hover(&self, cx: &mut Context<Self>, win_w: f32) -> Option<AnyElement> {
+        if self.feedback.capturing {
+            return None;
+        }
+        let hit = self.feedback.hover.as_ref()?;
+        if self.feedback.press.is_some()
+            || self.feedback.popover.is_some()
+            || self.feedback.capture_pending.is_some()
+        {
+            return None;
+        }
+        let accent = feedback_accent(cx);
+        let on_accent = feedback_on_accent(cx);
+        let fill = gpui::Hsla { a: 0.14, ..accent };
+        let chip = if hit.label.is_empty() {
+            human_role(&hit.role).to_owned()
+        } else {
+            format!("{} · {}", human_role(&hit.role), hit.label)
+        };
+        // Roughly 6.9 px per mono glyph at 11.5 px plus the 7 px side
+        // padding each side; clamped into the window.
+        let est_w = chip.chars().count() as f32 * 6.9 + 14.0;
+        let centre = hit.rect.x + hit.rect.w / 2.0;
+        let chip_x = (centre - est_w / 2.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
+        let chip_y = if hit.rect.y <= 30.0 {
+            hit.rect.y + hit.rect.h + 4.0
+        } else {
+            hit.rect.y - 28.0
+        };
+        Some(
+            div()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(hit.rect.x - 3.0))
+                        .top(px(hit.rect.y - 3.0))
+                        .w(px(hit.rect.w + 6.0))
+                        .h(px(hit.rect.h + 6.0))
+                        .rounded(px(6.0))
+                        .border_2()
+                        .border_color(accent)
+                        .bg(fill),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(chip_x))
+                        .top(px(chip_y))
+                        .rounded(px(6.0))
+                        .bg(accent)
+                        .px(px(7.0))
+                        .py(px(3.0))
+                        .mono(11.5)
+                        .text_color(on_accent)
+                        .whitespace_nowrap()
+                        .child(chip),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The live drag box: a 2 px accent border over the 14 % fill.
+    /// Decorative: no role, pointer-transparent.
+    fn render_feedback_dragbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.feedback.capturing {
+            return None;
+        }
+        let (start, current) = (self.feedback.press?, self.feedback.drag?);
+        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
+            return None;
+        }
+        let (sx, sy) = (f32::from(start.x), f32::from(start.y));
+        let (cx_, cy) = (f32::from(current.x), f32::from(current.y));
+        let (x0, x1) = if sx <= cx_ { (sx, cx_) } else { (cx_, sx) };
+        let (y0, y1) = if sy <= cy { (sy, cy) } else { (cy, sy) };
+        let accent = feedback_accent(cx);
+        let fill = gpui::Hsla { a: 0.14, ..accent };
+        Some(
+            div()
+                .absolute()
+                .left(px(x0))
+                .top(px(y0))
+                .w(px((x1 - x0).max(1.0)))
+                .h(px((y1 - y0).max(1.0)))
+                .border_2()
+                .border_color(accent)
+                .bg(fill)
+                .into_any_element(),
+        )
+    }
+
+    /// One pin per draft note: a 1.5 px accent outline at ~55 % opacity
+    /// around its rect and a 22 px numbered badge at the rect's top-right.
+    /// Active only, hidden while capturing. Decorative: no role,
+    /// pointer-transparent.
+    fn render_feedback_pins(
+        &self,
+        cx: &mut Context<Self>,
+        win_w: f32,
+        win_h: f32,
+    ) -> Option<AnyElement> {
+        if self.feedback.capturing || self.feedback.draft.is_empty() {
+            return None;
+        }
+        let accent = feedback_accent(cx);
+        let on_accent = feedback_on_accent(cx);
+        let line = gpui::Hsla { a: 0.55, ..accent };
+        let pins = self
+            .feedback
+            .draft
+            .notes
+            .iter()
+            .map(|note| {
+                let rect = FeedbackUi::target_rect(&note.target);
+                let badge_x = (rect.x + rect.w - 11.0).clamp(0.0, (win_w - 22.0).max(0.0));
+                let badge_y = (rect.y - 11.0).clamp(0.0, (win_h - 22.0).max(0.0));
+                div()
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(rect.x))
+                            .top(px(rect.y))
+                            .w(px(rect.w.max(1.0)))
+                            .h(px(rect.h.max(1.0)))
+                            .rounded(px(6.0))
+                            .border(px(1.5))
+                            .border_color(line),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(badge_x))
+                            .top(px(badge_y))
+                            .size(px(22.0))
+                            .rounded_full()
+                            .bg(accent)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .mono(11.5)
+                            .semibold()
+                            .text_color(on_accent)
+                            .child(note.index.to_string()),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        Some(div().children(pins).into_any_element())
+    }
+
     /// The floating chrome: the bar while Active, the pill while Paused,
-    /// nothing while Off.
-    pub(crate) fn render_feedback_chrome(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// nothing while Off — and nothing while capturing, when the window
+    /// must read clean.
+    pub(crate) fn render_feedback_chrome(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.feedback.capturing {
+            return None;
+        }
         match self.feedback.phase {
             FeedbackPhase::Off => None,
-            FeedbackPhase::Active => Some(self.render_feedback_bar(cx)),
+            FeedbackPhase::Active => Some(self.render_feedback_bar(window, cx)),
             FeedbackPhase::Paused => Some(self.render_feedback_pill(cx)),
         }
     }
 
+    /// The accent Done button both the bar and the pill share: feedback
+    /// accent fill with on-accent text (never Baaz's purple primary), at
+    /// ~40 % opacity while disabled. A styled div with the aui md metrics
+    /// (28 px height, 11 px side padding, small radius), a Button role and
+    /// label, hover and disabled states.
+    fn render_feedback_done(
+        &self,
+        id: &'static str,
+        label: &str,
+        two_line: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        let accent = feedback_accent(cx);
+        let on_accent = feedback_on_accent(cx);
+        let hover = gpui::Hsla { l: (accent.l - 0.06).max(0.0), ..accent };
+        let sub = gpui::Hsla { a: 0.75, ..on_accent };
+        let enabled = self.feedback.done_enabled();
+        div()
+            .id(id)
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px(px(11.0))
+            .py(if two_line { px(4.0) } else { px(0.0) })
+            .h(if two_line { px(44.0) } else { px(28.0) })
+            .rounded(px(scale::R_SM))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .bg(accent)
+            .when(!enabled, |this| this.opacity(0.4))
+            .when(enabled, |this| {
+                this.hover(|this| this.bg(hover)).cursor_pointer()
+            })
+            .text_color(on_accent)
+            .role(gpui::Role::Button)
+            .aria_label("Done — save feedback report")
+            .on_click(move |_, window, cx| {
+                if enabled {
+                    on_click(window, cx);
+                }
+            })
+            .child(
+                div()
+                    .ui(scale::FS_13)
+                    .semibold()
+                    .line_height(gpui::relative(1.0))
+                    .whitespace_nowrap()
+                    .child(label.to_owned()),
+            )
+            .when(two_line, |this| {
+                this.child(
+                    div()
+                        .ui(scale::FS_11)
+                        .line_height(gpui::relative(1.0))
+                        .text_color(sub)
+                        .whitespace_nowrap()
+                        .child("Saves the report and copies its path"),
+                )
+            })
+            .shadow(p.shadow(1))
+            .into_any_element()
+    }
+
+    /// The note popover: a sibling of the capture layer (never inside its
+    /// key context), floating above it and consuming its own mouse events.
+    /// 300 px wide, 12 px right of the target (left when there is no room,
+    /// clamped below the bar): header, field, Cancel/Save, hints.
+    pub(crate) fn render_feedback_popover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+            return None;
+        }
+        let (target, field) = match &self.feedback.popover {
+            Some(note) => (note.target.clone(), note.field.clone()),
+            None => return None,
+        };
+        let p = cx.aui().colors;
+        let accent = feedback_accent(cx);
+        let on_accent = feedback_on_accent(cx);
+        let hover = gpui::Hsla { l: (accent.l - 0.06).max(0.0), ..accent };
+        let win = window.viewport_size();
+        let (win_w, win_h) = (f32::from(win.width), f32::from(win.height));
+        let rect = FeedbackUi::target_rect(&target);
+        let x = if rect.x + rect.w + 12.0 + 300.0 <= win_w - 8.0 {
+            rect.x + rect.w + 12.0
+        } else {
+            rect.x - 300.0 - 12.0
+        }
+        .clamp(8.0, (win_w - 308.0).max(8.0));
+        let y = rect.y.clamp(64.0, (win_h - 280.0).max(64.0));
+        let title = Self::feedback_note_title(&target);
+        let subtitle = self.feedback_note_subtitle(&target);
+        let save = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.save_feedback_note(window, cx);
+        });
+        let cancel = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.cancel_feedback_note(window, cx);
+        });
+        let on_save_action = cx.listener(
+            |this: &mut Self, _: &crate::app::FeedbackNoteSave, window, cx| {
+                this.save_feedback_note(window, cx);
+            },
+        );
+        let on_cancel_action = cx.listener(
+            |this: &mut Self, _: &crate::app::FeedbackNoteCancel, window, cx| {
+                this.cancel_feedback_note(window, cx);
+            },
+        );
+        let popover = v_flex()
+            .id("feedback-note")
+            .w(px(300.0))
+            .role(gpui::Role::Group)
+            .aria_label("Feedback note")
+            .bg(p.surface_1)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(12.0))
+            .shadow(p.shadow(2))
+            .p(px(12.0))
+            .gap(px(9.0))
+            .occlude()
+            .key_context(FEEDBACK_NOTE_CONTEXT)
+            .on_action(move |event, window, cx| on_save_action(event, window, cx))
+            .on_action(move |event, window, cx| on_cancel_action(event, window, cx))
+            .child(
+                v_flex()
+                    .gap(px(2.0))
+                    .child(div().ui(scale::FS_13).semibold().text_color(p.ink).child(title))
+                    .child(
+                        div()
+                            .mono(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                Textarea::new(&field)
+                    .aria_label("Feedback note text")
+                    .into_any_element(),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .justify_end()
+                    .child(
+                        button("feedback-note-cancel", "Cancel")
+                            .ghost()
+                            .accessibility_label("Cancel note")
+                            .on_click(move |_, window, cx| cancel(&(), window, cx)),
+                    )
+                    .child(
+                        div()
+                            .id("feedback-note-save")
+                            .h(px(28.0))
+                            .px(px(11.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(scale::R_SM))
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .bg(accent)
+                            .hover(|this| this.bg(hover))
+                            .cursor_pointer()
+                            .ui(scale::FS_13)
+                            .medium()
+                            .text_color(on_accent)
+                            .whitespace_nowrap()
+                            .role(gpui::Role::Button)
+                            .aria_label("Save note")
+                            .on_click(move |_, window, cx| save(&(), window, cx))
+                            .child("Save note"),
+                    ),
+            )
+            .child(
+                div()
+                    .ui(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .child("↵ save · ⇧↵ new line · Esc cancel"),
+            );
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .child(popover),
+            )
+            .into_any_element(),
+        )
+    }
+
     /// The Active bar, top-centre: dot · Feedback · N notes · help ·
-    /// Pause · Discard · Done (two lines: the primary button over its
-    /// caption). Above the capture layer, below toasts.
-    fn render_feedback_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// Pause · Discard · Done (one two-line button: the caption lives
+    /// inside it). Above the capture layer, below toasts. Moving over the
+    /// bar clears the hover outline beneath it.
+    fn render_feedback_bar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.feedback.expire_discard();
         let p = cx.aui().colors;
         let accent = feedback_accent(cx);
         let notes = self.feedback.notes_label();
         let discard_label = self.feedback.discard_label();
         let discard_enabled = self.feedback.discard_enabled();
-        let done_enabled = self.feedback.done_enabled();
         let pause = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.pause_feedback(window, cx);
         });
@@ -659,11 +1644,21 @@ impl crate::app::Harness {
             this.finish_feedback(window, cx);
         });
         let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
+        let done_button =
+            self.render_feedback_done("feedback-done", done_label, true, cx, move |window, cx| {
+                done(&(), window, cx);
+            });
         let bar = h_flex()
             .id("feedback-bar")
             .occlude()
             .role(gpui::Role::Group)
             .aria_label("Feedback mode")
+            .on_mouse_move(cx.listener(|this: &mut Self, _: &gpui::MouseMoveEvent, _, cx| {
+                if this.feedback.hover.is_some() {
+                    this.feedback.clear_hover();
+                    cx.notify();
+                }
+            }))
             .bg(p.surface_1)
             .border_1()
             .border_color(p.line_strong)
@@ -709,25 +1704,7 @@ impl crate::app::Harness {
                     .accessibility_label("Discard feedback notes")
                     .on_click(move |_, window, cx| discard(&(), window, cx)),
             )
-            .child(
-                v_flex()
-                    .flex_none()
-                    .gap(px(2.0))
-                    .items_center()
-                    .child(
-                        button("feedback-done", done_label)
-                            .primary()
-                            .disabled(!done_enabled)
-                            .accessibility_label("Done — save feedback report")
-                            .on_click(move |_, window, cx| done(&(), window, cx)),
-                    )
-                    .child(
-                        div()
-                            .ui(scale::FS_12)
-                            .text_color(p.ink_3)
-                            .child("Saves the report and copies its path"),
-                    ),
-            );
+            .child(done_button);
         popover_layer(
             div()
                 .absolute()
@@ -743,18 +1720,23 @@ impl crate::app::Harness {
 
     /// The Paused pill, bottom-right: dot · N notes · Resume · Done.
     /// It never blocks the app. Shown even with 0 notes (Resume live,
-    /// Done disabled).
+    /// Done disabled). Done is the same accent button as the bar's, one
+    /// line.
     fn render_feedback_pill(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let accent = feedback_accent(cx);
         let notes = self.feedback.notes_label();
-        let done_enabled = self.feedback.done_enabled();
         let resume = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.resume_feedback(window, cx);
         });
         let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.finish_feedback(window, cx);
         });
+        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
+        let done_button =
+            self.render_feedback_done("feedback-done", done_label, false, cx, move |window, cx| {
+                done(&(), window, cx);
+            });
         let pill = h_flex()
             .id("feedback-pill")
             .occlude()
@@ -782,13 +1764,7 @@ impl crate::app::Harness {
                     .accessibility_label("Resume feedback")
                     .on_click(move |_, window, cx| resume(&(), window, cx)),
             )
-            .child(
-                button("feedback-done", "Done")
-                    .primary()
-                    .disabled(!done_enabled)
-                    .accessibility_label("Done — save feedback report")
-                    .on_click(move |_, window, cx| done(&(), window, cx)),
-            );
+            .child(done_button);
         popover_layer(
             div()
                 .absolute()
@@ -803,7 +1779,7 @@ impl crate::app::Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feedback::{Rect, Target};
+    use crate::feedback::{FakeProbe, Rect, Target};
 
     /// A live shell on the test app: the transition tests need a real
     /// focus handle, which needs the app.
@@ -1178,10 +2154,12 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         let layer = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_layer(cx).is_some()))
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.render_feedback_layer(window, cx).is_some()))
         };
         let chrome = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_chrome(cx).is_some()))
+            vc.update(|window, cx| {
+                baaz.update(cx, |h, cx| h.render_feedback_chrome(window, cx).is_some())
+            })
         };
         assert!(!layer(vc), "Off renders no layer");
         assert!(!chrome(vc), "Off renders no chrome");
