@@ -50,6 +50,18 @@ pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
 const HOME_KEY: &str = "home";
+
+/// The pending-screenshot key for the tab `id`: the Menu Screenshot
+/// capture keys to the shown tab, never the session key.
+fn screenshot_tab_key(id: TabId) -> String {
+    format!("browse-tab:{}", id.0)
+}
+
+/// The tab behind a [`screenshot_tab_key`], or `None` for older
+/// session-keyed entries, which drain through the legacy path.
+fn screenshot_tab_id(key: &str) -> Option<TabId> {
+    key.strip_prefix("browse-tab:")?.parse::<u64>().ok().map(TabId)
+}
 /// What a webview opens on when its session never navigated anywhere.
 const BLANK: &str = "about:blank";
 
@@ -817,6 +829,14 @@ impl Harness {
         if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
         }
+        // The tab being left drops its find highlight (its strip keeps the
+        // query), and the shared input points at the arriving tab — both
+        // on the event, never during render.
+        if let Some(leaving) = self.browse_centre_shown() {
+            if leaving != id {
+                self.stop_find_on_tab(leaving, cx);
+            }
+        }
         if self.browser.tabs.activate(id) {
             self.schedule_tabs_write(cx);
         }
@@ -826,6 +846,7 @@ impl Harness {
         self.browse_drop_target = None;
         self.browse_drop_at_end = false;
         self.ensure_tab_page(HOME_KEY, id, window, cx);
+        self.sync_find_input_to_tab(id, window, cx);
         self.leave_browse_address(window, cx);
         cx.notify();
     }
@@ -1176,6 +1197,11 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         if self.browser.tabs.get(id).is_none_or(|tab| !matches!(tab.owner, Owner::Session(_))) {
             return;
+        }
+        if let Some(leaving) = self.browse_centre_shown() {
+            if leaving != id {
+                self.stop_find_on_tab(leaving, cx);
+            }
         }
         if self.browser.tabs.activate(id) {
             self.schedule_tabs_write(cx);
@@ -2072,11 +2098,28 @@ impl Harness {
         let live: HashSet<TabId> = self.browser.tabs.tabs.iter().map(|tab| tab.id).collect();
         self.browser.find_strips.retain(&live);
         // A Screenshot whose bytes were not there yet attaches on arrival.
-        // Stays pending across tab switches: it attaches when its own
-        // session is active again, so a switch can never misattribute it.
+        // Pending captures key to the tab they were taken on
+        // ([`screenshot_tab_key`]): the bytes attach to the active
+        // session's draft only while that tab still shows, so a switch
+        // can never misattribute them.
         let active_key = self.browser_key(cx);
+        let shown_now = self.browse_centre_shown();
         let pending: Vec<String> = self.browser.shot_pending.iter().cloned().collect();
         for key in pending {
+            if let Some(id) = screenshot_tab_id(&key) {
+                let ready = self
+                    .browser
+                    .states
+                    .get(&id)
+                    .and_then(|state| state.read(cx).screenshot().map(<[u8]>::to_vec));
+                if let Some(bytes) = ready {
+                    if shown_now == Some(id) {
+                        self.browser.shot_pending.remove(&key);
+                        self.attach_browser_screenshot(bytes, cx);
+                    }
+                }
+                continue;
+            }
             let owner = self.tab_owner_for_key(&key);
             let space = self.owner_space(&owner);
             let bytes = self
@@ -2176,10 +2219,13 @@ impl Harness {
             .iter()
             .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
             .collect();
-        // B2a-H5: the chrome popovers drop over the page and the Baaz-drawn
-        // crashed page covers its rect — both obscure the native view.
-        let chrome_popover_open =
-            self.browser.downloads_open || self.browser.extensions_open || self.browser.more_open;
+        // B2a-H5: the chrome popovers drop over the centre page and the
+        // Baaz-drawn crashed page covers its rect. The popover half is
+        // resolved honestly below, once the centre tab is known: raw
+        // flags blanked the page under popovers that render nothing, and
+        // leaked into Sessions mode. The pane side never sees them.
+        let in_browse = self.mode == crate::layout::Mode::Browse;
+        let chrome_popover_open = false;
         let page_error_open = self
             .browse_centre_shown()
             .and_then(|id| self.browser.states.get(&id))
@@ -2223,7 +2269,6 @@ impl Harness {
         // page — so the session page can neither share the centre's tab
         // nor paint behind the mode. The render path shows the Changes
         // fallback instead, and the sync hides every pane page here.
-        let in_browse = self.mode == crate::layout::Mode::Browse;
         let (shown, frame_live) = if in_browse { (None, false) } else { (shown, frame_live) };
         // B2a-H2: in Browse the centre shows the current project's
         // person-tab page under the same covering rules as the pane.
@@ -2234,28 +2279,85 @@ impl Harness {
         // palette/menus/dialogs/settings do. The centre rect is stored
         // for the mouse-down hand-back: the single source behind
         // placement and release.
-        let centre_page = self.browse_centre_page_rect(content, window);
-        self.browser.centre_page_rect = in_browse.then_some(centre_page);
         let centre_shown = self.browse_centre_shown();
         // B2a-H5: a switch dismisses the chrome popovers (they point at
-        // the old tab's state); the find strip is per tab and stays. The
-        // first sight sets without dismissing, so a `--steps` popover
-        // opens onto its own first frame.
-        if self.browser.last_centre_shown.is_some() && self.browser.last_centre_shown != centre_shown {
-            self.browser.last_centre_shown = centre_shown;
+        // the old tab's state), and leaving Browse closes them all; the
+        // find strip is per tab and stays. The last-seen tab stores every
+        // frame — including from `None` — so the switch check is never
+        // dead and no flag leaks into Sessions mode. The first sight sets
+        // without dismissing, so a `--steps` popover opens onto its own
+        // first frame.
+        let switched = self.browser.last_centre_shown.is_some() && self.browser.last_centre_shown != centre_shown;
+        if switched || !in_browse {
             self.browser.downloads_open = false;
             self.browser.extensions_open = false;
+            self.browser.downloads_rendered = false;
             self.browser.more_open = false;
             self.browser.more_move_open = false;
         }
-        // B2a-H5: trusted origins auto-answer everywhere; any other ask on
-        // a background tab marks its row while in Browse.
+        self.browser.last_centre_shown = centre_shown;
+        // B2a-H5: covering is honest — a popover covers the page only while
+        // it actually renders. A flag whose popover cannot render (no
+        // downloads, no centre state) clears instead of blanking the page
+        // under an invisible popover; the downloads flag clears only once
+        // it rendered, so a scripted download's first frame never closes
+        // its own capture.
+        let centre_has_state = centre_shown.is_some_and(|id| self.browser.states.contains_key(&id));
+        let downloads_empty = self.browse_downloads(cx).is_empty();
+        if self.browser.downloads_open && centre_shown.is_some() && !downloads_empty {
+            self.browser.downloads_rendered = true;
+        }
+        if self.browser.downloads_open
+            && chrome::downloads_flag_clears(centre_shown.is_some(), downloads_empty, self.browser.downloads_rendered)
+        {
+            self.browser.downloads_open = false;
+            self.browser.downloads_rendered = false;
+        }
+        if self.browser.extensions_open && centre_shown.is_none() {
+            self.browser.extensions_open = false;
+        }
+        if self.browser.more_open && !centre_has_state {
+            self.browser.more_open = false;
+            self.browser.more_move_open = false;
+        }
+        let chrome_popover_open = in_browse
+            && ((self.browser.downloads_open && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
+                || (self.browser.extensions_open && centre_shown.is_some())
+                || (self.browser.more_open && centre_has_state));
+        // The find and permission strips are in-flow rows above the page,
+        // so the stored page rect starts below them: placement and the
+        // mouse-down release share this one rect.
+        let find_open = self.browser.find_strips.visible(centre_shown).is_some();
+        let permission_open = centre_shown
+            .and_then(|id| self.browser.states.get(&id))
+            .is_some_and(|state| !state.read(cx).permissions().is_empty());
+        let stack = chrome::strip_stack_px(find_open, permission_open);
+        let mut centre_page = self.browse_centre_page_rect(content, window);
+        if in_browse && stack > 0.0 {
+            centre_page.origin.y += gpui::px(stack);
+            centre_page.size.height = (centre_page.size.height - gpui::px(stack)).max(gpui::px(0.0));
+        }
+        self.browser.centre_page_rect = in_browse.then_some(centre_page);
+        // A crashed page hides the find strip: the highlight stops and the
+        // strip closes, so the error page owns the rect alone.
+        if let Some(id) = centre_shown {
+            if let Some(state) = self.browser.states.get(&id).cloned() {
+                if state.read(cx).crashed().is_some() && self.browser.find_strips.for_tab(id).close() {
+                    state.update(cx, |state, _| state.stop_find());
+                }
+            }
+        }
+        // Tabs that navigated away (or closed) drop their "while visiting"
+        // grants; then trusted origins auto-answer and background asks
+        // mark their rows while in Browse.
+        self.revoke_stale_visit_grants();
         self.route_browse_permissions(centre_shown, in_browse, cx);
         let centre_live = browser_visible(BrowserVisibility {
             centre_browse: centre_shown.is_some(),
             session_active: self.browse_centre_live(cx),
             terminal_covering: false,
             window_active: shown_window_active(window.is_window_active(), centre_shown, &holds),
+            chrome_popover_open,
             ..base
         });
         // Editing ends when the page takes the keyboard (B2a-H4 7b): a click
@@ -2546,7 +2648,13 @@ impl Harness {
     /// Open the find strip on the shown tab (B2a-H5): ⌘F in Browse with a
     /// page shown, or the ⋯ menu's "Find in page". Focuses the input
     /// prefilled with the tab's kept query; a stored query re-searches.
+    /// Opening releases the page keyboard first, so typing lands in the
+    /// find field instead of the page. A crashed page or a blank tab
+    /// opens nothing.
     pub(crate) fn open_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != crate::layout::Mode::Browse {
+            return;
+        }
         self.ensure_tabs_loaded(cx);
         let Some(id) = self.browse_centre_shown() else { return };
         let Some(state) = self.browse_centre_page(window, cx) else { return };
@@ -2556,6 +2664,7 @@ impl Harness {
         if matches!(state.read(cx).url().as_ref(), "" | BLANK) {
             return;
         }
+        state.update(cx, |state, _| state.release_keyboard());
         let (query, match_case, research) = {
             let strip = self.browser.find_strips.for_tab(id);
             let research = strip.open();
@@ -2569,12 +2678,16 @@ impl Harness {
     }
 
     /// Close the find strip (Done, Esc): `stop_find` clears the highlight.
-    /// Closing a closed strip is a no-op, never a second `stop_find`.
+    /// Closing a closed strip is a no-op, never a second `stop_find`. The
+    /// shared input lives while any tab's strip stands open, so closing
+    /// one tab's strip never strands the others'.
     pub(crate) fn close_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.browse_centre_shown() else { return };
         let stop = self.browser.find_strips.for_tab(id).close();
-        self.browse_find = None;
-        self.browse_find_sub = None;
+        if !self.browser.find_strips.any_open() {
+            self.browse_find = None;
+            self.browse_find_sub = None;
+        }
         if stop {
             if let Some(state) = self.browse_centre_state() {
                 state.update(cx, |state, _| state.stop_find());
@@ -2582,6 +2695,34 @@ impl Harness {
         }
         window.focus(&self.focus_root, cx);
         cx.notify();
+    }
+
+    /// Clear the tab's find highlight as it is left behind (a switch or a
+    /// crash): the strip itself stays as it stood, so returning restores
+    /// the query — only the page's highlight drops.
+    fn stop_find_on_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        let open = self.browser.find_strips.for_tab(id).open;
+        if open {
+            if let Some(state) = self.browser.states.get(&id).cloned() {
+                state.update(cx, |state, _| state.stop_find());
+            }
+        }
+    }
+
+    /// Point the shared find input at the tab's kept query (a tab switch):
+    /// the value is set here, on the event — never during render.
+    fn sync_find_input_to_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let (open, query) = match self.browser.find_strips.visible(Some(id)) {
+            Some((_, strip)) => (true, strip.query.clone()),
+            None => return,
+        };
+        if open {
+            if let Some(input) = self.browse_find.clone() {
+                input.update(cx, |input, cx| {
+                    input.set_value(query, window, cx);
+                });
+            }
+        }
     }
 
     /// Step the find to the next (`forward`) or previous match: Enter, the
@@ -2647,6 +2788,8 @@ impl Harness {
 
     /// Live search as the query types: a changed non-empty query searches
     /// 100 ms after the last keystroke; clearing the field stops nothing.
+    /// The debounce is per tab: the timer fires only for the tab that
+    /// armed it, so a switch never searches a stale query on the new tab.
     fn find_input_changed(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.browse_centre_shown() else { return };
         let typed = self.browse_find.as_ref().map(|input| input.read(cx).value().to_string());
@@ -2654,12 +2797,13 @@ impl Harness {
         if !self.browser.find_strips.for_tab(id).set_query(&typed) {
             return;
         }
-        self.browse_find_generation += 1;
-        let generation = self.browse_find_generation;
+        let generation = self.browser.find_strips.arm(id);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(chrome::FIND_DEBOUNCE_MS)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.browse_find_generation == generation {
+                if this.browser.find_strips.armed_current(id, generation)
+                    && this.browse_centre_shown() == Some(id)
+                {
                     this.step_browse_find(true, cx);
                 }
             });
@@ -2669,14 +2813,22 @@ impl Harness {
 
     /// Answer the shown tab's pending permission `id`: Block denies, Allow
     /// once and Allow while visiting grant — the latter remembers the
-    /// origin for this run and auto-answers repeats.
+    /// (origin, kinds) for this run and auto-answers repeats of exactly
+    /// those kinds. The grant keys on the full origin (scheme + host +
+    /// port): a host-only report borrows them from the tab's URL.
     pub(crate) fn answer_shown_permission(&mut self, id: u64, allow: bool, remember_visit: bool, cx: &mut Context<Self>) {
-        let origin = self
-            .browse_centre_state()
-            .and_then(|state| state.read(cx).permissions().iter().find(|request| request.id == id).map(|request| request.origin.clone()));
+        let tab_url = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()));
+        let ask = self.browse_centre_state().and_then(|state| {
+            state
+                .read(cx)
+                .permissions()
+                .iter()
+                .find(|request| request.id == id)
+                .map(|request| (request.origin.clone(), request.kinds.clone()))
+        });
         if remember_visit && allow {
-            if let Some(origin) = &origin {
-                self.browser.visit_allows.remember(origin);
+            if let (Some((origin, kinds)), Some(tab_url)) = (&ask, &tab_url) {
+                self.browser.visit_allows.remember(&chrome::normalize_origin(origin, tab_url), kinds);
             }
         }
         if let Some(state) = self.browse_centre_state() {
@@ -2686,13 +2838,15 @@ impl Harness {
         cx.notify();
     }
 
-    /// Route permission asks once per frame: trusted origins auto-answer on
-    /// any tab; any other ask on a background tab marks that tab's row (the
-    /// sidebar's "needs you" dot) until the tab is shown — in Browse only,
-    /// where the rows live. The strip itself reads the shown tab's live
-    /// asks, so a page dismissal drops it with no Baaz state to clear.
+    /// Route permission asks once per frame: origins trusted "while
+    /// visiting" auto-answer on any tab, but only for the kinds granted —
+    /// anything else still asks. Any other ask on a background tab marks
+    /// that tab's row (the sidebar's "needs you" dot) until the tab is
+    /// shown — in Browse only, where the rows live. The strip itself reads
+    /// the shown tab's live asks, so a page dismissal drops it with no
+    /// Baaz state to clear.
     fn route_browse_permissions(&mut self, shown: Option<TabId>, mark_background: bool, cx: &mut Context<Self>) {
-        let live: Vec<(TabId, Vec<(u64, String)>)> = self
+        let live: Vec<(TabId, Vec<(u64, String, Vec<aui_webview::PermissionKind>)>)> = self
             .browser
             .states
             .iter()
@@ -2701,15 +2855,17 @@ impl Harness {
                     .read(cx)
                     .permissions()
                     .iter()
-                    .map(|request| (request.id, request.origin.clone()))
+                    .map(|request| (request.id, request.origin.clone(), request.kinds.clone()))
                     .collect();
                 (*id, asks)
             })
             .collect();
         let mut dirty = false;
         for (id, asks) in &live {
-            for (ask, origin) in asks {
-                if chrome::auto_answer(origin, &self.browser.visit_allows).is_some() {
+            let tab_url = self.browser.tabs.get(*id).map(|tab| tab.url.clone()).unwrap_or_default();
+            for (ask, origin, kinds) in asks {
+                let origin = chrome::normalize_origin(origin, &tab_url);
+                if chrome::auto_answer(&origin, kinds, &self.browser.visit_allows).is_some() {
                     if let Some(state) = self.browser.states.get(id).cloned() {
                         state.update(cx, |state, cx| state.answer_permission(*ask, PermissionDecision::Allow, cx));
                     }
@@ -2739,16 +2895,47 @@ impl Harness {
         }
     }
 
+    /// Revoke "while visiting" grants the tabs left behind: a tab that
+    /// navigated to another origin — or closed — drops that origin's
+    /// grants, unless another live tab still shows it. Pure model work,
+    /// once per frame.
+    fn revoke_stale_visit_grants(&mut self) {
+        let live: HashMap<TabId, String> = self
+            .browser
+            .tabs
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, chrome::normalize_origin(&tab.url, &tab.url)))
+            .collect();
+        let live_origins: HashSet<String> = live.values().cloned().collect();
+        let mut stale = Vec::new();
+        for (id, seen) in &self.browser.permission_origins {
+            if live.get(id) != Some(seen) {
+                stale.push(seen.clone());
+            }
+        }
+        for origin in stale {
+            if !live_origins.contains(&origin) {
+                self.browser.visit_allows.revoke_origin(&origin);
+            }
+        }
+        self.browser.permission_origins = live;
+    }
+
     /// Drain popups and "open in new tab" requests each frame for every
     /// live tab: each becomes a new tab right after its opener, with the
     /// opener's owner and space, wrapping the given backend for popups — a
-    /// fresh tab at that URL for open requests. Foreground ones select.
+    /// fresh tab at that URL for open requests. Only the shown tab's
+    /// popups may take the centre: a foreground ask from a background
+    /// opener lands in the background instead.
     fn drain_browse_popups(&mut self, cx: &mut Context<Self>) {
+        let shown = self.browse_centre_shown();
         let openers: Vec<TabId> = self.browser.states.keys().copied().collect();
         for opener in openers {
             let Some(state) = self.browser.states.get(&opener).cloned() else { continue };
             let popups = state.update(cx, |state, _| state.take_popup_backends());
             for (url, foreground, backend) in popups {
+                let foreground = chrome::popup_foreground(foreground, opener, shown);
                 let Some(id) = chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground) else { continue };
                 let page = cx.new(|cx| WebviewState::new(backend, cx));
                 self.browser.states.insert(id, page);
@@ -2758,6 +2945,7 @@ impl Harness {
             }
             let opens = state.update(cx, |state, _| state.take_open_requests());
             for (url, foreground) in opens {
+                let foreground = chrome::popup_foreground(foreground, opener, shown);
                 if chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground).is_some() {
                     self.schedule_tabs_write(cx);
                     cx.notify();
@@ -2809,13 +2997,22 @@ impl Harness {
     }
 
     /// Dismiss every Browse chrome popover (downloads, extensions, ⋯):
-    /// row activation, the toggle press and tab switches all land here.
-    pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) {
+    /// row activation, the toggle press, click-outside, Escape and tab
+    /// switches all land here. Answers whether one stood open.
+    pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.browser.downloads_open
+            || self.browser.extensions_open
+            || self.browser.more_open
+            || self.browser.more_move_open;
         self.browser.downloads_open = false;
         self.browser.extensions_open = false;
         self.browser.more_open = false;
         self.browser.more_move_open = false;
-        cx.notify();
+        self.browser.downloads_rendered = false;
+        if open {
+            cx.notify();
+        }
+        open
     }
 
     /// Copy the shown tab's link (⇧⌘C in Browse, the ⋯ menu): the live
@@ -2837,20 +3034,25 @@ impl Harness {
     }
 
     /// Open the shown tab's developer tools (⌥⌘I in Browse, the ⋯ menu).
-    /// A no-op with no shown page.
+    /// A no-op with no shown page, or where the backend cannot host them.
     pub(crate) fn open_browse_devtools(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.browse_centre_state() {
-            state.update(cx, |state, _| state.show_devtools());
+            if state.read(cx).supports(aui_webview::BackendFeature::DevTools) {
+                state.update(cx, |state, _| state.show_devtools());
+            }
         }
         self.dismiss_browse_popovers(cx);
     }
 
-    /// Step the shown tab's zoom by `delta` points, clamped to the engine's
-    /// sane range (the ⋯ menu's –/+ row).
+    /// Step the shown tab's zoom along Chrome's ladder (the ⋯ menu's –/+
+    /// row): `delta` is a direction, not points — positive climbs one
+    /// rung, negative drops one, zero holds.
     pub(crate) fn browse_zoom_step(&mut self, delta: i16, cx: &mut Context<Self>) {
+        if delta == 0 {
+            return;
+        }
         if let Some(state) = self.browse_centre_state() {
-            let zoom = state.read(cx).zoom() as i16;
-            let next = zoom.saturating_add(delta).clamp(25, 500) as u16;
+            let next = toolbar::zoom_step(state.read(cx).zoom(), delta > 0);
             state.update(cx, |state, _| state.set_zoom(next));
         }
     }
@@ -2868,29 +3070,39 @@ impl Harness {
 
     /// Screenshot the shown tab into the active session's draft (the ⋯
     /// menu): the same capture-or-pend path the library intent takes, read
-    /// off the centre page instead of the pane's.
+    /// off the centre page instead of the pane's. The popover closes
+    /// first, so the page it covered is visible in the capture; the
+    /// pending capture keys to the shown tab, never the session key, so a
+    /// switch can never misattribute it.
     pub(crate) fn capture_browse_screenshot(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_browse_popovers(cx);
+        let shown = self.browse_centre_shown();
         if let Some(state) = self.browse_centre_state() {
             state.update(cx, |state, _cx| state.capture());
             match state.read(cx).screenshot().map(<[u8]>::to_vec) {
                 Some(bytes) => self.attach_browser_screenshot(bytes, cx),
                 None => {
-                    self.browser.shot_pending.insert(self.browser_key(cx));
+                    if let Some(id) = shown {
+                        self.browser.shot_pending.insert(screenshot_tab_key(id));
+                    }
                 }
             }
         }
-        self.dismiss_browse_popovers(cx);
     }
 
-    /// Open the shown tab's URL in Safari (`open -a Safari <url>`).
-    /// A no-op with no shown URL.
-    pub(crate) fn open_browse_in_safari(&mut self, cx: &mut Context<Self>) {
+    /// Whether the ⋯ menu offers "Open in Safari": only for `http(s)` pages.
+    pub(crate) fn browse_safari_url(&self, cx: &gpui::App) -> Option<String> {
         let url = self
             .browse_centre_state()
             .map(|state| state.read(cx).url().to_string())
-            .filter(|url| url.starts_with("http"))
             .unwrap_or_default();
-        if !url.is_empty() {
+        (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
+    }
+
+    /// Open the shown tab's URL in Safari (`open -a Safari <url>`).
+    /// A no-op unless the URL is `http(s)`.
+    pub(crate) fn open_browse_in_safari(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.browse_safari_url(cx) {
             let _ = std::process::Command::new("open").args(["-a", "Safari", &url]).spawn();
         }
         self.dismiss_browse_popovers(cx);
@@ -2936,15 +3148,26 @@ impl Harness {
         self.dismiss_browse_popovers(cx);
     }
 
-    /// Reveal a landed file in Finder (`open -R <path>`).
-    pub(crate) fn reveal_browse_download(path: &str) {
-        let _ = std::process::Command::new("open").args(["-R", path]).spawn();
+    /// Reveal a landed file in Finder (`open -R -- <path>`). A file that
+    /// moved or vanished toasts instead of revealing nothing.
+    pub(crate) fn reveal_browse_download(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !std::path::Path::new(path).exists() {
+            self.overlays.update(cx, |overlays, _| overlays.toast("Downloads", "File moved or deleted"));
+            cx.notify();
+            return;
+        }
+        let _ = std::process::Command::new("open").args(["-R", "--", path]).spawn();
     }
 
-    /// Open the downloads folder ("All downloads", `~/Downloads`).
+    /// Open the downloads folder ("All downloads", `~/Downloads`, resolved
+    /// from `$HOME` with no `dirs` dependency). With no `$HOME` there is
+    /// nothing to open: log and return.
     pub(crate) fn open_downloads_folder() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        let _ = std::process::Command::new("open").arg(format!("{home}/Downloads")).spawn();
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            crate::baaz_log!("downloads: no $HOME, cannot open the downloads folder");
+            return;
+        };
+        let _ = std::process::Command::new("open").arg(home.join("Downloads")).spawn();
     }
 
     /// Navigate the Browse centre's shown tab to `url`: the model records
@@ -3494,6 +3717,7 @@ impl Harness {
             return;
         }
         self.browser.downloads_open = true;
+        self.browser.downloads_rendered = false;
         self.browser.extensions_open = false;
         self.browser.more_open = false;
         cx.notify();
@@ -3795,12 +4019,19 @@ pub(crate) struct BrowserRegistry {
     /// Origins trusted "while visiting" (B2a-H5): in memory for this run
     /// only — persistence is B2b.
     pub visit_allows: chrome::VisitAllows,
+    /// Each live tab's last seen origin: navigating to another origin (or
+    /// closing) revokes that origin's "while visiting" grants.
+    pub permission_origins: HashMap<TabId, String>,
     /// Which Browse chrome popover stands open (B2a-H5): downloads (the
     /// toolbar button exists only while downloads list), extensions, ⋯.
     /// They drop over the page; see [`BrowserVisibility`].
     pub downloads_open: bool,
     /// The extensions popover stands open.
     pub extensions_open: bool,
+    /// Whether the downloads popover has rendered since it opened: an
+    /// emptied list clears the flag only after it rendered once, so a
+    /// scripted download's first frame never closes its own capture.
+    pub downloads_rendered: bool,
     /// The ⋯ page-actions menu stands open.
     pub more_open: bool,
     /// The ⋯ menu's inline "Move tab to project" list, expanded or not.
@@ -3840,8 +4071,10 @@ impl BrowserRegistry {
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
+            permission_origins: HashMap::new(),
             downloads_open: false,
             extensions_open: false,
+            downloads_rendered: false,
             more_open: false,
             more_move_open: false,
             fake_scripts: Vec::new(),
@@ -4366,6 +4599,15 @@ mod tests {
             "showing the pane is not a navigation"
         );
         assert!(!should_remember("about:blank", Some("https://example.com")));
+    }
+
+    #[test]
+    fn screenshot_keys_round_trip_through_their_tab() {
+        let id = TabId(41);
+        let key = super::screenshot_tab_key(id);
+        assert_eq!(super::screenshot_tab_id(&key), Some(id), "the capture keys to its tab");
+        assert_eq!(super::screenshot_tab_id("home"), None, "session keys drain the legacy way");
+        assert_eq!(super::screenshot_tab_id("browse-tab:abc"), None, "garbage keys match nothing");
     }
 
     #[test]

@@ -826,10 +826,6 @@ pub struct Harness {
     /// debounced): held while [`Self::browse_find`] is `Some`, dropped
     /// with it. Never persists.
     pub(crate) browse_find_sub: Option<gpui::Subscription>,
-    /// The live-search generation (B2a-H5): typing bumps this and arms a
-    /// 100 ms timer, and only the latest generation searches — the strip
-    /// searches once per pause, not once per keystroke. Never persists.
-    pub(crate) browse_find_generation: u64,
     /// The Ask question waiting for its session (B2a-H4d): `browse_ask`
     /// arms this and starts the session; `activate` writes it into the
     /// landed view's draft (appending on a new line over reused text) —
@@ -1423,7 +1419,6 @@ impl Harness {
             browse_address_page_focus: false,
             browse_find: None,
             browse_find_sub: None,
-            browse_find_generation: 0,
             pending_ask_draft: None,
             browse_completed: None,
             browse_completed_text: None,
@@ -3968,7 +3963,7 @@ impl Harness {
     /// this session. A % badge ringed in accent while any is active, the
     /// plain tray mark otherwise; it opens the popover.
     fn browse_downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::browser::chrome::{downloads_active_count, downloads_label};
+        use crate::browser::chrome::{downloads_badge, downloads_label};
         let downloads = self.browse_downloads(cx);
         if downloads.is_empty() {
             return None;
@@ -3976,23 +3971,11 @@ impl Harness {
         let states: Vec<aui_webview::DownloadState> =
             downloads.iter().map(|(_, _, download)| download.clone()).collect();
         let spoken = downloads_label(&states);
-        let badge = if downloads_active_count(&states) == 0 {
-            "↓".to_owned()
-        } else {
-            let (mut received, mut total) = (0u64, 0u64);
-            for download in &states {
-                if download.state == aui_webview::DownloadStatus::Downloading {
-                    received += download.received;
-                    total += download.total.unwrap_or(0);
-                }
-            }
-            match received.checked_mul(100).and_then(|hundredths| hundredths.checked_div(total)) {
-                Some(pct) => format!("{pct}%"),
-                None => "↓".to_owned(),
-            }
-        };
+        let badge = downloads_badge(&states);
         let p = cx.aui().colors;
-        let active = downloads_active_count(&states) > 0;
+        let active = badge.active;
+        let label = badge.label.clone();
+        let ring = if badge.indeterminate { p.ink_2 } else if active { p.accent } else { p.line };
         Some(
             div()
                 .id("hd-browse-downloads")
@@ -4002,6 +3985,11 @@ impl Harness {
                 .cursor_pointer()
                 .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                     this.browser.downloads_open = !this.browser.downloads_open;
+                    // A fresh open renders before any honesty check runs, so
+                    // an emptied list never closes its own first frame.
+                    if this.browser.downloads_open {
+                        this.browser.downloads_rendered = false;
+                    }
                     this.browser.extensions_open = false;
                     this.browser.more_open = false;
                     cx.notify();
@@ -4014,34 +4002,33 @@ impl Harness {
                         .justify_center()
                         .rounded(px(12.0))
                         .border_1()
-                        .border_color(if active { p.accent } else { p.line })
+                        .border_color(ring)
                         .ui(scale::FS_11)
                         .text_color(if active { p.accent } else { p.ink_2 })
-                        .child(badge),
+                        .child(label),
                 )
                 .into_any_element(),
         )
     }
 
-    /// The find strip (B2a-H5): a row above the page — input, "3 / 12",
-    /// ↑/↓, Match case, Done. Only the shown tab's open strip renders;
-    /// the input syncs to its kept query, so a switch never shows another
-    /// tab's text. Esc closes (the wrapper owns it, like the address
-    /// field); Enter steps through the input's own PressEnter.
-    fn render_browse_find(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The find strip (B2a-H5): a row above the page — a styled query
+    /// field, "3 / 12", ↑/↓, a Match case chip, Done. Only the shown
+    /// tab's open strip renders, never on a crashed page; the input value
+    /// is set when the strip opens or the tab switches — never here, so
+    /// render mutates nothing. Esc closes (the wrapper owns it, like the
+    /// address field); Enter steps through the input's own PressEnter and
+    /// Shift+Enter steps back.
+    fn render_browse_find(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::find_count_text;
         let shown = self.browse_centre_shown();
         let (query, match_case) = match self.browser.find_strips.visible(shown) {
             Some((_, strip)) => (strip.query.clone(), strip.match_case),
             None => return None,
         };
-        let input = self.browse_find.clone()?;
-        if input.read(cx).value() != query {
-            let synced = query.clone();
-            input.update(cx, |input, cx| {
-                input.set_value(synced, window, cx);
-            });
+        if self.browse_centre_state().is_some_and(|state| state.read(cx).crashed().is_some()) {
+            return None;
         }
+        let input = self.browse_find.clone()?;
         let p = cx.aui().colors;
         let count = self
             .browse_centre_state()
@@ -4049,8 +4036,10 @@ impl Harness {
             .filter(|found| found.query == query)
             .map(|found| (find_count_text(found.active, found.total), found.active, found.total));
         let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
-            if event.keystroke.key.as_str() == "escape" {
-                this.close_browse_find(window, cx);
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_browse_find(window, cx),
+                "enter" if event.keystroke.modifiers.shift => this.step_browse_find(false, cx),
+                _ => {}
             }
         });
         let mut row = h_flex()
@@ -4062,13 +4051,29 @@ impl Harness {
             .px(px(8.0))
             .gap(px(6.0))
             .bg(p.surface_1)
+            .border_b_1()
+            .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Find in page")
             .on_key_down(keys)
             .child(
-                div().flex_1().min_w(px(0.0)).child(
-                    a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w(px(0.0)),
-                ),
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .bg(p.surface_2)
+                    .rounded(px(scale::R_SM))
+                    .border_1()
+                    .border_color(p.line)
+                    .child(icon(IconName::Search).size(px(13.0)).color(p.ink_3))
+                    .child(
+                        a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w(px(0.0)),
+                    ),
             );
         match count {
             Some((text, active, total)) => {
@@ -4096,56 +4101,49 @@ impl Harness {
                 );
             }
         }
-        let prev = self.browse_chrome_button(
-            "browse-find-prev",
-            "↑",
-            "Previous match",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+        let prev = button("browse-find-prev", "↑")
+            .ghost()
+            .sm()
+            .accessibility_label("Previous match")
+            .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.step_browse_find(false, cx);
-            }),
-            cx,
-        );
-        let next = self.browse_chrome_button(
-            "browse-find-next",
-            "↓",
-            "Next match",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            }));
+        let next = button("browse-find-next", "↓")
+            .ghost()
+            .sm()
+            .accessibility_label("Next match")
+            .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.step_browse_find(true, cx);
-            }),
-            cx,
-        );
-        let case = self.browse_chrome_button(
-            "browse-find-case",
-            &format!("Match case: {}", if match_case { "On" } else { "Off" }),
-            "Match case",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            }));
+        let case = button("browse-find-case", "Match case")
+            .sm()
+            .accessibility_label(if match_case { "Match case on" } else { "Match case off" })
+            .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.toggle_browse_find_case(cx);
-            }),
-            cx,
-        );
-        let done = self.browse_chrome_button(
-            "browse-find-done",
-            "Done",
-            "Done",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            }));
+        let case = if match_case { case.primary() } else { case.ghost() };
+        let done = button("browse-find-done", "Done").sm().on_click(cx.listener(
+            |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.close_browse_find(window, cx);
-            }),
-            cx,
-        );
+            },
+        ));
         row = row.child(prev).child(next).child(case).child(done);
         Some(row.into_any_element())
     }
 
     /// The permission strip (B2a-H5): a row above the page while the shown
-    /// tab holds an unanswered ask — the sentence plus Block, Allow once
-    /// and Allow while visiting. Trusted origins never reach it (the sync
-    /// auto-answers), and a page dismissal drops it with no state here.
+    /// tab holds an unanswered ask — a site glyph, the host in bold, the
+    /// ask, then Block (ghost), Allow once (secondary) and Allow while
+    /// visiting (primary). Trusted (origin, kind) grants never reach it
+    /// (the sync auto-answers), and a page dismissal drops it with no
+    /// state here.
     fn render_browse_permission(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::browser::chrome::permission_sentence;
+        use crate::browser::chrome::{permission_sentence, permission_want};
         let p = cx.aui().colors;
         let state = self.browse_centre_state()?;
         let request = state.read(cx).permissions().first()?.clone();
         let sentence = permission_sentence(&request.origin, &request.kinds);
+        let want = permission_want(&request.kinds);
         let id = request.id;
         let mut row = h_flex()
             .id("browse-permission")
@@ -4156,8 +4154,20 @@ impl Harness {
             .px(px(8.0))
             .gap(px(6.0))
             .bg(p.surface_1)
+            .border_b_1()
+            .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Permission request")
+            .child(icon(IconName::Globe).size(px(14.0)).color(p.ink_2))
+            .child(
+                div()
+                    .id("browse-permission-host")
+                    .flex_none()
+                    .ui(scale::FS_13)
+                    .semibold()
+                    .text_color(p.ink)
+                    .child(request.origin.clone()),
+            )
             .child(
                 div()
                     .id("browse-permission-text")
@@ -4168,35 +4178,25 @@ impl Harness {
                     .text_color(p.ink)
                     .role(gpui::Role::Label)
                     .aria_label(sentence.clone())
-                    .child(sentence),
+                    .child(format!("wants to {want}")),
             );
-        let block = self.browse_chrome_button(
-            "browse-permission-block",
-            "Block",
-            "Block",
-            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+        let block = button("browse-permission-block", "Block")
+            .ghost()
+            .sm()
+            .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.answer_shown_permission(id, false, false, cx);
-            }),
-            cx,
-        );
-        let once = self.browse_chrome_button(
-            "browse-permission-once",
-            "Allow once",
-            "Allow once",
-            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            }));
+        let once = button("browse-permission-once", "Allow once").sm().on_click(cx.listener(
+            move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.answer_shown_permission(id, true, false, cx);
-            }),
-            cx,
-        );
-        let visiting = self.browse_chrome_button(
-            "browse-permission-visiting",
-            "Allow while visiting",
-            "Allow while visiting",
-            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            },
+        ));
+        let visiting = button("browse-permission-visiting", "Allow while visiting")
+            .primary()
+            .sm()
+            .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.answer_shown_permission(id, true, true, cx);
-            }),
-            cx,
-        );
+            }));
         row = row.child(block).child(once).child(visiting);
         Some(row.into_any_element())
     }
@@ -4305,9 +4305,10 @@ impl Harness {
                         ("browse-download-reveal", id),
                         "Reveal in Finder",
                         "Reveal in Finder",
-                        move |_, _, _| {
-                            Self::reveal_browse_download(&path);
-                        },
+                        cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                            let path = path.clone();
+                            this.reveal_browse_download(&path, cx);
+                        }),
                         cx,
                     );
                     Some(div().flex().flex_row().child(reveal).into_any_element())
@@ -4431,7 +4432,7 @@ impl Harness {
             "–",
             "Zoom out",
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.browse_zoom_step(-10, cx);
+                this.browse_zoom_step(-1, cx);
             }),
             cx,
         );
@@ -4451,7 +4452,7 @@ impl Harness {
             "+",
             "Zoom in",
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.browse_zoom_step(10, cx);
+                this.browse_zoom_step(1, cx);
             }),
             cx,
         );
@@ -4471,12 +4472,20 @@ impl Harness {
                 .child(zoom_in),
         );
         let shown = self.browse_centre_shown();
+        // Moving tabs between projects is a person-tab operation: session
+        // tabs stay with their sessions, so the mover hides for them.
+        let shown_is_person = shown.is_some_and(|id| {
+            self.browser.tabs.get(id).is_some_and(|tab| tab.owner == crate::browser::Owner::Person)
+        });
+        let shown_space = shown
+            .and_then(|id| self.browser.tabs.get(id))
+            .and_then(|tab| tab.space.clone());
         let projects: Vec<(String, String)> =
             self.projects.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect();
         let space = self.current_project_id();
         let movers: Vec<(String, String)> =
             projects.into_iter().filter(|(pid, _)| Some(pid) != space.as_ref()).collect();
-        if shown.is_some() && !movers.is_empty() {
+        if shown_is_person && shown.is_some() && (!movers.is_empty() || shown_space.is_some()) {
             let move_row = self.browse_menu_row(
                 "browse-more-move",
                 "Move tab to project ▸",
@@ -4505,19 +4514,37 @@ impl Harness {
                         );
                         menu = menu.child(row);
                     }
+                    // A tab filed under a project can leave it again.
+                    if shown_space.is_some() {
+                        let row = self.browse_menu_row(
+                            "browse-more-move-none",
+                            "No project",
+                            None,
+                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                                this.move_browse_tab_to_project(shown, None, window, cx);
+                                this.dismiss_browse_popovers(cx);
+                            }),
+                            cx,
+                        );
+                        menu = menu.child(row);
+                    }
                 }
             }
         }
-        let safari = self.browse_menu_row(
-            "browse-more-safari",
-            "Open in Safari",
-            None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.open_browse_in_safari(cx);
-            }),
-            cx,
-        );
-        menu = menu.child(safari);
+        // "Open in Safari" is an http(s) operation: any other scheme
+        // hides the row instead of opening nothing.
+        if self.browse_safari_url(cx).is_some() {
+            let safari = self.browse_menu_row(
+                "browse-more-safari",
+                "Open in Safari",
+                None,
+                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.open_browse_in_safari(cx);
+                }),
+                cx,
+            );
+            menu = menu.child(safari);
+        }
         let copy = self.browse_menu_row(
             "browse-more-copy",
             "Copy link",
@@ -5126,6 +5153,24 @@ impl Harness {
         let downloads = self.render_browse_downloads(window, cx);
         let extensions = self.render_browse_extensions(window, cx);
         let more = self.render_browse_more(window, cx);
+        // A click outside the popovers dismisses them, like the tab menu:
+        // the catcher is a sibling below the popovers in the same relative
+        // column, so popover clicks still land on the popovers.
+        let scrim: Option<AnyElement> =
+            (downloads.is_some() || extensions.is_some() || more.is_some()).then(|| {
+                let dismiss = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.dismiss_browse_popovers(cx);
+                });
+                div()
+                    .id("browse-popover-scrim")
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .role(gpui::Role::Button)
+                    .aria_label("Dismiss menu")
+                    .on_click(dismiss)
+                    .into_any_element()
+            });
         v_flex()
             .size_full()
             .relative()
@@ -5136,6 +5181,7 @@ impl Harness {
             .children(permission)
             .child(body)
             .children(omnibox)
+            .children(scrim)
             .children(downloads)
             .children(extensions)
             .children(more)
@@ -6771,7 +6817,9 @@ impl Render for Harness {
                 // with no shown page (the context is what scopes them,
                 // the guards are the belt).
                 .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
-                    this.open_browse_find(window, cx);
+                    if this.mode == layout::Mode::Browse {
+                        this.open_browse_find(window, cx);
+                    }
                 }))
                 .on_action(cx.listener(|this, _: &CopyLink, window, cx| {
                     if this.mode == layout::Mode::Browse {
@@ -6780,7 +6828,11 @@ impl Render for Harness {
                     let _ = window;
                 }))
                 .on_action(cx.listener(|this, _: &DevTools, window, cx| {
-                    if this.mode == layout::Mode::Browse {
+                    if this.mode == layout::Mode::Browse
+                        && this
+                            .browse_centre_state()
+                            .is_some_and(|state| state.read(cx).supports(aui_webview::BackendFeature::DevTools))
+                    {
                         this.open_browse_devtools(cx);
                     }
                     let _ = window;
@@ -6917,6 +6969,12 @@ impl Harness {
         // The Browse tab menu is pane state, never the overlay stack:
         // Escape closes it here, before the Settings and Skills pages.
         if self.close_tab_menu(cx) {
+            return;
+        }
+        // The Browse chrome popovers (downloads, extensions, ⋯) are
+        // centre state, never the overlay stack either: Escape dismisses
+        // them here, one layer per press.
+        if self.dismiss_browse_popovers(cx) {
             return;
         }
         if !matches!(self.auth, Auth::SignedIn(_)) {
