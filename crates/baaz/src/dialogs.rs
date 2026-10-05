@@ -1507,18 +1507,22 @@ impl Harness {
             .aria_label(tip.clone())
             .tooltip(move |_, cx| cx.new(|_| ToastChipTip { text: tip.clone() }).into())
             .child(div().flex_none().size(px(8.0)).rounded_full().bg(dot))
+            // Title and body shrink (truncating) so the action and the
+            // close button always stay inside the 480 px chip: a long
+            // body once pushed ✕ out of reach (found in a capture).
             .child(
                 div()
                     .flex_none()
+                    .max_w(px(220.0))
+                    .truncate()
                     .text_size(aui_tokens::scaled(12.5))
                     .semibold()
                     .text_color(p.ink)
-                    .whitespace_nowrap()
                     .child(title),
             )
             .child(
                 div()
-                    .flex_none()
+                    .flex_shrink(1.0)
                     .min_w(px(0.0))
                     .max_w(px(320.0))
                     .truncate()
@@ -1534,19 +1538,20 @@ impl Harness {
         if let Some(first) = newest.actions.first() {
             let label = first.label.clone();
             chip = chip.child(
-                button("toast-chip-action", label.clone())
-                    .ghost()
-                    .sm()
-                    .accessibility_label(label)
-                    .on_click(act),
+                div().flex_none().child(
+                    button("toast-chip-action", label.clone())
+                        .ghost()
+                        .sm()
+                        .accessibility_label(label)
+                        .on_click(act),
+                ),
             );
         }
+        // One labelled button (the icon button), never a nested pair.
         chip = chip.child(
             div()
                 .id("toast-chip-close")
                 .flex_none()
-                .role(gpui::Role::Button)
-                .aria_label("Dismiss notification")
                 .child(
                     icon_button("toast-chip-close-button", IconName::X)
                         .ghost()
