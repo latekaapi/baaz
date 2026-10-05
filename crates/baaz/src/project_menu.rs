@@ -1,10 +1,10 @@
-//! The project menu: the header crumb's, and a group row's `…` tray.
+//! The project menu: a group row's `…` tray, the Skills header, and the
+//! scripted steps.
 //!
 //! Part of the [`Harness`] entity; see [`crate::app`]
 //! for what it owns. The menu wears the Sessions view menu's shape (`view_menu`,
-//! 250 wide) and seats through `aui::overlay::anchored_menu` at the trigger
-//! that opened it: below-start of the header crumb, or below-start of the
-//! group row's tray `…` button (whose window bounds the library reports per
+//! 250 wide) and seats through `aui::overlay::anchored_menu` at the group
+//! row's tray `…` button (whose window bounds the library reports per
 //! frame via `SidebarView::on_group_menu_prepainted`). The Colour submenu
 //! hangs off the menu's right edge at the Colour row's height through a
 //! second `anchored_menu`, so it flips left near the window edge.
@@ -36,7 +36,7 @@ enum ProjectMenuAction {
     Pick(String),
     /// Start a session in the menu's project.
     NewHere,
-    /// Rename the menu's project through the crumb's field.
+    /// Rename the menu's project through the header's rename field.
     Rename,
     /// Open or close the Colour submenu (the swatches hang off the menu
     /// with their own handler).
@@ -52,8 +52,11 @@ enum ProjectMenuAction {
 }
 
 impl Harness {
-    /// Open a project menu: the header crumb's (`from_header`), or a group
-    /// row's `…` tray (`project` is `None` when the session is unfiled).
+    /// Open a project menu: a header or palette surface (`from_header`),
+    /// or a group row's `…` tray (`project` is `None` when the session is
+    /// unfiled). `from_header` no longer carries its own trigger rect —
+    /// the menu seats at the group row either way — but the toggle still
+    /// tells a header open apart from a group tray open.
     /// Clicking the same affordance again closes it, like every other menu.
     pub(crate) fn open_project_menu(&mut self, project: Option<String>, from_header: bool, cx: &mut Context<Self>) {
         let already = self
@@ -171,8 +174,8 @@ impl Harness {
         self.new_session_in(Some(id), window, cx);
     }
 
-    /// Rename through the crumb's dense field: the menu's project becomes
-    /// current (its name is what the crumb shows), the field is seeded with
+    /// Rename through the header's dense field: the menu's project becomes
+    /// current (its name is what the field shows), the field is seeded with
     /// it, and `ConfirmRename` commits through [`Self::commit_project_rename`].
     /// Renaming never touches the project: opening the field must not
     /// reorder the groups.
@@ -291,7 +294,7 @@ impl Harness {
         self.adopt_root(&path, cx);
     }
 
-    /// `project-menu`: the header crumb's menu for the current project.
+    /// `project-menu`: the current project's menu, seated at its group row.
     /// `project-menu:<name>`: the group row menu for the project named.
     pub(crate) fn step_project_menu(&mut self, rest: &str, cx: &mut Context<Self>) {
         let name = rest.trim();
@@ -308,9 +311,9 @@ impl Harness {
 
     /// `project-colour:<n>`: the current project's colour slot, 1–8.
     /// Anything else is not a slot and does nothing. With no payload, open
-    /// the Colour submenu instead (opening the header menu first when no
-    /// project menu is open), so the submenu has a scripted entry for its
-    /// screenshots.
+    /// the Colour submenu instead (opening the current project's menu
+    /// first when no project menu is open), so the submenu has a scripted
+    /// entry for its screenshots.
     pub(crate) fn step_project_colour(&mut self, rest: &str, cx: &mut Context<Self>) {
         if rest.trim().is_empty() {
             if !self.overlays.read(cx).is_open(MenuKind::Project) {
@@ -390,10 +393,11 @@ impl Harness {
         self.confirm_remove_project(cx);
     }
 
-    /// The project menu, anchored under the header crumb or right-aligned to
-    /// the sidebar's content edge for a group row. Escape and click-outside
-    /// close it like the other menus: Escape through the overlay stack, and
-    /// there is no scrim, exactly as the view menu does it.
+    /// The project menu, anchored below-start of the group row's tray `…`
+    /// for its project (below-start of the unfiled row for `None`).
+    /// Escape and click-outside close it like the other menus: Escape
+    /// through the overlay stack, and there is no scrim, exactly as the
+    /// view menu does it.
     pub(crate) fn render_project_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (target, from_header) = {
             let menu = self.overlays.read(cx).menu.as_ref()?;
@@ -509,24 +513,16 @@ impl Harness {
                 None => {}
             }
         });
-        // The seat: below-start of whatever opened the menu — the header
-        // crumb's rect, or the group row's tray `…` bounds (`None` is the
-        // unfiled row, keyed under its group id). `anchored_menu`
-        // flips the side and slides inside the window on overflow. No bounds
-        // yet: no menu this frame, never the old `top(52)` seat; the rail
-        // guard keeps a scripted group menu there from repainting forever
-        // (the crumb is always rendered, so the header menu always notifies).
-        let trigger = if from_header {
-            self.crumb_bounds
-        } else {
-            let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
-            self.group_menu_bounds.get(&key).copied()
-        };
+        // The seat: below-start of the group row's tray `…` for the menu's
+        // project (`None` is the unfiled row, keyed under its group id).
+        // `anchored_menu` flips the side and slides inside the window on
+        // overflow. No bounds yet: no menu this frame, never the old
+        // `top(52)` seat; the open notifies so the menu appears once its
+        // row reports.
+        let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
+        let trigger = self.group_menu_bounds.get(&key).copied();
         let Some(trigger) = trigger else {
-            if !from_header {
-                let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
-                crate::baaz_log!("project menu: no trigger bounds for {key}");
-            }
+            crate::baaz_log!("project menu: no trigger bounds for {key}");
             if from_header || self.sidebar_open {
                 cx.notify();
             }
