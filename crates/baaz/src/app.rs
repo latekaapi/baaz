@@ -163,6 +163,26 @@ actions!(
         /// Open a blank browser tab (⌘T): a person tab in Browse, the
         /// shown owner's tab otherwise.
         NewBrowserTab,
+        /// Close the active Browse tab (⌘W in Browse; in Sessions ⌘W
+        /// keeps closing the window).
+        CloseBrowseTab,
+        /// Reopen the most recently closed tab (⌘⇧T), selecting it.
+        ReopenBrowseTab,
+        /// Select the n-th person tab on screen (⌘1–⌘8).
+        BrowseTab1,
+        BrowseTab2,
+        BrowseTab3,
+        BrowseTab4,
+        BrowseTab5,
+        BrowseTab6,
+        BrowseTab7,
+        BrowseTab8,
+        /// Select the last person tab on screen (⌘9).
+        BrowseTabLast,
+        /// Move the active Browse tab down one slot (⌥⌘↓).
+        MoveBrowseTabDown,
+        /// Move the active Browse tab up one slot (⌥⌘↑).
+        MoveBrowseTabUp,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -256,6 +276,16 @@ pub(crate) const PALETTE_QUERY_CONTEXT: &str = "AuiMenu > Input";
 /// the tree than they do, so it wins, and `NoAction` consumes the keystroke
 /// without an action, which hands it to the grid's own key handler.
 pub(crate) const TERMINAL_CONTEXT: &str = "BaazTerminal";
+
+/// The context the window wears while in Browse mode (B2a-H3): the tab
+/// shortcuts (⌘W to close a tab, ⌘⇧T to reopen, ⌘1–⌘9 to select, ⌥⌘↑/↓
+/// to move) bind here, so Sessions mode keeps ⌘T unbound and ⌘W closing
+/// the window. Worn on a wrapper around the window body while
+/// [`layout::Mode::Browse`] is current (see `render`), never in Sessions.
+pub(crate) const BROWSE_CONTEXT: &str = "BaazBrowse";
+/// The root node's contexts in Browse: `AuiRoot` and [`BROWSE_CONTEXT`] on one
+/// node (pinned against `aui::keys::ROOT_CONTEXT` by a test).
+pub(crate) const BROWSE_ROOT_CONTEXT: &str = "AuiRoot BaazBrowse";
 
 /// The toast stack's own width, the library's `.toast{width:320px}`.
 pub(crate) const TOAST_W: f32 = 320.0;
@@ -882,6 +912,33 @@ pub struct Harness {
     /// rail switches instantly) and cleared the frame the Layout spring
     /// actually rests — never after a fixed delay, never at boot.
     mode_slide: bool,
+    /// The From-sessions groups standing open in the Browse sidebar, by
+    /// session id: collapsed by default, flipped by the group header.
+    /// Part of [`SidebarKey`](crate::sidebar_view::SidebarKey), so an
+    /// expand repaints the cached pane.
+    pub(crate) browse_from_expanded: std::collections::HashSet<String>,
+    /// The tab row a drag hovers over: the 2 px accent line's slot while
+    /// a tab drag is in flight. Transient (cleared on drop), never keyed.
+    pub(crate) browse_drop_target: Option<crate::browser::TabId>,
+    /// The drop-at-end slot below the last tab row: the accent line's
+    /// slot when a tab drag rests past every row (drops append at the
+    /// end). Transient like the row target, never keyed.
+    pub(crate) browse_drop_at_end: bool,
+    /// The tab whose right-click menu stands open in the Browse sidebar
+    /// (`None` while none does). Part of the sidebar key.
+    pub(crate) tab_menu: Option<crate::browser::TabId>,
+    /// The open tab menu's anchor: the clicked row's bounds, reported by
+    /// the row's own prepaint. The popup seats at this rect; cleared with
+    /// the menu, refilled on the next pane repaint.
+    pub(crate) tab_menu_bounds: Option<(u64, Bounds<Pixels>)>,
+    /// A session-owned tab the Browse centre shows (From sessions): it
+    /// stays owned by its session. Cleared by any person-tab select.
+    /// Part of the sidebar key (and read by the centre every frame).
+    pub(crate) browse_session_tab: Option<crate::browser::TabId>,
+    /// The Browse tab row the pointer rests on: its × shows on hover as
+    /// well as when active. Transient (cleared on leave), never keyed —
+    /// the hover report notifies the pane directly.
+    pub(crate) browse_hovered_tab: Option<crate::browser::TabId>,
     /// The Settings Shortcuts section's live rows, re-read when the dialog
     /// opens and after every shortcut edit. The dialog builds from state
     /// every frame, and a file read per frame is not state.
@@ -1368,6 +1425,13 @@ impl Harness {
             subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_slide: false,
+            browse_from_expanded: std::collections::HashSet::new(),
+            browse_drop_target: None,
+            browse_drop_at_end: false,
+            tab_menu: None,
+            tab_menu_bounds: None,
+            browse_session_tab: None,
+            browse_hovered_tab: None,
         };
         // Booting into Browse restores what Browse remembered for the
         // right pane (closed on a fresh file) — the live width and the
@@ -1380,6 +1444,9 @@ impl Harness {
             this.layout.right_kind = remembered.right_kind;
             this.right_resize.width = layout::right_width(&this.layout);
         }
+        // The CEF claim check's live-mode flag starts where the window
+        // starts; every switch after this rides `set_mode`.
+        crate::keymap::set_claim_live_browse(this.mode == layout::Mode::Browse);
         // When the agent opens a URL the Browser pane opens on it — never
         // focused, so the person's keyboard stays where it was while they
         // watch. Deferred for the same re-entrancy reason as the dock hook
@@ -2225,16 +2292,15 @@ impl Harness {
         self.set_mode(self.mode.other(), window, cx);
     }
 
-    /// ⌘T, at window level so it fires with a page focused (B2a-H2b): a
-    /// person tab in Browse, the shown owner's tab otherwise — the
-    /// empty centre's "⌘T for a new tab", and never a session. Sessions
-    /// keep ⌘N; ⌘T never leaves the browser.
+    /// ⌘T, at window level so it fires with a page focused (B2a-H3): a
+    /// person tab in the current project — from Sessions mode it
+    /// switches to Browse first, then opens there. Sessions keep ⌘N;
+    /// ⌘T never leaves the browser.
     pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == layout::Mode::Browse {
-            self.new_browse_sidebar_tab(window, cx);
-        } else {
-            self.new_blank_tab(window, cx);
+        if self.mode != layout::Mode::Browse {
+            self.set_mode(layout::Mode::Browse, window, cx);
         }
+        self.new_browse_sidebar_tab(window, cx);
     }
 
     /// Set the window's mode, idempotently: asking for the current mode
@@ -2254,6 +2320,9 @@ impl Harness {
         let leaving = self.mode_state(cx);
         let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
+        // The CEF claim check filters `BaazBrowse` rows by this flag, set
+        // here (never read from gpui state inside the router callback).
+        crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
         self.layout.mode = mode;
         self.layout.right_open = entering.right_open;
         self.layout.right_width = entering.right_width;
@@ -4879,6 +4948,7 @@ impl Render for Harness {
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
         let project_menu = self.render_project_menu(cx);
+        let tab_menu = self.render_tab_menu_popup(cx);
         // Z7a, the native-overlay rule: persist real navigations, resolve
         // pending screenshot attaches, and hide every native webview this
         // frame covers (the page is composited above gpui, so gpui cannot
@@ -4888,6 +4958,7 @@ impl Render for Harness {
             view_options.is_some(),
             account.is_some(),
             project_menu.is_some(),
+            tab_menu.is_some(),
             window,
             cx,
         );
@@ -4952,11 +5023,20 @@ impl Render for Harness {
             window.focus(&self.focus_root, cx);
         }
         self.overlay_was_open = overlay_now;
-        aui::keys::track_pointer(
+        let root = aui::keys::track_pointer(
             div()
                 .size_full()
                 .relative()
-                .key_context(aui::keys::ROOT_CONTEXT)
+                // Browse adds its context on the SAME node as `AuiRoot`, so
+                // both sit at one depth and the later table row wins (⌘W =
+                // close tab after ⌘W = close window). An ancestor wrapper
+                // lost to the deeper `AuiRoot` binding; a child wrapper was
+                // never on the focused path.
+                .key_context(if self.mode == layout::Mode::Browse {
+                    BROWSE_ROOT_CONTEXT
+                } else {
+                    aui::keys::ROOT_CONTEXT
+                })
                 .track_focus(&self.focus_root)
                 // A mouse-down outside the browser page's rect hands the
                 // keyboard back when the page holds it. Capture phase, next
@@ -5014,6 +5094,50 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &NewBrowserTab, window, cx| {
                     this.new_browser_tab(window, cx);
                 }))
+                // B2a-H3: the Browse tab shortcuts. They bind in
+                // `BaazBrowse` (the wrapper above), so with a page
+                // focused the claimed set carries them here; each is a
+                // no-op outside Browse (the context is what scopes them,
+                // the guard is the belt).
+                .on_action(cx.listener(|this, _: &CloseBrowseTab, window, cx| {
+                    this.close_browse_shortcut(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &ReopenBrowseTab, window, cx| {
+                    this.reopen_browse_shortcut(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab1, window, cx| {
+                    this.select_browse_nth(1, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab2, window, cx| {
+                    this.select_browse_nth(2, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab3, window, cx| {
+                    this.select_browse_nth(3, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab4, window, cx| {
+                    this.select_browse_nth(4, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab5, window, cx| {
+                    this.select_browse_nth(5, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab6, window, cx| {
+                    this.select_browse_nth(6, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab7, window, cx| {
+                    this.select_browse_nth(7, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab8, window, cx| {
+                    this.select_browse_nth(8, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTabLast, window, cx| {
+                    this.select_browse_nth(9, true, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveBrowseTabDown, window, cx| {
+                    this.move_browse_shortcut(1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveBrowseTabUp, window, cx| {
+                    this.move_browse_shortcut(-1, window, cx);
+                }))
                 // ⌘L at window level: the webview's own `cmd-l` binding
                 // only fires while gpui holds the keyboard, so this root
                 // binding carries it when the native page has focus. The
@@ -5046,10 +5170,19 @@ impl Render for Harness {
                 .children(view_options)
                 .children(account)
                 .children(project_menu)
+                .children(tab_menu)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
                 .child(session::draw_end_marker()),
-        )
+        );
+        // B2a-H3b: while in Browse the window wears `BaazBrowse` on an
+        // ancestor of the focus-root div below (which owns `track_focus`
+        // and `AuiRoot`), never in Sessions. Focus resting on the root —
+        // the first frame, after overlays close, after a routed page key —
+        // still carries both contexts, so ⌘W closes a tab in Browse and
+        // the window in Sessions; a child wrapper would sit below the
+        // focused node and never apply.
+        root.into_any_element()
     }
 }
 
@@ -5131,6 +5264,11 @@ impl Harness {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
             cx.notify();
+            return;
+        }
+        // The Browse tab menu is pane state, never the overlay stack:
+        // Escape closes it here, before the Settings and Skills pages.
+        if self.close_tab_menu(cx) {
             return;
         }
         if !matches!(self.auth, Auth::SignedIn(_)) {

@@ -591,7 +591,7 @@ impl SessionEntry {
     /// everything else is idle. The compact row (agentic-ui v0.3.15) has no
     /// status verb line, so this dot — plus the trailing slot — is the only
     /// place the state reads: "Needs approval" and "Failed" ride both.
-    fn state(&self) -> AgentState {
+    pub(crate) fn state(&self) -> AgentState {
         if self.running {
             AgentState::Running
         } else if self.needs_approval() || self.asked() {

@@ -91,6 +91,9 @@
 //! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
 //! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
+//! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range records a step failure, free |
+//! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range records a step failure, free |
+//! | `from-sessions:<n>` | expand the n-th From-sessions group of the current project (1-based, first-seen order), collapsing the rest; empty collapses every group; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
@@ -297,6 +300,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
     WindowVerb { verb: "tab-select", run: |this, rest, window, cx| this.step_tab_select(rest, window, cx) },
     WindowVerb { verb: "tab-close", run: |this, rest, window, cx| this.step_tab_close(rest, window, cx) },
+    WindowVerb { verb: "tab-pin", run: |this, rest, _, cx| this.step_tab_pin(rest, cx) },
+    WindowVerb { verb: "tab-menu", run: |this, rest, _, cx| this.step_tab_menu(rest, cx) },
+    WindowVerb { verb: "from-sessions", run: |this, rest, _, cx| this.step_from_sessions(rest, cx) },
     WindowVerb {
         verb: "tab-discard-now",
         run: |this, _, window, cx| this.step_tab_discard_now(window, cx),
