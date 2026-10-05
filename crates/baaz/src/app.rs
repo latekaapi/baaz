@@ -3897,6 +3897,12 @@ impl Harness {
         // R2: the feedback header slot (toggle icon, count, Done and
         // Discard — or the Done confirmation), just left of the header
         // icon buttons — the region pages never cover.
+        // R3: the header toast chip, immediately left of the feedback
+        // slot — same never-covered region, where toasts stay visible
+        // while a native page is on screen.
+        if let Some(chip) = self.render_toast_chip(cx) {
+            cell = cell.child(chip);
+        }
         if let Some(slot) = self.render_feedback_header_slot(cx) {
             cell = cell.child(slot);
         }
@@ -4998,6 +5004,12 @@ impl Harness {
         // R2: the feedback header slot (toggle icon, count, Done and
         // Discard — or the Done confirmation), just left of the header
         // icon buttons — the region pages never cover.
+        // R3: the header toast chip, immediately left of the feedback
+        // slot — same never-covered region.
+        let row = match self.render_toast_chip(cx) {
+            Some(chip) => row.child(chip),
+            None => row,
+        };
         let row = match self.render_feedback_header_slot(cx) {
             Some(slot) => row.child(slot),
             None => row,
@@ -5625,6 +5637,9 @@ impl Harness {
         // Discard — or the Done confirmation) sits
         // here, just left of the header icon buttons — the one header
         // region native pages never cover.
+        // R3: the header toast chip sits immediately left of it — same
+        // never-covered region.
+        let toast_chip = self.render_toast_chip(cx);
         let feedback_slot = self.render_feedback_header_slot(cx);
         // No expand button: the header row stands still while the sidebar
         // collapses, so the toggle in the sidebar header stays put and the
@@ -5649,6 +5664,10 @@ impl Harness {
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
         let cell = cell.child(title);
+        let cell = match toast_chip {
+            Some(chip) => cell.child(chip),
+            None => cell,
+        };
         let cell = match feedback_slot {
             Some(slot) => cell.child(slot),
             None => cell,

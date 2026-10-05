@@ -206,6 +206,14 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:https://example.com;more-menu"]},
     "browse-crashed":       {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;crashed:the page crashed (-1);wait:200"]},
+    # R3: a toast over a live Browse page — the header chip, not the
+    # top-right stack (the native page would cover the stack). `tab-new:`
+    # lands the scripted page first (captures always run the fake page,
+    # which the predicate counts like a real one), then `toast:` raises
+    # the production toast through the production path. Offline, fake
+    # backend, no baselines — capture and look.
+    "toast-header":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;toast:Feedback saved · 3 notes|/tmp/baaz-report.md"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
