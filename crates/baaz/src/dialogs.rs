@@ -2265,7 +2265,7 @@ mod tests {
         let state = hermetic_state("toast-no-pane");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut vc = cx.add_empty_window();
-        let baaz = header_harness(&mut vc, &state.2);
+        let baaz = header_harness(vc, &state.2);
         assert!(vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)), "no pane, no header chip");
         restore_state(state);
     }
@@ -2279,7 +2279,7 @@ mod tests {
         let state = hermetic_state("toast-pane-page");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut vc = cx.add_empty_window();
-        let baaz = header_harness(&mut vc, &state.2);
+        let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.browser.fake = true;
@@ -2304,7 +2304,7 @@ mod tests {
         let state = hermetic_state("toast-browse-page");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut vc = cx.add_empty_window();
-        let baaz = header_harness(&mut vc, &state.2);
+        let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
@@ -2327,7 +2327,7 @@ mod tests {
         let state = hermetic_state("toast-blank-tab");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut vc = cx.add_empty_window();
-        let baaz = header_harness(&mut vc, &state.2);
+        let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
@@ -2360,7 +2360,7 @@ mod tests {
         let state = hermetic_state("toast-settings");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut vc = cx.add_empty_window();
-        let baaz = header_harness(&mut vc, &state.2);
+        let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
