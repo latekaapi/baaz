@@ -277,7 +277,10 @@ pub fn feedback_accent(cx: &gpui::App) -> gpui::Hsla {
 }
 
 /// Text on the feedback colour: near-black `#1A1206` on dark's amber,
-/// white on light's.
+/// white on light's. F2's bar and pill keep the theme buttons, so only
+/// F3's note popover paints on the feedback colour — this waits for it,
+/// like F1's model waited for F2.
+#[allow(dead_code)]
 pub fn feedback_on_accent(cx: &gpui::App) -> gpui::Hsla {
     if cx.aui().kind.is_dark() {
         gpui::Hsla { h: 0.1000, s: 0.6250, l: 0.0627, a: 1.0 }
@@ -480,7 +483,9 @@ impl crate::app::Harness {
     /// current project, the open session and its title, the right pane
     /// (only while open), the shown page's URL (only while a page shows),
     /// the settings section (only while Settings is open), the window
-    /// size and scale, and the theme. F3 calls this per note.
+    /// size and scale, and the theme. F3 calls this per note; F2 builds
+    /// it only in tests, so the non-test build parks it here.
+    #[allow(dead_code)]
     pub(crate) fn feedback_context(&self, window: &mut Window, cx: &gpui::App) -> ScreenContext {
         let mode = match self.mode {
             crate::layout::Mode::Sessions => "sessions".to_owned(),
@@ -514,7 +519,7 @@ impl crate::app::Harness {
             settings_section,
             window_w: f32::from(size.width),
             window_h: f32::from(size.height),
-            scale: f32::from(window.scale_factor()),
+            scale: window.scale_factor(),
             theme: if cx.aui().kind.is_dark() { "dark".to_owned() } else { "light".to_owned() },
         }
     }

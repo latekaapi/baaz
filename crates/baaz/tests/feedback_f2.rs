@@ -122,7 +122,7 @@ fn capture_layer_blocks_active_only_with_an_f3_hook() {
     assert!(ui.contains("F3 hook"), "F3 finds where to attach");
     let app = source("app.rs");
     assert!(
-        app.contains("self.feedback.phase != feedback_ui::FeedbackPhase::Off"),
+        app.contains("self.feedback.is_open()"),
         "focus parks when the shell closes"
     );
     assert!(
