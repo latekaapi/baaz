@@ -2171,7 +2171,10 @@ mod tests {
     /// focus handle, which needs the app.
     fn live_shell(cx: &mut gpui::App) -> FeedbackUi {
         FeedbackUi::new(
-            Box::new(FakeProbe { hits: Vec::new(), enrich_calls: std::cell::Cell::new(0) }),
+            Box::new(FakeProbe {
+                hits: Vec::new(),
+                enrich_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+            }),
             cx,
         )
     }
@@ -2836,17 +2839,34 @@ mod tests {
         gpui::point(gpui::px(x), gpui::px(y))
     }
 
+    /// Swap the shell's probe for scripted hits, handing back the shared
+    /// enrich counter so tests assert hover never enriches and a click
+    /// enriches exactly once.
     fn inject_hits(
         baaz: &gpui::Entity<crate::app::Harness>,
         vc: &mut gpui::VisualTestContext,
         hits: Vec<ElementHit>,
-    ) {
+    ) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let probe_calls = calls.clone();
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                h.feedback.probe =
-                    Box::new(FakeProbe { hits, enrich_calls: std::cell::Cell::new(0) });
+                h.feedback.probe = Box::new(FakeProbe { hits, enrich_calls: probe_calls });
             })
         });
+        calls
+    }
+
+    /// Drive the real frame path: run parked tasks (firing the capture's
+    /// 120 ms bound and the step pump's ticks) and deliver two painted
+    /// frames for the capture's nested `on_next_frame` pair.
+    fn drive_frames(vc: &mut gpui::VisualTestContext) {
+        vc.run_until_parked();
+        vc.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        vc.run_until_parked();
     }
 
     /// Press and release at one point, then complete the capture the way
@@ -2895,6 +2915,14 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).feedback.hover.is_some()),
             "a sub-2 px move keeps the outline without re-hit-testing"
         );
+        // The throttle would skip an immediate re-test: age the last one
+        // past ~30 ms so the empty-space hover really hit-tests.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.hover_tested_at =
+                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1));
+            })
+        });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(500.0, 500.0), window, cx)));
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.hover.is_none()),
@@ -2903,20 +2931,77 @@ mod tests {
         restore_state(state);
     }
 
+    /// Hover never enriches (the debug-tree parse waits for the note's
+    /// target) and hit-tests at most one per ~30 ms: an immediate second
+    /// move keeps the old outline, an aged one re-tests.
+    #[gpui::test]
+    fn hover_throttles_and_never_enriches(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-hover-throttle");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        let calls = inject_hits(
+            &baaz,
+            vc,
+            vec![
+                f3_hit(10.0, 10.0, 100.0, 30.0, "Headers"),
+                f3_hit(300.0, 300.0, 100.0, 30.0, "Footer"),
+            ],
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(20.0, 20.0), window, cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            Some("Headers".to_owned())
+        );
+        assert_eq!(calls.get(), 0, "hover never enriches");
+        // An immediate move onto the other hit is throttled: no re-test,
+        // the old outline stays, and still no enrichment.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(310.0, 310.0), window, cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            Some("Headers".to_owned()),
+            "the throttled move keeps the last outline"
+        );
+        assert_eq!(calls.get(), 0, "the throttled move enriches nothing either");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.hover_tested_at =
+                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1));
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(310.0, 310.0), window, cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            Some("Footer".to_owned()),
+            "past the throttle the move re-hit-tests"
+        );
+        assert_eq!(calls.get(), 0, "even a real re-test never enriches");
+        restore_state(state);
+    }
+
     /// A click on a hit opens the popover with that element as its target,
-    /// staying Active.
+    /// staying Active — driven through the real frame path (the step
+    /// handler, then parked tasks plus painted frames), never by calling
+    /// the capture finish by hand. The click enriches exactly once.
     #[gpui::test]
     fn click_on_a_hit_opens_an_element_popover(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3-click-hit");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
-        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        f3_click(&baaz, vc, 20.0, 20.0);
+        let calls =
+            inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
+            "no popover yet: the capture has not landed"
+        );
+        drive_frames(vc);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Element(hit)) => assert_eq!(hit.label, "Headers"),
             other => panic!("the popover points at the clicked element, got {other:?}"),
         }
+        assert_eq!(calls.get(), 1, "the click enriches exactly once");
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
             "note-taking stays Active"
@@ -2925,7 +3010,10 @@ mod tests {
     }
 
     /// A click on no hit parks a warm retry; when the tree stays cold past
-    /// a second, the poll falls back to a 60×40 area centred on the point.
+    /// a second, the render's poll falls back to a 60×40 area centred on
+    /// the point — driven through the real frame path (the step handler,
+    /// the clock, a layer render, then frames), never by calling the poll
+    /// or the capture finish by hand.
     #[gpui::test]
     fn click_off_any_hit_falls_back_to_a_centred_area(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3-click-miss");
@@ -2933,13 +3021,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, Vec::new());
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let point = f3_point(200.0, 200.0);
-                h.feedback_press_at(point, window, cx);
-                h.feedback_release_at(point, window, cx);
-            })
-        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx)));
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
             "no popover yet: the click waits for the tree to warm"
@@ -2948,16 +3030,23 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).feedback.pending_click.is_some()),
             "the miss parks a retry"
         );
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
+        // Let the tree stay cold past the warm window (wall-clock: the
+        // retry bounds on `Instant`, not the test clock), then render the
+        // layer the way a frame would: its poll falls back to the area and
+        // starts the capture, which the frames below land.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
                 if let Some(pending) = h.feedback.pending_click.as_mut() {
                     pending.since = Instant::now() - FEEDBACK_PROBE_WARM - Duration::from_secs(1);
                 }
-                h.feedback_poll(window, cx);
-                let seq = h.feedback.capture_seq;
-                h.finish_note_capture(window, cx, seq);
             })
         });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let _ = h.render_feedback_layer(window, cx);
+            })
+        });
+        drive_frames(vc);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Area { rect, region }) => {
                 assert_eq!(rect, Rect { x: 170.0, y: 180.0, w: 60.0, h: 40.0 });
@@ -3199,42 +3288,300 @@ mod tests {
         restore_state(state);
     }
 
-    /// The `note:` step fills the open popover and saves; `cancel` closes
-    /// it unsaved. Both ride the same handlers as the buttons.
+    /// The scripted `click → note → drag → note` sequence files two notes:
+    /// `note:` waits behind the in-flight capture across frames instead of
+    /// racing it, and the `drag:` queues behind the first capture instead
+    /// of cancelling it. Then `cancel` really runs: it closes a fresh
+    /// popover unsaved. All through `step_feedback` plus parked tasks —
+    /// never by calling the capture finish by hand. The drag's centre has
+    /// a scripted hit so the area names its region without waiting out
+    /// the cold-tree window (wall-clock, not the test clock).
     #[gpui::test]
     fn note_and_cancel_steps_fill_and_close(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3-note-step");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
-        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        // `click:` starts the capture; `note:` finishes it and saves.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
-        assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some() || baaz.read(cx).feedback.capture_pending.is_some()),
-            "click: parks a capture or a popover"
+        inject_hits(
+            &baaz,
+            vc,
+            vec![
+                f3_hit(10.0, 10.0, 100.0, 30.0, "Headers"),
+                f3_hit(700.0, 330.0, 100.0, 80.0, "Canvas"),
+            ],
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("note:Make this quieter", window, cx)));
-        vc.update(|_, cx| {
-            let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 1);
-            assert_eq!(harness.feedback.draft.notes[0].text, "Make this quieter");
-            assert!(harness.feedback.popover.is_none());
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_feedback("note:Make this quieter", window, cx))
         });
-        // `drag:` + `cancel`: the area popover opens, then closes unsaved.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("drag:560,300,900,420", window, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("note:Too much space here", window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_feedback("drag:560,300,900,420", window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_feedback("note:Too much space here", window, cx))
+        });
+        vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 2);
+            assert_eq!(harness.feedback.note_count(), 2, "click → note → drag → note files 2 notes");
+            assert_eq!(harness.feedback.draft.notes[0].text, "Make this quieter");
+            assert_eq!(harness.feedback.draft.notes[1].text, "Too much space here");
             match &harness.feedback.draft.notes[1].target {
                 Target::Area { rect, region } => {
                     assert_eq!(*rect, Rect { x: 560.0, y: 300.0, w: 340.0, h: 120.0 });
-                    assert_eq!(*region, None, "no scripted hit covers the box centre");
+                    assert_eq!(*region, Some("near Canvas".to_owned()));
                 }
                 other => panic!("the drag saves an area, got {other:?}"),
             }
+            assert!(harness.feedback.popover.is_none());
+            assert!(harness.feedback.step_queue.is_empty(), "the pump drained the queue");
         });
+        // `cancel` really runs: a fresh popover opens, then closes unsaved.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        drive_frames(vc);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()),
+            "the fresh click opens a popover"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("cancel", window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.feedback.popover.is_none(), "cancel closes the popover");
+            assert_eq!(harness.feedback.note_count(), 2, "cancel saves nothing");
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "cancel stays Active");
+        });
+        restore_state(state);
+    }
+
+    /// A press whose mouse-up landed on the bar, the popover or outside
+    /// the window never reaches the layer: the next button-up move clears
+    /// the stale press and drag without filing a note, and hover revives.
+    #[gpui::test]
+    fn stale_press_clears_on_move_without_filing(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-stale-press");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.feedback_press_at(f3_point(20.0, 20.0), window, cx))
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.press.is_some()));
+        // The button is up but the press is still armed: the release went
+        // elsewhere. A move clears it — no note, no retry, no capture.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.feedback_move_at(f3_point(30.0, 30.0), None, window, cx))
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.feedback.press.is_none(), "the stale press clears");
+            assert!(harness.feedback.drag.is_none(), "the stale drag clears");
+            assert!(harness.feedback.pending_click.is_none(), "no retry parks");
+            assert!(harness.feedback.capture_pending.is_none(), "no capture starts");
+            assert!(harness.feedback.popover.is_none(), "no note is filed");
+            assert!(harness.feedback.draft.is_empty());
+            assert!(
+                harness.feedback.hover.as_ref().is_some_and(|hit| hit.label == "Headers"),
+                "hover revives on the same move"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// The pure clamp geometry: the chip sits below a top-edge target,
+    /// above a mid-window one, on screen at the bottom edge, and pinned
+    /// inside an element taller than the window; the popover drops below
+    /// the bar at the top edge and flips above a bottom-edge target so
+    /// Save stays on screen, growing with the field's row count.
+    #[gpui::test]
+    fn chip_and_popover_clamps() {
+        let (win_w, win_h) = (1000.0, 800.0);
+        let (_, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 100.0, y: 8.0, w: 200.0, h: 24.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, 36.0, "a top-edge chip sits below the element");
+        let (_, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 100.0, y: 400.0, w: 200.0, h: 30.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, 372.0, "a mid-window chip sits above the element");
+        let (_, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 100.0, y: 780.0, w: 200.0, h: 30.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, 752.0, "a bottom-edge chip stays on screen");
+        assert!(y + 24.0 <= win_h);
+        let (x, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 50.0, y: 0.0, w: 900.0, h: 900.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!((x, y), (54.0, 4.0), "a taller-than-window chip pins inside its top-left");
+
+        assert!(
+            FeedbackUi::feedback_popover_height(8) > FeedbackUi::feedback_popover_height(3),
+            "the estimate grows with the row count"
+        );
+        assert_eq!(
+            FeedbackUi::feedback_popover_height(1),
+            FeedbackUi::feedback_popover_height(3),
+            "rows clamp to the field minimum"
+        );
+        assert_eq!(
+            FeedbackUi::feedback_popover_height(20),
+            FeedbackUi::feedback_popover_height(8),
+            "rows clamp to the field maximum"
+        );
+        let (_, y) = FeedbackUi::feedback_popover_pos(
+            Rect { x: 100.0, y: 8.0, w: 200.0, h: 24.0 },
+            FeedbackUi::feedback_popover_height(3),
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, FEEDBACK_BAR_ZONE_H, "a top-edge popover drops below the bar");
+        let (_, y) = FeedbackUi::feedback_popover_pos(
+            Rect { x: 100.0, y: 740.0, w: 200.0, h: 40.0 },
+            250.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, 482.0, "a bottom-edge popover flips above the target");
+        assert!(y + 250.0 <= win_h - 8.0, "the whole popover including Save stays on screen");
+        assert!(y >= FEEDBACK_BAR_ZONE_H);
+    }
+
+    /// Pause keeps a note-in-progress (popover plus typed text) and Resume
+    /// restores it with the keyboard back in its field; Done files the open
+    /// note first and then writes.
+    #[gpui::test]
+    fn pause_keeps_the_note_and_resume_restores_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-pause-note");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        drive_frames(vc);
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.fill_feedback_note("half-typed words", window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
+            assert!(harness.feedback.popover.is_some(), "pause keeps the popover");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume_feedback(window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                assert_eq!(h.feedback.phase, FeedbackPhase::Active);
+                let note = h.feedback.popover.as_ref().expect("resume restores the popover");
+                assert_eq!(
+                    note.field.read(cx).value().to_string(),
+                    "half-typed words",
+                    "the typed text survives the round-trip"
+                );
+                assert!(
+                    note.field.read(cx).focus_handle(cx).is_focused(window),
+                    "resume hands the keyboard back to the field"
+                );
+            })
+        });
+        restore_state(state);
+    }
+
+    /// Done with an unsaved open note files it first, then writes: the
+    /// toast counts it and the shell parks Off with a cleared draft.
+    #[gpui::test]
+    fn done_saves_the_open_note_first(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-done-note");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        drive_frames(vc);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.fill_feedback_note("file me on Done", window, cx))
+        });
+        assert!(
+            vc.update(|_, cx| !baaz.read(cx).feedback.done_enabled()),
+            "the draft is still empty with the note unsaved"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        vc.run_until_parked();
+        let latest =
+            std::fs::read_to_string(crate::feedback::feedback_root().join("latest")).expect("Done writes latest");
+        assert!(std::path::PathBuf::from(latest.trim()).is_dir(), "the report dir lands");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Off, "Done parks Off");
+            assert!(harness.feedback.draft.is_empty(), "Done clears the draft");
+            let toast = harness.overlays.read(cx).toasts.last().cloned().expect("a toast lands");
+            assert_eq!(toast.title.to_string(), "Feedback saved · 1 note");
+        });
+        restore_state(state);
+    }
+
+    /// Starting a capture while a Done write is in flight is a no-op: the
+    /// write owns the window until it lands.
+    #[gpui::test]
+    fn begin_capture_refuses_while_saving(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-capture-saving");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.feedback.saving = true;
+                h.begin_note_capture(
+                    Target::Area { rect: Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0 }, region: None },
+                    window,
+                    cx,
+                );
+            })
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(!harness.feedback.capturing, "no capture starts while saving");
+            assert!(harness.feedback.capture_pending.is_none());
+            assert!(harness.feedback.popover.is_none());
+        });
+        restore_state(state);
+    }
+
+    /// The popover subtitle reads as a person reads it: the capitalised
+    /// mode, or `<pane> pane` while the right pane is open. The stored
+    /// [`ScreenContext`] values stay lowercase — display only.
+    #[gpui::test]
+    fn subtitle_reads_as_a_person_reads_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3-subtitle");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        let target = Target::Element(f3_hit(10.0, 10.0, 100.0, 30.0, "Headers"));
+        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target));
+        assert_eq!(subtitle, "Button · in Header · Sessions");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.layout.right_open = true;
+                h.layout.right_kind = Some(crate::layout::RightKind::Browser);
+            })
+        });
+        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target));
+        assert_eq!(subtitle, "Button · in Header · Browser pane");
         restore_state(state);
     }
 

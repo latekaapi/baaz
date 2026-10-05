@@ -82,8 +82,9 @@ pub struct FakeProbe {
     pub hits: Vec<ElementHit>,
     /// How many times [`ElementProbe::enrich`] ran: enrichment is free
     /// here (a no-op), so tests assert hover never enriches and a click
-    /// enriches exactly once.
-    pub enrich_calls: std::cell::Cell<usize>,
+    /// enriches exactly once. Shared so a test can hold the handle past
+    /// injection into the shell.
+    pub enrich_calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl FakeProbe {
@@ -500,7 +501,7 @@ mod tests {
                 hit_at(10.0, 10.0, 20.0, 20.0, "inner"),
                 hit_at(12.0, 12.0, 5.0, 5.0, "core"),
             ],
-            enrich_calls: std::cell::Cell::new(0),
+            enrich_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
         };
         let label = |hit: Option<ElementHit>| hit.map(|hit| hit.label);
         assert_eq!(label(probe.hit_point(14.0, 14.0)), Some("core".to_owned()));
@@ -512,11 +513,11 @@ mod tests {
     fn fake_probe_returns_none_outside_all_hits() {
         let probe = FakeProbe {
             hits: vec![hit_at(0.0, 0.0, 10.0, 10.0, "only")],
-            enrich_calls: std::cell::Cell::new(0),
+            enrich_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
         };
         assert!(probe.hit_point(99.0, 99.0).is_none());
         assert!(
-            FakeProbe { hits: vec![], enrich_calls: std::cell::Cell::new(0) }
+            FakeProbe { hits: vec![], enrich_calls: std::rc::Rc::new(std::cell::Cell::new(0)) }
                 .hit_point(1.0, 1.0)
                 .is_none()
         );
