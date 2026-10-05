@@ -587,6 +587,10 @@ pub(crate) struct BrowserPane<'a> {
     pub tabs: &'a [StripTab],
     /// The window, for tab hover tracking.
     pub window: &'a mut Window,
+    /// Whether the strip offers the "Browse" button (B2a-H4): true when
+    /// the shown owner is a session, whose active tab carries into Browse
+    /// full-width. Person tabs already live in Browse, so they get none.
+    pub carry: bool,
 }
 
 pub(crate) fn render(
@@ -605,6 +609,7 @@ pub(crate) fn render(
             BrowserPlaceholder::Page => browser_pane(
                 browser.state.expect("has_webview means Some"),
                 browser.tabs,
+                browser.carry,
                 browser.window,
                 cx,
             ),
@@ -2602,6 +2607,7 @@ fn text_doc_pane(doc: &TextDoc, harness: WeakEntity<Harness>) -> AnyElement {
 fn browser_pane(
     state: &Entity<aui_webview::WebviewState>,
     tabs: &[StripTab],
+    carry: bool,
     window: &mut Window,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
@@ -2621,7 +2627,7 @@ fn browser_pane(
         .aria_label("Browser")
         .size_full();
     if !tabs.is_empty() {
-        column = column.child(browser_tab_strip(tabs, &strip_harness, window, cx));
+        column = column.child(browser_tab_strip(tabs, carry, &strip_harness, window, cx));
     }
     column.child(pane).into_any_element()
 }
@@ -2636,6 +2642,7 @@ const TAB_TITLE_CHARS: usize = 24;
 /// middle-click closes, `+` opens a blank tab with the address focused.
 fn browser_tab_strip(
     tabs: &[StripTab],
+    carry: bool,
     harness: &WeakEntity<Harness>,
     window: &mut Window,
     cx: &mut App,
@@ -2654,6 +2661,35 @@ fn browser_tab_strip(
         row = row.child(browser_strip_tab(tab, harness, p, window, cx));
     }
     row = row.child(browser_new_tab(harness, p));
+    // "Browse" beside the pane's tab strip (B2a-H4): the session's active
+    // tab shows full-width in Browse mode with the ↩ chip. Only for
+    // session owners — person tabs already live in Browse.
+    if carry {
+        let go = harness.clone();
+        row = row.child(
+            div()
+                .id("right-browser-carry")
+                .flex_none()
+                .role(gpui::Role::Button)
+                .aria_label("Browse full width")
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    let _ = go.update(cx, |this, cx| this.carry_session_tab_to_browse(window, cx));
+                })
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .px(px(6.0))
+                        .h(px(22.0))
+                        .rounded(px(scale::R_SM))
+                        .text_color(p.ink_2)
+                        .ui(scale::FS_12)
+                        .child("↗")
+                        .child("Browse"),
+                ),
+        );
+    }
     row.into_any_element()
 }
 
@@ -2701,8 +2737,6 @@ fn browser_strip_tab(
         .overflow_hidden()
         .cursor_pointer()
         .track_interaction(&tracked)
-        .role(gpui::Role::Tab)
-        .aria_label(format!("{} tab", title))
         .child(
             div()
                 .size(px(16.0))
@@ -2725,6 +2759,7 @@ fn browser_strip_tab(
                 .whitespace_nowrap()
                 .child(title.clone()),
         )
+        .role(gpui::Role::Tab)
         // Named again beside the click for the a11y ratchet's window.
         .aria_label(format!("{} tab", title))
         .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))

@@ -146,6 +146,20 @@ ENTRIES = {
                                       "--steps", "mode:browse"]},
     "browse-tabs":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/"]},
+    # B2a-H4: the Browse toolbar, omnibox, session chip, Browse button and
+    # new-tab page. `tab-new:` navigates (ending any address edit), and the
+    # scripted page badges the URL's own classification (Secure for
+    # https, Local for localhost) since it reports no Security of its own.
+    "browse-toolbar":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com"]},
+    "browse-toolbar-dev":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:http://localhost:5173/overview"]},
+    "browse-omnibox":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;omnibox:example"]},
+    "browse-newtab":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;tab-new:about:blank"]},
+    "browse-from-session":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "fixture-session:Fix ledger chart"]},
     "sessions-switch":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400"]},
     # B2a-H3: the full Browse sidebar — 3 person tabs with 1 pinned, one
