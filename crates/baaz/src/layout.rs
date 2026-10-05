@@ -206,8 +206,15 @@ pub struct ScrollPos {
 /// the right pane's open state, kind and width, the sidebar's scroll
 /// offset, and which session or tab was selected. Saved on the way out,
 /// restored on the way back in — see [`ModeSlots::switch`].
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// B2a-H6: the sidebar's open state rides along too, so hiding the
+/// sidebar in Browse never touches Sessions' own sidebar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModeState {
+    /// Whether the sidebar stood open in this mode. Open by default, so
+    /// a file written before this feature reads as today's behaviour.
+    #[serde(rename = "sidebarOpen", default = "default_true")]
+    pub sidebar_open: bool,
     /// Whether the right pane stood open in this mode.
     #[serde(rename = "rightOpen", default)]
     pub right_open: bool,
@@ -226,6 +233,22 @@ pub struct ModeState {
     /// The selected person-tab id while in Browse mode, if any.
     #[serde(rename = "selectedTab", default, skip_serializing_if = "Option::is_none")]
     pub selected_tab: Option<u64>,
+}
+
+impl Default for ModeState {
+    /// Open sidebar, everything else shut: an untouched mode reads — and
+    /// stays out of `layout.json` — exactly like before this feature.
+    fn default() -> Self {
+        Self {
+            sidebar_open: true,
+            right_open: false,
+            right_width: None,
+            right_kind: None,
+            scroll: None,
+            selected_session: None,
+            selected_tab: None,
+        }
+    }
 }
 
 impl ModeState {
@@ -272,6 +295,52 @@ impl ModeSlots {
     /// object out of `layout.json` until the first real switch.
     pub fn is_default_all(&self) -> bool {
         self.sessions.is_default() && self.browse.is_default()
+    }
+}
+
+/// Where Browse shows the person's tabs (B2a-H6): down the sidebar, as
+/// the window always did — or in a strip row above the page, with the
+/// sidebar keeping only New tab, From sessions and Agents. Owned by the
+/// Settings → Browser page; changing it is instant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserTabs {
+    /// The tab list down the sidebar.
+    #[default]
+    Vertical,
+    /// A tab strip row above the page.
+    Horizontal,
+}
+
+impl BrowserTabs {
+    /// Every layout the Settings segmented control offers, in order.
+    pub const ALL: [BrowserTabs; 2] = [BrowserTabs::Vertical, BrowserTabs::Horizontal];
+
+    /// The machine name: what `layout.json` stores and `settings-set:`
+    /// parses.
+    pub fn slug(self) -> &'static str {
+        match self {
+            BrowserTabs::Vertical => "vertical",
+            BrowserTabs::Horizontal => "horizontal",
+        }
+    }
+
+    /// The inverse of [`BrowserTabs::slug`]: `None` for an unknown string,
+    /// so a hand-edited file reads as today's behaviour, never an error.
+    pub fn parse(s: &str) -> Option<BrowserTabs> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "vertical" => Some(BrowserTabs::Vertical),
+            "horizontal" => Some(BrowserTabs::Horizontal),
+            _ => None,
+        }
+    }
+
+    /// The user-visible name: the Settings segmented control's labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            BrowserTabs::Vertical => "Vertical",
+            BrowserTabs::Horizontal => "Horizontal",
+        }
     }
 }
 
@@ -409,6 +478,50 @@ pub struct Layout {
     /// read unchanged.
     #[serde(rename = "modeMemory", default, skip_serializing_if = "ModeSlots::is_default_all")]
     pub mode_memory: ModeSlots,
+    /// Where Browse shows the person's tabs (B2a-H6): [`BrowserTabs`].
+    /// Missing in every file written before this feature, which reads as
+    /// vertical — today's Baaz.
+    #[serde(rename = "browserTabs", default)]
+    pub browser_tabs: BrowserTabs,
+    /// The engine an address commit searches with (B2a-H6): what the
+    /// Settings → Browser page owns. Missing reads as Google, like the
+    /// old toolbar const.
+    #[serde(rename = "searchEngine", default)]
+    pub search_engine: crate::browser::toolbar::SearchEngine,
+    /// Where downloads land (B2a-H6): `None` is `~/Downloads`. Owned by
+    /// the Settings → Browser page's Change row; passed to the CEF
+    /// backend at startup and on change.
+    #[serde(rename = "downloadDir", default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<PathBuf>,
+}
+
+/// The folder downloads land in when nothing was ever chosen:
+/// `~/Downloads` (`/tmp/Downloads` with no home). The CEF backend's own
+/// default matches, so a fresh window agrees with it before anything is
+/// stored.
+pub fn default_download_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp")).join("Downloads")
+}
+
+/// The folder downloads land in: the chosen one, or the default. Pure,
+/// so Settings and startup share it.
+pub fn browser_download_dir(layout: &Layout) -> PathBuf {
+    layout.download_dir.clone().unwrap_or_else(default_download_dir)
+}
+
+/// A path for the Settings row: `~/…` when under home, else the full
+/// path. Pure, so tests pin it without touching the home dir.
+pub fn tilde_path(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if path == home {
+            return "~".to_owned();
+        }
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
 }
 
 /// The default for the auto-title and auto-summary switches: ON. A missing
@@ -445,6 +558,9 @@ impl Default for Layout {
             use_own_mcp: UseOwnMcp::default(),
             mode: Mode::Sessions,
             mode_memory: ModeSlots::default(),
+            browser_tabs: BrowserTabs::Vertical,
+            search_engine: crate::browser::toolbar::SearchEngine::Google,
+            download_dir: None,
         }
     }
 }
@@ -618,6 +734,7 @@ mod tests {
             mode: Mode::Browse,
             mode_memory: ModeSlots {
                 sessions: ModeState {
+                    sidebar_open: true,
                     right_open: true,
                     right_width: Some(420.0),
                     right_kind: Some(RightKind::Changes),
@@ -627,6 +744,9 @@ mod tests {
                 },
                 browse: ModeState::default(),
             },
+            browser_tabs: BrowserTabs::Horizontal,
+            search_engine: crate::browser::toolbar::SearchEngine::Kagi,
+            download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -645,7 +765,10 @@ mod tests {
         assert!(text.contains("\"rightKind\":\"changes\""));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         assert!(text.contains("\"mode\":\"browse\""));
-        assert!(text.contains("\"modeMemory\":{\"sessions\":{\"rightOpen\":true"));
+        assert!(text.contains("\"modeMemory\":{\"sessions\":{\"sidebarOpen\":true,\"rightOpen\":true"));
+        assert!(text.contains("\"browserTabs\":\"horizontal\""));
+        assert!(text.contains("\"searchEngine\":\"kagi\""));
+        assert!(text.contains("\"downloadDir\":\"/tmp/baaz-downloads\""));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
@@ -668,7 +791,11 @@ mod tests {
         assert_eq!(back.mode_memory.sessions.right_width, Some(420.0));
         assert_eq!(back.mode_memory.sessions.right_kind, Some(RightKind::Changes));
         assert_eq!(back.mode_memory.sessions.selected_session.as_deref(), Some("s-1"));
+        assert!(back.mode_memory.sessions.sidebar_open);
         assert!(back.mode_memory.browse.is_default());
+        assert_eq!(back.browser_tabs, BrowserTabs::Horizontal);
+        assert_eq!(back.search_engine, crate::browser::toolbar::SearchEngine::Kagi);
+        assert_eq!(back.download_dir, Some(PathBuf::from("/tmp/baaz-downloads")));
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.mode, Mode::Sessions);
@@ -760,6 +887,7 @@ mod tests {
     fn switching_saves_the_leaving_mode_and_restores_the_entering_one() {
         let mut slots = ModeSlots::default();
         let sessions_left = ModeState {
+            sidebar_open: true,
             right_open: true,
             right_width: Some(420.0),
             right_kind: Some(RightKind::Files),
@@ -775,6 +903,7 @@ mod tests {
         // Back to Sessions: Browse's frame is saved, Sessions restores
         // exactly what it left with.
         let browse_left = ModeState {
+            sidebar_open: false,
             right_open: false,
             right_width: None,
             right_kind: None,

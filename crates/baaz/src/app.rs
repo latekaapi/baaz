@@ -1547,6 +1547,9 @@ impl Harness {
             this.layout.right_kind = remembered.right_kind;
             this.right_resize.width = layout::right_width(&this.layout);
         }
+        // B2a-H6: boot onto the mode's own sidebar — a Browse relaunch
+        // with a hidden sidebar stays hidden, Sessions is untouched.
+        this.sidebar_open = this.layout.mode_memory.get(this.mode).sidebar_open;
         // The CEF claim check's live-mode flag starts where the window
         // starts; every switch after this rides `set_mode`.
         crate::keymap::set_claim_live_browse(this.mode == layout::Mode::Browse);
@@ -2316,9 +2319,12 @@ impl Harness {
         self.args.screenshot.is_some() || crate::clock::deterministic()
     }
 
-    /// The sidebar's collapse toggle: the rail is the column at zero width.
+    /// The sidebar's collapse toggle (⌘B): the rail is the column at zero
+    /// width. Remembered per mode (B2a-H6): hiding the sidebar in Browse
+    /// never touches Sessions' own sidebar, and back again.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        self.persist_layout(cx);
         cx.notify();
     }
 
@@ -2423,6 +2429,9 @@ impl Harness {
         let leaving = self.mode_state(cx);
         let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
+        // B2a-H6: each mode keeps its own sidebar — entering restores
+        // what it remembered, leaving already saved above.
+        self.sidebar_open = entering.sidebar_open;
         // A mode switch unparks any carried session tab, leaves the address
         // field (its dropdown belongs to Browse's centre) and resets the
         // page-holds edge, so Browse never reopens onto stale centre state.
@@ -2503,6 +2512,7 @@ impl Harness {
             .flatten()
             .map(|id| id.0);
         layout::ModeState {
+            sidebar_open: self.sidebar_open,
             right_open: self.layout.right_open,
             right_width: self.layout.right_width,
             right_kind: self.layout.right_kind,
@@ -7292,7 +7302,7 @@ mod tests {
             let id = h.browse_centre_shown().expect("a tab shows");
             let url = h.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert!(
-                url.starts_with(crate::browser::toolbar::DEFAULT_SEARCH_ENGINE),
+                url.starts_with(crate::browser::toolbar::SearchEngine::Google.url_prefix()),
                 "a clamped Enter searches instead of missing: {url}"
             );
         });
