@@ -1711,8 +1711,13 @@ mod tests {
             assert!(claimed_has(&claimed, keystroke), "{keystroke:?} must be claimed");
         }
         super::refresh_claimed_keys(&super::build_bindings());
+        // The thread-local starts in Sessions: Browse-only chords claim
+        // only once the live mode says Browse (see
+        // `claims_filter_browse_chords_by_live_mode` for both halves).
+        super::set_claim_live_browse(true);
         assert!(super::claims_keystroke("cmd-alt-down"), "⌥⌘↓ is claimed");
         assert!(!super::claims_keystroke("cmd-c"), "the page keeps ⌘C");
+        super::set_claim_live_browse(false);
     }
 
     /// The claimed set never takes what belongs to the page or the typing:
@@ -1756,6 +1761,40 @@ mod tests {
         let claimed = super::claimed_shortcuts(&loaded.bindings);
         assert!(!claimed_has(&claimed, "cmd-k"), "the unbound library ⌘K stays with the page");
         assert!(claimed_has(&claimed, "cmd-l"), "the rest of the set is untouched");
+    }
+
+    /// B2a-H3b: the `BaazBrowse`-only subset is exactly the chords that
+    /// bind in `BaazBrowse` and nowhere app-level — ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓ —
+    /// while the dual-bound chords (⌘W, ⌘T) stay out of it.
+    #[test]
+    fn browse_only_subset_holds_exactly_the_browse_only_chords() {
+        let only = super::browse_only_shortcuts(&super::build_bindings());
+        for keystroke in ["cmd-shift-t", "cmd-1", "cmd-8", "cmd-9", "cmd-alt-up", "cmd-alt-down"] {
+            assert!(claimed_has(&only, keystroke), "{keystroke:?} is Browse-only");
+        }
+        for keystroke in ["cmd-w", "cmd-t", "cmd-k", "cmd-c"] {
+            assert!(!claimed_has(&only, keystroke), "{keystroke:?} is not Browse-only");
+        }
+    }
+
+    /// B2a-H3b: the claim check filters that subset by the live mode. In
+    /// Sessions a page keeps ⌘1–⌘9, ⌘⇧T and ⌥⌘↑/↓ while ⌘W and ⌘T still
+    /// claim (their Sessions handlers need them); in Browse everything
+    /// claims. The snapshot itself never changes on a switch.
+    #[test]
+    fn claims_filter_browse_chords_by_live_mode() {
+        super::refresh_claimed_keys(&super::build_bindings());
+        super::set_claim_live_browse(false);
+        for keystroke in ["cmd-1", "cmd-9", "cmd-shift-t", "cmd-alt-up", "cmd-alt-down"] {
+            assert!(!super::claims_keystroke(keystroke), "Sessions keeps {keystroke:?}");
+        }
+        assert!(super::claims_keystroke("cmd-w"), "Sessions still claims ⌘W for CloseWindow");
+        assert!(super::claims_keystroke("cmd-t"), "Sessions still claims ⌘T for NewBrowserTab");
+        super::set_claim_live_browse(true);
+        for keystroke in ["cmd-1", "cmd-9", "cmd-shift-t", "cmd-alt-up", "cmd-alt-down", "cmd-w", "cmd-t"] {
+            assert!(super::claims_keystroke(keystroke), "Browse claims {keystroke:?}");
+        }
+        super::set_claim_live_browse(false);
     }
 
     /// The thread-local snapshot the CEF router reads: refreshed from the
