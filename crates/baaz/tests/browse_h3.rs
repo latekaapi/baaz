@@ -81,6 +81,27 @@ fn browse_context_wraps_the_shell_in_browse_only() {
     );
 }
 
+/// B2a-H3b item 1: `BaazBrowse` sits on an ancestor of the focus-root
+/// div (which owns `track_focus` and `AuiRoot`), never on a child of it
+/// — focus resting on the root carries both contexts, so ⌘W closes a
+/// tab in Browse and the window in Sessions.
+#[test]
+fn browse_context_sits_above_the_focus_root() {
+    let app = source("app.rs");
+    assert!(
+        app.contains(".key_context(BROWSE_CONTEXT).child(root)"),
+        "the context wrapper is an ancestor of the focus-root div"
+    );
+    assert!(
+        !app.contains(".key_context(BROWSE_CONTEXT).child(body)"),
+        "no child wrapper sits below the focused node"
+    );
+    assert!(
+        app.contains(".track_focus(&self.focus_root)"),
+        "the root still owns the focus"
+    );
+}
+
 /// `tab-pin:`, `tab-menu:` and `from-sessions:` are window verbs and
 /// are documented — the doc test enforces the table, this pins the
 /// registration the captures rely on.

@@ -1942,6 +1942,7 @@ impl Harness {
             && !self.skills.open
     }
 
+    #[allow(clippy::too_many_arguments)] // one caller's five cover flags, threaded by hand
     pub(crate) fn sync_browser(
         &mut self,
         overflow: bool,

@@ -99,7 +99,7 @@ pub(crate) struct StripTab {
 
 /// The whole tab model: ordered tabs, each owner's active tab, and the
 /// recently closed for reopen. Serialisable as one JSON file.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, Serialize, Deserialize)]
 pub(crate) struct Tabs {
     /// Every open tab, in strip order.
     #[serde(default)]
@@ -125,6 +125,19 @@ pub(crate) struct Tabs {
     /// starts a fresh run at zero.
     #[serde(skip, default)]
     pub generation: u64,
+}
+
+/// Content equality: the generation is an ephemeral repaint counter —
+/// never serialised, never compared — so a loaded snapshot equals the
+/// model that wrote it.
+impl PartialEq for Tabs {
+    fn eq(&self, other: &Self) -> bool {
+        self.tabs == other.tabs
+            && self.active == other.active
+            && self.next_id == other.next_id
+            && self.closed == other.closed
+            && self.migrated == other.migrated
+    }
 }
 
 impl Tabs {
@@ -1361,6 +1374,52 @@ mod tests {
         assert_eq!(model.reopen_last(), Some(third));
         assert_eq!(model.close_others(TabId(77)), 0);
         let _ = first;
+    }
+
+    #[test]
+    fn close_others_spares_pinned_tabs() {
+        let mut model = tabs();
+        let pinned = model.open(None, session("s"), "https://a.example/", None);
+        let kept = model.open(None, session("s"), "https://b.example/", None);
+        let doomed = model.open(None, session("s"), "https://c.example/", None);
+        assert!(model.set_pinned(pinned, true));
+        assert_eq!(model.close_others(kept), 1, "only the unpinned other closes");
+        assert!(model.get(pinned).is_some(), "the pinned tab survives");
+        assert!(model.get(doomed).is_none(), "the unpinned other closes");
+        assert!(model.get(kept).is_some(), "the kept tab survives");
+        assert_eq!(model.active_of(&session("s"), None), Some(kept));
+    }
+
+    #[test]
+    fn mutations_bump_the_model_generation() {
+        let mut model = tabs();
+        assert_eq!(model.generation, 0, "a fresh model starts at zero");
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let opened = model.generation;
+        assert!(opened > 0, "opening bumps the generation");
+        assert!(model.activate(first));
+        assert!(model.generation > opened, "selecting bumps the generation");
+        let selected = model.generation;
+        assert!(model.set_pinned(first, true));
+        assert!(model.generation > selected, "pinning bumps the generation");
+        let pinned_gen = model.generation;
+        assert!(model.set_url_title(first, "https://a.example/", "A"));
+        assert!(model.generation > pinned_gen, "a retitle bumps the generation");
+        let retitled = model.generation;
+        assert_eq!(
+            model.close(second),
+            None,
+            "closing a background tab answers nothing — and still bumps"
+        );
+        assert!(model.generation > retitled, "closing bumps the generation");
+        assert!(model.duplicate(first).is_some());
+        assert!(model.move_before(first, None));
+        assert!(model.reorder(first, 0));
+        let before = model.generation;
+        assert!(!model.set_url_title(first, "https://a.example/", "A"), "an unchanged report is not a change");
+        assert_eq!(model.generation, before, "an unchanged report bumps nothing");
+        let _ = selected;
     }
 
     #[test]

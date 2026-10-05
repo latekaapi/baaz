@@ -929,12 +929,13 @@ impl Harness {
             // session" while it has no row yet — never the bare
             // "Session"), with the tab count beside it and the open
             // chevron the library draws.
-            let count = if tabs.len() == 1 {
+            let tab_total = tabs.len();
+            let count = if tab_total == 1 {
                 "1 tab".to_owned()
             } else {
-                format!("{} tabs", tabs.len())
+                format!("{tab_total} tabs")
             };
-            let spoken = format!("{label}, {}", count);
+            let spoken = format!("{label}, {count}");
             let toggle = {
                 let baaz = baaz.clone();
                 let session = session.clone();
@@ -1587,9 +1588,7 @@ impl Harness {
             cx.notify();
             return None;
         }
-        if self.browser.tabs.get(id).is_none() {
-            return None;
-        }
+        self.browser.tabs.get(id)?;
         let p = cx.aui().colors;
         let baaz = cx.entity().downgrade();
         // A click anywhere outside closes it: the catcher is a sibling of
@@ -4410,6 +4409,120 @@ mod tests {
         });
         let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
         assert!(expanded != menu, "the tab menu re-arms the cached pane");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3b item 1: with focus on the focus root in Browse, ⌘W's
+    /// handler closes the active person tab; the same handler in
+    /// Sessions is a no-op (the belt), so ⌘W falls through to
+    /// CloseWindow there. The context placement behind the dispatch —
+    /// `BaazBrowse` on an ancestor of the focus-root div, Browse-only —
+    /// is pinned in `browse_h3.rs`; this pins the handler half with
+    /// focus resting on the root (the first frame, after overlays
+    /// close), which is the case the ancestor fixes.
+    #[gpui::test]
+    fn browse_close_shortcut_closes_a_tab_only_in_browse(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-close");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.current_project_id();
+                h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://a.example/",
+                    None,
+                );
+                h.browser.tabs.open(space, crate::browser::Owner::Person, "https://b.example/", None);
+            })
+        });
+        vc.update(|window, cx| window.focus(&baaz.read(cx).focus_root.clone(), cx));
+        vc.update(|window, cx| {
+            assert!(
+                baaz.read(cx).focus_root.is_focused(window),
+                "focus rests on the focus root"
+            );
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 1, "⌘W in Browse closes a tab, not the window");
+        });
+        // Sessions: the same handler must not touch the tabs — the belt
+        // holds, and ⌘W keeps closing the window there.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Sessions;
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 1, "⌘W in Sessions closes no tab");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
+    /// it (back to the person's active tab, closing nothing) and the
+    /// moves are no-ops (they would act on the hidden person tab).
+    #[gpui::test]
+    fn browse_shortcuts_defer_to_the_shown_session_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-session-tab");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.current_project_id();
+                h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://a.example/",
+                    None,
+                );
+                h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://b.example/", None);
+                let shown = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Session("s-1".to_owned()),
+                    "https://c.example/",
+                    None,
+                );
+                h.browser.tabs.activate(shown);
+                h.browse_session_tab = Some(shown);
+            })
+        });
+        let before = vc.update(|_, cx| baaz.read(cx).browser.tabs.generation);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.move_browse_shortcut(1, window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.browse_session_tab.is_some(), "the session show survives the move");
+            assert_eq!(
+                h.browser.tabs.generation, before,
+                "the move touches no person tab while a session tab shows"
+            );
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.browse_session_tab.is_none(), "⌘W stops showing the session tab");
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 2, "⌘W closes nothing while a session tab shows");
+        });
         b3c_teardown(&dir, guard, old);
     }
 
