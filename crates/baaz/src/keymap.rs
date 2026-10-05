@@ -148,6 +148,8 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "SkillsFind", keystroke: "cmd-f", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Search skills" },
     KeymapEntry { action: "SkillsClose", keystroke: "escape", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Leave the Skills page" },
     KeymapEntry { action: "SettingsFind", keystroke: "cmd-f", context: Some(crate::app::SETTINGS_CONTEXT), category: "settings", label: "Search shortcuts" },
+    KeymapEntry { action: "ToggleFeedback", keystroke: "ctrl-alt-cmd-f", context: Some(aui::keys::ROOT_CONTEXT), category: "window", label: "Feedback mode: start or pause" },
+    KeymapEntry { action: "FeedbackEscape", keystroke: "escape", context: Some(crate::app::feedback_ui::FEEDBACK_CONTEXT), category: "window", label: "Pause feedback mode" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
@@ -279,6 +281,8 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "SkillsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsFind, context)),
         "SkillsClose" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsClose, context)),
         "SettingsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SettingsFind, context)),
+        "ToggleFeedback" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleFeedback, context)),
+        "FeedbackEscape" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackEscape, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
@@ -1115,6 +1119,34 @@ mod tests {
                 row.keystroke
             );
         }
+    }
+
+    /// ⌃⌥⌘F starts or pauses feedback mode from the root (so it fires
+    /// from a focused Chromium page through the pre-key router), and
+    /// Escape pauses it from the capture layer's own context.
+    #[test]
+    fn feedback_rows_bind_toggle_and_layer_escape() {
+        let toggle = KEYMAP
+            .iter()
+            .find(|row| row.action == "ToggleFeedback")
+            .expect("KEYMAP carries ToggleFeedback");
+        assert_eq!(toggle.keystroke, "ctrl-alt-cmd-f");
+        assert_eq!(toggle.context, Some(aui::keys::ROOT_CONTEXT));
+        assert_eq!(toggle.category, "window");
+        assert!(
+            super::binding_for_action(toggle.action, toggle.keystroke, toggle.context).is_some(),
+            "ToggleFeedback builds a binding"
+        );
+        let escape = KEYMAP
+            .iter()
+            .find(|row| row.action == "FeedbackEscape")
+            .expect("KEYMAP carries FeedbackEscape");
+        assert_eq!(escape.keystroke, "escape");
+        assert_eq!(escape.context, Some(crate::app::feedback_ui::FEEDBACK_CONTEXT));
+        assert!(
+            super::binding_for_action(escape.action, escape.keystroke, escape.context).is_some(),
+            "FeedbackEscape builds a binding"
+        );
     }
 
     /// No two rows claim the same keystroke in the same context: that is

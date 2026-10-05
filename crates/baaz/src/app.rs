@@ -241,6 +241,10 @@ actions!(
         SkillsClose,
         /// Focus the Settings Shortcuts search field (⌘F on the page).
         SettingsFind,
+        /// Start or pause feedback mode (⌃⌥⌘F).
+        ToggleFeedback,
+        /// Pause feedback mode (Escape on the capture layer).
+        FeedbackEscape,
     ]
 );
 
@@ -509,6 +513,7 @@ pub fn set_menus(cx: &mut App) {
         ]),
         gpui::Menu::new("Help").items([
             gpui::MenuItem::action("Baaz Documentation", ShowDocs),
+            gpui::MenuItem::action("Feedback Mode", ToggleFeedback),
         ]),
     ]);
 }
@@ -517,6 +522,11 @@ mod find;
 pub(crate) mod lifecycle;
 mod list;
 mod titles;
+/// F2 feedback mode shell (setting, ⌃⌥⌘F, bar + pill, Done). Included by
+/// path so `feedback/mod.rs` — F1's frozen model/report API — stays
+/// untouched.
+#[path = "feedback/ui.rs"]
+pub(crate) mod feedback_ui;
 
 /// The connection's own state, which is what the reconnect banner reads.
 pub(crate) enum Wire {
@@ -721,6 +731,8 @@ pub struct Harness {
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
     pub(crate) overlays: Entity<Overlays>,
+    /// F2 feedback mode shell: phase, draft, probe, discard arm.
+    pub(crate) feedback: feedback_ui::FeedbackUi,
     pub(crate) sidebar_open: bool,
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
@@ -1404,6 +1416,10 @@ impl Harness {
             pending_draft: None,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
+            feedback: feedback_ui::FeedbackUi::new(
+                feedback_ui::FeedbackUi::probe_for(browser_fake),
+                cx,
+            ),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
@@ -7322,6 +7338,10 @@ impl Render for Harness {
             self.render_login(window, cx).into_any_element()
         };
         let dialog = self.render_dialog(window, cx);
+        // F2: the feedback capture layer (Active only) under its chrome
+        // (bar while Active, pill while Paused), both under toasts.
+        let feedback_layer = self.render_feedback_layer(cx);
+        let feedback_chrome = self.render_feedback_chrome(cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = self.render_palette(cx);
@@ -7429,7 +7449,8 @@ impl Render for Harness {
         let overlay_now = self.overlays.read(cx).palette.is_some()
             || self.overlays.read(cx).dialog.is_some()
             || self.overlays.read(cx).menu.is_some()
-            || self.settings_page.open;
+            || self.settings_page.open
+            || self.feedback.phase != feedback_ui::FeedbackPhase::Off;
         let overlay_just_closed = self.overlay_was_open && !overlay_now;
         // Two triggers, and both are needed. The first frame has nothing
         // focused at all, so without the `is_none` arm the very first
@@ -7488,6 +7509,8 @@ impl Render for Harness {
                 .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
                 .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
                 .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
+                .on_action(cx.listener(|this, _: &ToggleFeedback, window, cx| this.toggle_feedback(window, cx)))
+                .on_action(cx.listener(|this, _: &FeedbackEscape, window, cx| this.escape_feedback(window, cx)))
                 .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
                 // ⌘, (and File → Settings…): the last-visited section this
                 // run, General on first open — an empty target spells that
@@ -7610,6 +7633,8 @@ impl Render for Harness {
                 })
                 .child(body)
                 .children(capture)
+                .children(feedback_layer)
+                .children(feedback_chrome)
                 .children(toasts)
                 .children(palette)
                 .children(dialog)
