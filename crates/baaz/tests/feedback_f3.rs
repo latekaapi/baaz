@@ -77,8 +77,8 @@ fn assert_offline_signed_in(entry: &serde_json::Value, name: &str) {
 }
 
 /// The three F3 entries drive the exact scripted flows: hover names the
-/// header's project button, note leaves its popover open, pins saves an
-/// element note and an area note.
+/// empty-state hero's `New session` button, note leaves its popover open,
+/// pins saves an element note and an area note.
 #[test]
 fn probe_entries_drive_the_f3_flows() {
     let entries = probe_entries();
@@ -87,17 +87,17 @@ fn probe_entries_drive_the_f3_flows() {
     assert_offline_signed_in(&entries["pins"], "feedback-pins");
     assert_eq!(
         steps_arg(&entries["hover"]),
-        "feedback-mode:on;feedback-mode:hover:297,21",
-        "feedback-hover names the project button"
+        "feedback-mode:on;feedback-mode:hover:846,551",
+        "feedback-hover names the hero button"
     );
     assert_eq!(
         steps_arg(&entries["note"]),
-        "feedback-mode:on;feedback-mode:click:297,21",
-        "feedback-note clicks the project button and leaves the popover open"
+        "feedback-mode:on;feedback-mode:click:846,551",
+        "feedback-note clicks the hero button and leaves the popover open"
     );
     assert_eq!(
         steps_arg(&entries["pins"]),
-        "feedback-mode:on;feedback-mode:click:297,21;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here",
+        "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here",
         "feedback-pins saves an element note and an area note"
     );
 }
