@@ -163,6 +163,26 @@ actions!(
         /// Open a blank browser tab (⌘T): a person tab in Browse, the
         /// shown owner's tab otherwise.
         NewBrowserTab,
+        /// Close the active Browse tab (⌘W in Browse; in Sessions ⌘W
+        /// keeps closing the window).
+        CloseBrowseTab,
+        /// Reopen the most recently closed tab (⌘⇧T), selecting it.
+        ReopenBrowseTab,
+        /// Select the n-th person tab on screen (⌘1–⌘8).
+        BrowseTab1,
+        BrowseTab2,
+        BrowseTab3,
+        BrowseTab4,
+        BrowseTab5,
+        BrowseTab6,
+        BrowseTab7,
+        BrowseTab8,
+        /// Select the last person tab on screen (⌘9).
+        BrowseTabLast,
+        /// Move the active Browse tab down one slot (⌥⌘↓).
+        MoveBrowseTabDown,
+        /// Move the active Browse tab up one slot (⌥⌘↑).
+        MoveBrowseTabUp,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -256,6 +276,13 @@ pub(crate) const PALETTE_QUERY_CONTEXT: &str = "AuiMenu > Input";
 /// the tree than they do, so it wins, and `NoAction` consumes the keystroke
 /// without an action, which hands it to the grid's own key handler.
 pub(crate) const TERMINAL_CONTEXT: &str = "BaazTerminal";
+
+/// The context the window wears while in Browse mode (B2a-H3): the tab
+/// shortcuts (⌘W to close a tab, ⌘⇧T to reopen, ⌘1–⌘9 to select, ⌥⌘↑/↓
+/// to move) bind here, so Sessions mode keeps ⌘T unbound and ⌘W closing
+/// the window. Worn on a wrapper around the window body while
+/// [`layout::Mode::Browse`] is current (see `render`), never in Sessions.
+pub(crate) const BROWSE_CONTEXT: &str = "BaazBrowse";
 
 /// The toast stack's own width, the library's `.toast{width:320px}`.
 pub(crate) const TOAST_W: f32 = 320.0;
@@ -882,6 +909,25 @@ pub struct Harness {
     /// rail switches instantly) and cleared the frame the Layout spring
     /// actually rests — never after a fixed delay, never at boot.
     mode_slide: bool,
+    /// The From-sessions groups standing open in the Browse sidebar, by
+    /// session id: collapsed by default, flipped by the group header.
+    /// Part of [`SidebarKey`](crate::sidebar_view::SidebarKey), so an
+    /// expand repaints the cached pane.
+    pub(crate) browse_from_expanded: std::collections::HashSet<String>,
+    /// The tab row a drag hovers over: the 2 px accent line's slot while
+    /// a tab drag is in flight. Transient (cleared on drop), never keyed.
+    pub(crate) browse_drop_target: Option<crate::browser::TabId>,
+    /// The tab whose right-click menu stands open in the Browse sidebar
+    /// (`None` while none does). Part of the sidebar key.
+    pub(crate) tab_menu: Option<crate::browser::TabId>,
+    /// A session-owned tab the Browse centre shows (From sessions): it
+    /// stays owned by its session. Cleared by any person-tab select.
+    /// Part of the sidebar key (and read by the centre every frame).
+    pub(crate) browse_session_tab: Option<crate::browser::TabId>,
+    /// The Browse tab row the pointer rests on: its × shows on hover as
+    /// well as when active. Transient (cleared on leave), never keyed —
+    /// the hover report notifies the pane directly.
+    pub(crate) browse_hovered_tab: Option<crate::browser::TabId>,
     /// The Settings Shortcuts section's live rows, re-read when the dialog
     /// opens and after every shortcut edit. The dialog builds from state
     /// every frame, and a file read per frame is not state.
@@ -1368,6 +1414,11 @@ impl Harness {
             subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_slide: false,
+            browse_from_expanded: std::collections::HashSet::new(),
+            browse_drop_target: None,
+            tab_menu: None,
+            browse_session_tab: None,
+            browse_hovered_tab: None,
         };
         // Booting into Browse restores what Browse remembered for the
         // right pane (closed on a fresh file) — the live width and the
@@ -2225,16 +2276,15 @@ impl Harness {
         self.set_mode(self.mode.other(), window, cx);
     }
 
-    /// ⌘T, at window level so it fires with a page focused (B2a-H2b): a
-    /// person tab in Browse, the shown owner's tab otherwise — the
-    /// empty centre's "⌘T for a new tab", and never a session. Sessions
-    /// keep ⌘N; ⌘T never leaves the browser.
+    /// ⌘T, at window level so it fires with a page focused (B2a-H3): a
+    /// person tab in the current project — from Sessions mode it
+    /// switches to Browse first, then opens there. Sessions keep ⌘N;
+    /// ⌘T never leaves the browser.
     pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == layout::Mode::Browse {
-            self.new_browse_sidebar_tab(window, cx);
-        } else {
-            self.new_blank_tab(window, cx);
+        if self.mode != layout::Mode::Browse {
+            self.set_mode(layout::Mode::Browse, window, cx);
         }
+        self.new_browse_sidebar_tab(window, cx);
     }
 
     /// Set the window's mode, idempotently: asking for the current mode
@@ -4952,6 +5002,16 @@ impl Render for Harness {
             window.focus(&self.focus_root, cx);
         }
         self.overlay_was_open = overlay_now;
+        // B2a-H3: while in Browse the window wears `BaazBrowse` on a
+        // wrapper around the shell, inside the `AuiRoot` root above — so
+        // both contexts apply and the tab shortcuts (⌘W, ⌘⇧T, ⌘1–⌘9,
+        // ⌥⌘↑/↓) bind here while Sessions keeps ⌘W closing the window.
+        // Never in Sessions: the wrapper is what carries the context.
+        let body: AnyElement = if self.mode == layout::Mode::Browse {
+            div().size_full().key_context(BROWSE_CONTEXT).child(body).into_any_element()
+        } else {
+            body
+        };
         aui::keys::track_pointer(
             div()
                 .size_full()
@@ -5013,6 +5073,50 @@ impl Render for Harness {
                 }))
                 .on_action(cx.listener(|this, _: &NewBrowserTab, window, cx| {
                     this.new_browser_tab(window, cx);
+                }))
+                // B2a-H3: the Browse tab shortcuts. They bind in
+                // `BaazBrowse` (the wrapper above), so with a page
+                // focused the claimed set carries them here; each is a
+                // no-op outside Browse (the context is what scopes them,
+                // the guard is the belt).
+                .on_action(cx.listener(|this, _: &CloseBrowseTab, window, cx| {
+                    this.close_browse_shortcut(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &ReopenBrowseTab, window, cx| {
+                    this.reopen_browse_shortcut(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab1, window, cx| {
+                    this.select_browse_nth(1, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab2, window, cx| {
+                    this.select_browse_nth(2, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab3, window, cx| {
+                    this.select_browse_nth(3, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab4, window, cx| {
+                    this.select_browse_nth(4, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab5, window, cx| {
+                    this.select_browse_nth(5, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab6, window, cx| {
+                    this.select_browse_nth(6, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab7, window, cx| {
+                    this.select_browse_nth(7, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTab8, window, cx| {
+                    this.select_browse_nth(8, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &BrowseTabLast, window, cx| {
+                    this.select_browse_nth(9, true, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveBrowseTabDown, window, cx| {
+                    this.move_browse_shortcut(1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveBrowseTabUp, window, cx| {
+                    this.move_browse_shortcut(-1, window, cx);
                 }))
                 // ⌘L at window level: the webview's own `cmd-l` binding
                 // only fires while gpui holds the keyboard, so this root
