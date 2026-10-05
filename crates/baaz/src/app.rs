@@ -5288,6 +5288,7 @@ impl Harness {
         let selected = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
         let mut list = v_flex()
             .id("browse-omni-list")
+            .debug_selector(|| "browse-omni-list".into())
             .py(px(4.0))
             .rounded(px(scale::R_MD))
             .bg(p.surface_1)
@@ -7840,6 +7841,10 @@ mod tests {
             self.0.borrow_mut().set_annotate(on);
         }
 
+        fn set_zoom(&mut self, percent: u16) {
+            self.0.borrow_mut().set_zoom(percent);
+        }
+
         fn poll_events(&mut self) -> Vec<aui_webview::WebEvent> {
             self.0.borrow_mut().poll_events()
         }
@@ -8117,10 +8122,175 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the Show-sidebar toggle renders");
         assert!(vc.debug_bounds("hd-minimal-address").is_some(), "the wide field renders");
+        assert!(vc.debug_bounds("hd-minimal-site").is_some(), "the security glyph renders");
+        assert!(vc.debug_bounds("hd-minimal-more").is_some(), "the ⋯ menu renders");
         assert!(vc.debug_bounds("hd-minimal-new-tab").is_some(), "the `+` renders");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-sidebar").is_none(), "reopening the sidebar restores the toolbar");
+        restore_state(state);
+    }
+
+    /// B2a-H6b: the one-row chrome keeps the zoom pill while off 100% —
+    /// and only then. An engine zoom draws it; resetting calls the engine
+    /// and its echo clears it.
+    #[gpui::test]
+    fn minimal_chrome_keeps_zoom_pill_off_default(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-minimal-zoom");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        // A scriptable page on the shown tab, like the stop/reload test's:
+        // the harness holds the shared fake while the state owns this
+        // delegate, so the test scripts the engine zoom edges the state
+        // then drains.
+        let fake = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let id = h.browse_centre_shown().expect("a tab shows");
+                let fake =
+                    std::rc::Rc::new(std::cell::RefCell::new(aui_webview::FakeWebBackend::new()));
+                let page = cx.new(|cx| {
+                    aui_webview::WebviewState::new(Box::new(SharedFake(fake.clone())), cx)
+                });
+                h.browser.states.insert(id, page);
+                fake
+            })
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.debug_bounds("hd-minimal-zoom").is_none(), "100% wears no pill");
+        fake.borrow_mut().script_zoom(125);
+        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.run_until_parked();
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.debug_bounds("hd-minimal-zoom").is_some(), "125% wears the pill");
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.browse_reset_zoom(window, cx));
+        });
+        assert_eq!(fake.borrow().zoom_calls(), &[100], "the pill resets through the engine");
+        fake.borrow_mut().script_zoom(100);
+        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.run_until_parked();
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.debug_bounds("hd-minimal-zoom").is_none(), "the engine echo clears the pill");
+        restore_state(state);
+    }
+
+    /// B2a-H6b: the one-row chrome keeps the ↩ session chip when the shown
+    /// tab came from a session — a session-owned tab with no sidebar.
+    #[gpui::test]
+    fn minimal_chrome_keeps_session_chip(cx: &mut gpui::TestAppContext) {
+        use chrono::Local;
+        let state = hermetic_state("browse-minimal-chip");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                let id = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Session("s-9".to_owned()),
+                    "https://example.com/",
+                    None,
+                );
+                h.browser.centre_override = Some(id);
+                h.sessions.push(crate::sidebar::SessionEntry {
+                    id: "s-9".to_owned(),
+                    label: "x".into(),
+                    updated: Local::now(),
+                    running: true,
+                    turns: 1,
+                    hidden: false,
+                    pinned: false,
+                    archived: false,
+                    description: String::new(),
+                    replayed: false,
+                    provider: None,
+                    named: false,
+                    needs_title: false,
+                    side_marker: false,
+                    title_pending: false,
+                    last_ask: None,
+                    branch: None,
+                    terminals_running: 0,
+                    local: false,
+                    provisional: false,
+                    workspace: None,
+                    project: None,
+                    project_name: None,
+                    attention: Vec::new(),
+                    approval_command: None,
+                    pending_question: None,
+                    turn_started: None,
+                    last_error: None,
+                });
+            })
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.debug_bounds("hd-minimal-chip").is_some(), "the ↩ session chip renders with no sidebar");
+        restore_state(state);
+    }
+
+    /// B2a-H6b: Browse-with-sidebar-hidden mounts no rail — Sessions with
+    /// its sidebar hidden keeps it.
+    #[gpui::test]
+    fn browse_hidden_hides_the_rail_but_sessions_keeps_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-rail-hidden");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
+        assert!(
+            vc.debug_bounds("browse-rail-hidden").is_some(),
+            "Browse-with-sidebar-hidden mounts no rail"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Sessions, window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
+        assert!(
+            vc.debug_bounds("browse-rail-hidden").is_none(),
+            "Sessions keeps its rail"
+        );
         restore_state(state);
     }
 
@@ -8180,6 +8350,169 @@ mod tests {
         assert!(vc.debug_bounds("browse-strip-new-tab").is_some(), "the strip ends in `+`");
         assert!(vc.debug_bounds("browse-tabs-caption").is_none(), "horizontal drops the sidebar Tabs list");
         assert!(vc.debug_bounds("browse-new-tab-button").is_some(), "the sidebar keeps New tab");
+        // B2a-H6b: the chips scroll inside their own area while the `+`
+        // rides outside it, so a long strip never scrolls it away.
+        assert!(
+            vc.debug_bounds("browse-strip-scroll").is_some(),
+            "the chips scroll inside their own area"
+        );
+        let scroll = vc.debug_bounds("browse-strip-scroll").expect("the scrolling area draws");
+        let plus = vc.debug_bounds("browse-strip-new-tab").expect("the `+` draws");
+        assert!(
+            plus.origin.x >= scroll.origin.x + scroll.size.width,
+            "the `+` rides outside the scrolling area"
+        );
+        restore_state(state);
+    }
+
+    /// B2a-H6b: the stored centre page hangs under the strip in horizontal
+    /// mode and under the header in sidebar-hidden minimal mode — the one
+    /// rect behind placement and the mouse-down hand-back.
+    #[gpui::test]
+    fn centre_page_rect_hangs_under_strip_or_header(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-page-rect");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
+        draw_shell(&mut *vc, &baaz);
+        let strip_page =
+            vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
+        assert_eq!(
+            strip_page.origin.y,
+            gpui::px(44.0 + 34.0),
+            "horizontal hangs the page under the strip"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
+        let minimal_page =
+            vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
+        assert_eq!(
+            minimal_page.origin.y,
+            gpui::px(44.0),
+            "sidebar-hidden hangs the page under the header"
+        );
+        restore_state(state);
+    }
+
+    /// B2a-H6b: the strip's chip order is `nth_tab` order — pinned tabs
+    /// lead, and dropping a chip at the end reorders through the same
+    /// path the drag handlers call.
+    #[gpui::test]
+    fn strip_chip_order_matches_nth_tab_order(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-strip-order");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://docs.rs/", window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://example.com/", window, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                // Pin the middle tab: the strip leads with pinned tabs, in
+                // `nth_tab` order.
+                let middle = h.browse_person_snaps(cx)[1].id;
+                h.browser.tabs.set_pinned(middle, true);
+                let order: Vec<crate::browser::TabId> =
+                    h.browse_person_snaps(cx).iter().map(|snap| snap.id).collect();
+                assert!(
+                    h.browser.tabs.get(order[0]).is_some_and(|tab| tab.pinned),
+                    "pinned tabs lead the strip"
+                );
+                for (index, id) in order.iter().enumerate() {
+                    assert_eq!(
+                        h.browser
+                            .tabs
+                            .nth_tab(&crate::browser::Owner::Person, space.as_deref(), index + 1, false),
+                        Some(*id),
+                        "strip chip {} follows `nth_tab` order",
+                        index + 1,
+                    );
+                }
+                // Dropping the second chip at the end reorders the strip
+                // through the same path the drag handlers call: the pinned
+                // tab stays first, the rest rotate.
+                h.reorder_browse_tab(order[1], None, cx);
+                let moved: Vec<crate::browser::TabId> =
+                    h.browse_person_snaps(cx).iter().map(|snap| snap.id).collect();
+                let mut expected = vec![order[0]];
+                expected.extend_from_slice(&order[2..]);
+                expected.push(order[1]);
+                assert_eq!(moved, expected, "the drop-at-end order lands on the strip");
+            })
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H6b: the toolbar-anchored omnibox list hangs under the tab
+    /// strip in horizontal mode — never over it — and under the toolbar
+    /// otherwise.
+    #[gpui::test]
+    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-omni-anchor");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://docs.rs/", window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
+        });
+        draw_shell(&mut *vc, &baaz);
+        let strip = vc.debug_bounds("browse-strip").expect("the strip draws");
+        let strip_bottom = strip.origin.y + strip.size.height;
+        let list = vc.debug_bounds("browse-omni-list").expect("the dropdown draws");
+        assert!(
+            list.origin.y >= strip_bottom,
+            "the dropdown anchors under the strip, never over it"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
+        });
+        draw_shell(&mut *vc, &baaz);
+        let rest = vc.debug_bounds("browse-omni-list").expect("the dropdown draws");
+        assert!(rest.origin.y < strip_bottom, "vertical anchors under the toolbar");
         restore_state(state);
     }
 
@@ -8209,12 +8542,19 @@ mod tests {
         assert!(vc.debug_bounds("settings-browser-tabs").is_some(), "the Tabs layout control draws");
         assert!(vc.debug_bounds("settings-search-engine-google").is_some(), "the engine rows draw");
         assert!(vc.debug_bounds("settings-downloads-change").is_some(), "the Change row draws");
-        assert!(vc.debug_bounds("settings-browser-chromium").is_some(), "the Chromium row draws");
+        // The Chromium row shows only where the engine loads `chrome://`
+        // pages (the `cef` backend) — anywhere else it hides.
+        if cfg!(feature = "cef") {
+            assert!(vc.debug_bounds("settings-browser-chromium").is_some(), "the Chromium row draws");
+        } else {
+            assert!(vc.debug_bounds("settings-browser-chromium").is_none(), "no Chromium row without the engine");
+        }
         restore_state(state);
     }
 
-    /// B2a-H6: the Chromium row leaves Settings for Browse and opens
-    /// `chrome://settings` in a new person tab.
+    /// B2a-H6b: the Chromium row leaves Settings for Browse and shows
+    /// `chrome://settings` in a person tab — selecting the existing tab
+    /// when one already shows it instead of opening another.
     #[gpui::test]
     fn chromium_row_opens_its_settings_tab(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("chromium-row-tab");
@@ -8238,6 +8578,25 @@ mod tests {
             let id = harness.browse_centre_shown().expect("a tab shows");
             let url = harness.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert_eq!(url, "chrome://settings", "the new tab loads Chromium's settings");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_chromium_settings(window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let space = harness.current_project_id();
+            let settings_tabs: Vec<crate::browser::TabId> = harness
+                .browser
+                .tabs
+                .person_tabs(space.as_deref())
+                .iter()
+                .filter(|tab| tab.url == crate::settings::CHROMIUM_SETTINGS_URL)
+                .map(|tab| tab.id)
+                .collect();
+            assert_eq!(settings_tabs.len(), 1, "reopening selects the existing tab instead of opening another");
+            assert_eq!(
+                harness.browse_centre_shown(),
+                Some(settings_tabs[0]),
+                "the existing tab shows"
+            );
         });
         restore_state(state);
     }
