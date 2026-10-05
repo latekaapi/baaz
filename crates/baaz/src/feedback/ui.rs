@@ -2086,8 +2086,13 @@ impl crate::app::Harness {
         // points inside them. The row is this wrapper's only child, so its
         // first bounds are the slot's own rect — the `crumb_bounds` pattern.
         let report = cx.entity().downgrade();
+        // While Active the floating copy (above the capture layer) is the
+        // one that shows; this copy only holds the space and the bounds.
+        // Drawing both ghosted them a few pixels apart (seen in a capture).
+        let covered = self.feedback.phase == FeedbackPhase::Active && self.feedback.slot_bounds.is_some();
         Some(
             div()
+                .when(covered, |d| d.opacity(0.0))
                 .on_children_prepainted(move |bounds, _, cx| {
                     if let Some(first) = bounds.first() {
                         let bounds = *first;
