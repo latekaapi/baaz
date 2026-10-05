@@ -592,13 +592,16 @@ impl FeedbackUi {
         hit: ElementHit,
         point: Point<Pixels>,
         win: gpui::Size<Pixels>,
+        in_browse: bool,
     ) -> Target {
         let area = f32::from(win.width) * f32::from(win.height);
         if area > 0.0 && hit.rect.w * hit.rect.h > 0.4 * area {
             let Target::Area { rect, .. } = FeedbackUi::click_target(None, point, win) else {
                 unreachable!("click_target(None, ..) is always an area")
             };
-            let region = if hit.role == "AXGroup" || hit.label.is_empty() {
+            // Only Browse has a page under the layer; elsewhere a large
+            // group is a part of Baaz and is named as such.
+            let region = if in_browse && (hit.role == "AXGroup" || hit.label.is_empty()) {
                 "web page".to_owned()
             } else {
                 format!("near {}", hit.label)
@@ -726,9 +729,12 @@ impl FeedbackUi {
     /// right-pane kind, same Settings section. Pure, so tests drive the
     /// matrix directly.
     pub(crate) fn pin_context_matches(current: &ScreenContext, note: &ScreenContext) -> bool {
+        fn page(url: &Option<String>) -> Option<&str> {
+            url.as_deref().map(|u| u.split('#').next().unwrap_or(u).trim_end_matches('/'))
+        }
         current.mode == note.mode
             && current.session_id == note.session_id
-            && current.page_url == note.page_url
+            && page(&current.page_url) == page(&note.page_url)
             && current.right_pane == note.right_pane
             && current.settings_section == note.settings_section
     }
@@ -940,6 +946,11 @@ impl crate::app::Harness {
     /// error. Afterwards the layer keeps the keyboard when still Active,
     /// so Escape keeps working after the click.
     pub(crate) fn finish_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A Done while a report is still being written must not file the
+        // open note into the draft the write is about to clear.
+        if self.feedback.saving {
+            return;
+        }
         // Done first files the open note when it holds text: a
         // note-in-progress is a note, not chrome. An in-flight capture has
         // no popover to file yet, so it is dropped instead.
@@ -975,6 +986,23 @@ impl crate::app::Harness {
                         this.feedback.done_applied();
                         this.feedback.saved_flash =
                             Some(SavedFlash { at: Instant::now(), notes: note_count, path: path.clone() });
+                        // The flash is checked only at render: repaint once it
+                        // has expired, or an idle window keeps it up forever.
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(FEEDBACK_SAVED_FLASH).await;
+                            let _ = this.update(cx, |this: &mut Self, cx| {
+                                if this
+                                    .feedback
+                                    .saved_flash
+                                    .as_ref()
+                                    .is_some_and(|flash| flash.at.elapsed() >= FEEDBACK_SAVED_FLASH)
+                                {
+                                    this.feedback.saved_flash = None;
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
                         this.overlays.update(cx, |o, _| {
                             o.toast(format!("Feedback saved · {note_count} {unit}"), path)
                         });
@@ -1259,14 +1287,27 @@ impl crate::app::Harness {
     /// tab's page, otherwise the pane's page. Empty and `about:blank`
     /// never count as a page.
     pub(crate) fn feedback_page_url(&self, cx: &gpui::App) -> Option<String> {
-        let state = if self.mode == crate::layout::Mode::Browse {
-            self.browse_centre_state()
+        // In Browse the tab model's URL is what the toolbar shows; the
+        // page state's own URL was found empty live on a loaded Chromium
+        // tab, so it is only the fallback.
+        let url = if self.mode == crate::layout::Mode::Browse {
+            let from_tab = self
+                .browse_centre_shown()
+                .and_then(|id| self.browser.tabs.get(id))
+                .map(|tab| tab.url.clone())
+                .filter(|url| !url.is_empty() && url != "about:blank");
+            from_tab.or_else(|| self.browse_centre_state().map(|state| state.read(cx).url().to_string()))
         } else {
-            self.existing_browser(cx)
+            // The pane's page counts only while the pane is open on the
+            // Browser: a background page must not move the screen identity.
+            let pane_on_browser = self.layout.right_open
+                && crate::layout::right_kind(&self.layout) == crate::layout::RightKind::Browser;
+            pane_on_browser
+                .then(|| self.existing_browser(cx))
+                .flatten()
+                .map(|state| state.read(cx).url().to_string())
         };
-        state
-            .map(|state| state.read(cx).url().to_string())
-            .filter(|url| !url.is_empty() && url != "about:blank")
+        url.filter(|url| !url.is_empty() && url != "about:blank")
     }
 
     /// The settings section in view, only while Settings is open.
@@ -1520,7 +1561,8 @@ impl crate::app::Harness {
         match self.feedback.probe.hit(window, point) {
             Some(hit) => {
                 let win = window.viewport_size();
-                let target = FeedbackUi::note_target_for_hit(hit, point, win);
+                let in_browse = self.mode == crate::layout::Mode::Browse;
+                let target = FeedbackUi::note_target_for_hit(hit, point, win, in_browse);
                 self.begin_note_capture(target, window, cx);
             }
             None => {
@@ -1568,7 +1610,8 @@ impl crate::app::Harness {
             if let Some(hit) = self.feedback.probe.hit(window, pending.point) {
                 self.feedback.pending_click = None;
                 let win = window.viewport_size();
-                let target = FeedbackUi::note_target_for_hit(hit, pending.point, win);
+                let in_browse = self.mode == crate::layout::Mode::Browse;
+                let target = FeedbackUi::note_target_for_hit(hit, pending.point, win, in_browse);
                 self.begin_note_capture(target, window, cx);
                 return;
             }
@@ -4071,6 +4114,30 @@ mod tests {
         );
     }
 
+    /// The same page with a fragment or a trailing slash is the same
+    /// screen: its pins keep drawing.
+    #[gpui::test]
+    fn pins_match_a_page_despite_fragment_and_trailing_slash() {
+        let mut current = ScreenContext {
+            mode: "Browse".to_owned(),
+            project: None,
+            session_id: None,
+            session_title: None,
+            right_pane: None,
+            page_url: Some("https://example.com/docs/#intro".to_owned()),
+            settings_section: None,
+            window_w: 1000.0,
+            window_h: 800.0,
+            scale: 2.0,
+            theme: "dark".to_owned(),
+        };
+        let mut note = current.clone();
+        note.page_url = Some("https://example.com/docs".to_owned());
+        assert!(FeedbackUi::pin_context_matches(&current, &note));
+        current.page_url = Some("https://example.com/other".to_owned());
+        assert!(!FeedbackUi::pin_context_matches(&current, &note));
+    }
+
     /// A hit covering more than 40 % of the window becomes a 60×40 area
     /// around the point: `near <label>` for a widget, `"web page"` for
     /// the page stand-in. Smaller hits stay elements.
@@ -4079,22 +4146,28 @@ mod tests {
         let win = gpui::size(gpui::px(1000.0), gpui::px(800.0));
         let mut page = f3_hit(0.0, 0.0, 1000.0, 800.0, "Browse");
         page.role = "AXGroup".to_owned();
-        match FeedbackUi::note_target_for_hit(page, f3_point(500.0, 400.0), win) {
+        match FeedbackUi::note_target_for_hit(page.clone(), f3_point(500.0, 400.0), win, true) {
             Target::Area { rect, region } => {
                 assert_eq!(rect, Rect { x: 470.0, y: 380.0, w: 60.0, h: 40.0 });
                 assert_eq!(region, Some("web page".to_owned()));
             }
             other => panic!("the page-sized group becomes a web-page area, got {other:?}"),
         }
+        // Outside Browse there is no page under the layer: a big group is a
+        // part of Baaz and is named, never called a web page.
+        match FeedbackUi::note_target_for_hit(page, f3_point(500.0, 400.0), win, false) {
+            Target::Area { region, .. } => assert_eq!(region, Some("near Browse".to_owned())),
+            other => panic!("a big group outside Browse becomes a nearby area, got {other:?}"),
+        }
         let big = f3_hit(0.0, 0.0, 1000.0, 800.0, "Canvas");
-        match FeedbackUi::note_target_for_hit(big, f3_point(500.0, 400.0), win) {
+        match FeedbackUi::note_target_for_hit(big, f3_point(500.0, 400.0), win, true) {
             Target::Area { region, .. } => {
                 assert_eq!(region, Some("near Canvas".to_owned()));
             }
             other => panic!("a page-sized widget becomes a nearby area, got {other:?}"),
         }
         let small = f3_hit(10.0, 10.0, 100.0, 30.0, "Headers");
-        match FeedbackUi::note_target_for_hit(small, f3_point(20.0, 20.0), win) {
+        match FeedbackUi::note_target_for_hit(small, f3_point(20.0, 20.0), win, true) {
             Target::Element(hit) => assert_eq!(hit.label, "Headers"),
             other => panic!("a small hit stays an element, got {other:?}"),
         }
@@ -4108,6 +4181,8 @@ mod tests {
         let state = hermetic_state("f3c-page-hit");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
+        // A web page only exists under the layer in Browse.
+        baaz.update(vc, |h, _| h.mode = crate::layout::Mode::Browse);
         enter_active(&baaz, vc);
         let mut page = f3_hit(0.0, 0.0, 2000.0, 2000.0, "Browse");
         page.role = "AXGroup".to_owned();

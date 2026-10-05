@@ -464,6 +464,10 @@ mod tests {
 
     #[test]
     fn a_listed_side_session_is_recognisable_with_no_local_record() {
+        // Reads `support_dir()` twice (here and inside the check): hold the
+        // env lock so a test that repoints `BAAZ_STATE_DIR` cannot switch it
+        // between the two reads (found flaking beside the feedback tests).
+        let _env = crate::store::test_env_lock();
         let prompt = title_prompt("Explain the layout");
         assert!(looks_like_side_session(Some(&prompt), None));
         let rewrite = crate::byline::rewrite_prompt("fix it", "patched it");
