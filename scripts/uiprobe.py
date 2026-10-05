@@ -253,8 +253,10 @@ ENTRIES = {
     # F2 feedback mode shell: the header slot while Active
     # (`feedback-mode:on` parks the run-only flag and enters Active) and
     # paused with a note in the draft (`feedback-mode:pause` after a click
-    # and a note). Offline, idempotent. No baseline yet — generate on
-    # main after merge, never to silence a finding.
+    # and a note). The paused entry's `click:846,551` is the empty-state
+    # hero button at the probe's fixed 1440×900 capture size. Offline,
+    # idempotent. No baseline yet — generate on main after merge, never to
+    # silence a finding.
     "feedback-header-active": {"shot": ["--no-connect", "--login", "signed-in",
                                         "--steps", "feedback-mode:on"]},
     "feedback-header-paused": {"shot": ["--no-connect", "--login", "signed-in",
