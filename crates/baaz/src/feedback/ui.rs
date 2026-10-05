@@ -83,6 +83,18 @@ pub struct FeedbackUi {
     pub discard_armed: bool,
     /// When the arm started, for the 4 s window.
     pub discard_armed_at: Option<Instant>,
+    /// The pending disarm task, if the arm is live. One slot, never a
+    /// queue: re-arming replaces the previous task (dropping cancels it),
+    /// so the arm can never stack timers on `wire_tasks`.
+    pub discard_task: Option<gpui::Task<()>>,
+    /// A Done write is in flight. While set, `done_enabled()` is false
+    /// and toggle/pause/resume/discard/steps are no-ops, so a second
+    /// Done cannot start a second report.
+    pub saving: bool,
+    /// The `feedback-mode:on` step verb parked the shell here for this
+    /// run. Runtime-only, never `layout.feedback_mode`: [`Self::toggle`]
+    /// treats it as the setting being on, and no layout save persists it.
+    pub forced_on: bool,
     /// The capture layer's focus, taken on entering Active.
     pub focus: FocusHandle,
 }
@@ -96,6 +108,9 @@ impl FeedbackUi {
             probe,
             discard_armed: false,
             discard_armed_at: None,
+            discard_task: None,
+            saving: false,
+            forced_on: false,
             focus: cx.focus_handle(),
         }
     }
@@ -136,10 +151,10 @@ impl FeedbackUi {
         }
     }
 
-    /// Drop a stale arm: older than [`DISCARD_ARM`].
+    /// Drop a stale arm: at or past [`DISCARD_ARM`].
     pub fn expire_discard(&mut self) {
         if self.discard_armed
-            && self.discard_armed_at.is_some_and(|at| at.elapsed() > DISCARD_ARM)
+            && self.discard_armed_at.is_some_and(|at| at.elapsed() >= DISCARD_ARM)
         {
             self.disarm_discard();
         }
@@ -173,17 +188,21 @@ impl FeedbackUi {
         !self.draft.is_empty()
     }
 
-    /// Done is clickable in Active or Paused with notes to save.
+    /// Done is clickable in Active or Paused with notes to save — never
+    /// while a write is in flight.
     pub fn done_enabled(&self) -> bool {
-        self.phase != FeedbackPhase::Off && !self.draft.is_empty()
+        !self.saving && self.phase != FeedbackPhase::Off && !self.draft.is_empty()
     }
 
     /// ⌃⌥⌘F / the menu item: setting off stays Off; Off → Active (a fresh
     /// draft when empty, the kept one otherwise); Active → Paused;
     /// Paused → Active. Pure — the caller runs the side effects the
-    /// outcome names (toasts, probe activation, focus).
+    /// outcome names (toasts, probe activation, focus). The run-only
+    /// [`Self::forced_on`] counts as the setting being on. While
+    /// [`Self::saving`] the Harness guards the toggle outright (there is
+    /// no stay-put outcome to return here).
     pub fn toggle(&mut self, setting_on: bool) -> ToggleOutcome {
-        if !setting_on {
+        if !(setting_on || self.forced_on) {
             return ToggleOutcome::NeedsSetting;
         }
         match self.phase {
@@ -208,37 +227,42 @@ impl FeedbackUi {
         }
     }
 
-    /// Escape, the Pause button: Active → Paused, anywhere else a no-op.
+    /// Escape, the Pause button: Active → Paused, anywhere else a no-op —
+    /// and always a no-op while [`Self::saving`].
     pub fn pause(&mut self) {
-        if self.phase == FeedbackPhase::Active {
+        if self.phase == FeedbackPhase::Active && !self.saving {
             self.disarm_discard();
             self.phase = FeedbackPhase::Paused;
         }
     }
 
-    /// The Resume button / `resume` verb: Paused → Active, else a no-op.
+    /// The Resume button / `resume` verb: Paused → Active, else a no-op —
+    /// and always a no-op while [`Self::saving`].
     pub fn resume(&mut self) {
-        if self.phase == FeedbackPhase::Paused {
+        if self.phase == FeedbackPhase::Paused && !self.saving {
             self.disarm_discard();
             self.phase = FeedbackPhase::Active;
         }
     }
 
     /// Turning the setting off mid-session: Off, but the draft survives
-    /// so the next toggle resumes it.
+    /// so the next toggle resumes it. Clears the run-only
+    /// [`Self::forced_on`]: the shell is fully off, not parked for a run.
     pub fn setting_off(&mut self) {
+        self.forced_on = false;
         if self.phase != FeedbackPhase::Off {
             self.disarm_discard();
             self.phase = FeedbackPhase::Off;
         }
     }
 
-    /// A Discard click: disabled with 0 notes; the first click arms (the
-    /// button reads `Discard N notes?` for up to 4 s); the second click
-    /// inside the window clears the draft, staying in the current phase.
+    /// A Discard click: disabled with 0 notes (or while
+    /// [`Self::saving`]); the first click arms (the button reads
+    /// `Discard N notes?` for up to 4 s); the second click inside the
+    /// window clears the draft, staying in the current phase.
     /// A stale arm reads as a first click again.
     pub fn discard_press(&mut self) -> DiscardOutcome {
-        if self.draft.is_empty() {
+        if self.saving || self.draft.is_empty() {
             return DiscardOutcome::Disabled;
         }
         if self.discard_armed_live() {
@@ -252,15 +276,21 @@ impl FeedbackUi {
         }
     }
 
-    /// Discard arm + confirm in one go, for the `discard` step verb.
+    /// Discard arm + confirm in one go, for the `discard` step verb. A
+    /// no-op while [`Self::saving`].
     pub fn discard_all(&mut self) {
+        if self.saving {
+            return;
+        }
         self.draft.discard();
         self.disarm_discard();
     }
 
-    /// A finished Done write: Off with a cleared draft.
+    /// A finished Done write: Off with a cleared draft, and the in-flight
+    /// guard lifted.
     pub fn done_applied(&mut self) {
         self.disarm_discard();
+        self.saving = false;
         self.phase = FeedbackPhase::Off;
         self.draft = Draft::new();
     }
@@ -304,6 +334,9 @@ impl crate::app::Harness {
     /// otherwise the toggle outcome, focusing the layer and priming the
     /// probe on the way into Active.
     pub(crate) fn toggle_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.saving {
+            return;
+        }
         match self.feedback.toggle(self.layout.feedback_mode) {
             ToggleOutcome::NeedsSetting => {
                 self.overlays.update(cx, |o, _| {
@@ -321,10 +354,17 @@ impl crate::app::Harness {
         }
     }
 
-    /// On the way into Active: touch the a11y tree so F3 can hit-test on
+    /// On the way into Active: close the palette, menu and dialog (they
+    /// would otherwise sit frozen under the capture layer — Settings may
+    /// stay open beneath it), touch the a11y tree so F3 can hit-test on
     /// a later frame, take focus so typing never reaches the composer,
     /// and repaint.
     pub(crate) fn enter_feedback_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlays.update(cx, |overlays, _| {
+            overlays.palette = None;
+            overlays.menu = None;
+        });
+        self.close_dialog(cx);
         self.feedback.probe.activate(window);
         window.focus(&self.feedback.focus, cx);
         window.refresh();
@@ -341,15 +381,21 @@ impl crate::app::Harness {
         }
     }
 
-    /// The bar's Pause button.
+    /// The bar's Pause button. A no-op while saving.
     pub(crate) fn pause_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.saving {
+            return;
+        }
         self.feedback.pause();
         window.focus(&self.focus_root, cx);
         cx.notify();
     }
 
-    /// The pill's Resume button.
+    /// The pill's Resume button. A no-op while saving.
     pub(crate) fn resume_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.saving {
+            return;
+        }
         if self.feedback.phase == FeedbackPhase::Paused {
             self.feedback.resume();
             self.enter_feedback_active(window, cx);
@@ -357,8 +403,14 @@ impl crate::app::Harness {
     }
 
     /// The bar's Discard button: arm, then clear on the confirm. A stale
-    /// arm disarms itself on a timer so the label falls back.
-    pub(crate) fn discard_feedback(&mut self, cx: &mut Context<Self>) {
+    /// arm disarms itself on a timer so the label falls back. At most one
+    /// disarm task is ever pending: re-arming replaces the previous one.
+    /// A no-op while saving. Afterwards the layer keeps the keyboard when
+    /// still Active, so Escape keeps working after the click.
+    pub(crate) fn discard_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.saving {
+            return;
+        }
         match self.feedback.discard_press() {
             DiscardOutcome::Disabled => {}
             DiscardOutcome::Armed => {
@@ -369,12 +421,15 @@ impl crate::app::Harness {
                         cx.notify();
                     });
                 });
-                self.wire_tasks().push(task);
+                self.feedback.discard_task = Some(task);
                 cx.notify();
             }
             DiscardOutcome::Cleared => {
                 cx.notify();
             }
+        }
+        if self.feedback.phase == FeedbackPhase::Active {
+            window.focus(&self.feedback.focus, cx);
         }
     }
 
@@ -382,18 +437,30 @@ impl crate::app::Harness {
     /// off the UI thread, then back on it copy the report dir path to the
     /// clipboard, toast it, and go Off with a cleared draft. A write
     /// error toasts instead and keeps the draft and the phase.
-    pub(crate) fn finish_feedback(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// The in-flight guard: `saving` is set before the spawn, so a second
+    /// Done (button or step) is a no-op until this one lands — exactly one
+    /// report folder per save. The note count is captured before the
+    /// write, so the toast never says `0 notes`; the draft moves out with
+    /// `mem::take` (never cloned on the UI thread) and moves back on
+    /// error. Afterwards the layer keeps the keyboard when still Active,
+    /// so Escape keeps working after the click.
+    pub(crate) fn finish_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.feedback.done_enabled() {
             return;
         }
-        let draft = self.feedback.draft.clone();
+        self.feedback.saving = true;
+        let note_count = self.feedback.note_count();
+        let draft = std::mem::take(&mut self.feedback.draft);
         let root = crate::feedback::feedback_root();
         let build = feedback_build_string();
         let task = cx.spawn(async move |this, cx| {
-            let written = cx
+            let (written, draft) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::feedback::write_report(&root, &draft, chrono::Local::now(), &build)
+                    let result =
+                        crate::feedback::write_report(&root, &draft, chrono::Local::now(), &build);
+                    (result, draft)
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
@@ -401,14 +468,15 @@ impl crate::app::Harness {
                     Ok(dir) => {
                         let path = dir.display().to_string();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
-                        let count = this.feedback.note_count();
-                        let unit = if count == 1 { "note" } else { "notes" };
+                        let unit = if note_count == 1 { "note" } else { "notes" };
                         this.feedback.done_applied();
                         this.overlays.update(cx, |o, _| {
-                            o.toast(format!("Feedback saved · {count} {unit}"), path)
+                            o.toast(format!("Feedback saved · {note_count} {unit}"), path)
                         });
                     }
                     Err(err) => {
+                        this.feedback.draft = draft;
+                        this.feedback.saving = false;
                         this.overlays.update(cx, |o, _| {
                             o.toast("Couldn't save feedback", format!("{err:#}"))
                         });
@@ -418,6 +486,10 @@ impl crate::app::Harness {
             });
         });
         self.wire_tasks().push(task);
+        if self.feedback.phase == FeedbackPhase::Active {
+            window.focus(&self.feedback.focus, cx);
+        }
+        cx.notify();
     }
 
     /// The setting flipped off mid-session: the shell goes Off but keeps
@@ -427,18 +499,22 @@ impl crate::app::Harness {
         cx.notify();
     }
 
-    /// `feedback:<sub>`: `on` turns the setting on for this run (in
-    /// memory, never `layout.json` — a capture aid) and enters Active;
-    /// `pause` / `resume` move between Active and Paused; `off` clears the
-    /// run's setting and parks Off keeping the draft; `discard` clears the
-    /// draft at once; `done` saves like the Done button. Idempotent where
-    /// it can be (`on` while Active stays Active). Any other payload is
-    /// the session verb's `feedback:<text>`, forwarded to the open
-    /// session's field; with no session open it records a step failure.
+    /// `feedback-mode:<sub>`: `on` parks the run-only [`FeedbackUi::forced_on`]
+    /// flag (never `layout.feedback_mode`) and enters Active; `pause` /
+    /// `resume` move between Active and Paused; `off` clears the run's
+    /// flag and parks Off keeping the draft; `discard` clears the draft
+    /// at once; `done` saves like the Done button. Idempotent where it
+    /// can be (`on` while Active stays Active). A no-op while saving. An
+    /// unknown sub records a step failure — there is no forwarding: the
+    /// session verb `feedback:<text>` (the open approval/clarify field)
+    /// is a different verb again and dispatches on its own.
     pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.saving {
+            return;
+        }
         match rest.trim() {
             "on" => {
-                self.layout.feedback_mode = true;
+                self.feedback.forced_on = true;
                 if self.feedback.phase == FeedbackPhase::Off {
                     self.feedback.toggle(true);
                     self.enter_feedback_active(window, cx);
@@ -459,7 +535,7 @@ impl crate::app::Harness {
                 }
             }
             "off" => {
-                self.layout.feedback_mode = false;
+                self.feedback.forced_on = false;
                 self.feedback.setting_off();
                 cx.notify();
             }
@@ -467,13 +543,9 @@ impl crate::app::Harness {
                 self.feedback.discard_all();
                 cx.notify();
             }
-            "done" => self.finish_feedback(cx),
+            "done" => self.finish_feedback(window, cx),
             _ => {
-                if let Some(view) = self.active.clone() {
-                    view.update(cx, |v, cx| v.step_feedback(rest, window, cx));
-                } else {
-                    crate::steps::record_step_failure(&format!("feedback:{rest}"));
-                }
+                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
                 cx.notify();
             }
         }
@@ -580,14 +652,16 @@ impl crate::app::Harness {
         let pause = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.pause_feedback(window, cx);
         });
-        let discard = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.discard_feedback(cx);
+        let discard = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.discard_feedback(window, cx);
         });
-        let done = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.finish_feedback(cx);
+        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.finish_feedback(window, cx);
         });
+        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
         let bar = h_flex()
             .id("feedback-bar")
+            .occlude()
             .role(gpui::Role::Group)
             .aria_label("Feedback mode")
             .bg(p.surface_1)
@@ -641,7 +715,7 @@ impl crate::app::Harness {
                     .gap(px(2.0))
                     .items_center()
                     .child(
-                        button("feedback-done", "Done")
+                        button("feedback-done", done_label)
                             .primary()
                             .disabled(!done_enabled)
                             .accessibility_label("Done — save feedback report")
@@ -678,11 +752,12 @@ impl crate::app::Harness {
         let resume = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.resume_feedback(window, cx);
         });
-        let done = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.finish_feedback(cx);
+        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.finish_feedback(window, cx);
         });
         let pill = h_flex()
             .id("feedback-pill")
+            .occlude()
             .role(gpui::Role::Group)
             .aria_label("Feedback paused")
             .bg(p.surface_1)
@@ -978,7 +1053,7 @@ mod tests {
                 );
             })
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.finish_feedback(cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         vc.run_until_parked();
         let report_root = crate::feedback::feedback_root();
         let latest_path = report_root.join("latest");
@@ -1016,6 +1091,361 @@ mod tests {
         assert!(ctx.settings_section.is_none(), "settings starts closed");
         assert!(ctx.session_id.is_none(), "no session is open");
         assert!(ctx.project.is_some(), "the explicit workspace is current");
+        restore_state(state);
+    }
+
+    /// A rendered window harness with keys bound, for dispatch tests: an
+    /// entity that is never rendered has no element tree, so keystrokes
+    /// never dispatch through it.
+    fn window_harness<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (gpui::Entity<crate::app::Harness>, &'a mut gpui::VisualTestContext) {
+        cx.update(crate::app::bind_keys);
+        cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                test_args(dir),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        })
+    }
+
+    fn enter_active(
+        baaz: &gpui::Entity<crate::app::Harness>,
+        vc: &mut gpui::VisualTestContext,
+    ) {
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.layout.feedback_mode = true;
+                h.toggle_feedback(window, cx);
+            })
+        });
+    }
+
+    /// The cover predicate follows the phase: Active covers, Paused leaves
+    /// pages live (so `browser_visible` stays true under the pill).
+    #[gpui::test]
+    fn covers_app_is_active_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut shell = live_shell(cx);
+            assert!(!shell.covers_app(), "Off covers nothing");
+            shell.toggle(true);
+            assert!(shell.covers_app(), "Active covers the app");
+            shell.pause();
+            assert!(!shell.covers_app(), "Paused leaves pages live");
+        });
+    }
+
+    /// The run-only flag counts as the setting being on, without writing
+    /// it: `toggle(false)` still enters Active once forced.
+    #[gpui::test]
+    fn forced_on_counts_as_the_setting(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut shell = live_shell(cx);
+            assert_eq!(shell.toggle(false), ToggleOutcome::NeedsSetting);
+            shell.forced_on = true;
+            assert_eq!(shell.toggle(false), ToggleOutcome::EnteredActive);
+            assert_eq!(shell.phase, FeedbackPhase::Active);
+        });
+    }
+
+    /// While saving, Done is disabled and pause/resume/discard are no-ops.
+    #[gpui::test]
+    fn saving_freezes_the_shell(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut shell = live_shell(cx);
+            shell.toggle(true);
+            note_on(&mut shell, "one");
+            shell.saving = true;
+            assert!(!shell.done_enabled(), "no second Done while saving");
+            shell.pause();
+            assert_eq!(shell.phase, FeedbackPhase::Active, "pause waits out the save");
+            shell.resume();
+            assert_eq!(shell.phase, FeedbackPhase::Active, "resume waits out the save");
+            assert_eq!(shell.discard_press(), DiscardOutcome::Disabled);
+            shell.discard_all();
+            assert_eq!(shell.note_count(), 1, "the in-flight draft survives");
+        });
+    }
+
+    /// The layer element exists only while Active; the chrome exists while
+    /// Active (bar) or Paused (pill), never while Off.
+    #[gpui::test]
+    fn layer_and_chrome_follow_the_phase(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("layer-phase");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        let layer = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_layer(cx).is_some()))
+        };
+        let chrome = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_chrome(cx).is_some()))
+        };
+        assert!(!layer(&mut vc), "Off renders no layer");
+        assert!(!chrome(&mut vc), "Off renders no chrome");
+        enter_active(&baaz, &mut vc);
+        assert!(layer(&mut vc), "Active renders the layer");
+        assert!(chrome(&mut vc), "Active renders the bar");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        assert!(!layer(&mut vc), "Paused renders no layer");
+        assert!(chrome(&mut vc), "Paused renders the pill");
+        restore_state(state);
+    }
+
+    /// While Active, app keys die on the layer: ⌘N opens no session and
+    /// Tab never leaves the layer's focus — but ⌃⌥⌘F still pauses.
+    #[gpui::test]
+    fn active_layer_swallows_app_keys_but_keeps_the_toggle(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("keys-swallow");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, &mut vc);
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active));
+        let sessions_before = vc.update(|_, cx| baaz.read(cx).sessions.len());
+        vc.simulate_keystrokes("cmd-n");
+        vc.simulate_keystrokes("tab");
+        vc.update(|window, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.sessions.len(), sessions_before, "⌘N opened a session under the layer");
+            assert!(harness.active.is_none(), "⌘N opened a draft under the layer");
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert!(
+                harness.feedback.focus.is_focused(window),
+                "Tab moved focus off the layer"
+            );
+        });
+        vc.simulate_keystrokes("ctrl-alt-cmd-f");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "⌃⌥⌘F still pauses from the layer"
+        );
+        restore_state(state);
+    }
+
+    /// Entering Active closes the palette and the dialog: they would
+    /// otherwise sit frozen under the capture layer.
+    #[gpui::test]
+    fn entering_active_closes_palette_and_dialog(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("enter-closes");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.open_palette(crate::overlays::PaletteKind::Commands, cx);
+                h.set_dialog(cx, crate::app::Harness::quit_terminal_dialog("sleep 10", 0));
+            })
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_some()));
+        enter_active(&baaz, &mut vc);
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_none()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_none()));
+        restore_state(state);
+    }
+
+    /// Two Done calls in a row write exactly one report folder; the toast
+    /// carries the pre-write note count and the clipboard the report dir.
+    #[gpui::test]
+    fn double_done_writes_one_report_with_count_and_clipboard(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("double-done");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, &mut vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0 },
+                        region: None,
+                    },
+                    "first".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 2.0, y: 2.0, w: 8.0, h: 8.0 },
+                        region: None,
+                    },
+                    "second".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.saving),
+            "the first Done raises the guard"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        vc.run_until_parked();
+        let root = crate::feedback::feedback_root();
+        let dirs = std::fs::read_dir(&root)
+            .expect("report root reads")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        assert_eq!(dirs, 1, "two Done calls wrote {dirs} report folders");
+        let latest = std::fs::read_to_string(root.join("latest")).expect("Done writes latest");
+        let (toast, clip) = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let toast = harness.overlays.read(cx).toasts.last().cloned().expect("a toast lands");
+            let clip = cx.read_from_clipboard().and_then(|item| item.text());
+            (toast, clip)
+        });
+        assert_eq!(toast.title.to_string(), "Feedback saved · 2 notes");
+        assert_eq!(clip.as_deref(), Some(latest.trim()), "the clipboard holds the report dir");
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()));
+        assert!(!vc.update(|_, cx| baaz.read(cx).feedback.saving));
+        restore_state(state);
+    }
+
+    /// A failed write keeps the draft and the phase, lifts the guard, and
+    /// toasts the error. The state dir points at a FILE, so `create_dir_all`
+    /// cannot succeed.
+    #[gpui::test]
+    fn failed_done_keeps_draft_and_phase(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("done-error");
+        let blocker = state.2.join("blocker");
+        std::fs::write(&blocker, b"not a dir").expect("blocker file writes");
+        std::env::set_var("BAAZ_STATE_DIR", &blocker);
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, &mut vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 3.0, y: 3.0, w: 8.0, h: 8.0 },
+                        region: None,
+                    },
+                    "kept".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "the phase survives");
+            assert_eq!(harness.feedback.note_count(), 1, "the draft moves back");
+            assert!(!harness.feedback.saving, "the guard lifts");
+            let toast = harness.overlays.read(cx).toasts.last().cloned().expect("an error toasts");
+            assert_eq!(toast.title.to_string(), "Couldn't save feedback");
+        });
+        restore_state(state);
+    }
+
+    /// The click path keeps Escape alive: Discard (button handler) leaves
+    /// the layer focused, so `escape` still pauses.
+    #[gpui::test]
+    fn discard_click_keeps_escape_working(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("discard-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, &mut vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 4.0, y: 4.0, w: 8.0, h: 8.0 },
+                        region: None,
+                    },
+                    "arming".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        // The bar button's own handler, exactly as the click calls it.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        vc.simulate_keystrokes("escape");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "escape pauses after the Discard click"
+        );
+        restore_state(state);
+    }
+
+    /// The window verb never touches the persisted setting: `on` parks the
+    /// run-only flag, `off` clears it, `layout.feedback_mode` never moves —
+    /// and an unknown sub records a step failure instead of forwarding.
+    #[gpui::test]
+    fn feedback_mode_steps_never_touch_the_layout_setting(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("mode-steps");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        assert!(!vc.update(|_, cx| baaz.read(cx).layout.feedback_mode));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert!(harness.feedback.forced_on, "the run-only flag parks");
+            assert!(!harness.layout.feedback_mode, "the persisted setting never moves");
+        });
+        let failures_before = crate::steps::step_failures();
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("bogus", window, cx)));
+        assert_eq!(crate::steps::step_failures(), failures_before + 1);
+        assert!(
+            crate::steps::step_failure_names().iter().any(|name| name == "feedback-mode:bogus"),
+            "the unknown sub fails under its own verb"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("off", window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
+            assert!(!harness.feedback.forced_on, "off clears the run-only flag");
+            assert!(!harness.layout.feedback_mode, "off leaves the persisted setting alone");
+        });
+        restore_state(state);
+    }
+
+    /// Arming Discard twice leaves a single pending disarm task: the slot
+    /// replaces, never queues.
+    #[gpui::test]
+    fn rearming_discard_keeps_a_single_task(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("discard-task");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, mut vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, &mut vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 5.0, y: 5.0, w: 8.0, h: 8.0 },
+                        region: None,
+                    },
+                    "arming".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        // A stale arm reads as a first click again, so the second press
+        // re-arms instead of clearing.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.discard_armed_at =
+                    Some(Instant::now() - DISCARD_ARM - Duration::from_secs(1));
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.discard_task.is_some()),
+            "one disarm task is pending after two arms"
+        );
         restore_state(state);
     }
 }

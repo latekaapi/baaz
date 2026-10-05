@@ -242,14 +242,14 @@ ENTRIES = {
     # generate on main after merge, never to silence a finding.
     "settings-general":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:general"]},
-    # F2 feedback mode shell: the bar while Active (`feedback:on` turns
-    # the setting on for this run and enters Active) and the pill after
-    # `feedback:pause`. Offline, idempotent. No baseline yet — generate
-    # on main after merge, never to silence a finding.
+    # F2 feedback mode shell: the bar while Active (`feedback-mode:on`
+    # parks the run-only flag and enters Active) and the pill after
+    # `feedback-mode:pause`. Offline, idempotent. No baseline yet —
+    # generate on main after merge, never to silence a finding.
     "feedback-bar":         {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback:on"]},
+                                      "--steps", "feedback-mode:on"]},
     "feedback-pill":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback:on;feedback:pause"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:pause"]},
     # The Settings page's Archived section: offline, idempotent. No
     # baseline yet — generate on main after merge, never to silence a
     # finding.
