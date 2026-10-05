@@ -242,10 +242,13 @@ impl Overlays {
 
     /// Show a note. Toasts are informational here — a compaction that did
     /// nothing, a command this build does not have — so they carry no action.
-    pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>) {
+    /// Returns the toast's id, so callers with something to retract (the
+    /// feedback shell's "mode is off" note) can dismiss it later.
+    pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>) -> String {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);
-        self.toasts.push(ToastData::new(id, title.into(), body.into()).kind(ToastKind::Neutral));
+        self.toasts.push(ToastData::new(id.clone(), title.into(), body.into()).kind(ToastKind::Neutral));
+        id
     }
 
     /// Show a note carrying one action, and return the toast's id.
