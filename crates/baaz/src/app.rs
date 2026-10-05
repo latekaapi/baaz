@@ -2258,7 +2258,11 @@ impl Harness {
         self.layout.right_open = entering.right_open;
         self.layout.right_width = entering.right_width;
         self.layout.right_kind = entering.right_kind;
-        self.persist_layout(cx);
+        // A plain write: `switch` already put the leaving state in its slot
+        // and the entering slot is what we restore from. `persist_layout`
+        // here would re-read live state that still belongs to the mode we
+        // just left and file it under the one we entered.
+        layout::write(&self.layout);
         // The cached sidebar slides to rest on animation frames (a
         // `SpringKind::Layout` translate, snapped under reduced motion);
         // `on_frame` re-arms the pane until the spring actually rests.
@@ -4439,7 +4443,7 @@ impl Harness {
         if self.mode_slide {
             let browse = self.mode == layout::Mode::Browse;
             let phase = spring_phase(("mode-slide", "phase"), browse, SpringKind::Layout, window, cx);
-            let settled = if browse { phase >= 1.0 } else { phase <= 0.0 };
+            let settled = if browse { phase >= 0.999 } else { phase <= 0.001 };
             if settled {
                 self.mode_slide = false;
             } else {
