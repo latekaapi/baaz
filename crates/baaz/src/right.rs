@@ -2737,8 +2737,6 @@ fn browser_strip_tab(
         .overflow_hidden()
         .cursor_pointer()
         .track_interaction(&tracked)
-        .role(gpui::Role::Tab)
-        .aria_label(format!("{} tab", title))
         .child(
             div()
                 .size(px(16.0))
@@ -2761,6 +2759,8 @@ fn browser_strip_tab(
                 .whitespace_nowrap()
                 .child(title.clone()),
         )
+        .role(gpui::Role::Tab)
+        .aria_label(format!("{} tab", title))
         .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
         // Middle-click closes only when the press AND the release land on
         // this same tab: the down records the pressed tab, the up closes
