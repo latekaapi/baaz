@@ -21,8 +21,15 @@ pub trait ElementProbe {
     fn activate(&self, window: &mut gpui::Window);
 
     /// The element under `point` (window-logical pixels, top-left origin),
-    /// or `None` when nothing labelled is there.
+    /// or `None` when nothing labelled is there. Cheap: never enriches —
+    /// hover calls this on every move, so the debug-tree serialise and
+    /// parse waits for [`ElementProbe::enrich`] instead.
     fn hit(&self, window: &mut gpui::Window, point: gpui::Point<gpui::Pixels>) -> Option<ElementHit>;
+
+    /// Fill `hit`'s gpui provenance (`element_id`, `view`) from the debug
+    /// accessibility tree. Called once when a note's target is fixed, never
+    /// for hover. The default is a no-op (the tree is macOS-only).
+    fn enrich(&self, _window: &mut gpui::Window, _hit: &mut ElementHit) {}
 }
 
 /// The real macOS probe. On other targets [`ElementProbe::hit`] is `None`.
@@ -50,12 +57,33 @@ impl ElementProbe for MacProbe {
             None
         }
     }
+
+    fn enrich(&self, window: &mut gpui::Window, hit: &mut ElementHit) {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(json) = window.debug_a11y_tree_json() {
+                if let Some((element_id, view)) = enrich_from_debug_json(&json, &hit.label, &hit.role) {
+                    hit.element_id = element_id;
+                    hit.view = view;
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            let _ = hit;
+        }
+    }
 }
 
 /// A scripted probe for tests: the smallest-area hit containing the point.
 pub struct FakeProbe {
     /// The hits to choose from, in any order.
     pub hits: Vec<ElementHit>,
+    /// How many times [`ElementProbe::enrich`] ran: enrichment is free
+    /// here (a no-op), so tests assert hover never enriches and a click
+    /// enriches exactly once.
+    pub enrich_calls: std::cell::Cell<usize>,
 }
 
 impl FakeProbe {
@@ -85,6 +113,10 @@ impl ElementProbe for FakeProbe {
 
     fn hit(&self, _window: &mut gpui::Window, point: gpui::Point<gpui::Pixels>) -> Option<ElementHit> {
         self.hit_point(f32::from(point.x), f32::from(point.y))
+    }
+
+    fn enrich(&self, _window: &mut gpui::Window, _hit: &mut ElementHit) {
+        self.enrich_calls.set(self.enrich_calls.get() + 1);
     }
 }
 
@@ -171,7 +203,6 @@ fn strip_element_id(raw: &str) -> String {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::super::{ElementHit, Rect};
-    use super::enrich_from_debug_json;
     use objc2::{msg_send, rc::Retained, runtime::AnyObject};
     use objc2_foundation::{NSPoint, NSRect};
 
@@ -238,12 +269,10 @@ mod mac {
         }
         let rect = screen_to_logical(frame, window_ptr, view, bounds, flipped);
         let ancestors = parents(raw);
-        let (element_id, view_name) = window
-            .debug_a11y_tree_json()
-            .as_deref()
-            .and_then(|json| enrich_from_debug_json(json, &label, &role))
-            .unwrap_or((None, None));
-        Some(ElementHit { label, role, ancestors, rect, element_id, view: view_name })
+        // No enrichment here: hover hit-tests on every move, and the
+        // debug-tree serialise plus parse costs a full frame. The shell
+        // calls `enrich` once the note's target is fixed instead.
+        Some(ElementHit { label, role, ancestors, rect, element_id: None, view: None })
     }
 
     /// Which `NSString` property to read.
@@ -471,6 +500,7 @@ mod tests {
                 hit_at(10.0, 10.0, 20.0, 20.0, "inner"),
                 hit_at(12.0, 12.0, 5.0, 5.0, "core"),
             ],
+            enrich_calls: std::cell::Cell::new(0),
         };
         let label = |hit: Option<ElementHit>| hit.map(|hit| hit.label);
         assert_eq!(label(probe.hit_point(14.0, 14.0)), Some("core".to_owned()));
@@ -480,9 +510,16 @@ mod tests {
 
     #[test]
     fn fake_probe_returns_none_outside_all_hits() {
-        let probe = FakeProbe { hits: vec![hit_at(0.0, 0.0, 10.0, 10.0, "only")] };
+        let probe = FakeProbe {
+            hits: vec![hit_at(0.0, 0.0, 10.0, 10.0, "only")],
+            enrich_calls: std::cell::Cell::new(0),
+        };
         assert!(probe.hit_point(99.0, 99.0).is_none());
-        assert!(FakeProbe { hits: vec![] }.hit_point(1.0, 1.0).is_none());
+        assert!(
+            FakeProbe { hits: vec![], enrich_calls: std::cell::Cell::new(0) }
+                .hit_point(1.0, 1.0)
+                .is_none()
+        );
     }
 
     #[test]
