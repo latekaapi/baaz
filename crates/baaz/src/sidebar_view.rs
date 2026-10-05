@@ -27,14 +27,14 @@ use aui::nav::{
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::IconName;
-use aui_motion::pulse_phase;
+use aui_motion::{pulse_phase, spring_phase, SpringKind};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
     div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset, Pixels, Render,
     SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::input::TextareaState;
-use gpui_kit::base::v_flex;
+use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::AccountStateKind;
 
 use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
@@ -268,6 +268,38 @@ pub(crate) struct SidebarKey {
     reveal: Option<String>,
     auth: (u8, String, String, String, bool),
     current_project: Option<String>,
+    mode: crate::layout::Mode,
+    session_count: usize,
+    tab_count: usize,
+    browse_tabs: Vec<(u64, String, bool)>,
+}
+
+impl SidebarKey {
+    /// The Browse sidebar's fingerprint: the current project's person
+    /// tabs as `(id, label, active)` triples. A select, a title change
+    /// or an open/close moves the key, so the cached pane repaints.
+    /// B2a-H3 extends this helper with the From-sessions groups; the
+    /// key field stays as is.
+    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, String, bool)> {
+        if !baaz.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = baaz.current_project_id();
+        let active =
+            baaz.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
+        baaz.browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .map(|tab| {
+                (
+                    tab.id.0,
+                    crate::browser::tabs::tab_label(&tab.title, &tab.url),
+                    Some(tab.id) == active,
+                )
+            })
+            .collect()
+    }
 }
 
 impl SidebarKey {
@@ -291,6 +323,17 @@ impl SidebarKey {
                 identity.is_api_key(),
             ),
         };
+        // The mode switch shows both counts, so both are key inputs: the
+        // sessions in the current project and the project's person tabs.
+        let current_project = baaz.current_project.clone();
+        let session_count =
+            visible.iter().filter(|entry| entry.project == current_project).count();
+        let tab_count = if baaz.browser.tabs_loaded {
+            baaz.browser.tabs.person_tabs(current_project.as_deref()).len()
+        } else {
+            0
+        };
+        let browse_tabs = Self::browse_tabs_fingerprint(baaz);
         Self {
             visible: Rc::as_ptr(&visible) as usize,
             grouping: Rc::as_ptr(&grouping) as usize,
@@ -298,7 +341,11 @@ impl SidebarKey {
             renaming: baaz.renaming.clone(),
             reveal: baaz.reveal.clone(),
             auth,
-            current_project: baaz.current_project.clone(),
+            current_project,
+            mode: baaz.mode,
+            session_count,
+            tab_count,
+            browse_tabs,
         }
     }
 }
@@ -490,6 +537,216 @@ impl Harness {
             })
             .child(group_row("sessions-caption", "Sessions").on_view_options(move |_, w, cx| open_view(&(), w, cx)))
             .into_any_element()
+    }
+
+    /// Sessions in the current project: the switch's Sessions count.
+    fn mode_session_count(&self, cx: &gpui::App) -> usize {
+        let current = self.current_project.clone();
+        self.visible_sessions(cx).iter().filter(|entry| entry.project == current).count()
+    }
+
+    /// The current project's person tabs: the switch's Browse count.
+    fn mode_tab_count(&self) -> usize {
+        if !self.browser.tabs_loaded {
+            return 0;
+        }
+        let space = self.current_project_id();
+        self.browser.tabs.person_tabs(space.as_deref()).len()
+    }
+
+    /// The Sessions | Browse switch at the very top of the sidebar
+    /// column, above "New session" (B2a-H2): two segments with the live
+    /// counts — sessions in the current project, tabs in the current
+    /// project. A two-button control with the segmented look (the
+    /// library's `segmented` takes plain labels, so the muted counts
+    /// ride as their own ink runs): each segment is a Tab named
+    /// "Sessions, N" / "Browse, M" with its selected state.
+    fn render_mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let sessions = self.mode_session_count(cx);
+        let tabs = self.mode_tab_count();
+        let baaz = cx.entity().downgrade();
+        h_flex()
+            .id("mode-switch")
+            .flex_none()
+            .w_full()
+            .items_center()
+            .p(px(2.0))
+            .gap(px(2.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_2)
+            .role(gpui::Role::TabList)
+            .aria_label("Switch between Sessions and Browse")
+            .child(Self::mode_segment(
+                "mode-sessions",
+                crate::layout::Mode::Sessions,
+                sessions,
+                self.mode,
+                p,
+                baaz.clone(),
+            ))
+            .child(Self::mode_segment(
+                "mode-browse",
+                crate::layout::Mode::Browse,
+                tabs,
+                self.mode,
+                p,
+                baaz,
+            ))
+            .into_any_element()
+    }
+
+    /// One half of the mode switch: the mode's name in content ink (muted
+    /// off) with its count in muted ink beside it, on the raised surface
+    /// while selected.
+    fn mode_segment(
+        id: &'static str,
+        mode: crate::layout::Mode,
+        count: usize,
+        current: crate::layout::Mode,
+        p: Palette,
+        baaz: WeakEntity<Harness>,
+    ) -> AnyElement {
+        let selected = mode == current;
+        let mut segment = h_flex()
+            .id(id)
+            .flex_1()
+            .h(px(26.0))
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .rounded(px(scale::R_XS))
+            .cursor_pointer()
+            .role(gpui::Role::Tab)
+            .aria_label(format!("{}, {}", mode.label(), count))
+            .aria_selected(selected)
+            .child(div().ui(scale::FS_12).text_color(if selected { p.ink } else { p.ink_3 }).child(mode.label()))
+            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("{count}")));
+        if selected {
+            segment = segment.bg(p.surface_1);
+        }
+        segment
+            .on_click(move |_, window, cx| {
+                let _ = baaz.update(cx, |this, cx| this.set_mode(mode, window, cx));
+            })
+            .into_any_element()
+    }
+
+    /// The Browse sidebar's body (B2a-H2): a minimal placeholder list of
+    /// the current project's person tabs — an initial tile plus the
+    /// title, clicked to select — with a "New tab" row that opens one.
+    /// B2a-H3 replaces this with the real Browse sidebar; until then
+    /// this is deliberately plain rows, not the sessions list.
+    fn render_browse_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let space = self.current_project_id();
+        let tabs: Vec<(crate::browser::TabId, String, String, bool)> = if self.browser.tabs_loaded {
+            let active = self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
+            self.browser
+                .tabs
+                .person_tabs(space.as_deref())
+                .iter()
+                .map(|tab| {
+                    (
+                        tab.id,
+                        crate::browser::tabs::tab_label(&tab.title, &tab.url),
+                        crate::browser::tabs::tab_initial(&tab.title, &tab.url),
+                        Some(tab.id) == active,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let new_tab = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.new_browse_sidebar_tab(window, cx);
+        });
+        let baaz = cx.entity().downgrade();
+        let mut column = v_flex().w_full().flex_1().min_h(px(0.0)).overflow_hidden().py(px(4.0));
+        for (id, title, initial, active) in tabs {
+            let label = title.clone();
+            let mut row = h_flex()
+                .id(("browse-tab", id.0))
+                .w_full()
+                .h(px(30.0))
+                .flex_none()
+                .items_center()
+                .px(px(8.0))
+                .gap(px(8.0))
+                .rounded(px(scale::R_SM))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(scale::R_XS))
+                        .border_1()
+                        .border_color(p.line_strong)
+                        .text_color(p.ink_2)
+                        .ui(scale::FS_11)
+                        .child(initial),
+                )
+                .child(div().flex_1().min_w(px(0.0)).truncate().ui(scale::FS_12).text_color(p.ink).child(title));
+            if active {
+                row = row.bg(p.surface_2);
+            }
+            // The role and label ride directly above the click, so the
+            // accessible name sits in the labelling ratchet's chain.
+            let id = id.0;
+            let baaz = baaz.clone();
+            column = column.child(
+                row.role(gpui::Role::Button).aria_label(format!("Show tab {label}")).on_click(
+                    move |_, window, cx| {
+                        let _ = baaz.update(cx, |this, cx| {
+                            this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
+                        });
+                    },
+                ),
+            );
+        }
+        column
+            .child(
+                h_flex()
+                    .id("browse-new-tab")
+                    .w_full()
+                    .h(px(30.0))
+                    .flex_none()
+                    .items_center()
+                    .px(px(8.0))
+                    .gap(px(8.0))
+                    .rounded(px(scale::R_SM))
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label("New tab")
+                    .child(div().ui(scale::FS_12).text_color(p.ink_3).child("+"))
+                    .child(div().ui(scale::FS_12).text_color(p.ink_3).child("New tab"))
+                    .on_click(move |event, window, cx| new_tab(event, window, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The slide between modes (B2a-H2): the entering body translates in
+    /// from its side — tabs from the right into Browse, sessions from
+    /// the left back — inside a clipped column, on the Layout spring
+    /// (~220 ms feel). Reduced motion snaps: the spring resolves
+    /// instantly, so the body simply appears. The switch and the footer
+    /// stay out of it; only what sits between them moves. Collapsed
+    /// (rail) switches never slide: the rail swaps instantly, so the
+    /// offset reads zero while it shows.
+    fn mode_slide_offset(&self, window: &mut Window, cx: &mut gpui::App) -> Pixels {
+        if !self.sidebar_open {
+            return px(0.0);
+        }
+        let browse = self.mode == crate::layout::Mode::Browse;
+        let phase = spring_phase(("mode-slide", "phase"), browse, SpringKind::Layout, window, cx);
+        if browse {
+            px(64.0 * (1.0 - phase))
+        } else {
+            px(-64.0 * phase)
+        }
     }
 
     pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -720,7 +977,10 @@ impl Harness {
         // unchanged; stored without notifying past the first prepaint (the
         // overlay reads it on this same frame).
         let pane_report = cx.entity().downgrade();
-        let column = v_flex()
+        // Sessions mode draws today's column; Browse mode draws the tab
+        // list instead (B2a-H3's sidebar replaces the placeholder). The
+        // switch above and the footer below stay put across both.
+        let sessions_body = v_flex()
             .size_full()
             .child(self.render_nav_block(cx))
             .child(self.render_sessions_caption(cx))
@@ -742,6 +1002,27 @@ impl Harness {
                     .child(sidebar_wheel_capture(self))
                     .child(view)
                     .children(empty),
+            )
+            .into_any_element();
+        let body: AnyElement = if self.mode == crate::layout::Mode::Browse {
+            self.render_browse_sidebar(cx)
+        } else {
+            sessions_body
+        };
+        let column = v_flex()
+            .size_full()
+            .child(self.render_mode_switch(cx))
+            // The slide's clip: the entering body translates in from its
+            // side on the Layout spring (see `mode_slide_offset`), and the
+            // clipped wrapper keeps every translated pixel inside the
+            // column while it travels.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .overflow_hidden()
+                    .child(div().size_full().relative().left(self.mode_slide_offset(window, cx)).child(body)),
             )
             .child(self.render_footer(cx));
         div()
@@ -1490,8 +1771,17 @@ impl Harness {
             RailItem::nav("new", IconName::Plus),
             RailItem::nav("search", IconName::Search),
             RailItem::nav("projects", IconName::Folder),
-            RailItem::separator(),
         ];
+        // The mode toggle: one lowercase `mode` cell that flips halves —
+        // "Switch to Browse" from Sessions, "Switch to Sessions" back
+        // from Browse (marked current there, the screen the rail is
+        // showing). The rail library renders nav cells with no label
+        // slot of their own (like the new/search/projects cells), so
+        // those two names are the toggle's documented accessible names
+        // and the sidebar switch's segments own the labelled control.
+        let in_browse = self.mode == crate::layout::Mode::Browse;
+        items.push(RailItem::nav("mode", IconName::Globe).current(in_browse));
+        items.push(RailItem::separator());
         // The visible list is already newest-first; pinned rows lead it so
         // the rail keeps what the person keeps.
         let visible = self.visible_sessions(cx);
@@ -1538,6 +1828,7 @@ impl Harness {
             // header search icon and ⌘⇧F.
             "search" => this.open_search(window, cx),
             "projects" => this.open_projects(false, window, cx),
+            "mode" => this.toggle_browse_mode(window, cx),
             "account" => this.open_menu(MenuKind::Account, cx),
             _ => {}
         });
@@ -3086,6 +3377,25 @@ mod tests {
         let (selected, current) = selected_and_current(&baaz, vc);
         assert_eq!(selected.as_deref(), Some("s-new"), "a new session still names its selection");
         assert_eq!(current.as_deref(), Some(ids[1].as_str()), "its project group is current");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H2: the cached pane re-arms on a mode switch, so the switch
+    /// row at the top of the column never goes stale.
+    #[gpui::test]
+    fn sidebar_key_changes_with_mode(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("mode-key");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let sessions_key = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert_eq!(sessions_key.mode, crate::layout::Mode::Sessions);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Browse);
+        });
+        let browse_key = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(sessions_key != browse_key, "the mode switch re-arms the cached pane");
+        assert_eq!(browse_key.mode, crate::layout::Mode::Browse);
         b3c_teardown(&dir, guard, old);
     }
 

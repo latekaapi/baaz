@@ -1318,6 +1318,13 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // B2a-H2b: like `resume_inner` — ⌘N, the rail's new cell, the
+        // sidebar button and the provider picks switch out of Browse
+        // before the session starts. (⌘T opens a person tab while in
+        // Browse and never reaches here.)
+        if self.mode == crate::layout::Mode::Browse {
+            self.set_mode(crate::layout::Mode::Sessions, window, cx);
+        }
         // A `new` while a provider switch is pending is the person doing
         // something else: the switch is cancelled (its open lands stale
         // and is discarded) and this opens as a normal new session on the
@@ -1934,6 +1941,13 @@ impl Harness {
         }
         if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
             return;
+        }
+        // B2a-H2b: opening a session while in Browse switches to
+        // Sessions first — the palettes, search, the rail, the `open:`
+        // step and boot all funnel through here, and a session opened
+        // behind Browse would otherwise stay invisible.
+        if self.mode == crate::layout::Mode::Browse {
+            self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
         self.adopt_session_project(&session_id, cx);
         // Selecting a session returns from the Skills page (D54).
@@ -4375,7 +4389,7 @@ impl Harness {
         }
         let on = !self.layout.fold_finished_turns;
         crate::settings::apply_setting(&mut self.layout, "fold_finished_turns", on);
-        crate::layout::write(&self.layout);
+        self.persist_layout(cx);
         self.apply_fold_to_views(on, cx);
         self.invalidate_list();
         cx.notify();

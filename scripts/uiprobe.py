@@ -136,6 +136,18 @@ ENTRIES = {
     # native view. No baselines — capture and look.
     "right-tabs":           {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:520;right:browser;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-select:1"]},
+    # B2a-H2: Sessions ↔ Browse in one window. `browse-empty` enters
+    # Browse with no person tab (one blank tab opens, URL field focused);
+    # `browse-tabs` enters Browse over two person tabs; `sessions-switch`
+    # stays in Sessions with the new switch row visible above "New
+    # session". Offline, idempotent (`mode:` sets, never toggles), so
+    # both settle captures agree. No baselines — capture and look.
+    "browse-empty":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse"]},
+    "browse-tabs":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/"]},
+    "sessions-switch":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
