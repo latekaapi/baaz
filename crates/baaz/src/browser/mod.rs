@@ -45,9 +45,7 @@ pub(crate) mod tabs;
 pub(crate) mod toolbar;
 
 pub(crate) use tabs::{Owner, StripTab, TabId, Tabs};
-pub(crate) use toolbar::{
-    BackForward, OmniRow, OmniTarget, SuggestKind, DEFAULT_SEARCH_ENGINE, SEARCH_ENGINE_NAME,
-};
+pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
 const HOME_KEY: &str = "home";
@@ -2248,18 +2246,6 @@ impl Harness {
         }
     }
 
-    /// What a pick-up row opens: a tab selects, a session opens, and a
-    /// closed tab is display-only (reopen is last-closed-first, never the
-    /// clicked row — so closed rows carry no click).
-    pub(crate) enum PickupTarget {
-        /// Select this person tab.
-        Tab(TabId),
-        /// Open this session.
-        Session(String),
-        /// Display-only closed row.
-        Closed,
-    }
-
     /// The new-tab page's pick-up rows (B2a-H4) with what each opens: this
     /// project's open tabs (blank ones excluded — the current empty tab is
     /// not somewhere to pick up), then its recent sessions, then recently
@@ -2323,13 +2309,6 @@ impl Harness {
         }
         targets.truncate(5);
         display.into_iter().zip(targets).collect()
-    }
-
-    /// The new-tab page's pick-up rows (B2a-H4): display halves of
-    /// [`Self::browse_pickup_full`].
-    pub(crate) fn browse_pickup_rows(&self, cx: &gpui::App) -> Vec<toolbar::PickupRow> {
-        let _ = cx;
-        self.browse_pickup_full().into_iter().map(|(row, _)| row).collect()
     }
 
     /// `omnibox:<text>`: focus the Browse address field and type `text` —
@@ -2524,6 +2503,18 @@ impl Harness {
         });
         self.tasks.push(task);
     }
+}
+
+/// What a pick-up row opens: a tab selects, a session opens, and a
+/// closed tab is display-only (reopen is last-closed-first, never the
+/// clicked row — so closed rows carry no click).
+pub(crate) enum PickupTarget {
+    /// Select this person tab.
+    Tab(TabId),
+    /// Open this session.
+    Session(String),
+    /// Display-only closed row.
+    Closed,
 }
 
 /// All webviews a [`Harness`](crate::app::Harness) holds. Kept here so the

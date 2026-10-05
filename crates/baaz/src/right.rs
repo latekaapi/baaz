@@ -2672,6 +2672,10 @@ fn browser_tab_strip(
                 .flex_none()
                 .role(gpui::Role::Button)
                 .aria_label("Browse full width")
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    let _ = go.update(cx, |this, cx| this.carry_session_tab_to_browse(window, cx));
+                })
                 .child(
                     h_flex()
                         .items_center()
@@ -2681,10 +2685,6 @@ fn browser_tab_strip(
                         .rounded(px(scale::R_SM))
                         .text_color(p.ink_2)
                         .ui(scale::FS_12)
-                        .cursor_pointer()
-                        .on_click(move |_, window, cx| {
-                            let _ = go.update(cx, |this, cx| this.carry_session_tab_to_browse(window, cx));
-                        })
                         .child("↗")
                         .child("Browse"),
                 ),
