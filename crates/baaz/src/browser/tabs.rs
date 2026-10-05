@@ -767,6 +767,21 @@ mod tests {
     }
 
     #[test]
+    fn reopen_by_id_restores_the_named_tab() {
+        let mut model = tabs();
+        let first = model.open(Some("p".to_owned()), Owner::Person, "https://a.example/", None);
+        let second = model.open(Some("p".to_owned()), Owner::Person, "https://b.example/", None);
+        model.close(first);
+        model.close(second);
+        assert_eq!(model.reopen(TabId(404)), None, "an unknown id reopens nothing");
+        let back = model.reopen(first).expect("the named closed tab");
+        assert_eq!(back, first, "identity survives the round trip");
+        assert_eq!(model.get(back).map(|tab| tab.url.as_str()), Some("https://a.example/"));
+        assert_eq!(model.active_of(&Owner::Person, Some("p")), Some(first));
+        assert!(!model.closed.iter().any(|tab| tab.id == first), "reopened leaves the closed list");
+    }
+
+    #[test]
     fn moving_hands_the_tab_to_the_new_owner() {
         let mut model = tabs();
         let id = model.open(None, session("s"), "https://a.example/", None);

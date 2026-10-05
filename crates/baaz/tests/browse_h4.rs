@@ -320,7 +320,7 @@ fn suggestions_pickup_and_row_presses() {
     assert!(suggestions.contains("entry.project == current"), "suggestions stay in this project");
     let pickup = fn_body(&browser, "browse_pickup_full");
     assert!(pickup.contains("tab.owner == Owner::Person"), "closed rows are person tabs");
-    assert!(pickup.contains("PickupTarget::Closed(id)"), "each closed row reopens its own tab");
+    assert!(pickup.contains("PickupTarget::Closed(*id)"), "each closed row reopens its own tab");
     let app = source("app.rs");
     assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
     assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
