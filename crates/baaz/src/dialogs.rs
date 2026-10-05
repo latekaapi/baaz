@@ -727,6 +727,64 @@ impl Harness {
         )
     }
 
+    /// The Browse header back button's history menu (B2a-H4), anchored
+    /// under the back button: the shown tab's back stack, newest first.
+    /// Picking a row navigates there. The menu covers the page like every
+    /// other menu, through the shared overlay inputs.
+    pub(crate) fn render_back_history_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).is_open(MenuKind::BackHistory) {
+            return None;
+        }
+        let shown = self.browse_centre_shown();
+        let id = shown?;
+        let mut past: Vec<String> = self
+            .browser
+            .histories
+            .get(&id)
+            .map(|history| history.past_urls())
+            .unwrap_or_default();
+        past.reverse();
+        if past.is_empty() {
+            return None;
+        }
+        let rows: Vec<MenuRow> =
+            past.iter().map(|url| MenuRow::Toggle { label: url.clone().into(), checked: false }).collect();
+        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.ensure_tabs_loaded(cx);
+            if let Some(url) = past.get(*index).cloned() {
+                if let Some(id) = this.browse_centre_shown() {
+                    this.navigate_browse_tab(id, &url, window, cx);
+                }
+            }
+        });
+        let Some(trigger) = self.back_bounds else {
+            cx.notify();
+            return None;
+        };
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        });
+        let catcher = div()
+            .id("back-history-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        Some(
+            div().absolute().inset_0().child(catcher).child(anchored_menu(
+                trigger,
+                MenuSide::Below,
+                MenuAlign::Start,
+                view_menu("back-history", rows).at_rest().on_activate(move |i, w, cx| {
+                    activate(&i, w, cx)
+                }),
+            ))
+            .into_any_element(),
+        )
+    }
+
     /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
