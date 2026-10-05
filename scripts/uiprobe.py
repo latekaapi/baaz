@@ -173,6 +173,19 @@ ENTRIES = {
     # Offline, fake backend, no baselines — capture and look.
     "browse-tab-menu":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-menu:2"]},
+    # B2a-H6b: the sidebar-hidden one-row chrome — lights, toggle, nav, a
+    # wide field (security glyph, title, zoom pill) with the ⋯ menu and
+    # `+`; no rail, the page full width. `sidebar` toggles the sidebar
+    # shut (per-mode memory keeps Sessions' own rail). Offline, fake
+    # backend, no baselines — capture and look.
+    "browse-minimal":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;sidebar;tab-new:https://www.wikipedia.org/"]},
+    # B2a-H6: horizontal tabs — the strip row above the page over three
+    # person tabs (`settings-set:` lands instantly, like the Settings
+    # segmented control). Offline, fake backend, no baselines — capture
+    # and look.
+    "browse-horizontal":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings-set:browser-tabs=horizontal;mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-new:https://example.com"]},
     # B2a-H7: a link from another app, driven through the scripted twin of
     # the open-URL event (`open-url:` runs the same path `on_open_urls`
     # drains into): a person tab on wikipedia in Browse. Offline, fake
@@ -234,6 +247,13 @@ ENTRIES = {
     # finding.
     "settings-archived":    {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:archived"]},
+    # B2a-H6b: the Settings page's Browser section (tabs layout, search
+    # engine, downloads, the Default-browser row with its fixed capture
+    # text; the Chromium row only where the engine loads chrome:// pages).
+    # Offline, idempotent. No baseline yet — generate on main after merge,
+    # never to silence a finding.
+    "settings-browser":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:browser"]},
     # A Settings provider sub-page (Codex), on scripted statuses like
     # `settings-providers`: offline, idempotent, deterministic. No
     # baseline yet — generate on main after merge, never to silence a

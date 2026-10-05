@@ -53,7 +53,8 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::switch::Switch;
 
 use crate::app::Harness;
-use crate::layout::Layout;
+use crate::browser::toolbar::SearchEngine;
+use crate::layout::{browser_download_dir, tilde_path, BrowserTabs, Layout};
 use crate::providers::ProviderId;
 
 /// Flip one Sidebar switch in `layout` by row id. `false` is an unknown id,
@@ -74,6 +75,10 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     true
 }
 
+/// What the Settings → Browser page's Chromium row opens: Chromium's own
+/// settings surface, shown in a Browse person tab.
+pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
+
 /// The page's sections, in list order (a muted divider before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
@@ -89,7 +94,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
-        "browser" => "Links from other apps land in Baaz tabs here.",
+        "browser" => "How Baaz browses: tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
@@ -186,6 +191,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
             Some("general")
         }
         "group_chevron" | "compact_rows" | "group_branch" => Some("sidebar"),
+        "browser-tabs" | "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
         _ if id.starts_with("shortcut:") || parse_shortcut_row_id(id).is_some() => Some("shortcuts"),
@@ -594,6 +600,108 @@ impl Harness {
         cx.notify();
     }
 
+    /// Set where Browse shows the person's tabs, instantly: the sidebar
+    /// list or the strip above the page. The Settings → Browser page's
+    /// segmented control and the `settings-set:browser-tabs=` verb share
+    /// this one path.
+    pub(crate) fn set_browser_tabs(&mut self, tabs: BrowserTabs, cx: &mut Context<Self>) {
+        self.layout.browser_tabs = tabs;
+        self.persist_layout(cx);
+        cx.notify();
+    }
+
+    /// Set the engine an address commit searches with. The Settings →
+    /// Browser page's rows own it; the toolbar reads it on every commit.
+    pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
+        self.layout.search_engine = engine;
+        self.persist_layout(cx);
+        cx.notify();
+    }
+
+    /// Point downloads at `dir`: persisted, and passed to the CEF backend
+    /// at once, like at startup. The Settings → Browser page's Change
+    /// row and nothing else writes this.
+    pub(crate) fn set_download_dir_path(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
+        #[cfg(feature = "cef")]
+        aui_cef::CefBackend::set_download_dir(dir.clone());
+        self.layout.download_dir = Some(dir);
+        self.persist_layout(cx);
+        cx.notify();
+    }
+
+    /// The Settings → Browser page's Change row: the native folder
+    /// panel, directories only — the same panel Add project uses. Cancel
+    /// does nothing.
+    pub(crate) fn choose_downloads_folder(&mut self, cx: &mut Context<Self>) {
+        crate::baaz_log!("choose_downloads_folder: opening the folder panel");
+        cx.activate(true);
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            match paths.await {
+                Ok(Ok(Some(paths))) => {
+                    crate::baaz_log!(
+                        "choose_downloads_folder: panel chose {}",
+                        paths.first().map(|p| p.display().to_string()).unwrap_or_default()
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(dir) = paths.first() {
+                            this.set_download_dir_path(dir.clone(), cx);
+                        }
+                    });
+                }
+                Ok(Ok(None)) => crate::baaz_log!("choose_downloads_folder: panel cancelled"),
+                Ok(Err(error)) => crate::baaz_log!("choose_downloads_folder: panel errored: {error:#}"),
+                Err(_) => crate::baaz_log!("choose_downloads_folder: panel future dropped"),
+            }
+        }));
+    }
+
+    /// The Settings → Browser page's Chromium row: leave Settings for
+    /// Browse and show `chrome://settings` in a person tab, where
+    /// Chromium owns passwords, cookies and site settings. An existing
+    /// `chrome://settings` tab is selected instead of opening another.
+    pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(cx);
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.ensure_tabs_loaded(cx);
+        let space = self.current_project_id();
+        let existing = self
+            .browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .find(|tab| tab.url == CHROMIUM_SETTINGS_URL)
+            .map(|tab| tab.id);
+        match existing {
+            Some(id) => self.select_browse_sidebar_tab(id, window, cx),
+            None => self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx),
+        }
+    }
+
+    /// `settings-set:<key>=<value>`: the scripted twin of the Settings →
+    /// Browser rows. `browser-tabs=horizontal|vertical` lands instantly;
+    /// anything else records a step failure, never a silent no-op.
+    pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let (key, value) =
+            rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
+        match key {
+            "browser-tabs" => match BrowserTabs::parse(value) {
+                Some(tabs) => self.set_browser_tabs(tabs, cx),
+                None => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
+            },
+            "search-engine" => match SearchEngine::parse(value) {
+                Some(engine) => self.set_search_engine(engine, cx),
+                None => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
+            },
+            _ => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
+        }
+    }
+
     /// `auto-title`: flip the automatic-naming switch and persist it. The
     /// switch itself lives on the Settings page's General section; this
     /// verb is what captures flip. Off means no title model call ever.
@@ -970,18 +1078,227 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Browser (B2a-H7): where links from other apps go, and which app
-    /// owns them. The Default-browser row renders the cached `https`
-    /// handler only — the frame hook owns the LaunchServices lookup —
-    /// and Make default claims `http` and `https` for Baaz (macOS shows
-    /// its own confirmation and applies it asynchronously, so the row
-    /// waits until the next re-read). The button is the only place that
-    /// ever changes the system default.
+    /// One half of the Tabs layout segmented control: its name in content
+    /// ink (muted off), on the raised surface while selected — the mode
+    /// switch's segments, without the counts.
+    fn browser_tabs_segment(&self, tabs: BrowserTabs, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let selected = self.layout.browser_tabs == tabs;
+        let mut segment = h_flex()
+            .id(SharedString::from(format!("settings-browser-tabs-{}", tabs.slug())))
+            .flex_1()
+            .h(px(26.0))
+            .items_center()
+            .justify_center()
+            .rounded(px(scale::R_SM))
+            .cursor_pointer()
+            .role(gpui::Role::Tab)
+            .aria_label(format!("Tabs layout, {}", tabs.label()))
+            .aria_selected(selected)
+            .child(
+                div()
+                    .ui(scale::FS_12)
+                    .text_color(if selected { p.ink } else { p.ink_3 })
+                    .child(tabs.label().to_string()),
+            );
+        if selected {
+            segment = segment.bg(p.surface_1);
+        }
+        let set = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.set_browser_tabs(tabs, cx);
+        });
+        // Named again beside the click, so the a11y ratchet's window
+        // sees the click is named.
+        segment.aria_label(format!("Tabs layout, {}", tabs.label())).on_click(set).into_any_element()
+    }
+
+    /// The Tabs group: the Vertical / Horizontal segmented control. The
+    /// change is instant — the strip (or the sidebar list) redraws on the
+    /// next frame.
+    fn settings_browser_tabs_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let mut control = h_flex()
+            .id("settings-browser-tabs")
+            .debug_selector(|| "settings-browser-tabs".into())
+            .flex_none()
+            .items_center()
+            .p(px(2.0))
+            .gap(px(2.0))
+            .rounded(px(scale::R_MD))
+            .bg(p.surface_2)
+            .border_1()
+            .border_color(p.line)
+            .role(gpui::Role::TabList)
+            .aria_label("Tabs layout");
+        for tabs in BrowserTabs::ALL {
+            control = control.child(self.browser_tabs_segment(tabs, cx));
+        }
+        let row = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Tabs layout".to_string()))
+                    .child(
+                        div()
+                            .text_color(p.ink_3)
+                            .ui(scale::FS_12)
+                            .child("Vertical lists tabs down the sidebar; horizontal strips them above the page."),
+                    ),
+            )
+            .child(control);
+        self.settings_group("Tabs", vec![row.into_any_element()], cx)
+    }
+
+    /// One Default-search-engine row: the radio dot (accent while
+    /// checked) and the engine's name. Every row carries a role and a
+    /// name.
+    fn settings_search_engine_row(&self, engine: SearchEngine, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let checked = self.layout.search_engine == engine;
+        let dot = div()
+            .flex_none()
+            .size(px(14.0))
+            .rounded_full()
+            .border_1()
+            .border_color(if checked { p.accent } else { p.line_strong })
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(if checked {
+                div().size(px(6.0)).rounded_full().bg(p.accent).into_any_element()
+            } else {
+                div().into_any_element()
+            });
+        let set = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.set_search_engine(engine, cx);
+        });
+        h_flex()
+            .id(SharedString::from(format!("settings-search-engine-{}", engine.slug())))
+            .debug_selector(move || format!("settings-search-engine-{}", engine.slug()))
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .cursor_pointer()
+            .role(gpui::Role::RadioButton)
+            .aria_selected(checked)
+            .aria_label(format!("Default search engine, {}", engine.name()))
+            .on_click(set)
+            .child(dot)
+            .child(div().text_color(p.ink).ui(scale::FS_13).child(engine.name().to_string()))
+            .into_any_element()
+    }
+
+    /// The Search group: the four engines as radio rows. The address
+    /// field commits to the checked one from the next Enter on.
+    fn settings_browser_search_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows =
+            SearchEngine::ALL.iter().map(|engine| self.settings_search_engine_row(*engine, cx)).collect();
+        self.settings_group("Search", rows, cx)
+    }
+
+    /// The Downloads group: the current folder and its Change row,
+    /// which opens the same folder panel Add project uses.
+    fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let dir = browser_download_dir(&self.layout);
+        let row = h_flex()
+            .id("settings-browser-downloads")
+            .debug_selector(|| "settings-browser-downloads".into())
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Downloads folder".to_string()))
+                    .child(
+                        div()
+                            .id("settings-downloads-path")
+                            .debug_selector(|| "settings-downloads-path".into())
+                            .text_color(p.ink_3)
+                            .ui(scale::FS_12)
+                            .truncate()
+                            .child(tilde_path(&dir)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-downloads-change-wrap")
+                    .debug_selector(|| "settings-downloads-change".into())
+                    .flex_none()
+                    .child(
+                        button("settings-downloads-change", "Change…")
+                            .accessibility_label("Change downloads folder")
+                            .on_click(cx.listener(
+                                |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                                    this.choose_downloads_folder(cx);
+                                },
+                            )),
+                    ),
+            );
+        self.settings_group("Downloads", vec![row.into_any_element()], cx)
+    }
+
+    /// The Chromium row: everything Chromium owns — passwords, cookies,
+    /// site settings — lives at `chrome://settings`, opened in a Browse
+    /// tab.
+    fn settings_browser_chromium_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.open_chromium_settings(window, cx);
+        });
+        let row = h_flex()
+            .id("settings-browser-chromium")
+            .debug_selector(|| "settings-browser-chromium".into())
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label("Open Chromium settings")
+            .on_click(open)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Open chrome://settings".to_string()))
+                    .child(
+                        div()
+                            .text_color(p.ink_3)
+                            .ui(scale::FS_12)
+                            .child("Passwords, cookies, site settings and everything else Chromium owns."),
+                    ),
+            )
+            .child(div().flex_none().text_color(p.ink_3).ui(scale::FS_13).child("↗"));
+        self.settings_group("Chromium", vec![row.into_any_element()], cx)
+    }
+
+    /// Browser (B2a-H6): tabs, search, downloads, the Chromium row — and
+    /// the Default-browser row below, which B2a-H7 owns. The
+    /// Default-browser row renders the cached `https` handler only — the
+    /// frame hook owns the LaunchServices lookup — and Make default
+    /// claims `http` and `https` for Baaz (macOS shows its own
+    /// confirmation and applies it asynchronously, so the row waits until
+    /// the next re-read). The button is the only place that ever changes
+    /// the system default. Under `BAAZ_DETERMINISTIC=1` the row wears its
+    /// fixed capture text instead, so captures never depend on the
+    /// machine's handler.
     fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let handler = self.default_browser_handler().map(str::to_owned);
-        let status =
-            crate::default_browser::status_text(handler.as_deref(), self.default_browser_confirm_pending);
+        let status = crate::default_browser::row_status_text(
+            handler.as_deref(),
+            self.default_browser_confirm_pending,
+        );
         // B2a-H7
         let mut row = h_flex()
             .w_full()
@@ -1014,10 +1331,19 @@ impl Harness {
                     .on_click(move |_, window, cx| make(&(), window, cx)),
             );
         }
-        v_flex()
+        // Chromium owns its settings UI, so the row shows only where the
+        // engine can load `chrome://` pages (the `cef` backend) — anywhere
+        // else it would be a dead row.
+        let mut page = v_flex()
             .w_full()
             .gap(px(scale::SP_4))
-            .child(self.settings_group(
+            .child(self.settings_browser_tabs_group(cx))
+            .child(self.settings_browser_search_group(cx))
+            .child(self.settings_browser_downloads_group(cx));
+        if cfg!(feature = "cef") {
+            page = page.child(self.settings_browser_chromium_group(cx));
+        }
+        page.child(self.settings_group(
                 "Default browser",
                 vec![row.into_any_element()],
                 cx,
@@ -1765,6 +2091,25 @@ mod tests {
         assert!(apply_setting(&mut layout, "handoff_model_summary", false));
         assert!(!layout.handoff_model_summary);
         assert!(!apply_setting(&mut layout, "nope", true));
+    }
+
+    /// B2a-H6: the Browser section is registered — listed after
+    /// Sidebar, normalised, crumbed, blurbed, and home to its rows.
+    #[test]
+    fn browser_section_is_registered() {
+        let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, ["general", "sidebar", "browser", "providers", "shortcuts", "archived"]);
+        assert_eq!(normalize_settings_target("browser", ""), "browser");
+        assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
+        assert_eq!(normalize_settings_target("browser-tabs", ""), "browser");
+        assert_eq!(
+            settings_breadcrumb("browser"),
+            vec!["Settings".to_owned(), "Browser".to_owned()]
+        );
+        assert_eq!(settings_blurb("browser"), "How Baaz browses: tabs, search, downloads.");
+        assert_eq!(setting_home("browser-tabs"), Some("browser"));
+        assert_eq!(setting_home("search-engine"), Some("browser"));
+        assert_eq!(setting_home("download-dir"), Some("browser"));
     }
 
     /// A row id round-trips to the action and context the handler writes

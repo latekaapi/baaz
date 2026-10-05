@@ -738,6 +738,9 @@ fn main() {
             mock_keychain: std::env::var_os("BAAZ_CEF_KEYCHAIN").is_none(),
             log_file: Some(dir.join("cef.log")),
         });
+        // B2a-H6: downloads land in the Settings → Browser folder
+        // (`~/Downloads` until the person chooses one).
+        aui_cef::CefBackend::set_download_dir(crate::layout::browser_download_dir(&crate::layout::read()));
         crate::log::boot_mark("cef-loaded");
     }
     // The provider status service (Y4): read the cache, log the statuses,

@@ -12,11 +12,77 @@
 
 use aui_webview::PageSecurity;
 
-/// The search engine an address commit searches with (B2a-H4): a const
-/// until Settings arrives in H6.
-pub(crate) const DEFAULT_SEARCH_ENGINE: &str = "https://www.google.com/search?q=";
-/// The engine's short name for the omnibox's default row.
-pub(crate) const SEARCH_ENGINE_NAME: &str = "Google";
+/// The engine an address commit searches with (B2a-H6): what the
+/// Settings → Browser page owns, carried on
+/// [`crate::layout::Layout::search_engine`]. Google is the default, like
+/// the old const.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SearchEngine {
+    /// Google.
+    #[default]
+    Google,
+    /// DuckDuckGo.
+    DuckDuckGo,
+    /// Bing.
+    Bing,
+    /// Kagi.
+    Kagi,
+}
+
+impl SearchEngine {
+    /// Every engine the Settings page offers, in row order.
+    pub(crate) const ALL: [SearchEngine; 4] =
+        [SearchEngine::Google, SearchEngine::DuckDuckGo, SearchEngine::Bing, SearchEngine::Kagi];
+
+    /// The machine name: what `layout.json` stores.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            SearchEngine::Google => "google",
+            SearchEngine::DuckDuckGo => "duckduckgo",
+            SearchEngine::Bing => "bing",
+            SearchEngine::Kagi => "kagi",
+        }
+    }
+
+    /// The inverse of [`SearchEngine::slug`]: `None` for an unknown
+    /// string, so a hand-edited file reads as Google, never an error.
+    pub(crate) fn parse(s: &str) -> Option<SearchEngine> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "google" => Some(SearchEngine::Google),
+            "duckduckgo" | "duck-duck-go" | "ddg" => Some(SearchEngine::DuckDuckGo),
+            "bing" => Some(SearchEngine::Bing),
+            "kagi" => Some(SearchEngine::Kagi),
+            _ => None,
+        }
+    }
+
+    /// The user-visible name: the omnibox's default row and the Settings
+    /// rows.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            SearchEngine::Google => "Google",
+            SearchEngine::DuckDuckGo => "DuckDuckGo",
+            SearchEngine::Bing => "Bing",
+            SearchEngine::Kagi => "Kagi",
+        }
+    }
+
+    /// The search URL prefix: the query appends percent-encoded.
+    pub(crate) fn url_prefix(self) -> &'static str {
+        match self {
+            SearchEngine::Google => "https://www.google.com/search?q=",
+            SearchEngine::DuckDuckGo => "https://duckduckgo.com/?q=",
+            SearchEngine::Bing => "https://www.bing.com/search?q=",
+            SearchEngine::Kagi => "https://kagi.com/search?q=",
+        }
+    }
+
+    /// The search URL for `query`.
+    pub(crate) fn search_url(self, query: &str) -> String {
+        format!("{}{}", self.url_prefix(), encode_query(query))
+    }
+}
 
 /// What Enter on the address field means: navigate, or search.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,19 +188,19 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// Decide what Enter on `text` does: a URL for an allowlisted scheme or
-/// something that looks like a host, otherwise a search with the default
+/// something that looks like a host, otherwise a search with the
 /// engine. Empty restores the field (an empty search), never navigates.
 /// Dangerous schemes (`javascript:`, `data:`, …) are searches, never
 /// navigated — and so is any unknown `scheme:` prefix (`ms-settings:`,
 /// `ftp:`), except `host:port` (`localhost:3000`), which still navigates.
 /// Bare loopbacks (`localhost`, `localhost:3000`, `[::1]:3000`,
 /// `127.0.0.1:8080`) earn `http://`, everything else `https://`.
-pub(crate) fn classify_address_input(text: &str) -> NavTarget {
+pub(crate) fn classify_address_input_with(text: &str, engine: SearchEngine) -> NavTarget {
     let typed = text.trim();
     if typed.is_empty() {
         return NavTarget::Search(String::new());
     }
-    let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+    let search = |query: &str| NavTarget::Search(engine.search_url(query));
     if let Some((scheme, _)) = typed.split_once("://") {
         if NAV_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) {
             return NavTarget::Url(typed.to_owned());
@@ -398,6 +464,7 @@ pub(crate) fn rank_omnibox(
     tabs: &[(super::TabId, String, String, u64)],
     sessions: &[(String, String, u64)],
     history: &[(String, String, u64)],
+    engine: SearchEngine,
 ) -> Vec<OmniRow> {
     let q = query.trim();
     if q.is_empty() {
@@ -482,11 +549,11 @@ pub(crate) fn rank_omnibox(
     rows.push(OmniRow {
         suggestion: Suggestion {
             kind: SuggestKind::Search,
-            title: format!("Search with {SEARCH_ENGINE_NAME} for {q}"),
+            title: format!("Search with {} for {q}", engine.name()),
             hint: "↵".to_owned(),
             complete: None,
         },
-        target: OmniTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(q))),
+        target: OmniTarget::Search(engine.search_url(q)),
     });
     rows
 }
@@ -712,45 +779,45 @@ mod tests {
     #[test]
     fn enter_decides_url_vs_search() {
         assert_eq!(
-            classify_address_input("example.com"),
+            classify_address_input_with("example.com", SearchEngine::Google),
             NavTarget::Url("https://example.com".to_owned())
         );
         assert_eq!(
-            classify_address_input("localhost:3000"),
+            classify_address_input_with("localhost:3000", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000".to_owned())
         );
         assert_eq!(
-            classify_address_input("  https://x.y/z  "),
+            classify_address_input_with("  https://x.y/z  ", SearchEngine::Google),
             NavTarget::Url("https://x.y/z".to_owned())
         );
         assert_eq!(
-            classify_address_input("file:///tmp/a.html"),
+            classify_address_input_with("file:///tmp/a.html", SearchEngine::Google),
             NavTarget::Url("file:///tmp/a.html".to_owned())
         );
         assert_eq!(
-            classify_address_input("foo bar"),
-            NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}foo%20bar"))
+            classify_address_input_with("foo bar", SearchEngine::Google),
+            NavTarget::Search(SearchEngine::Google.search_url("foo bar"))
         );
     }
 
     #[test]
     fn enter_edge_cases() {
-        assert_eq!(classify_address_input(""), NavTarget::Search(String::new()), "empty restores");
+        assert_eq!(classify_address_input_with("", SearchEngine::Google), NavTarget::Search(String::new()), "empty restores");
         assert_eq!(
-            classify_address_input("  "),
+            classify_address_input_with("  ", SearchEngine::Google),
             NavTarget::Search(String::new()),
             "blank restores"
         );
         assert!(
-            matches!(classify_address_input("foo"), NavTarget::Search(_)),
+            matches!(classify_address_input_with("foo", SearchEngine::Google), NavTarget::Search(_)),
             "a bare word searches"
         );
         assert_eq!(
-            classify_address_input("localhost:3000/a/b"),
+            classify_address_input_with("localhost:3000/a/b", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000/a/b".to_owned())
         );
         assert_eq!(
-            classify_address_input("about:blank"),
+            classify_address_input_with("about:blank", SearchEngine::Google),
             NavTarget::Url("about:blank".to_owned())
         );
     }
@@ -767,7 +834,7 @@ mod tests {
             ("s-2".to_owned(), "Recharts spike".to_owned(), 0),
         ];
         let history = vec![("Recharts gallery".to_owned(), "https://recharts.org/gallery".to_owned(), 0)];
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &history);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &history, SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(
             kinds,
@@ -781,15 +848,15 @@ mod tests {
         assert_eq!(rows[3].target, OmniTarget::History("https://recharts.org/gallery".to_owned()));
         assert!(rows.last().is_some_and(|row| row.suggestion.kind == SuggestKind::Search));
         // Non-matching tabs and sessions drop out; Ask and Search stay.
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &[]);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], SearchEngine::Google);
         assert!(
             !rows.iter().any(|row| row.suggestion.kind == SuggestKind::History),
             "the history section is omitted when empty"
         );
-        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &history);
+        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &history, SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(kinds, vec![SuggestKind::Ask, SuggestKind::Search]);
-        assert!(rank_omnibox("   ", &tabs, &sessions, &history).is_empty(), "empty query suggests nothing");
+        assert!(rank_omnibox("   ", &tabs, &sessions, &history, SearchEngine::Google).is_empty(), "empty query suggests nothing");
     }
 
     #[test]
@@ -865,7 +932,7 @@ mod tests {
     #[test]
     fn classify_table_allowlists_schemes_and_loopbacks() {
         type Case<'a> = (&'a str, NavTarget);
-        let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+        let search = |query: &str| NavTarget::Search(SearchEngine::Google.search_url(query));
         let cases: &[Case] = &[
             ("http://example.com/a", NavTarget::Url("http://example.com/a".to_owned())),
             ("HTTP://example.com/a", NavTarget::Url("HTTP://example.com/a".to_owned())),
@@ -894,7 +961,11 @@ mod tests {
             ("foo bar", search("foo bar")),
         ];
         for (input, expected) in cases {
-            assert_eq!(&classify_address_input(input), expected, "classify {input:?}");
+            assert_eq!(
+                &classify_address_input_with(input, SearchEngine::Google),
+                expected,
+                "classify {input:?}"
+            );
         }
     }
 
@@ -922,7 +993,7 @@ mod tests {
             (TabId(2), "The best apiary".to_owned(), "https://hive.example/2".to_owned(), 20),
             (TabId(3), "Apiary".to_owned(), "https://hive.example/3".to_owned(), 10),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[]);
+        let rows = rank_omnibox("api", &tabs, &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -936,7 +1007,7 @@ mod tests {
             (TabId(1), "Apiary one".to_owned(), "https://hive.example/1".to_owned(), 10),
             (TabId(2), "Apiary two".to_owned(), "https://hive.example/2".to_owned(), 50),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[]);
+        let rows = rank_omnibox("api", &tabs, &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -952,7 +1023,7 @@ mod tests {
         use super::super::TabId;
         let tabs = vec![(TabId(7), "Ledger".to_owned(), "https://ledger.example/".to_owned(), 0)];
         let sessions = vec![("s-9".to_owned(), "Ledger fix".to_owned(), 0)];
-        let rows = rank_omnibox("ledger", &tabs, &sessions, &[]);
+        let rows = rank_omnibox("ledger", &tabs, &sessions, &[], SearchEngine::Google);
         let tab = rows.iter().find(|row| row.suggestion.kind == SuggestKind::Tab).expect("a tab row");
         assert_eq!(tab.suggestion.complete.as_deref(), Some("https://ledger.example/"), "Tab completes the URL");
         let session =
@@ -995,12 +1066,16 @@ mod tests {
     fn unknown_scheme_prefixes_are_a_search() {
         // `ms-settings:` and `ftp:` are not navigated — and never gain an
         // `https://` prefix — while a host with a numeric port still does.
-        let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+        let search = |query: &str| NavTarget::Search(SearchEngine::Google.search_url(query));
         for input in ["ms-settings:privacy", "MS-SETTINGS:privacy", "ftp:files", "gopher:hole"] {
-            assert_eq!(classify_address_input(input), search(input), "classify {input:?}");
+            assert_eq!(
+                classify_address_input_with(input, SearchEngine::Google),
+                search(input),
+                "classify {input:?}"
+            );
         }
         assert_eq!(
-            classify_address_input("localhost:3000"),
+            classify_address_input_with("localhost:3000", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000".to_owned()),
             "a numeric port still reads as a host"
         );
@@ -1011,5 +1086,67 @@ mod tests {
         let view = address_view("https://EXAMPLE.COM/Docs", PageSecurity::Secure, false);
         assert_eq!(view.host, "example.com", "the bright host reads lowercased");
         assert_eq!(view.path, "/Docs", "the quiet path keeps its case");
+    }
+
+    /// B2a-H6: every engine builds its own search URL — names, slugs
+    /// and parse round-trip, and queries encode the same everywhere.
+    #[test]
+    fn search_engines_build_their_own_urls() {
+        assert_eq!(SearchEngine::default(), SearchEngine::Google);
+        assert_eq!(
+            SearchEngine::ALL.map(|engine| engine.slug()),
+            ["google", "duckduckgo", "bing", "kagi"]
+        );
+        assert_eq!(
+            SearchEngine::ALL.map(|engine| engine.name()),
+            ["Google", "DuckDuckGo", "Bing", "Kagi"]
+        );
+        assert_eq!(SearchEngine::parse("Google"), Some(SearchEngine::Google));
+        assert_eq!(SearchEngine::parse(" duckduckgo "), Some(SearchEngine::DuckDuckGo));
+        assert_eq!(SearchEngine::parse("BING"), Some(SearchEngine::Bing));
+        assert_eq!(SearchEngine::parse("kagi"), Some(SearchEngine::Kagi));
+        assert_eq!(SearchEngine::parse("yahoo"), None);
+        assert_eq!(
+            SearchEngine::Google.search_url("foo bar"),
+            "https://www.google.com/search?q=foo%20bar"
+        );
+        assert_eq!(
+            SearchEngine::DuckDuckGo.search_url("foo bar"),
+            "https://duckduckgo.com/?q=foo%20bar"
+        );
+        assert_eq!(
+            SearchEngine::Bing.search_url("a/b?c"),
+            "https://www.bing.com/search?q=a%2Fb%3Fc"
+        );
+        assert_eq!(SearchEngine::Kagi.search_url("foo bar"), "https://kagi.com/search?q=foo%20bar");
+    }
+
+    /// B2a-H6: Enter searches the Settings engine — URLs never touch it.
+    #[test]
+    fn classify_with_engine_searches_there() {
+        assert_eq!(
+            classify_address_input_with("foo bar", SearchEngine::Kagi),
+            NavTarget::Search("https://kagi.com/search?q=foo%20bar".to_owned())
+        );
+        assert_eq!(
+            classify_address_input_with("example.com", SearchEngine::Bing),
+            NavTarget::Url("https://example.com".to_owned()),
+            "a host navigates whatever the engine"
+        );
+        assert_eq!(
+            classify_address_input_with("", SearchEngine::DuckDuckGo),
+            NavTarget::Search(String::new()),
+            "empty still restores"
+        );
+    }
+
+    /// B2a-H6: the omnibox's engine row names the Settings engine and
+    /// loads its URL.
+    #[test]
+    fn omnibox_engine_row_names_the_settings_engine() {
+        let rows = rank_omnibox("ledger", &[], &[], &[], SearchEngine::DuckDuckGo);
+        let last = rows.last().expect("a query always ranks the engine row");
+        assert_eq!(last.suggestion.title, "Search with DuckDuckGo for ledger");
+        assert_eq!(last.target, OmniTarget::Search("https://duckduckgo.com/?q=ledger".to_owned()));
     }
 }
