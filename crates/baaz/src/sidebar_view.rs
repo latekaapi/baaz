@@ -904,7 +904,10 @@ impl Harness {
                 .flex_none()
                 .h(px(if end_armed { 2.0 } else { 8.0 }))
                 .can_drop(|dragged: &dyn std::any::Any, _, _| dragged.is::<BrowseTabDrag>())
-                .on_drag_move::<BrowseTabDrag>(move |_, _, cx| {
+                .on_drag_move::<BrowseTabDrag>(move |event, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
                     let _ = end_over.update(cx, |this, cx| {
                         if this.browse_drop_target.is_some() || !this.browse_drop_at_end {
                             this.browse_drop_target = None;
@@ -1108,20 +1111,43 @@ impl Harness {
                 let select = baaz.clone();
                 let menu = baaz.clone();
                 // Named beside the click for the a11y ratchet's window.
-                row = row.child(
-                    tile
-                        .aria_label(format!("Pinned: {title}"))
-                        .on_click(move |_, window, cx| {
-                            let _ = select.update(cx, |this, cx| {
-                                this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
-                            });
-                        })
-                        .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
-                            let _ = menu.update(cx, |this, cx| {
-                                this.open_tab_menu(crate::browser::TabId(id), cx)
-                            });
-                        }),
-                );
+                let tile = tile
+                    .aria_label(format!("Pinned: {title}"))
+                    .on_click(move |_, window, cx| {
+                        let _ = select.update(cx, |this, cx| {
+                            this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
+                        });
+                    })
+                    .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                        let _ = menu.update(cx, |this, cx| {
+                            this.open_tab_menu(crate::browser::TabId(id), cx)
+                        });
+                    });
+                // The open menu's anchor, exactly as a row reports it: without
+                // it the popup had no seat, never showed, and re-rendered
+                // every frame waiting for one.
+                if self.tab_menu == Some(snap.id) {
+                    let report = baaz.clone();
+                    row = row.child(
+                        div()
+                            .flex_1()
+                            .on_children_prepainted(move |bounds, _, cx| {
+                                if let Some(first) = bounds.first() {
+                                    let bounds = *first;
+                                    let _ = report.update(cx, |this, cx| {
+                                        let fresh = this.tab_menu_bounds.is_none_or(|(known, _)| known != id);
+                                        this.tab_menu_bounds = Some((id, bounds));
+                                        if fresh {
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            })
+                            .child(tile.w_full()),
+                    );
+                } else {
+                    row = row.child(tile);
+                }
             }
             // A short last row keeps its tiles square: fillers hold the
             // grid's four columns.
@@ -1279,11 +1305,14 @@ impl Harness {
             })
             .on_drag_move::<BrowseTabDrag>(move |event, _, cx| {
                 // Every row fires while a drag moves anywhere over the
-                // pane: only the row under the pointer claims the drop
-                // line, and only a change notifies the pane.
-                let inside = event.bounds.contains(&event.event.position);
+                // pane: only the row under the pointer may touch the drop
+                // line (rows elsewhere resetting it made the last row
+                // processed win), and only a change notifies the pane.
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
                 let _ = over.update(cx, |this, cx| {
-                    let next = inside.then_some(crate::browser::TabId(id));
+                    let next = Some(crate::browser::TabId(id));
                     if this.browse_drop_target != next || this.browse_drop_at_end {
                         this.browse_drop_target = next;
                         this.browse_drop_at_end = false;

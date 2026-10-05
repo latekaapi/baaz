@@ -283,6 +283,9 @@ pub(crate) const TERMINAL_CONTEXT: &str = "BaazTerminal";
 /// the window. Worn on a wrapper around the window body while
 /// [`layout::Mode::Browse`] is current (see `render`), never in Sessions.
 pub(crate) const BROWSE_CONTEXT: &str = "BaazBrowse";
+/// The root node's contexts in Browse: `AuiRoot` and [`BROWSE_CONTEXT`] on one
+/// node (pinned against `aui::keys::ROOT_CONTEXT` by a test).
+pub(crate) const BROWSE_ROOT_CONTEXT: &str = "AuiRoot BaazBrowse";
 
 /// The toast stack's own width, the library's `.toast{width:320px}`.
 pub(crate) const TOAST_W: f32 = 320.0;
@@ -5024,7 +5027,16 @@ impl Render for Harness {
             div()
                 .size_full()
                 .relative()
-                .key_context(aui::keys::ROOT_CONTEXT)
+                // Browse adds its context on the SAME node as `AuiRoot`, so
+                // both sit at one depth and the later table row wins (⌘W =
+                // close tab after ⌘W = close window). An ancestor wrapper
+                // lost to the deeper `AuiRoot` binding; a child wrapper was
+                // never on the focused path.
+                .key_context(if self.mode == layout::Mode::Browse {
+                    BROWSE_ROOT_CONTEXT
+                } else {
+                    aui::keys::ROOT_CONTEXT
+                })
                 .track_focus(&self.focus_root)
                 // A mouse-down outside the browser page's rect hands the
                 // keyboard back when the page holds it. Capture phase, next
@@ -5170,11 +5182,7 @@ impl Render for Harness {
         // still carries both contexts, so ⌘W closes a tab in Browse and
         // the window in Sessions; a child wrapper would sit below the
         // focused node and never apply.
-        if self.mode == layout::Mode::Browse {
-            div().size_full().key_context(BROWSE_CONTEXT).child(root).into_any_element()
-        } else {
-            root.into_any_element()
-        }
+        root.into_any_element()
     }
 }
 
