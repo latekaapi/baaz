@@ -151,6 +151,14 @@ pub(crate) fn browse_strip_offset(tabs: crate::layout::BrowserTabs) -> Pixels {
     }
 }
 
+/// The toolbar-anchored omnibox list's top offset within the Browse
+/// centre: under the toolbar's address field in vertical mode, under the
+/// tab strip in horizontal mode — never over the strip. Pure, so tests
+/// pin the anchor without a window.
+pub(crate) fn omnibox_dropdown_top(tabs: crate::layout::BrowserTabs) -> Pixels {
+    gpui::px(6.0) + browse_strip_offset(tabs)
+}
+
 /// The window's content box in window coordinates. `Window::content_mask`
 /// is only valid while painting (a debug assertion aborts a debug build when
 /// it is read from a mouse handler); the viewport is valid at any time and,
@@ -3275,9 +3283,9 @@ mod tests {
     use super::{
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
         browser_session_active, browser_visible, initial_url, middle_release_closes,
-        should_release_keyboard_on_mouse_down, should_remember, shown_window_active,
-        terminal_covers_browser, terminal_dock_bounds, Annotation, BrowserVisibility, FakeWebBackend,
-        WebviewState,
+        omnibox_dropdown_top, should_release_keyboard_on_mouse_down, should_remember,
+        shown_window_active, terminal_covers_browser, terminal_dock_bounds, Annotation,
+        BrowserVisibility, FakeWebBackend, WebviewState, BROWSE_TAB_STRIP_PX,
     };
     use super::{Owner, TabId};
     use aui_webview::WebBackend as _;
@@ -3360,6 +3368,23 @@ mod tests {
         let mut dead = centre_clear();
         dead.window_active = false;
         assert!(!browser_visible(dead), "a dead window hides the centre page");
+    }
+
+    #[test]
+    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal() {
+        // The toolbar-anchored list hangs 6 px under the address field's
+        // row: the centre's top in vertical mode, the strip's bottom in
+        // horizontal mode — never over the strip.
+        assert_eq!(
+            omnibox_dropdown_top(crate::layout::BrowserTabs::Vertical),
+            gpui::px(6.0),
+            "vertical anchors under the toolbar"
+        );
+        assert_eq!(
+            omnibox_dropdown_top(crate::layout::BrowserTabs::Horizontal),
+            gpui::px(6.0 + BROWSE_TAB_STRIP_PX),
+            "horizontal anchors under the strip"
+        );
     }
 
     #[test]

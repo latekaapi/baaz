@@ -75,6 +75,10 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     true
 }
 
+/// What the Settings → Browser page's Chromium row opens: Chromium's own
+/// settings surface, shown in a Browse person tab.
+pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
+
 /// The page's sections, in list order (a muted divider before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
@@ -658,12 +662,25 @@ impl Harness {
     }
 
     /// The Settings → Browser page's Chromium row: leave Settings for
-    /// Browse and open `chrome://settings` in a new person tab, where
-    /// Chromium owns passwords, cookies and site settings.
+    /// Browse and show `chrome://settings` in a person tab, where
+    /// Chromium owns passwords, cookies and site settings. An existing
+    /// `chrome://settings` tab is selected instead of opening another.
     pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_settings(cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.step_tab_new("chrome://settings", window, cx);
+        self.ensure_tabs_loaded(cx);
+        let space = self.current_project_id();
+        let existing = self
+            .browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .find(|tab| tab.url == CHROMIUM_SETTINGS_URL)
+            .map(|tab| tab.id);
+        match existing {
+            Some(id) => self.select_browse_sidebar_tab(id, window, cx),
+            None => self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx),
+        }
     }
 
     /// `settings-set:<key>=<value>`: the scripted twin of the Settings →
@@ -1272,12 +1289,16 @@ impl Harness {
     /// claims `http` and `https` for Baaz (macOS shows its own
     /// confirmation and applies it asynchronously, so the row waits until
     /// the next re-read). The button is the only place that ever changes
-    /// the system default.
+    /// the system default. Under `BAAZ_DETERMINISTIC=1` the row wears its
+    /// fixed capture text instead, so captures never depend on the
+    /// machine's handler.
     fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let handler = self.default_browser_handler().map(str::to_owned);
-        let status =
-            crate::default_browser::status_text(handler.as_deref(), self.default_browser_confirm_pending);
+        let status = crate::default_browser::row_status_text(
+            handler.as_deref(),
+            self.default_browser_confirm_pending,
+        );
         // B2a-H7
         let mut row = h_flex()
             .w_full()
@@ -1310,14 +1331,19 @@ impl Harness {
                     .on_click(move |_, window, cx| make(&(), window, cx)),
             );
         }
-        v_flex()
+        // Chromium owns its settings UI, so the row shows only where the
+        // engine can load `chrome://` pages (the `cef` backend) — anywhere
+        // else it would be a dead row.
+        let mut page = v_flex()
             .w_full()
             .gap(px(scale::SP_4))
             .child(self.settings_browser_tabs_group(cx))
             .child(self.settings_browser_search_group(cx))
-            .child(self.settings_browser_downloads_group(cx))
-            .child(self.settings_browser_chromium_group(cx))
-            .child(self.settings_group(
+            .child(self.settings_browser_downloads_group(cx));
+        if cfg!(feature = "cef") {
+            page = page.child(self.settings_browser_chromium_group(cx));
+        }
+        page.child(self.settings_group(
                 "Default browser",
                 vec![row.into_any_element()],
                 cx,
