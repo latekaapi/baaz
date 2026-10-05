@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use aui::workbench::Annotation;
 use aui_tokens::ActiveAui;
-use aui_webview::{FakeWebBackend, WebBackend, WebviewIntent, WebviewState, WryBackend};
+use aui_webview::{DownloadState, FakeWebBackend, PermissionDecision, WebBackend, WebviewIntent, WebviewState, WryBackend};
 use gpui::{AppContext as _, Bounds, Context, Entity, Pixels, Point, Window};
 use gpui_kit::base::input::{InputEvent, InputState};
 
@@ -99,6 +99,14 @@ pub(crate) struct BrowserVisibility {
     /// the page, so while it is open the page must be obscured (it shows
     /// its screenshot stand-in, as with the palette).
     pub omnibox_open: bool,
+    /// A Browse chrome popover (downloads, extensions, ⋯) stands open. It
+    /// drops over the page, so while one is open the page must be
+    /// obscured, like the omnibox above.
+    pub chrome_popover_open: bool,
+    /// The Baaz-drawn crashed page covers the page rect. The library
+    /// reports no load-error event — only `Crashed` — so the error page
+    /// renders from that state alone, and the native view hides under it.
+    pub page_error_open: bool,
 }
 
 /// Whether `inputs`' native view may show: the pane open on the Browser
@@ -118,6 +126,8 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.drop_cover
         && !inputs.terminal_covering
         && !inputs.omnibox_open
+        && !inputs.chrome_popover_open
+        && !inputs.page_error_open
         && inputs.window_active
 }
 
@@ -1431,11 +1441,18 @@ impl Harness {
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
         self.browser_builds += 1;
         let fake = self.browser.fake || cfg!(test);
+        // The `--steps` capture seam: queued scripts land on the fresh
+        // scripted backend before it is boxed, then drain through the real
+        // poll path. Production never queues, so this takes nothing.
+        let scripts = std::mem::take(&mut self.browser.fake_scripts);
         let state = cx.new(|cx| {
             if fake {
                 let mut backend = FakeWebBackend::new();
                 if backend.url().as_ref() != initial {
                     backend.navigate(initial);
+                }
+                for script in &scripts {
+                    script.apply_to_fake(&mut backend);
                 }
                 WebviewState::new(Box::new(backend), cx)
             } else {
@@ -2046,6 +2063,14 @@ impl Harness {
         for (id, url, _) in &live {
             self.browser.histories.entry(*id).or_default().note_navigated(url);
         }
+        // B2a-H5, before the shown-tab computation below: popups become
+        // tabs (foreground ones select, so the centre follows),
+        // downloads stamp their start for the popover's estimates, and
+        // closed tabs drop their find strips.
+        self.drain_browse_popups(cx);
+        self.stamp_browse_downloads(cx);
+        let live: HashSet<TabId> = self.browser.tabs.tabs.iter().map(|tab| tab.id).collect();
+        self.browser.find_strips.retain(&live);
         // A Screenshot whose bytes were not there yet attaches on arrival.
         // Stays pending across tab switches: it attaches when its own
         // session is active again, so a switch can never misattribute it.
@@ -2151,6 +2176,14 @@ impl Harness {
             .iter()
             .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
             .collect();
+        // B2a-H5: the chrome popovers drop over the page and the Baaz-drawn
+        // crashed page covers its rect — both obscure the native view.
+        let chrome_popover_open =
+            self.browser.downloads_open || self.browser.extensions_open || self.browser.more_open;
+        let page_error_open = self
+            .browse_centre_shown()
+            .and_then(|id| self.browser.states.get(&id))
+            .is_some_and(|state| state.read(cx).crashed().is_some());
         let base = BrowserVisibility {
             pane_open: self.layout.right_open,
             kind_browser: kind == RightKind::Browser,
@@ -2168,6 +2201,8 @@ impl Harness {
             // rows the page must be obscured (its screenshot stand-in, as
             // with the palette) — gpui never paints over it.
             omnibox_open: self.browse_omnibox_open(cx),
+            chrome_popover_open,
+            page_error_open,
             // A Chromium page is its own child window: clicking it makes
             // the page key and the gpui window inactive. Counting that as
             // inactive hid the page, which handed the keyboard back, so a
@@ -2202,6 +2237,20 @@ impl Harness {
         let centre_page = self.browse_centre_page_rect(content, window);
         self.browser.centre_page_rect = in_browse.then_some(centre_page);
         let centre_shown = self.browse_centre_shown();
+        // B2a-H5: a switch dismisses the chrome popovers (they point at
+        // the old tab's state); the find strip is per tab and stays. The
+        // first sight sets without dismissing, so a `--steps` popover
+        // opens onto its own first frame.
+        if self.browser.last_centre_shown.is_some() && self.browser.last_centre_shown != centre_shown {
+            self.browser.last_centre_shown = centre_shown;
+            self.browser.downloads_open = false;
+            self.browser.extensions_open = false;
+            self.browser.more_open = false;
+            self.browser.more_move_open = false;
+        }
+        // B2a-H5: trusted origins auto-answer everywhere; any other ask on
+        // a background tab marks its row while in Browse.
+        self.route_browse_permissions(centre_shown, in_browse, cx);
         let centre_live = browser_visible(BrowserVisibility {
             centre_browse: centre_shown.is_some(),
             session_active: self.browse_centre_live(cx),
@@ -2492,6 +2541,410 @@ impl Harness {
             }
         }
         window.focus(&self.focus_root, cx);
+    }
+
+    /// Open the find strip on the shown tab (B2a-H5): ⌘F in Browse with a
+    /// page shown, or the ⋯ menu's "Find in page". Focuses the input
+    /// prefilled with the tab's kept query; a stored query re-searches.
+    pub(crate) fn open_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(state) = self.browse_centre_page(window, cx) else { return };
+        if state.read(cx).crashed().is_some() {
+            return;
+        }
+        if matches!(state.read(cx).url().as_ref(), "" | BLANK) {
+            return;
+        }
+        let (query, match_case, research) = {
+            let strip = self.browser.find_strips.for_tab(id);
+            let research = strip.open();
+            (strip.query.clone(), strip.match_case, research)
+        };
+        self.focus_browse_find_input(&query, window, cx);
+        if research {
+            state.update(cx, |state, _| state.find(&query, true, match_case));
+        }
+        cx.notify();
+    }
+
+    /// Close the find strip (Done, Esc): `stop_find` clears the highlight.
+    /// Closing a closed strip is a no-op, never a second `stop_find`.
+    pub(crate) fn close_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.browse_centre_shown() else { return };
+        let stop = self.browser.find_strips.for_tab(id).close();
+        self.browse_find = None;
+        self.browse_find_sub = None;
+        if stop {
+            if let Some(state) = self.browse_centre_state() {
+                state.update(cx, |state, _| state.stop_find());
+            }
+        }
+        window.focus(&self.focus_root, cx);
+        cx.notify();
+    }
+
+    /// Step the find to the next (`forward`) or previous match: Enter, the
+    /// ↑/↓ buttons. A no-op with no open strip or no query.
+    pub(crate) fn step_browse_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.browse_centre_shown() else { return };
+        let (query, match_case) = {
+            let strip = self.browser.find_strips.for_tab(id);
+            if !strip.open || strip.query.is_empty() {
+                return;
+            }
+            (strip.query.clone(), strip.match_case)
+        };
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _| state.find(&query, forward, match_case));
+        }
+    }
+
+    /// Flip "Match case" and re-search the kept query.
+    pub(crate) fn toggle_browse_find_case(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.browse_centre_shown() else { return };
+        let research = self.browser.find_strips.for_tab(id).toggle_case();
+        if research {
+            self.step_browse_find(true, cx);
+        }
+        cx.notify();
+    }
+
+    /// Focus the find input with `text`, creating it on first use. The
+    /// subscription types live (debounced) and commits Enter to the next
+    /// match; Escape never reaches here (the wrapper owns it, like the
+    /// address field), and blur drops nothing — the strip closes through
+    /// Done, Esc or a tab switch, never by clicking the page.
+    fn focus_browse_find_input(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_owned();
+        match self.browse_find.clone() {
+            Some(input) => {
+                input.update(cx, |input, cx| {
+                    input.set_value(text, window, cx);
+                    input.select_all(window, cx);
+                    input.focus(window, cx);
+                });
+            }
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |input, cx| {
+                    input.set_placeholder("Find in page", window, cx);
+                    input.set_value(text, window, cx);
+                    input.select_all(window, cx);
+                    input.focus(window, cx);
+                });
+                let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| match event {
+                    InputEvent::PressEnter { .. } => this.step_browse_find(true, cx),
+                    InputEvent::Change => this.find_input_changed(cx),
+                    InputEvent::Blur | InputEvent::Focus => {}
+                });
+                self.browse_find = Some(input);
+                self.browse_find_sub = Some(sub);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Live search as the query types: a changed non-empty query searches
+    /// 100 ms after the last keystroke; clearing the field stops nothing.
+    fn find_input_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.browse_centre_shown() else { return };
+        let typed = self.browse_find.as_ref().map(|input| input.read(cx).value().to_string());
+        let Some(typed) = typed else { return };
+        if !self.browser.find_strips.for_tab(id).set_query(&typed) {
+            return;
+        }
+        self.browse_find_generation += 1;
+        let generation = self.browse_find_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(chrome::FIND_DEBOUNCE_MS)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.browse_find_generation == generation {
+                    this.step_browse_find(true, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Answer the shown tab's pending permission `id`: Block denies, Allow
+    /// once and Allow while visiting grant — the latter remembers the
+    /// origin for this run and auto-answers repeats.
+    pub(crate) fn answer_shown_permission(&mut self, id: u64, allow: bool, remember_visit: bool, cx: &mut Context<Self>) {
+        let origin = self
+            .browse_centre_state()
+            .and_then(|state| state.read(cx).permissions().iter().find(|request| request.id == id).map(|request| request.origin.clone()));
+        if remember_visit && allow {
+            if let Some(origin) = &origin {
+                self.browser.visit_allows.remember(origin);
+            }
+        }
+        if let Some(state) = self.browse_centre_state() {
+            let decision = if allow { PermissionDecision::Allow } else { PermissionDecision::Deny };
+            state.update(cx, |state, cx| state.answer_permission(id, decision, cx));
+        }
+        cx.notify();
+    }
+
+    /// Route permission asks once per frame: trusted origins auto-answer on
+    /// any tab; any other ask on a background tab marks that tab's row (the
+    /// sidebar's "needs you" dot) until the tab is shown — in Browse only,
+    /// where the rows live. The strip itself reads the shown tab's live
+    /// asks, so a page dismissal drops it with no Baaz state to clear.
+    fn route_browse_permissions(&mut self, shown: Option<TabId>, mark_background: bool, cx: &mut Context<Self>) {
+        let live: Vec<(TabId, Vec<(u64, String)>)> = self
+            .browser
+            .states
+            .iter()
+            .map(|(id, state)| {
+                let asks = state
+                    .read(cx)
+                    .permissions()
+                    .iter()
+                    .map(|request| (request.id, request.origin.clone()))
+                    .collect();
+                (*id, asks)
+            })
+            .collect();
+        let mut dirty = false;
+        for (id, asks) in &live {
+            for (ask, origin) in asks {
+                if chrome::auto_answer(origin, &self.browser.visit_allows).is_some() {
+                    if let Some(state) = self.browser.states.get(id).cloned() {
+                        state.update(cx, |state, cx| state.answer_permission(*ask, PermissionDecision::Allow, cx));
+                    }
+                } else if mark_background && Some(*id) != shown {
+                    if let Some(tab) = self.browser.tabs.tabs.iter_mut().find(|tab| tab.id == *id) {
+                        if !tab.needs_attention {
+                            tab.needs_attention = true;
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(id) = shown {
+            let pending = live.iter().find(|(live, _)| *live == id).is_some_and(|(_, asks)| !asks.is_empty());
+            if !pending {
+                if let Some(tab) = self.browser.tabs.tabs.iter_mut().find(|tab| tab.id == id) {
+                    if tab.needs_attention {
+                        tab.needs_attention = false;
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.schedule_tabs_write(cx);
+        }
+    }
+
+    /// Drain popups and "open in new tab" requests each frame for every
+    /// live tab: each becomes a new tab right after its opener, with the
+    /// opener's owner and space, wrapping the given backend for popups — a
+    /// fresh tab at that URL for open requests. Foreground ones select.
+    fn drain_browse_popups(&mut self, cx: &mut Context<Self>) {
+        let openers: Vec<TabId> = self.browser.states.keys().copied().collect();
+        for opener in openers {
+            let Some(state) = self.browser.states.get(&opener).cloned() else { continue };
+            let popups = state.update(cx, |state, _| state.take_popup_backends());
+            for (url, foreground, backend) in popups {
+                let Some(id) = chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground) else { continue };
+                let page = cx.new(|cx| WebviewState::new(backend, cx));
+                self.browser.states.insert(id, page);
+                self.browser.find_strips.remove(id);
+                self.schedule_tabs_write(cx);
+                cx.notify();
+            }
+            let opens = state.update(cx, |state, _| state.take_open_requests());
+            for (url, foreground) in opens {
+                if chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground).is_some() {
+                    self.schedule_tabs_write(cx);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Every download's latest state across the live tabs, with the tab
+    /// that owns it (cancels and "saved by" labels route through it).
+    pub(crate) fn browse_downloads(&self, cx: &gpui::App) -> Vec<(TabId, Owner, DownloadState)> {
+        let mut out = Vec::new();
+        for (id, state) in &self.browser.states {
+            let owner = self.browser.tabs.get(*id).map(|tab| tab.owner.clone()).unwrap_or(Owner::Person);
+            for download in state.read(cx).downloads() {
+                out.push((*id, owner.clone(), download.clone()));
+            }
+        }
+        out.sort_by_key(|(_, _, download)| download.id);
+        out
+    }
+
+    /// Stamp newly seen active downloads and prune ended ones, once per
+    /// frame. The popover's "6 s left" reads the elapsed time since the
+    /// stamp against the average rate so far.
+    fn stamp_browse_downloads(&mut self, cx: &mut Context<Self>) {
+        let now = tabs::now_ms();
+        let mut live = std::collections::HashSet::new();
+        for (id, state) in &self.browser.states {
+            for download in state.read(cx).downloads() {
+                if download.state == aui_webview::DownloadStatus::Downloading {
+                    live.insert((*id, download.id));
+                    self.browser.download_started.entry((*id, download.id)).or_insert(now);
+                }
+            }
+        }
+        self.browser.download_started.retain(|key, _| live.contains(key));
+    }
+
+    /// Rebuild the shown tab's page, consuming queued fake-backend scripts
+    /// (the `--steps` capture seam; production never queues). Answers
+    /// whether a page was rebuilt.
+    fn rebuild_shown_browse_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else { return false };
+        self.browser.states.remove(&id);
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        true
+    }
+
+    /// Dismiss every Browse chrome popover (downloads, extensions, ⋯):
+    /// row activation, the toggle press and tab switches all land here.
+    pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) {
+        self.browser.downloads_open = false;
+        self.browser.extensions_open = false;
+        self.browser.more_open = false;
+        self.browser.more_move_open = false;
+        cx.notify();
+    }
+
+    /// Copy the shown tab's link (⇧⌘C in Browse, the ⋯ menu): the live
+    /// page's URL, falling back to the tab's. A no-op with no shown tab
+    /// or no URL.
+    pub(crate) fn copy_shown_browse_link(&mut self, cx: &mut Context<Self>) {
+        let url = self
+            .browse_centre_state()
+            .map(|state| state.read(cx).url().to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| {
+                self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+            })
+            .unwrap_or_default();
+        if !url.is_empty() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+        }
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Open the shown tab's developer tools (⌥⌘I in Browse, the ⋯ menu).
+    /// A no-op with no shown page.
+    pub(crate) fn open_browse_devtools(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _| state.show_devtools());
+        }
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Step the shown tab's zoom by `delta` points, clamped to the engine's
+    /// sane range (the ⋯ menu's –/+ row).
+    pub(crate) fn browse_zoom_step(&mut self, delta: i16, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state() {
+            let zoom = state.read(cx).zoom() as i16;
+            let next = zoom.saturating_add(delta).clamp(25, 500) as u16;
+            state.update(cx, |state, _| state.set_zoom(next));
+        }
+    }
+
+    /// Toggle annotate mode on the shown tab (the ⋯ menu): Browse hides
+    /// the library's nav row, so this row is how the intent stays
+    /// reachable. A no-op with no shown page.
+    pub(crate) fn toggle_browse_annotate(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state() {
+            let on = !state.read(cx).annotating();
+            state.update(cx, |state, _| state.set_annotate(on));
+        }
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Screenshot the shown tab into the active session's draft (the ⋯
+    /// menu): the same capture-or-pend path the library intent takes, read
+    /// off the centre page instead of the pane's.
+    pub(crate) fn capture_browse_screenshot(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _cx| state.capture());
+            match state.read(cx).screenshot().map(<[u8]>::to_vec) {
+                Some(bytes) => self.attach_browser_screenshot(bytes, cx),
+                None => {
+                    self.browser.shot_pending.insert(self.browser_key(cx));
+                }
+            }
+        }
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Open the shown tab's URL in Safari (`open -a Safari <url>`).
+    /// A no-op with no shown URL.
+    pub(crate) fn open_browse_in_safari(&mut self, cx: &mut Context<Self>) {
+        let url = self
+            .browse_centre_state()
+            .map(|state| state.read(cx).url().to_string())
+            .filter(|url| url.starts_with("http"))
+            .unwrap_or_default();
+        if !url.is_empty() {
+            let _ = std::process::Command::new("open").args(["-a", "Safari", &url]).spawn();
+        }
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Open Settings at the Browser section (the ⋯ menu; the section
+    /// exists, so no General fallback runs).
+    pub(crate) fn open_browse_settings(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_browse_popovers(cx);
+        self.open_settings_page("browser", cx);
+    }
+
+    /// Reload the shown tab at its own URL (the crashed page's Reload):
+    /// the navigation clears the crash, whatever the tab's owner.
+    pub(crate) fn reload_browse_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browse_centre_shown() else { return };
+        let url = self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+        if url.is_empty() {
+            return;
+        }
+        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
+        state.update(cx, |state, _cx| state.navigate(&url));
+        cx.notify();
+    }
+
+    /// Cancel the download `id` on its owning tab's page.
+    pub(crate) fn cancel_browse_download(&mut self, tab: TabId, id: u32, cx: &mut Context<Self>) {
+        if let Some(state) = self.browser.states.get(&tab).cloned() {
+            state.update(cx, |state, _| state.cancel_download(id));
+        }
+        cx.notify();
+    }
+
+    /// Retry a failed download (its "Try again"): re-navigate the owning
+    /// tab to the download's URL, exactly as re-clicking the link would.
+    pub(crate) fn retry_browse_download(&mut self, tab: TabId, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser.tabs.get(tab).is_none() {
+            return;
+        }
+        let state = self.ensure_tab_page(HOME_KEY, tab, window, cx);
+        state.update(cx, |state, _cx| state.navigate(url));
+        self.dismiss_browse_popovers(cx);
+    }
+
+    /// Reveal a landed file in Finder (`open -R <path>`).
+    pub(crate) fn reveal_browse_download(path: &str) {
+        let _ = std::process::Command::new("open").args(["-R", path]).spawn();
+    }
+
+    /// Open the downloads folder ("All downloads", `~/Downloads`).
+    pub(crate) fn open_downloads_folder() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+        let _ = std::process::Command::new("open").arg(format!("{home}/Downloads")).spawn();
     }
 
     /// Navigate the Browse centre's shown tab to `url`: the model records
@@ -2969,6 +3422,125 @@ impl Harness {
         self.focus_browse_address_with(rest, window, cx);
     }
 
+    /// `find:<query>`: open the find strip on the shown tab with `query`
+    /// typed (a scripted "3 of 12" result lands through the poll path, so
+    /// the `browse-find` capture shows the count). Empty records a step
+    /// failure. Free: no turn, no wire.
+    pub(crate) fn step_find(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        let query = rest.trim();
+        if query.is_empty() {
+            crate::steps::record_step_failure(&format!("find:{rest}"));
+            return;
+        }
+        self.browser.fake_scripts.push(chrome::FakePageScript::Find { query: query.to_owned(), active: 3, total: 12 });
+        if !self.rebuild_shown_browse_page(window, cx) {
+            crate::steps::record_step_failure(&format!("find:{rest}"));
+            return;
+        }
+        self.open_browse_find(window, cx);
+        if let Some(input) = self.browse_find.clone() {
+            let query = query.to_owned();
+            input.update(cx, |input, cx| input.set_value(query, window, cx));
+        }
+        self.find_input_changed(cx);
+    }
+
+    /// `permission:<kinds>`: script a permission ask (`camera,microphone`)
+    /// on the shown tab, so the `browse-permission` capture shows the
+    /// strip. Unknown kinds record a step failure. Free.
+    pub(crate) fn step_permission(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        let Some(kinds) = chrome::parse_permission_kinds(rest) else {
+            crate::steps::record_step_failure(&format!("permission:{rest}"));
+            return;
+        };
+        self.browser.fake_scripts.push(chrome::FakePageScript::Permission {
+            id: 7,
+            origin: "https://example.com".to_owned(),
+            kinds,
+        });
+        if !self.rebuild_shown_browse_page(window, cx) {
+            crate::steps::record_step_failure(&format!("permission:{rest}"));
+        }
+    }
+
+    /// `download:<name>`: script an active download (`done:<name>` lands
+    /// it) on the shown tab and open the popover, so the
+    /// `browse-downloads` capture shows the list. Empty records a step
+    /// failure. Free.
+    pub(crate) fn step_download(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        let (done, name) = match rest.trim().strip_prefix("done:") {
+            Some(done) => (true, done.trim()),
+            None => (false, rest.trim()),
+        };
+        if name.is_empty() {
+            crate::steps::record_step_failure(&format!("download:{rest}"));
+            return;
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+        self.browser.fake_scripts.push(chrome::FakePageScript::Download(aui_webview::DownloadState {
+            id: 3,
+            url: format!("https://cdn.example/{name}"),
+            file_name: name.to_owned(),
+            path: format!("{home}/Downloads/{name}"),
+            received: if done { 10_485_760 } else { 4_400_000 },
+            total: Some(10_485_760),
+            state: if done { aui_webview::DownloadStatus::Complete } else { aui_webview::DownloadStatus::Downloading },
+        }));
+        if !self.rebuild_shown_browse_page(window, cx) {
+            crate::steps::record_step_failure(&format!("download:{rest}"));
+            return;
+        }
+        self.browser.downloads_open = true;
+        self.browser.extensions_open = false;
+        self.browser.more_open = false;
+        cx.notify();
+    }
+
+    /// `crashed:<reason>`: script a renderer crash on the shown tab, so
+    /// the `browse-crashed` capture shows the Baaz error page. Free.
+    pub(crate) fn step_crashed(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        let reason = rest.trim();
+        let reason = if reason.is_empty() { "the page crashed (-1)" } else { reason };
+        self.browser.fake_scripts.push(chrome::FakePageScript::Crashed(reason.to_owned()));
+        if !self.rebuild_shown_browse_page(window, cx) {
+            crate::steps::record_step_failure(&format!("crashed:{rest}"));
+        }
+    }
+
+    /// `more-menu`: open the ⋯ page-actions menu on the shown tab, so the
+    /// `browse-more-menu` capture shows it. A no-op with no shown tab
+    /// (records a step failure). Free.
+    pub(crate) fn step_more_menu(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        if self.browse_centre_page(window, cx).is_none() {
+            crate::steps::record_step_failure(&format!("more-menu:{rest}"));
+            return;
+        }
+        self.browser.more_open = true;
+        self.browser.more_move_open = false;
+        self.browser.downloads_open = false;
+        self.browser.extensions_open = false;
+        cx.notify();
+    }
+
+    /// `extensions`: open the extensions popover on the shown tab. A no-op
+    /// with no shown tab (records a step failure). Free.
+    pub(crate) fn step_extensions(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        if self.browse_centre_page(window, cx).is_none() {
+            crate::steps::record_step_failure(&format!("extensions:{rest}"));
+            return;
+        }
+        self.browser.extensions_open = true;
+        self.browser.downloads_open = false;
+        self.browser.more_open = false;
+        cx.notify();
+    }
+
     /// `fixture-session:<name>`: park a local session row plus one session
     /// tab carrying `https://example.com`, and carry it into Browse — the
     /// offline `browse-from-session` capture aid. Free: no turn, no wire.
@@ -3217,6 +3789,35 @@ pub(crate) struct BrowserRegistry {
     /// the URLs the sync reports, since the library exposes no back,
     /// forward or reload calls to drive.
     pub histories: HashMap<TabId, BackForward>,
+    /// Every tab's find strip (B2a-H5): per tab, so switching hides the
+    /// strip and returning restores the query.
+    pub find_strips: chrome::FindStrips,
+    /// Origins trusted "while visiting" (B2a-H5): in memory for this run
+    /// only — persistence is B2b.
+    pub visit_allows: chrome::VisitAllows,
+    /// Which Browse chrome popover stands open (B2a-H5): downloads (the
+    /// toolbar button exists only while downloads list), extensions, ⋯.
+    /// They drop over the page; see [`BrowserVisibility`].
+    pub downloads_open: bool,
+    /// The extensions popover stands open.
+    pub extensions_open: bool,
+    /// The ⋯ page-actions menu stands open.
+    pub more_open: bool,
+    /// The ⋯ menu's inline "Move tab to project" list, expanded or not.
+    pub more_move_open: bool,
+    /// Scripted fake-backend events, queued by `--steps` verbs and consumed
+    /// when the next scripted page builds (captures only; production never
+    /// queues). The events drain through the real poll path, so captures
+    /// show the same strips a live page would.
+    pub fake_scripts: Vec<chrome::FakePageScript>,
+    /// When each live download started arriving, as ms since the epoch
+    /// ([`tabs::now_ms`]): the popover's "6 s left" estimates read this.
+    /// Stamped on first sight, pruned when the download ends.
+    pub download_started: HashMap<(TabId, u32), u64>,
+    /// The centre tab the last sync saw: a switch dismisses the chrome
+    /// popovers (they point at the old tab's state) but never the find
+    /// strip, which is per tab and restores on return.
+    pub last_centre_shown: Option<TabId>,
 }
 
 impl BrowserRegistry {
@@ -3237,6 +3838,15 @@ impl BrowserRegistry {
             centre_page_rect: None,
             centre_override: None,
             histories: HashMap::new(),
+            find_strips: chrome::FindStrips::default(),
+            visit_allows: chrome::VisitAllows::default(),
+            downloads_open: false,
+            extensions_open: false,
+            more_open: false,
+            more_move_open: false,
+            fake_scripts: Vec::new(),
+            download_started: HashMap::new(),
+            last_centre_shown: None,
         }
     }
 }
@@ -3270,6 +3880,8 @@ mod tests {
             terminal_covering: false,
             window_active: true,
             omnibox_open: false,
+            chrome_popover_open: false,
+            page_error_open: false,
         }
     }
 
@@ -3291,6 +3903,8 @@ mod tests {
             terminal_covering: false,
             window_active: true,
             omnibox_open: false,
+            chrome_popover_open: false,
+            page_error_open: false,
         }
     }
 
@@ -3344,6 +3958,25 @@ mod tests {
         let mut centre = centre_clear();
         centre.omnibox_open = true;
         assert!(!browser_visible(centre), "the omnibox obscures the centre page");
+    }
+
+    #[test]
+    fn chrome_popovers_and_error_pages_obscure_pane_and_centre() {
+        // The downloads/extensions/⋯ popovers drop over the page, and the
+        // Baaz-drawn crashed page covers its rect: both hide the native
+        // view on the pane and on the Browse centre alike.
+        let mut popover = all_clear();
+        popover.chrome_popover_open = true;
+        assert!(!browser_visible(popover), "a chrome popover obscures the pane's page");
+        let mut centre_popover = centre_clear();
+        centre_popover.chrome_popover_open = true;
+        assert!(!browser_visible(centre_popover), "a chrome popover obscures the centre page");
+        let mut error = all_clear();
+        error.page_error_open = true;
+        assert!(!browser_visible(error), "the crashed page covers the pane's page");
+        let mut centre_error = centre_clear();
+        centre_error.page_error_open = true;
+        assert!(!browser_visible(centre_error), "the crashed page covers the centre page");
     }
 
     #[test]

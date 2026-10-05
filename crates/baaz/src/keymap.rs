@@ -128,6 +128,9 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "BrowseTab8", keystroke: "cmd-8", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 8" },
     KeymapEntry { action: "BrowseTabLast", keystroke: "cmd-9", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select last tab" },
     KeymapEntry { action: "MoveBrowseTabUp", keystroke: "cmd-alt-up", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Move tab up" },
+    KeymapEntry { action: "FindInPage", keystroke: "cmd-f", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Find in page" },
+    KeymapEntry { action: "CopyLink", keystroke: "cmd-shift-c", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Copy link" },
+    KeymapEntry { action: "DevTools", keystroke: "alt-cmd-i", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Open developer tools" },
     KeymapEntry { action: "MoveBrowseTabDown", keystroke: "cmd-alt-down", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Move tab down" },
     KeymapEntry { action: "FocusAddress", keystroke: "cmd-l", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Focus address bar" },
     KeymapEntry { action: "TerminalSigint", keystroke: "ctrl-c", context: Some(crate::app::TERMINAL_CONTEXT), category: "terminal", label: "Interrupt terminal program" },
@@ -264,6 +267,9 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             crate::app::MoveBrowseTabDown,
             context,
         )),
+        "FindInPage" => Some(gpui::KeyBinding::new(keystroke, crate::app::FindInPage, context)),
+        "CopyLink" => Some(gpui::KeyBinding::new(keystroke, crate::app::CopyLink, context)),
+        "DevTools" => Some(gpui::KeyBinding::new(keystroke, crate::app::DevTools, context)),
         "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
         "TerminalSigint" => Some(gpui::KeyBinding::new(keystroke, crate::app::TerminalSigint, context)),
         "SkillsUp" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsUp, context)),
@@ -1669,6 +1675,9 @@ mod tests {
             ("BrowseTabLast", "cmd-9", browse),
             ("MoveBrowseTabUp", "cmd-alt-up", browse),
             ("MoveBrowseTabDown", "cmd-alt-down", browse),
+            ("FindInPage", "cmd-f", browse),
+            ("CopyLink", "cmd-shift-c", browse),
+            ("DevTools", "alt-cmd-i", browse),
         ] {
             let row = super::KEYMAP
                 .iter()
@@ -1769,7 +1778,17 @@ mod tests {
     #[test]
     fn browse_only_subset_holds_exactly_the_browse_only_chords() {
         let only = super::browse_only_shortcuts(&super::build_bindings());
-        for keystroke in ["cmd-shift-t", "cmd-1", "cmd-8", "cmd-9", "cmd-alt-up", "cmd-alt-down"] {
+        for keystroke in [
+            "cmd-shift-t",
+            "cmd-1",
+            "cmd-8",
+            "cmd-9",
+            "cmd-alt-up",
+            "cmd-alt-down",
+            "cmd-f",
+            "cmd-shift-c",
+            "alt-cmd-i",
+        ] {
             assert!(claimed_has(&only, keystroke), "{keystroke:?} is Browse-only");
         }
         for keystroke in ["cmd-w", "cmd-t", "cmd-k", "cmd-c"] {

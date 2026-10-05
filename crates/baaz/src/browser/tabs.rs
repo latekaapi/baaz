@@ -79,8 +79,9 @@ pub(crate) struct Tab {
     #[serde(default)]
     pub last_shown: Option<u64>,
     /// A background tab holds a permission ask: the sidebar draws its
-    /// "needs you" dot until the tab is shown (B2a-H5).
-    #[serde(default)]
+    /// "needs you" dot until the tab is shown (B2a-H5). Live state, never
+    /// persisted: a relaunch starts with no dots.
+    #[serde(skip)]
     pub needs_attention: bool,
 }
 

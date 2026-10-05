@@ -90,6 +90,11 @@ impl FindStrips {
     pub(crate) fn remove(&mut self, id: TabId) {
         self.strips.remove(&id);
     }
+
+    /// Forget every strip whose tab is gone (closed tabs keep nothing).
+    pub(crate) fn retain(&mut self, live: &HashSet<TabId>) {
+        self.strips.retain(|id, _| live.contains(id));
+    }
 }
 
 /// The find strip's count: "3 / 12".
@@ -119,7 +124,7 @@ pub(crate) fn permission_sentence(origin: &str, kinds: &[PermissionKind]) -> Str
         [only] => (*only).to_owned(),
         [first, second] => format!("{first} and {second}"),
         _ => {
-            let (last, rest) = capabilities.split_at(capabilities.len() - 1);
+            let (rest, last) = capabilities.split_at(capabilities.len() - 1);
             format!("{} and {}", rest.join(", "), last[0])
         }
     };
@@ -180,17 +185,35 @@ pub(crate) fn download_eta_secs(received: u64, total: Option<u64>, elapsed_secs:
     Some(remaining * elapsed_secs / received)
 }
 
+/// `bytes` in `scale`'s unit, with [`format_bytes`]' decimals: the
+/// received half of "4.2 of 9.8 MB" reads in the total's unit, never
+/// repeating it.
+fn format_bytes_scaled(bytes: u64, scale: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let bytes = bytes as f64;
+    if scale < 1024 {
+        format!("{} B", bytes as u64)
+    } else if (scale as f64) < MB {
+        format!("{:.1}", bytes / KB)
+    } else if (scale as f64) < GB {
+        format!("{:.1}", bytes / MB)
+    } else {
+        format!("{:.1}", bytes / GB)
+    }
+}
+
 /// One download's popover line: "4.2 of 9.8 MB · 6 s left" while active
-/// with a known total, "Done · 210 KB" when landed.
+/// with a known total (the received half reads in the total's unit),
+/// "Done · 210.0 KB" when landed.
 pub(crate) fn download_line(state: &DownloadState, elapsed_secs: u64) -> String {
     match state.state {
         DownloadStatus::Downloading => match state.total {
-            Some(_) => match download_eta_secs(state.received, state.total, elapsed_secs) {
-                Some(eta) => format!(
-                    "{} of {} · {eta} s left",
-                    format_bytes(state.received),
-                    format_bytes(state.total.unwrap_or(0))
-                ),
+            Some(total) => match download_eta_secs(state.received, state.total, elapsed_secs) {
+                Some(eta) => {
+                    format!("{} of {} · {eta} s left", format_bytes_scaled(state.received, total), format_bytes(total))
+                }
                 None => format!("{} · downloading", format_bytes(state.received)),
             },
             None => format!("{} · downloading", format_bytes(state.received)),
@@ -242,12 +265,73 @@ fn restore_active(tabs: &mut Tabs, opener_tab: &Tab, active: Option<TabId>) {
     }
 }
 
-/// The host part of `url` for the error page ("Can't reach <host>"),
-/// falling back to the whole URL when no host parses out.
-pub(crate) fn error_host(url: &str) -> &str {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let host = after_scheme.split(['/','?','#']).next().unwrap_or(after_scheme);
-    if host.is_empty() { url } else { host }
+/// One scripted fake-backend event, queued by a `--steps` verb and applied
+/// to the next scripted page at build (captures only): finds, asks,
+/// downloads and crashes — the states the probe entries show. The event
+/// then drains through the real poll path, so a capture shows the same
+/// strip a live page would — never a Baaz-side fake of backend state.
+/// (Popups and open-requests need no capture: the drain is pinned
+/// behaviourally against the scripted backend below.)
+#[derive(Clone, Debug)]
+pub(crate) enum FakePageScript {
+    /// A find result for `query` ("3 of 12" with the defaults).
+    Find {
+        /// What was searched for.
+        query: String,
+        /// The 1-based match under the cursor.
+        active: u32,
+        /// How many matches the page holds.
+        total: u32,
+    },
+    /// A permission ask waiting for an answer.
+    Permission {
+        /// The engine's id for the ask.
+        id: u64,
+        /// The origin asking.
+        origin: String,
+        /// What it asked for.
+        kinds: Vec<PermissionKind>,
+    },
+    /// A download's latest state.
+    Download(DownloadState),
+    /// The renderer went away; the tab reads as crashed until the next
+    /// successful navigation.
+    Crashed(String),
+}
+
+impl FakePageScript {
+    /// Queue this script on a fresh scripted backend, before it is boxed
+    /// into its [`WebviewState`](aui_webview::WebviewState).
+    pub(crate) fn apply_to_fake(&self, backend: &mut aui_webview::FakeWebBackend) {
+        match self {
+            FakePageScript::Find { query, active, total } => backend.script_find(query, *active, *total, true),
+            FakePageScript::Permission { id, origin, kinds } => backend.script_permission(*id, origin, kinds.clone()),
+            FakePageScript::Download(state) => backend.script_download(state.clone()),
+            FakePageScript::Crashed(reason) => backend.script_crashed(reason),
+        }
+    }
+}
+
+/// Parse a `permission:<kinds>` verb rest (`camera,microphone`) into the
+/// asked kinds. Unknown names answer `None` and the verb records a step
+/// failure instead of scripting a request the sentence never names.
+pub(crate) fn parse_permission_kinds(rest: &str) -> Option<Vec<PermissionKind>> {
+    let mut kinds = Vec::new();
+    for name in rest.split(',').map(str::trim) {
+        let kind = match name {
+            "camera" => PermissionKind::Camera,
+            "microphone" => PermissionKind::Microphone,
+            "geolocation" => PermissionKind::Geolocation,
+            "notifications" => PermissionKind::Notifications,
+            "clipboard" => PermissionKind::Clipboard,
+            "midi" => PermissionKind::Midi,
+            _ => return None,
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    (!kinds.is_empty()).then_some(kinds)
 }
 
 #[cfg(test)]
@@ -265,8 +349,10 @@ mod tests {
         assert!(strip.set_query("price"), "typing a query searches");
         assert!(!strip.set_query("price"), "retyping the same query searches nothing");
         assert!(strip.set_query("prices"), "changing the query re-searches");
-        assert!(!strip.set_query(""), "clearing the field stops nothing by itself");
         assert!(strip.toggle_case(), "flipping case re-searches the kept query");
+        assert!(strip.toggle_case(), "flipping back re-searches too");
+        assert!(!strip.set_query(""), "clearing the field stops nothing by itself");
+        assert!(!strip.toggle_case(), "flipping case on an empty query searches nothing");
         assert!(strip.close(), "closing an open strip stops the search");
         assert!(!strip.close(), "closing twice stops once");
         assert_eq!(strip.query, "", "the cleared query stays cleared");
@@ -288,6 +374,10 @@ mod tests {
         assert!(strips.for_tab(first).close(), "closing an open strip stops the search");
         assert!(!strips.for_tab(first).close(), "closing twice stops once");
         strips.remove(second);
+        let live: HashSet<TabId> = [second].into_iter().collect();
+        strips.retain(&live);
+        assert!(strips.visible(Some(first)).is_none(), "closed tabs keep no strip");
+        assert!(strips.visible(Some(second)).is_none(), "a never-opened tab still shows nothing");
     }
 
     #[test]
@@ -368,8 +458,7 @@ mod tests {
             state: DownloadStatus::Downloading,
         };
         let line = download_line(&active, 8);
-        assert!(line.starts_with("4.2 of 9.7 MB"), "sizes humanise: {line}");
-        assert!(line.ends_with("s left"), "active downloads estimate: {line}");
+        assert_eq!(line, "4.2 of 9.7 MB · 10 s left", "sizes humanise with an estimate: {line}");
         let done = DownloadState { state: DownloadStatus::Complete, received: 215_040, ..active.clone() };
         assert_eq!(download_line(&done, 0), "Done · 210.0 KB");
         let unknown = DownloadState { total: None, ..active.clone() };
@@ -408,9 +497,59 @@ mod tests {
     }
 
     #[test]
-    fn error_host_names_the_host() {
-        assert_eq!(error_host("https://example.com/a/b?x=1"), "example.com");
-        assert_eq!(error_host("about:blank"), "about:blank");
+    fn permission_verb_parses_known_kinds_only() {
+        assert_eq!(
+            parse_permission_kinds("camera,microphone"),
+            Some(vec![PermissionKind::Camera, PermissionKind::Microphone])
+        );
+        assert_eq!(parse_permission_kinds("camera,camera"), Some(vec![PermissionKind::Camera]));
+        assert_eq!(parse_permission_kinds("telepathy"), None);
+        assert_eq!(parse_permission_kinds(""), None);
+    }
+
+    /// Every script queues on a fresh backend: the capture seam covers
+    /// finds, asks, downloads and crashes alike.
+    #[test]
+    fn every_script_queues_on_a_fresh_backend() {
+        use aui_webview::{DownloadStatus, FakeWebBackend, WebBackend as _, WebEvent};
+        let mut backend = FakeWebBackend::new();
+        for script in [
+            FakePageScript::Find { query: "price".to_owned(), active: 3, total: 12 },
+            FakePageScript::Permission {
+                id: 7,
+                origin: "https://example.com".to_owned(),
+                kinds: vec![PermissionKind::Camera],
+            },
+            FakePageScript::Download(DownloadState {
+                id: 3,
+                url: "https://cdn.example/big.zip".to_owned(),
+                file_name: "big.zip".to_owned(),
+                path: "/tmp/big.zip".to_owned(),
+                received: 4_400_000,
+                total: Some(10_485_760),
+                state: DownloadStatus::Downloading,
+            }),
+            FakePageScript::Crashed("the page crashed (-1)".to_owned()),
+        ] {
+            script.apply_to_fake(&mut backend);
+        }
+        let events = backend.poll_events();
+        assert!(
+            events.iter().any(|event| matches!(event, WebEvent::Find(found) if found.query == "price" && found.active == 3 && found.total == 12)),
+            "the find result queues: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, WebEvent::Permission(request) if request.id == 7)),
+            "the ask queues: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, WebEvent::Download(download) if download.id == 3)),
+            "the download queues: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, WebEvent::Crashed(_))),
+            "the crash queues: {events:?}"
+        );
     }
 
     use aui_webview::{FakeWebBackend, WebviewState};
@@ -492,23 +631,35 @@ mod tests {
         cx.run_until_parked();
         let listed = state.update(cx, |state, _| state.downloads().to_vec());
         assert_eq!(listed.len(), 1, "the download lists");
-        assert_eq!(download_line(&listed[0], 4), "210.0 KB of 1.0 MB · 15 s left");
+        assert_eq!(download_line(&listed[0], 4), "0.2 of 1.0 MB · 15 s left");
     }
 
-    /// A crash shows the Baaz page and the next navigation clears it.
+    /// A crash shows the Baaz page and the next navigation clears it:
+    /// the crash report drains first (the page reads crashed), then a
+    /// navigation's announce clears it — the same event order a live
+    /// crash-then-reload produces.
     #[gpui::test]
     fn crashed_shows_until_the_next_navigation(cx: &mut gpui::TestAppContext) {
+        use aui_webview::WebBackend as _;
         let state = scripted_state(cx, |backend| backend.script_crashed("the page crashed (-1)"));
         cx.run_until_parked();
         assert!(
             state.update(cx, |state, _| state.crashed()).is_some(),
             "the crash shows the Baaz page"
         );
-        state.update(cx, |state, _| state.navigate("https://example.com/"));
+        let recovered = scripted_state(cx, |backend| {
+            backend.script_crashed("the page crashed (-1)");
+            backend.navigate("https://example.com/");
+        });
         cx.run_until_parked();
         assert!(
-            state.update(cx, |state, _| state.crashed()).is_none(),
+            recovered.update(cx, |state, _| state.crashed()).is_none(),
             "the next navigation clears the crash"
+        );
+        assert_eq!(
+            recovered.update(cx, |state, _| state.url().to_string()),
+            "https://example.com/",
+            "the navigation lands"
         );
     }
 

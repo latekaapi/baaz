@@ -97,6 +97,12 @@
 //! | `from-sessions:<n>` | expand the n-th From-sessions group of the current project (1-based, first-seen order), collapsing the rest; empty collapses every group; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
+//! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty records a step failure, free |
+//! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds record a step failure, free |
+//! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty records a step failure, free |
+//! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
+//! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
+//! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse with the ↩ chip (the offline `browse-from-session` shot), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
@@ -312,6 +318,12 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, _, window, cx| this.step_tab_discard_now(window, cx),
     },
     WindowVerb { verb: "omnibox", run: |this, rest, window, cx| this.step_omnibox(rest, window, cx) },
+    WindowVerb { verb: "find", run: |this, rest, window, cx| this.step_find(rest, window, cx) },
+    WindowVerb { verb: "permission", run: |this, rest, window, cx| this.step_permission(rest, window, cx) },
+    WindowVerb { verb: "download", run: |this, rest, window, cx| this.step_download(rest, window, cx) },
+    WindowVerb { verb: "crashed", run: |this, rest, window, cx| this.step_crashed(rest, window, cx) },
+    WindowVerb { verb: "more-menu", run: |this, rest, window, cx| this.step_more_menu(rest, window, cx) },
+    WindowVerb { verb: "extensions", run: |this, rest, window, cx| this.step_extensions(rest, window, cx) },
     WindowVerb {
         verb: "fixture-session",
         run: |this, rest, window, cx| this.step_fixture_session(rest, window, cx),
