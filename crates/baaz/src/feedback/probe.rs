@@ -120,7 +120,11 @@ pub fn enrich_from_debug_json(json: &str, label: &str, role: &str) -> Option<(Op
     let nodes = parsed.get("nodes")?.as_object()?;
     let wanted = ax_accesskit_role(role);
     for node in nodes.values() {
-        let aria = node.get("aria")?.as_object()?;
+        // A node without `aria` (structural nodes) is skipped, never fatal:
+        // map order decides which node comes first.
+        let Some(aria) = node.get("aria").and_then(Value::as_object) else {
+            continue;
+        };
         let node_label = aria.get("label").and_then(Value::as_str).unwrap_or("");
         if node_label != label {
             continue;
@@ -278,6 +282,13 @@ mod mac {
 
     /// Copy an `NSString` to Rust through its UTF-8 bytes.
     fn cocoa_string(value: &AnyObject) -> Option<String> {
+        // `accessibilityValue` is an NSNumber on checkboxes, radios and
+        // sliders; `UTF8String` on one raises "unrecognized selector",
+        // which aborts the app. Only NSStrings are read.
+        let is_string: bool = unsafe { msg_send![value, isKindOfClass: objc2::class!(NSString)] };
+        if !is_string {
+            return None;
+        }
         let bytes: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
         if bytes.is_null() {
             return None;
@@ -359,7 +370,10 @@ mod mac {
                 msg_send![&*view, convertPoint: in_window, fromView: std::ptr::null_mut::<AnyObject>()];
             in_view
         };
-        let y = if flipped { origin.y } else { bounds.size.height - origin.y - frame.size.height };
+        // `frame.origin` is the element's bottom-left corner in screen space.
+        // In a flipped view that point is the element's bottom edge, so its
+        // top sits one height above it.
+        let y = if flipped { origin.y - frame.size.height } else { bounds.size.height - origin.y - frame.size.height };
         Rect { x: origin.x as f32, y: y as f32, w: frame.size.width as f32, h: frame.size.height as f32 }
     }
 
@@ -427,6 +441,12 @@ mod tests {
 
     #[test]
     fn enrichment_returns_none_when_absent() {
+        // A structural node without `aria` ahead of the match is skipped.
+        let with_bare = r#"{"nodes":{"0":{"element_id":"Name(\"root\")"},"1":{"element_id":"Name(\"hd-project\")","view":"baaz::app::Harness","aria":{"role":"Button","label":"Open"}}}}"#;
+        assert_eq!(
+            enrich_from_debug_json(with_bare, "Open", "AXButton"),
+            Some((Some("hd-project".to_owned()), Some("baaz::app::Harness".to_owned())))
+        );
         assert_eq!(enrich_from_debug_json(sample_tree(), "No such label", "AXButton"), None);
         assert_eq!(enrich_from_debug_json(sample_tree(), "", "AXButton"), None);
         assert_eq!(enrich_from_debug_json("not json", "Project harness. Open project menu", "AXButton"), None);

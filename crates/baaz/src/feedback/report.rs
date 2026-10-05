@@ -30,23 +30,43 @@ pub fn write_report(
     build: &str,
 ) -> anyhow::Result<PathBuf> {
     let stamp = ended.format("%Y-%m-%d-%H%M%S").to_string();
+    std::fs::create_dir_all(root)?;
+    // `create_dir` (not `create_dir_all`) claims the name: two writers on
+    // the same second can never share a folder.
     let mut dir = root.join(&stamp);
     let mut suffix = 2;
-    while dir.exists() {
-        dir = root.join(format!("{stamp}-{suffix}"));
-        suffix += 1;
+    loop {
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                dir = root.join(format!("{stamp}-{suffix}"));
+                suffix += 1;
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
     std::fs::create_dir_all(dir.join("shots"))?;
-    let shots: Vec<(String, String)> =
-        draft.notes.iter().map(|note| standard_shots(note.index)).collect();
+    // A shot the note never captured is not named: the report must not
+    // point at files that do not exist.
+    let shots: Vec<(String, String)> = draft
+        .notes
+        .iter()
+        .map(|note| {
+            let (crop, full) = standard_shots(note.index);
+            (
+                if note.crop.is_some() { crop } else { String::new() },
+                if note.full.is_some() { full } else { String::new() },
+            )
+        })
+        .collect();
     std::fs::write(dir.join("report.md"), render_markdown(draft, ended, build, &shots))?;
     let json = render_json(draft, ended, build);
     std::fs::write(dir.join("report.json"), serde_json::to_string_pretty(&json)?)?;
     for (note, (crop_name, full_name)) in draft.notes.iter().zip(shots.iter()) {
-        if let Some(crop) = &note.crop {
+        if let (Some(crop), false) = (&note.crop, crop_name.is_empty()) {
             crop.save(dir.join(crop_name))?;
         }
-        if let Some(full) = &note.full {
+        if let (Some(full), false) = (&note.full, full_name.is_empty()) {
             super::to_logical(full, note.context.scale).save(dir.join(full_name))?;
         }
     }
@@ -54,6 +74,25 @@ pub fn write_report(
         if dir.is_absolute() { dir.clone() } else { std::env::current_dir()?.join(&dir) };
     crate::store::write_atomic(&root.join("latest"), format!("{}\n", absolute.display()).as_bytes())?;
     Ok(dir)
+}
+
+/// One line of inline Markdown from untrusted text (accessibility labels,
+/// titles): newlines fold to spaces and backticks become `'`, so a label can
+/// neither split a heading nor close a code span early.
+fn inline(text: &str) -> String {
+    let flat = text.replace("\r\n", " ").replace(['\n', '\r'], " ").replace('`', "'");
+    flat.trim().to_owned()
+}
+
+/// [`inline`], with an empty result named rather than left blank.
+fn named(text: &str) -> String {
+    let flat = inline(text);
+    if flat.is_empty() { "(unnamed)".to_owned() } else { flat }
+}
+
+/// A Markdown table cell: [`inline`] plus an escaped `|`.
+fn cell(text: &str) -> String {
+    inline(text).replace('|', "\\|")
 }
 
 /// The crop/full shot paths for a 1-based note index.
@@ -76,7 +115,7 @@ pub fn render_markdown(
     out.push_str("> How to use this report: each note names what the owner pointed at, the screen it was on, and their words. Open the crop first; the full shot shows surroundings. `Code id` is a gpui element id you can grep for.\n");
     out.push('\n');
     out.push_str("| Field | Value |\n|---|---|\n");
-    out.push_str(&format!("| Build | {build} |\n"));
+    out.push_str(&format!("| Build | {} |\n", cell(build)));
     let window = match draft.notes.first() {
         Some(note) => format!(
             "{} × {} @{}x · {}",
@@ -97,10 +136,10 @@ pub fn render_markdown(
     }
     for (position, note) in draft.notes.iter().enumerate() {
         let (title, suffix) = match &note.target {
-            Target::Element(hit) => (hit.label.clone(), pane_or_mode(note)),
+            Target::Element(hit) => (named(&hit.label), inline(&pane_or_mode(note))),
             Target::Area { region, .. } => (
                 "Area".to_owned(),
-                region.clone().unwrap_or_else(|| pane_or_mode(note)),
+                inline(&region.clone().unwrap_or_else(|| pane_or_mode(note))),
             ),
         };
         out.push('\n');
@@ -109,14 +148,14 @@ pub fn render_markdown(
         } else {
             out.push_str(&format!("## Note {} · {title} · {suffix}\n", note.index));
         }
-        out.push_str(&format!("Screen: {}\n", screen_line(note)));
+        out.push_str(&format!("Screen: {}\n", inline(&screen_line(note))));
         if let Target::Element(hit) = &note.target {
-            let mut element = format!("`{}` ({})", hit.label, human_role(&hit.role));
+            let mut element = format!("`{}` ({})", named(&hit.label), human_role(&hit.role));
             if !hit.ancestors.is_empty() {
                 let chain = hit
                     .ancestors
                     .iter()
-                    .map(|(_, label)| format!("`{label}`"))
+                    .map(|(_, label)| format!("`{}`", named(label)))
                     .collect::<Vec<_>>()
                     .join(" › ");
                 element.push_str(&format!(" in {chain}"));
@@ -124,8 +163,8 @@ pub fn render_markdown(
             out.push_str(&format!("Element: {element}\n"));
             if let Some(id) = &hit.element_id {
                 match &hit.view {
-                    Some(view) => out.push_str(&format!("Code id: `{id}` ({view})\n")),
-                    None => out.push_str(&format!("Code id: `{id}`\n")),
+                    Some(view) => out.push_str(&format!("Code id: `{}` ({})\n", inline(id), inline(view))),
+                    None => out.push_str(&format!("Code id: `{}`\n", inline(id))),
                 }
             }
         }
@@ -148,7 +187,13 @@ pub fn render_markdown(
             .get(position)
             .cloned()
             .unwrap_or_else(|| standard_shots(note.index));
-        out.push_str(&format!("Shots: `{crop}` · `{full}`\n"));
+        let named_shots: Vec<String> =
+            [crop, full].into_iter().filter(|name| !name.is_empty()).map(|name| format!("`{name}`")).collect();
+        if named_shots.is_empty() {
+            out.push_str("Shots: none\n");
+        } else {
+            out.push_str(&format!("Shots: {}\n", named_shots.join(" · ")));
+        }
     }
     out
 }
@@ -184,6 +229,8 @@ pub fn render_json(draft: &Draft, ended: DateTime<Local>, build: &str) -> serde_
             };
             let context = &note.context;
             let (crop, full) = standard_shots(note.index);
+            let crop = note.crop.as_ref().map(|_| crop);
+            let full = note.full.as_ref().map(|_| full);
             serde_json::json!({
                 "index": note.index,
                 "target": target,
@@ -401,8 +448,9 @@ mod tests {
         assert_eq!(first["text"], "Please make this\nless shouty.");
         assert_eq!(first["context"]["mode"], "sessions");
         assert_eq!(first["context"]["project"], "baaz");
-        assert_eq!(first["shots"]["crop"], "shots/note-1-crop.png");
-        assert_eq!(first["shots"]["full"], "shots/note-1-full.png");
+        // The golden notes carry no images, so no shot is named.
+        assert!(first["shots"]["crop"].is_null());
+        assert!(first["shots"]["full"].is_null());
         let second = &json["notes"][1];
         assert_eq!(second["target"]["kind"], "area");
         assert_eq!(second["target"]["region"], "composer");
@@ -431,6 +479,36 @@ mod tests {
             note.full = Some(image::RgbaImage::from_pixel(40, 30, image::Rgba([4, 5, 6, 255])));
         }
         draft
+    }
+
+    #[test]
+    fn untrusted_labels_cannot_break_the_markdown() {
+        let (mut draft, ended) = golden_draft();
+        if let Target::Element(hit) = &mut draft.notes[0].target {
+            hit.label = "Run `cargo`\nnow".to_owned();
+            hit.ancestors = vec![("AXGroup".to_owned(), String::new())];
+        }
+        let shots = vec![(String::new(), String::new()); 2];
+        let md = render_markdown(&draft, ended, "baaz | dev", &shots);
+        assert!(md.contains("| Build | baaz \\| dev |"), "pipe escaped in the table:\n{md}");
+        assert!(md.contains("## Note 1 · Run 'cargo' now"), "label folded to one heading line:\n{md}");
+        assert!(md.contains("Element: `Run 'cargo' now` (Button) in `(unnamed)`"), "{md}");
+        assert!(md.contains("Shots: none"), "no shot named when none exist:\n{md}");
+        assert!(!md.contains("note-1-crop"), "{md}");
+    }
+
+    #[test]
+    fn a_note_without_images_names_no_shots_and_writes_none() {
+        let root = scratch_root("noimages");
+        let (draft, ended) = golden_draft();
+        let dir = write_report(&root, &draft, ended, "0.1.0-test").expect("writes");
+        let md = std::fs::read_to_string(dir.join("report.md")).expect("md");
+        assert!(md.contains("Shots: none"), "{md}");
+        assert!(!dir.join("shots/note-1-crop.png").exists());
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+        assert!(json["notes"][0]["shots"]["crop"].is_null());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
