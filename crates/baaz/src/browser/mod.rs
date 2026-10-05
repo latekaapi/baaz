@@ -2100,6 +2100,13 @@ impl Harness {
         self.stamp_browse_downloads(cx);
         let live: HashSet<TabId> = self.browser.tabs.tabs.iter().map(|tab| tab.id).collect();
         self.browser.find_strips.retain(&live);
+        // A closed tab drops its strip above: with none standing open the
+        // shared input has no reader, so it drops too — the same hand-over
+        // `close_browse_find` does for Done/Esc.
+        if !self.browser.find_strips.any_open() {
+            self.browse_find = None;
+            self.browse_find_sub = None;
+        }
         // A Screenshot whose bytes were not there yet attaches on arrival.
         // Pending captures key to the tab they were taken on
         // ([`screenshot_tab_key`]): the bytes attach to the active
