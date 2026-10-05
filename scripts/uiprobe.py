@@ -261,19 +261,21 @@ ENTRIES = {
                                         "--steps", "feedback-mode:on"]},
     "feedback-header-paused": {"shot": ["--no-connect", "--login", "signed-in",
                                         "--steps", "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:x;feedback-mode:pause"]},
-    # F3 feedback commenting: `feedback-hover` names the header's project
-    # button under the outline, `feedback-note` leaves its note popover
-    # open, `feedback-pins` saves two notes (an element and a dragged
-    # area) so the numbered pins show. Window-only scripts: no `wait:`
+    # F3 feedback commenting: `feedback-hover` names the empty-state
+    # hero's `New session` button under the outline, `feedback-note`
+    # leaves its note popover open, `feedback-pins` saves two notes (an
+    # element and a dragged area) so the numbered pins show. The
+    # `click:846,551`/`hover:846,551` is the hero button at the probe's
+    # fixed 1440×900 capture size. Window-only scripts: no `wait:`
     # (a session verb — it would wait for a session that never opens).
     # No baseline yet — generate on main after merge, never to silence a
     # finding.
     "feedback-hover":       {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:hover:297,21"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:hover:846,551"]},
     "feedback-note":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:297,21"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:click:846,551"]},
     "feedback-pins":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:297,21;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here"]},
     # The Settings page's Archived section: offline, idempotent. No
     # baseline yet — generate on main after merge, never to silence a
     # finding.
