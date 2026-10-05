@@ -7450,7 +7450,7 @@ impl Render for Harness {
             || self.overlays.read(cx).dialog.is_some()
             || self.overlays.read(cx).menu.is_some()
             || self.settings_page.open
-            || self.feedback.phase != feedback_ui::FeedbackPhase::Off;
+            || self.feedback.is_open();
         let overlay_just_closed = self.overlay_was_open && !overlay_now;
         // Two triggers, and both are needed. The first frame has nothing
         // focused at all, so without the `is_none` arm the very first
