@@ -64,6 +64,25 @@ pub(crate) fn status_text(handler: Option<&str>, confirm_pending: bool) -> Strin
     status_line(handler)
 }
 
+/// The Default-browser row's fixed status line under determinism: captures
+/// must never depend on the machine's handler.
+pub(crate) const DETERMINISTIC_STATUS: &str = "Default browser: checked at runtime";
+
+/// Whether captures must not depend on this machine (`BAAZ_DETERMINISTIC=1`,
+/// which the capture harness always sets).
+pub(crate) fn deterministic_captures() -> bool {
+    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
+}
+
+/// The Default-browser row's status line: the fixed capture text under
+/// determinism, else [`status_text`].
+pub(crate) fn row_status_text(handler: Option<&str>, confirm_pending: bool) -> String {
+    if deterministic_captures() {
+        return DETERMINISTIC_STATUS.to_owned();
+    }
+    status_text(handler, confirm_pending)
+}
+
 /// Whether the row should offer Make default: anything but Baaz itself
 /// (and the unreadable case, where trying again is the only way out).
 /// Case-insensitive, like the lookup answers.
@@ -278,5 +297,42 @@ mod tests {
         assert!(offers_make_default(Some("com.apple.Safari")));
         assert!(offers_make_default(None));
         assert!(!offers_make_default(Some("sh.baaz.app")));
+    }
+
+    #[test]
+    fn deterministic_captures_wear_the_fixed_status_line() {
+        // The variable is process-global: hold the store lock (which every
+        // env-touching test holds) and restore whatever was there after.
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_DETERMINISTIC");
+        assert_eq!(
+            row_status_text(Some("com.apple.safari"), false),
+            "Safari is your default browser",
+            "live runs name the handler"
+        );
+        assert_eq!(
+            row_status_text(None, false),
+            "Could not determine the default browser",
+            "live runs keep the unreadable line"
+        );
+        std::env::set_var("BAAZ_DETERMINISTIC", "1");
+        assert!(deterministic_captures(), "the flag reads on");
+        assert_eq!(
+            row_status_text(Some("com.apple.safari"), false),
+            "Default browser: checked at runtime",
+            "captures never depend on the machine"
+        );
+        assert_eq!(
+            row_status_text(None, true),
+            "Default browser: checked at runtime",
+            "captures wear it even while confirming"
+        );
+        std::env::set_var("BAAZ_DETERMINISTIC", "0");
+        assert!(!deterministic_captures(), "any other value reads off");
+        match old {
+            Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+            None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+        }
+        drop(guard);
     }
 }
