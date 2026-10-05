@@ -1017,7 +1017,6 @@ impl crate::app::Harness {
                     Ok(dir) => {
                         let path = dir.display().to_string();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
-                        let unit = if note_count == 1 { "note" } else { "notes" };
                         this.feedback.done_applied();
                         this.feedback.saved_flash =
                             Some(SavedFlash { at: Instant::now(), notes: note_count, path: path.clone() });
@@ -1038,9 +1037,10 @@ impl crate::app::Harness {
                             });
                         })
                         .detach();
-                        this.overlays.update(cx, |o, _| {
-                            o.toast(format!("Feedback saved · {note_count} {unit}"), path)
-                        });
+                        // No toast: the header's "Saved · N notes — path
+                        // copied" flash says it, in every header, over any
+                        // page — a toast beside it said the same thing twice
+                        // (seen live).
                     }
                     Err(err) => {
                         this.feedback.draft = draft;
@@ -4020,13 +4020,15 @@ mod tests {
             .count();
         assert_eq!(dirs, 1, "two Done calls wrote {dirs} report folders");
         let latest = std::fs::read_to_string(root.join("latest")).expect("Done writes latest");
-        let (toast, clip) = vc.update(|_, cx| {
+        let (flash, toasts, clip) = vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let toast = harness.overlays.read(cx).toasts.last().cloned().expect("a toast lands");
+            let flash = harness.feedback.saved_flash.as_ref().map(|f| f.notes);
+            let toasts = harness.overlays.read(cx).toasts.len();
             let clip = cx.read_from_clipboard().and_then(|item| item.text());
-            (toast, clip)
+            (flash, toasts, clip)
         });
-        assert_eq!(toast.title.to_string(), "Feedback saved · 2 notes");
+        assert_eq!(flash, Some(2), "the header flash names the 2 notes saved");
+        assert_eq!(toasts, 0, "no toast repeats the flash");
         assert_eq!(clip.as_deref(), Some(latest.trim()), "the clipboard holds the report dir");
         assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off));
         assert!(vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()));
@@ -4963,8 +4965,7 @@ mod tests {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Off, "Done parks Off");
             assert!(harness.feedback.draft.is_empty(), "Done clears the draft");
-            let toast = harness.overlays.read(cx).toasts.last().cloned().expect("a toast lands");
-            assert_eq!(toast.title.to_string(), "Feedback saved · 1 note");
+            assert_eq!(harness.feedback.saved_flash.as_ref().map(|f| f.notes), Some(1), "the flash names 1 note");
         });
         restore_state(state);
     }
