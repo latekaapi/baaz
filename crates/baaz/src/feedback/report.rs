@@ -283,7 +283,9 @@ fn screen_line(note: &super::Note) -> String {
     match (&context.right_pane, &context.page_url) {
         (Some(pane), Some(url)) => parts.push(format!("right pane {pane} ({url})")),
         (Some(pane), None) => parts.push(format!("right pane {pane}")),
-        (None, _) => {}
+        // Browse mode's centre page has no right pane: still name the page.
+        (None, Some(url)) => parts.push(format!("page {url}")),
+        (None, None) => {}
     }
     if let Some(section) = &context.settings_section {
         parts.push(format!("Settings → {section}"));
@@ -495,6 +497,16 @@ mod tests {
         assert!(md.contains("Element: `Run 'cargo' now` (Button) in `(unnamed)`"), "{md}");
         assert!(md.contains("Shots: none"), "no shot named when none exist:\n{md}");
         assert!(!md.contains("note-1-crop"), "{md}");
+    }
+
+    #[test]
+    fn a_browse_page_note_names_its_page() {
+        let (mut draft, ended) = golden_draft();
+        draft.notes[1].context.right_pane = None;
+        draft.notes[1].context.page_url = Some("https://example.com/".to_owned());
+        let shots = vec![(String::new(), String::new()); 2];
+        let md = render_markdown(&draft, ended, "t", &shots);
+        assert!(md.contains("page https://example.com/"), "{md}");
     }
 
     #[test]
