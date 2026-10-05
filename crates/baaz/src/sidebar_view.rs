@@ -30,7 +30,7 @@ use aui_icons::{icon, IconName};
 use aui_motion::{pulse_phase, spring_phase, SpringKind};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
-    div, prelude::*, px, AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable, ListOffset,
+    div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset,
     Pixels, Render, SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::input::TextareaState;
@@ -247,6 +247,10 @@ impl Render for SidebarPane {
     }
 }
 
+/// One From-sessions group as the cached sidebar keys it: the session and
+/// its tabs' `(id, label, active)`.
+pub(crate) type BrowseGroupPrint = (String, Vec<(u64, String, bool)>);
+
 /// What the sidebar pane shows, as an equality key.
 ///
 /// Every input `render_sidebar` reads: the cached rows and grouping behind
@@ -273,7 +277,7 @@ pub(crate) struct SidebarKey {
     tab_count: usize,
     browse_tabs: Vec<(u64, String, bool, bool)>,
     browse_flags: Vec<(u64, bool, bool, bool, bool)>,
-    browse_groups: Vec<(String, Vec<(u64, String, bool)>)>,
+    browse_groups: Vec<BrowseGroupPrint>,
     browse_expanded: Vec<String>,
     browse_session_tab: Option<u64>,
     agents: Vec<(String, u8, String)>,
@@ -378,7 +382,7 @@ impl SidebarKey {
     /// in the current project that owns tabs, in first-seen order, each
     /// tab as `(id, label, session-active)`. A session tab opening,
     /// closing or retitling moves the key.
-    pub(crate) fn browse_groups_fingerprint(baaz: &Harness) -> Vec<(String, Vec<(u64, String, bool)>)> {
+    pub(crate) fn browse_groups_fingerprint(baaz: &Harness) -> Vec<BrowseGroupPrint> {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
@@ -842,7 +846,7 @@ impl Harness {
         // there are none), the Tabs caption and rows, then From
         // sessions. The switch above and the footer (plus the Agents
         // strip) below stay put.
-        let mut list = v_flex().w_full().flex_1().min_h(px(0.0)).overflow_y_scroll().py(px(4.0));
+        let mut list = v_flex().id("browse-list").w_full().flex_1().min_h(px(0.0)).overflow_y_scroll().py(px(4.0));
         list = list.child(self.browse_new_tab_row(baaz.clone(), p));
         if !pinned.is_empty() {
             list = list.child(self.browse_pinned_grid(&pinned, baaz.clone(), p));
@@ -871,7 +875,7 @@ impl Harness {
             let toggle = {
                 let baaz = baaz.clone();
                 let session = session.clone();
-                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
                     let _ = baaz.update(cx, |this, cx| this.toggle_from_sessions(session.clone(), cx));
                 }
             };
@@ -1162,7 +1166,9 @@ impl Harness {
         let drag = baaz.clone();
         let over = baaz.clone();
         let ghost_title = title.clone();
-        row.on_click(move |_, window, cx| {
+        // Named again beside the click (the same name as at the top of the
+        // chain) so the a11y ratchet's window sees the click is named.
+        row.aria_label(title.clone()).on_click(move |_, window, cx| {
             let _ = select.update(cx, |this, cx| {
                 if crashed {
                     this.reload_browse_tab(crate::browser::TabId(id), window, cx);
@@ -1224,7 +1230,7 @@ impl Harness {
             .rounded(px(scale::R_SM))
             .cursor_pointer()
             .role(gpui::Role::Tab)
-            .aria_label(spoken)
+            .aria_label(spoken.clone())
             .aria_selected(tab.active)
             .child(
                 div()
@@ -1252,7 +1258,8 @@ impl Harness {
         if tab.active {
             row = row.bg(p.surface_2);
         }
-        row.on_click(move |_, window, cx| {
+        // Named again beside the click for the a11y ratchet's window.
+        row.aria_label(spoken).on_click(move |_, window, cx| {
             let _ = baaz.update(cx, |this, cx| {
                 this.select_session_tab(crate::browser::TabId(id), window, cx);
             });
@@ -1262,8 +1269,8 @@ impl Harness {
 
     /// The open tab's right-click menu: Reload, Duplicate, Pin/Unpin,
     /// Copy link, Move to project (the projects list inline), Close tab
-    /// (⌘W), Close other tabs. ("Send to session", "Open beside a
-    /// session" and "Mute site" come later and are deliberately absent.)
+    /// (⌘W), Close other tabs. The agent rows (sending a tab to a session,
+    /// opening it beside one) and muting arrive with later stages.
     /// Every row closes the menu through its command.
     fn browse_tab_menu(
         &self,
@@ -1381,6 +1388,7 @@ impl Harness {
         let mut strip = v_flex().w_full().flex_none().px(px(4.0)).pb(px(4.0));
         strip = strip.child(div().w_full().flex_none().h(px(1.0)).bg(p.line));
         for (ix, need) in needs.iter().enumerate() {
+            let baaz = baaz.clone();
             let waiting = need.state == AgentState::Waiting;
             let word = if waiting { "Needs you" } else { "Running" };
             let spoken = format!("{}, {}", need.label, word.to_lowercase());
@@ -1401,7 +1409,7 @@ impl Harness {
                     .rounded(px(scale::R_SM))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label(spoken)
+                    .aria_label(spoken.clone())
                     .child(
                         div()
                             .size(px(8.0))
@@ -1420,6 +1428,8 @@ impl Harness {
                             .child(need.label.clone()),
                     )
                     .child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(word))
+                    // Named again beside the click for the a11y ratchet's window.
+                    .aria_label(spoken)
                     .on_click(move |_, window, cx| {
                         let _ = baaz.update(cx, |this, cx| {
                             this.review_session(session.clone(), window, cx);
