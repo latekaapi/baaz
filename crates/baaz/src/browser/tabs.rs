@@ -78,6 +78,10 @@ pub(crate) struct Tab {
     /// ([`now_ms`]); `None` for a tab never shown yet. Drives discard.
     #[serde(default)]
     pub last_shown: Option<u64>,
+    /// A background tab holds a permission ask: the sidebar draws its
+    /// "needs you" dot until the tab is shown (B2a-H5).
+    #[serde(default)]
+    pub needs_attention: bool,
 }
 
 /// How many closed tabs [`Tabs::closed`] keeps for reopen.
@@ -168,6 +172,7 @@ impl Tabs {
             title: url.to_owned(),
             pinned: false,
             last_shown: None,
+            needs_attention: false,
         };
         let at = after
             .and_then(|after| self.tabs.iter().position(|tab| tab.id == after))
@@ -517,6 +522,7 @@ impl Tabs {
                 title: tab.title.clone(),
                 pinned: false,
                 last_shown: None,
+                needs_attention: false,
             },
         );
         self.active.insert(active_key(&tab.owner, tab.space.as_deref()), fresh);
