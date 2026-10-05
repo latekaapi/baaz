@@ -2284,7 +2284,8 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.browser.fake = true;
                 h.browser.tabs_loaded = true;
-                h.browser.tabs.open(None, Owner::Person, "https://example.com", None);
+                let space = h.current_project_id();
+                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
                 h.layout.right_open = true;
                 h.layout.right_kind = Some(RightKind::Browser);
             })
@@ -2308,7 +2309,8 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                h.browser.tabs.open(None, Owner::Person, "https://example.com", None);
+                let space = h.current_project_id();
+                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
             })
         });
         assert!(
@@ -2330,7 +2332,8 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                h.browser.tabs.open(None, Owner::Person, "about:blank", None);
+                let space = h.current_project_id();
+                h.browser.tabs.open(space, Owner::Person, "about:blank", None);
             })
         });
         assert!(
@@ -2339,7 +2342,8 @@ mod tests {
         );
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                h.browser.tabs.open(None, Owner::Person, "", None);
+                let space = h.current_project_id();
+                h.browser.tabs.open(space, Owner::Person, "", None);
             })
         });
         assert!(
@@ -2361,7 +2365,8 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                h.browser.tabs.open(None, Owner::Person, "https://example.com", None);
+                let space = h.current_project_id();
+                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
                 h.settings_page.open = true;
             })
         });
