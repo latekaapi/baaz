@@ -1818,7 +1818,11 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
             MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider => return None,
-            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project => return None,
+            MenuKind::Overflow
+            | MenuKind::ViewOptions
+            | MenuKind::Account
+            | MenuKind::Project
+            | MenuKind::BackHistory => return None,
         };
         Some(
             popover_layer(
@@ -2210,7 +2214,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Overflow
             | MenuKind::ViewOptions
             | MenuKind::Account
-            | MenuKind::Project => Vec::new(),
+            | MenuKind::Project
+            | MenuKind::BackHistory => Vec::new(),
         }
     }
 }

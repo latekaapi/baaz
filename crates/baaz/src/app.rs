@@ -3492,9 +3492,7 @@ impl Harness {
         });
         let back_report = cx.entity().downgrade();
         let back = div()
-            .id("hd-browse-back-tip")
-            .role(gpui::Role::Button)
-            .aria_label("Back")
+            .flex_none()
             .on_children_prepainted(move |bounds, _, cx| {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
@@ -3562,6 +3560,8 @@ impl Harness {
                         .flex_none()
                         .role(gpui::Role::Button)
                         .aria_label(format!("Back to {name}"))
+                        .cursor_pointer()
+                        .on_click(back)
                         .child(
                             h_flex()
                                 .items_center()
@@ -3572,8 +3572,6 @@ impl Harness {
                                 .bg(p.surface_2)
                                 .text_color(p.ink_2)
                                 .ui(scale::FS_12)
-                                .cursor_pointer()
-                                .on_click(back)
                                 .child("↩")
                                 .child(div().truncate().child(name)),
                         )
@@ -3588,6 +3586,9 @@ impl Harness {
             .id("hd-browse-extensions")
             .role(gpui::Role::Button)
             .aria_label("Extensions")
+            .cursor_pointer()
+            // B2a-H5: the extensions menu.
+            .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
             .child(
                 div()
                     .flex_none()
@@ -3597,9 +3598,6 @@ impl Harness {
                     .justify_center()
                     .text_color(p.ink_3)
                     .ui(scale::FS_13)
-                    .cursor_pointer()
-                    // B2a-H5: the extensions menu.
-                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
                     .child("🧩"),
             );
         let more = div()
@@ -3615,9 +3613,12 @@ impl Harness {
                     // B2a-H5: the ⋯ menu.
                     .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
             );
-        let cell = header_cell("hd-browse")
-            .child(div().flex_none().child(self.project_crumb(window, cx)))
-            .children(chip)
+        let mut cell =
+            header_cell("hd-browse").child(div().flex_none().child(self.project_crumb(window, cx)));
+        if let Some(chip) = chip {
+            cell = cell.child(chip);
+        }
+        let cell = cell
             .child(back)
             .child(forward)
             .child(reload)
@@ -3645,7 +3646,11 @@ impl Harness {
         } else {
             None
         };
-        div().relative().w_full().child(cell).children(progress_bar).into_any_element()
+        let mut wrap = div().relative().w_full().child(cell);
+        if let Some(bar) = progress_bar {
+            wrap = wrap.child(bar);
+        }
+        wrap.into_any_element()
     }
 
     /// The address field's live input with its omnibox keys (B2a-H4):
@@ -3653,7 +3658,7 @@ impl Harness {
     /// ever renders it per frame. ↑/↓ move the highlight, Tab completes,
     /// ⌘↵ asks, Escape restores; plain Enter commits through the input's
     /// own PressEnter.
-    fn browse_address_input(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn browse_address_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(input) = self.browse_address.clone() else {
             return div().into_any_element();
         };
@@ -3676,7 +3681,7 @@ impl Harness {
             .min_w(px(0.0))
             .on_key_down(keys)
             .child(
-                a11y_text_input(("browse-address", "field"), "Address and search", &input, cx)
+                a11y_text_input("browse-address-field", "Address and search", &input, cx)
                     .flex_1()
                     .min_w(px(0.0)),
             )
@@ -3753,9 +3758,12 @@ impl Harness {
             });
             slot = slot.child(
                 div()
+                    .id("hd-browse-zoom")
                     .flex_none()
                     .role(gpui::Role::Button)
                     .aria_label(format!("Zoom {pill}, reset"))
+                    .cursor_pointer()
+                    .on_click(reset)
                     .child(
                         div()
                             .px(px(6.0))
@@ -3766,8 +3774,6 @@ impl Harness {
                             .border_1()
                             .border_color(p.line_strong)
                             .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .on_click(reset)
                             .child(pill),
                     )
                     .into_any_element(),
@@ -3787,9 +3793,12 @@ impl Harness {
                 });
                 slot = slot.child(
                     div()
+                        .id("hd-browse-agent")
                         .flex_none()
                         .role(gpui::Role::Button)
                         .aria_label("Agent using this tab")
+                        .cursor_pointer()
+                        .on_click(jump)
                         .child(
                             div()
                                 .px(px(6.0))
@@ -3799,8 +3808,6 @@ impl Harness {
                                 .rounded(px(scale::R_XS))
                                 .bg(p.surface_3)
                                 .text_color(p.ink_2)
-                                .cursor_pointer()
-                                .on_click(jump)
                                 .child("agent using this tab"),
                         )
                         .into_any_element(),
@@ -4228,7 +4235,7 @@ impl Harness {
                 .w(px(480.0))
                 .gap(px(2.0))
                 .child(div().ui(scale::FS_12).text_color(p.ink_3).child("Pick up where you left off"));
-            for (row, target) in pickup {
+            for (index, (row, target)) in pickup.into_iter().enumerate() {
                 let content = h_flex()
                     .w_full()
                     .items_center()
@@ -4246,6 +4253,7 @@ impl Harness {
                         });
                         rows = rows.child(
                             div()
+                                .id(("browse-pickup", index))
                                 .role(gpui::Role::Button)
                                 .aria_label(format!("Open {}", row.title))
                                 .cursor_pointer()
@@ -4260,6 +4268,7 @@ impl Harness {
                         });
                         rows = rows.child(
                             div()
+                                .id(("browse-pickup-session", index))
                                 .role(gpui::Role::Button)
                                 .aria_label(format!("Open {}", row.title))
                                 .cursor_pointer()
@@ -4293,6 +4302,7 @@ impl Harness {
         let p = cx.aui().colors;
         let selected = self.browse_omnibox_selected;
         let mut list = v_flex()
+            .id("browse-omni-list")
             .absolute()
             .top(px(6.0))
             .left(px(12.0))
@@ -4336,8 +4346,6 @@ impl Harness {
                 .px(px(10.0))
                 .h(px(28.0))
                 .ui(scale::FS_13)
-                .cursor_pointer()
-                .on_click(activate)
                 .child(
                     div()
                         .flex_1()
@@ -4357,6 +4365,8 @@ impl Harness {
                     .id(("browse-omni", index))
                     .role(gpui::Role::ListBoxOption)
                     .aria_label(row.suggestion.title.clone())
+                    .cursor_pointer()
+                    .on_click(activate)
                     .child(item),
             );
         }

@@ -140,7 +140,13 @@ impl SessionView {
             }
             // The shell's own menus are rendered and driven by the window,
             // not by the composer: no rows here, no Enter here.
-            Some(MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project) => 0,
+            Some(
+                MenuKind::Overflow
+                | MenuKind::ViewOptions
+                | MenuKind::Account
+                | MenuKind::Project
+                | MenuKind::BackHistory,
+            ) => 0,
             None => 0,
         }
     }
@@ -212,7 +218,11 @@ impl SessionView {
                 }
             }
             // Click-driven by the window; Enter stays with the composer.
-            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project => {}
+            MenuKind::Overflow
+            | MenuKind::ViewOptions
+            | MenuKind::Account
+            | MenuKind::Project
+            | MenuKind::BackHistory => {}
         }
     }
 
