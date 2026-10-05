@@ -41,6 +41,7 @@ use crate::app::Harness;
 use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
+pub(crate) mod chrome;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
 
