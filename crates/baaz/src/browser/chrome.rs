@@ -71,6 +71,12 @@ impl FindStrip {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FindStrips {
     strips: HashMap<TabId, FindStrip>,
+    /// The live-search generation: typing bumps it and arms a 100 ms
+    /// timer, and only the latest generation searches.
+    generation: u64,
+    /// The generation each tab's timer armed: the debounce is per tab, so
+    /// a switch never lets a stale tab's timer search the new one.
+    armed: HashMap<TabId, u64>,
 }
 
 impl FindStrips {
@@ -79,11 +85,33 @@ impl FindStrips {
         self.strips.entry(id).or_default()
     }
 
+    /// Arm the tab's debounce timer: answers the generation the timer
+    /// must still hold when it fires.
+    pub(crate) fn arm(&mut self, id: TabId) -> u64 {
+        self.generation += 1;
+        let generation = self.generation;
+        self.armed.insert(id, generation);
+        generation
+    }
+
+    /// Whether the tab's timer for `generation` may still search: only
+    /// when no newer keystroke (on any tab) armed after it and the tab is
+    /// still the one expecting it.
+    pub(crate) fn armed_current(&self, id: TabId, generation: u64) -> bool {
+        self.generation == generation && self.armed.get(&id) == Some(&generation)
+    }
+
     /// The strip to render for the shown tab, if it stands open.
     pub(crate) fn visible(&self, shown: Option<TabId>) -> Option<(TabId, &FindStrip)> {
         let id = shown?;
         let strip = self.strips.get(&id)?;
         strip.open.then_some((id, strip))
+    }
+
+    /// Whether any tab's strip stands open: the shared find input lives
+    /// while one does, so closing one tab's strip never strands the rest.
+    pub(crate) fn any_open(&self) -> bool {
+        self.strips.values().any(|strip| strip.open)
     }
 
     /// Forget a closed tab's strip.
@@ -94,6 +122,7 @@ impl FindStrips {
     /// Forget every strip whose tab is gone (closed tabs keep nothing).
     pub(crate) fn retain(&mut self, live: &HashSet<TabId>) {
         self.strips.retain(|id, _| live.contains(id));
+        self.armed.retain(|id, _| live.contains(id));
     }
 }
 
@@ -116,44 +145,143 @@ pub(crate) fn permission_capability(kind: &PermissionKind) -> &'static str {
 }
 
 /// The permission strip's sentence: "<origin> wants to <capabilities>".
-/// Several kinds join with commas and a final "and".
+/// One kind keeps its full capability ("use your camera", "know your
+/// location"); several join as nouns ("camera and microphone",
+/// "camera, microphone and location") behind one "use your".
 pub(crate) fn permission_sentence(origin: &str, kinds: &[PermissionKind]) -> String {
-    let capabilities: Vec<&str> = kinds.iter().map(permission_capability).collect();
-    let want = match capabilities.as_slice() {
-        [] => "use a site feature".to_owned(),
-        [only] => (*only).to_owned(),
-        [first, second] => format!("{first} and {second}"),
-        _ => {
-            let (rest, last) = capabilities.split_at(capabilities.len() - 1);
-            format!("{} and {}", rest.join(", "), last[0])
-        }
+    format!("{origin} wants to {}", permission_want(kinds))
+}
+
+/// The ask behind the strip's sentence, without the origin: "use your
+/// camera", "know your location", "use your camera and microphone".
+/// The strip renders the host on its own (bold), then this.
+pub(crate) fn permission_want(kinds: &[PermissionKind]) -> String {
+    if kinds.len() <= 1 {
+        return match kinds.first() {
+            None => "use a site feature".to_owned(),
+            Some(only) => permission_capability(only).to_owned(),
+        };
+    }
+    let nouns: Vec<&str> = kinds.iter().map(permission_noun).collect();
+    let (rest, last) = nouns.split_at(nouns.len() - 1);
+    let joined = if rest.len() == 1 {
+        format!("{} and {}", rest[0], last[0])
+    } else {
+        format!("{} and {}", rest.join(", "), last[0])
     };
-    format!("{origin} wants to {want}")
+    format!("use your {joined}")
+}
+
+/// One asked kind as a noun, for the combined sentence.
+fn permission_noun(kind: &PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Camera => "camera",
+        PermissionKind::Microphone => "microphone",
+        PermissionKind::Geolocation => "location",
+        PermissionKind::Notifications => "notifications",
+        PermissionKind::Clipboard => "clipboard",
+        PermissionKind::Midi => "MIDI devices",
+        PermissionKind::Other(_) => "a connected device",
+    }
 }
 
 /// Origins the person trusted "while visiting": in memory, this run only.
 /// Persistence is B2b.
+///
+/// Keyed by (origin, kind): trusting the camera on an origin never
+/// auto-allows its microphone — only the kinds granted skip the strip.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VisitAllows {
-    origins: HashSet<String>,
+    grants: HashSet<(String, String)>,
 }
 
 impl VisitAllows {
-    /// Trust `origin` for the rest of the run.
-    pub(crate) fn remember(&mut self, origin: &str) {
-        self.origins.insert(origin.to_owned());
+    /// Trust `origin` for `kinds` for the rest of the run.
+    pub(crate) fn remember(&mut self, origin: &str, kinds: &[PermissionKind]) {
+        for kind in kinds {
+            self.grants.insert((origin.to_owned(), permission_kind_key(kind)));
+        }
     }
 
-    /// Whether `origin` was trusted.
-    pub(crate) fn allows(&self, origin: &str) -> bool {
-        self.origins.contains(origin)
+    /// Whether every kind in `kinds` was trusted on `origin`.
+    pub(crate) fn allows_all(&self, origin: &str, kinds: &[PermissionKind]) -> bool {
+        kinds.iter().all(|kind| self.grants.contains(&(origin.to_owned(), permission_kind_key(kind))))
+    }
+
+    /// Drop every grant for `origin`: the tab navigated away or closed.
+    pub(crate) fn revoke_origin(&mut self, origin: &str) {
+        self.grants.retain(|(grant_origin, _)| grant_origin != origin);
     }
 }
 
-/// The host's answer for a pending request: auto-allow trusted origins,
-/// no answer otherwise (the strip asks the person).
-pub(crate) fn auto_answer(origin: &str, allows: &VisitAllows) -> Option<PermissionDecision> {
-    allows.allows(origin).then_some(PermissionDecision::Allow)
+/// The stable key for one asked kind: the grant table's second half.
+pub(crate) fn permission_kind_key(kind: &PermissionKind) -> String {
+    match kind {
+        PermissionKind::Camera => "camera".to_owned(),
+        PermissionKind::Microphone => "microphone".to_owned(),
+        PermissionKind::Geolocation => "geolocation".to_owned(),
+        PermissionKind::Notifications => "notifications".to_owned(),
+        PermissionKind::Clipboard => "clipboard".to_owned(),
+        PermissionKind::Midi => "midi".to_owned(),
+        PermissionKind::Other(bit) => format!("other:{bit}"),
+    }
+}
+
+/// The origin a permission grant is keyed by: `request.origin` must read
+/// as a full origin (scheme + host + port, no path) —
+/// `https://example.com`, never `https://example.com/page`. A host-only
+/// report (`example.com`) borrows the scheme and port from the tab's own
+/// URL, so the grant still names one origin.
+pub(crate) fn normalize_origin(request_origin: &str, tab_url: &str) -> String {
+    if let Some(full) = split_origin(request_origin) {
+        return full;
+    }
+    let host = request_origin.trim().trim_end_matches('/').split('/').next().unwrap_or("").to_owned();
+    if host.is_empty() {
+        return request_origin.to_owned();
+    }
+    let (scheme, port) = split_scheme_port(tab_url);
+    match scheme {
+        Some(scheme) => format!("{scheme}://{host}{port}"),
+        None => host,
+    }
+}
+
+/// `https://example.com:8443/page` to `https://example.com:8443`, or
+/// `None` when `value` carries no scheme (a bare host, empty, a path).
+fn split_origin(value: &str) -> Option<String> {
+    let (scheme, rest) = value.split_once("://")?;
+    if scheme.is_empty() || !scheme.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')) {
+        return None;
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{}://{}", scheme.to_ascii_lowercase(), authority))
+}
+
+/// The scheme and `:port` suffix behind a tab URL's authority, for
+/// host-only permission origins to borrow.
+fn split_scheme_port(tab_url: &str) -> (Option<String>, String) {
+    let Some((scheme, rest)) = tab_url.split_once("://") else {
+        return (None, String::new());
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let port = match authority.split_once(':') {
+        Some((_, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
+            format!(":{port}")
+        }
+        _ => String::new(),
+    };
+    (Some(scheme.to_ascii_lowercase()), port)
+}
+
+/// The host's answer for a pending request: auto-allow only when every
+/// asked kind was trusted on the (normalised) origin, no answer
+/// otherwise (the strip asks the person).
+pub(crate) fn auto_answer(origin: &str, kinds: &[PermissionKind], allows: &VisitAllows) -> Option<PermissionDecision> {
+    allows.allows_all(origin, kinds).then_some(PermissionDecision::Allow)
 }
 
 /// Human bytes: "210 KB", "4.2 MB", "9.8 MB", "1.0 GB". One decimal from
@@ -227,6 +355,74 @@ pub(crate) fn download_line(state: &DownloadState, elapsed_secs: u64) -> String 
 /// How many downloads are still moving.
 pub(crate) fn downloads_active_count(states: &[DownloadState]) -> usize {
     states.iter().filter(|state| state.state == DownloadStatus::Downloading).count()
+}
+
+/// The toolbar badge behind the downloads button: the overall percent
+/// across active downloads with a known total, an indeterminate mark
+/// while any active total is unknown, the tray mark when idle. The
+/// percent sums only known totals and never reads past 100.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DownloadsBadge {
+    /// What the ring reads (`"42%"`, `"…"`, `"↓"`).
+    pub label: String,
+    /// Whether any download is still moving (the accent ring).
+    pub active: bool,
+    /// Whether an active total is unknown (the indeterminate ring).
+    pub indeterminate: bool,
+}
+
+pub(crate) fn downloads_badge(states: &[DownloadState]) -> DownloadsBadge {
+    let mut active = false;
+    let mut unknown = false;
+    let (mut received, mut total) = (0u64, 0u64);
+    for state in states {
+        if state.state != DownloadStatus::Downloading {
+            continue;
+        }
+        active = true;
+        match state.total {
+            Some(known) => {
+                received = received.saturating_add(state.received);
+                total = total.saturating_add(known);
+            }
+            None => unknown = true,
+        }
+    }
+    if !active {
+        return DownloadsBadge { label: "↓".to_owned(), active: false, indeterminate: false };
+    }
+    if unknown || total == 0 {
+        return DownloadsBadge { label: "…".to_owned(), active: true, indeterminate: true };
+    }
+    let pct = received.checked_mul(100).and_then(|scaled| scaled.checked_div(total)).unwrap_or(100).min(100);
+    DownloadsBadge { label: format!("{pct}%"), active: true, indeterminate: false }
+}
+
+/// Whether a popup (or open request) may take the centre: only the shown
+/// tab's own popups may — a foreground ask from a background opener lands
+/// in the background instead.
+pub(crate) fn popup_foreground(requested: bool, opener: TabId, shown: Option<TabId>) -> bool {
+    requested && Some(opener) == shown
+}
+
+/// Whether the downloads popover flag clears this frame: no centre tab,
+/// or an emptied list that already rendered once. A flag that never
+/// rendered stays, so a fresh download's first frame never closes its
+/// own capture.
+pub(crate) fn downloads_flag_clears(centre_shown: bool, empty: bool, rendered: bool) -> bool {
+    !centre_shown || (rendered && empty)
+}
+
+/// The in-flow heights behind the centre page rect: the find and
+/// permission strips are rows above the page, so the stored page rect
+/// starts below them — placement and the mouse-down release share it.
+pub(crate) const FIND_STRIP_PX: f32 = 32.0;
+pub(crate) const PERMISSION_STRIP_PX: f32 = 32.0;
+
+/// How far below the centre column's top the page starts, given which
+/// strips stand open.
+pub(crate) fn strip_stack_px(find_open: bool, permission_open: bool) -> f32 {
+    (if find_open { FIND_STRIP_PX } else { 0.0 }) + (if permission_open { PERMISSION_STRIP_PX } else { 0.0 })
 }
 
 /// The toolbar button's label: "Downloads, 1 active".
@@ -422,28 +618,148 @@ mod tests {
     fn permission_sentence_joins_combined_kinds() {
         assert_eq!(
             permission_sentence("https://call.example/", &[PermissionKind::Camera, PermissionKind::Microphone]),
-            "https://call.example/ wants to use your camera and use your microphone"
+            "https://call.example/ wants to use your camera and microphone"
         );
         assert_eq!(
             permission_sentence(
                 "https://all.example/",
                 &[PermissionKind::Camera, PermissionKind::Microphone, PermissionKind::Geolocation]
             ),
-            "https://all.example/ wants to use your camera, use your microphone and know your location"
+            "https://all.example/ wants to use your camera, microphone and location"
         );
     }
 
     #[test]
     fn allow_while_visiting_auto_answers_repeats() {
+        use PermissionKind::{Camera, Microphone};
         let mut allows = VisitAllows::default();
-        assert_eq!(auto_answer("https://cam.example/", &allows), None, "strangers ask");
-        allows.remember("https://cam.example/");
+        assert_eq!(auto_answer("https://cam.example/", &[Camera], &allows), None, "strangers ask");
+        allows.remember("https://cam.example/", &[Camera]);
         assert_eq!(
-            auto_answer("https://cam.example/", &allows),
+            auto_answer("https://cam.example/", &[Camera], &allows),
             Some(PermissionDecision::Allow),
             "trusted origins auto-allow"
         );
-        assert_eq!(auto_answer("https://other.example/", &allows), None, "trust is per origin");
+        assert_eq!(
+            auto_answer("https://cam.example/", &[Camera, Microphone], &allows),
+            None,
+            "only the granted kinds skip the strip"
+        );
+        assert_eq!(
+            auto_answer("https://other.example/", &[Camera], &allows),
+            None,
+            "trust is per origin"
+        );
+        allows.revoke_origin("https://cam.example/");
+        assert_eq!(
+            auto_answer("https://cam.example/", &[Camera], &allows),
+            None,
+            "navigating away revokes the grant"
+        );
+    }
+
+    #[test]
+    fn permission_origins_normalise_to_full_origins() {
+        assert_eq!(
+            normalize_origin("https://example.com/some/page", "https://example.com/other"),
+            "https://example.com",
+            "paths never join the key"
+        );
+        assert_eq!(
+            normalize_origin("example.com", "https://example.com:8443/app"),
+            "https://example.com:8443",
+            "a host-only report borrows the tab's scheme and port"
+        );
+        assert_eq!(
+            normalize_origin("example.com", "http://example.com/"),
+            "http://example.com",
+            "no port to borrow, none joined"
+        );
+    }
+
+    #[test]
+    fn downloads_badge_reads_known_totals_only() {
+        fn downloading(received: u64, total: Option<u64>) -> DownloadState {
+            DownloadState {
+                id: 1,
+                url: "https://cdn.example/big.zip".to_owned(),
+                file_name: "big.zip".to_owned(),
+                path: "/tmp/big.zip".to_owned(),
+                received,
+                total,
+                state: DownloadStatus::Downloading,
+            }
+        }
+        let idle = downloads_badge(&[]);
+        assert_eq!(idle, DownloadsBadge { label: "↓".to_owned(), active: false, indeterminate: false });
+        let half = downloads_badge(&[downloading(5_000, Some(10_000))]);
+        assert_eq!(half.label, "50%", "known totals percent: {}", half.label);
+        assert!(half.active && !half.indeterminate);
+        let mixed = downloads_badge(&[downloading(5_000, Some(10_000)), downloading(9_000, None)]);
+        assert!(mixed.indeterminate, "an unknown active total reads indeterminate, not a percent");
+        assert_eq!(mixed.label, "…");
+        let over = downloads_badge(&[downloading(12_000, Some(10_000))]);
+        assert_eq!(over.label, "100%", "the badge never reads past 100: {}", over.label);
+        let done = DownloadState { state: DownloadStatus::Complete, ..downloading(10_000, Some(10_000)) };
+        let quiet = downloads_badge(&[done]);
+        assert!(!quiet.active, "landed downloads wear no ring");
+    }
+
+    #[test]
+    fn downloads_flag_clears_only_honestly() {
+        assert!(downloads_flag_clears(false, true, false), "no centre tab clears");
+        assert!(downloads_flag_clears(false, false, false), "no centre tab clears, even with downloads");
+        assert!(downloads_flag_clears(true, true, true), "an emptied list clears once rendered");
+        assert!(!downloads_flag_clears(true, true, false), "a fresh flag survives its first frame");
+        assert!(!downloads_flag_clears(true, false, true), "a listing popover stays");
+    }
+
+    #[test]
+    fn background_openers_cannot_take_the_centre() {
+        let mut tabs = Tabs::default();
+        let shown = tabs.open(None, Owner::Person, "https://a.example/", None);
+        let hidden = tabs.open(None, Owner::Person, "https://b.example/", None);
+        assert!(popup_foreground(true, shown, Some(shown)), "the shown tab's popups may");
+        assert!(
+            !popup_foreground(true, hidden, Some(shown)),
+            "a background opener's foreground ask lands behind"
+        );
+        assert!(!popup_foreground(false, shown, Some(shown)), "background stays background");
+        assert!(!popup_foreground(true, shown, None), "nothing shown, nothing takes it");
+    }
+
+    #[test]
+    fn strip_stack_counts_open_rows() {
+        assert_eq!(strip_stack_px(false, false), 0.0);
+        assert_eq!(strip_stack_px(true, false), FIND_STRIP_PX);
+        assert_eq!(strip_stack_px(true, true), FIND_STRIP_PX + PERMISSION_STRIP_PX);
+    }
+
+    #[test]
+    fn find_debounce_is_per_tab() {
+        let mut tabs = Tabs::default();
+        let first = tabs.open(None, Owner::Person, "https://a.example/", None);
+        let second = tabs.open(None, Owner::Person, "https://b.example/", None);
+        let mut strips = FindStrips::default();
+        let stale = strips.arm(first);
+        let fresh = strips.arm(second);
+        assert!(strips.armed_current(second, fresh), "the latest keystroke searches");
+        assert!(!strips.armed_current(first, stale), "a switch never lets a stale tab search");
+        assert!(!strips.armed_current(first, fresh), "a generation never crosses tabs");
+    }
+
+    #[test]
+    fn shared_find_input_lives_while_any_strip_is_open() {
+        let mut tabs = Tabs::default();
+        let first = tabs.open(None, Owner::Person, "https://a.example/", None);
+        let second = tabs.open(None, Owner::Person, "https://b.example/", None);
+        let mut strips = FindStrips::default();
+        strips.for_tab(first).open();
+        strips.for_tab(second).open();
+        assert!(strips.for_tab(first).close(), "closing one strip stops its search");
+        assert!(strips.any_open(), "the other tab's strip keeps the input alive");
+        assert!(strips.for_tab(second).close());
+        assert!(!strips.any_open(), "the last close drops the input");
     }
 
     #[test]

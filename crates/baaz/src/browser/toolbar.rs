@@ -286,6 +286,22 @@ pub(crate) fn zoom_pill(zoom: u16) -> Option<String> {
     if zoom == 100 { None } else { Some(format!("{zoom}%")) }
 }
 
+/// Chrome's zoom ladder: the ⋯ menu's –/+ steps snap along it, never by
+/// fixed points. The library (`aui_cef`) exposes no snapping of its own,
+/// so the ladder lives here, beside the pill that reads it.
+pub(crate) const ZOOM_LADDER: &[u16] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
+
+/// The next rung along [`ZOOM_LADDER`]: the first rung past `zoom`
+/// (`forward`), or the last rung before it (`!forward`). An off-ladder
+/// zoom snaps to the nearest rung in that direction; the ends hold.
+pub(crate) fn zoom_step(zoom: u16, forward: bool) -> u16 {
+    if forward {
+        ZOOM_LADDER.iter().copied().find(|rung| *rung > zoom).unwrap_or(*ZOOM_LADDER.last().unwrap_or(&zoom))
+    } else {
+        ZOOM_LADDER.iter().copied().rev().find(|rung| *rung < zoom).unwrap_or(*ZOOM_LADDER.first().unwrap_or(&zoom))
+    }
+}
+
 /// What an omnibox suggestion opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SuggestKind {
@@ -831,6 +847,19 @@ mod tests {
     fn zoom_pill_only_off_default() {
         assert_eq!(zoom_pill(100), None);
         assert_eq!(zoom_pill(125).as_deref(), Some("125%"));
+    }
+
+    #[test]
+    fn zoom_steps_follow_chromes_ladder() {
+        assert_eq!(zoom_step(100, true), 110, "plus leaves 100 for 110, never 120");
+        assert_eq!(zoom_step(100, false), 90, "minus leaves 100 for 90, never 80");
+        assert_eq!(zoom_step(110, false), 100);
+        assert_eq!(zoom_step(90, true), 100);
+        assert_eq!(zoom_step(96, true), 100, "off-ladder snaps forward to the next rung");
+        assert_eq!(zoom_step(96, false), 90, "off-ladder snaps back to the rung below");
+        assert_eq!(zoom_step(500, true), 500, "the top rung holds");
+        assert_eq!(zoom_step(25, false), 25, "the bottom rung holds");
+        assert_eq!(zoom_step(400, true), 500);
     }
 
     #[test]
