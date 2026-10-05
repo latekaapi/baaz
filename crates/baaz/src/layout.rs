@@ -180,10 +180,12 @@ impl Mode {
 impl<'de> Deserialize<'de> for Mode {
     /// What [`Mode::parse`] says, falling back to sessions: a stored
     /// mode from a newer build — or a hand-edited file — never fails
-    /// the whole read, it just opens today's Baaz.
+    /// the whole read, it just opens today's Baaz. Anything that is not
+    /// a known mode string (`null`, a number, an object, an unknown
+    /// slug) reads as sessions, so one bad value never fails the file.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Ok(Mode::parse(&text).unwrap_or(Mode::Sessions))
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Mode::parse).unwrap_or(Mode::Sessions))
     }
 }
 
@@ -471,8 +473,13 @@ pub fn read() -> Layout {
 /// Write the store, atomically.
 ///
 /// Best-effort: a store that cannot be written loses a width, which is a
-/// nuisance, and never a session, which would be a loss.
+/// nuisance, and never a session, which would be a loss. A deterministic
+/// capture writes nothing at all: like [`read`], the owner's file must
+/// never gain a capture's widths, modes or per-mode memory.
 pub fn write(layout: &Layout) {
+    if crate::clock::deterministic() {
+        return;
+    }
     if let Ok(text) = serde_json::to_vec_pretty(layout) {
         let _ = crate::store::write_atomic(&path(), &text);
     }
@@ -557,6 +564,24 @@ mod tests {
     #[test]
     fn an_empty_store_opens_at_the_default_width() {
         assert_eq!(sidebar_width(&Layout::default()), aui::shell::SIDEBAR_WIDTH);
+    }
+
+    /// B2a-H2b: the mode reads tolerantly — `null`, a number, an object
+    /// or an unknown slug all open Sessions, and none of them fails the
+    /// whole file.
+    #[test]
+    fn a_non_string_or_unknown_mode_reads_as_sessions() {
+        for raw in ["null", "7", "{\"slug\":\"browse\"}", "\"spaceship\"", "\"browse\""] {
+            let text = format!("{{\"mode\":{raw}}}");
+            let back: Layout = serde_json::from_str(&text)
+                .unwrap_or_else(|_| panic!("mode {raw} must not fail the read"));
+            assert_eq!(
+                back.mode,
+                if raw == "\"browse\"" { Mode::Browse } else { Mode::Sessions },
+                "mode {raw} decodes"
+            );
+        }
+        assert_eq!(Layout::default().mode, Mode::Sessions);
     }
 
     #[test]

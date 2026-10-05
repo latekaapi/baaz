@@ -271,6 +271,35 @@ pub(crate) struct SidebarKey {
     mode: crate::layout::Mode,
     session_count: usize,
     tab_count: usize,
+    browse_tabs: Vec<(u64, String, bool)>,
+}
+
+impl SidebarKey {
+    /// The Browse sidebar's fingerprint: the current project's person
+    /// tabs as `(id, label, active)` triples. A select, a title change
+    /// or an open/close moves the key, so the cached pane repaints.
+    /// B2a-H3 extends this helper with the From-sessions groups; the
+    /// key field stays as is.
+    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, String, bool)> {
+        if !baaz.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = baaz.current_project_id();
+        let active =
+            baaz.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
+        baaz.browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .map(|tab| {
+                (
+                    tab.id.0,
+                    crate::browser::tabs::tab_label(&tab.title, &tab.url),
+                    Some(tab.id) == active,
+                )
+            })
+            .collect()
+    }
 }
 
 impl SidebarKey {
@@ -304,6 +333,7 @@ impl SidebarKey {
         } else {
             0
         };
+        let browse_tabs = Self::browse_tabs_fingerprint(baaz);
         Self {
             visible: Rc::as_ptr(&visible) as usize,
             grouping: Rc::as_ptr(&grouping) as usize,
@@ -315,6 +345,7 @@ impl SidebarKey {
             mode: baaz.mode,
             session_count,
             tab_count,
+            browse_tabs,
         }
     }
 }
@@ -702,8 +733,13 @@ impl Harness {
     /// the left back — inside a clipped column, on the Layout spring
     /// (~220 ms feel). Reduced motion snaps: the spring resolves
     /// instantly, so the body simply appears. The switch and the footer
-    /// stay out of it; only what sits between them moves.
+    /// stay out of it; only what sits between them moves. Collapsed
+    /// (rail) switches never slide: the rail swaps instantly, so the
+    /// offset reads zero while it shows.
     fn mode_slide_offset(&self, window: &mut Window, cx: &mut gpui::App) -> Pixels {
+        if !self.sidebar_open {
+            return px(0.0);
+        }
         let browse = self.mode == crate::layout::Mode::Browse;
         let phase = spring_phase(("mode-slide", "phase"), browse, SpringKind::Layout, window, cx);
         if browse {
@@ -1736,14 +1772,15 @@ impl Harness {
             RailItem::nav("search", IconName::Search),
             RailItem::nav("projects", IconName::Folder),
         ];
-        // The mode toggle, named for the half it goes to: "Browse" from
-        // Sessions, "Sessions" back from Browse (marked current there, the
-        // screen the rail is showing).
-        if self.mode == crate::layout::Mode::Browse {
-            items.push(RailItem::nav("Sessions", IconName::Globe).current(true));
-        } else {
-            items.push(RailItem::nav("Browse", IconName::Globe));
-        }
+        // The mode toggle: one lowercase `mode` cell that flips halves —
+        // "Switch to Browse" from Sessions, "Switch to Sessions" back
+        // from Browse (marked current there, the screen the rail is
+        // showing). The rail library renders nav cells with no label
+        // slot of their own (like the new/search/projects cells), so
+        // those two names are the toggle's documented accessible names
+        // and the sidebar switch's segments own the labelled control.
+        let in_browse = self.mode == crate::layout::Mode::Browse;
+        items.push(RailItem::nav("mode", IconName::Globe).current(in_browse));
         items.push(RailItem::separator());
         // The visible list is already newest-first; pinned rows lead it so
         // the rail keeps what the person keeps.
@@ -1791,8 +1828,7 @@ impl Harness {
             // header search icon and ⌘⇧F.
             "search" => this.open_search(window, cx),
             "projects" => this.open_projects(false, window, cx),
-            "Browse" => this.set_mode(crate::layout::Mode::Browse, window, cx),
-            "Sessions" => this.set_mode(crate::layout::Mode::Sessions, window, cx),
+            "mode" => this.toggle_browse_mode(window, cx),
             "account" => this.open_menu(MenuKind::Account, cx),
             _ => {}
         });

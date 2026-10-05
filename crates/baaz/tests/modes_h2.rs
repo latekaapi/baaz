@@ -119,12 +119,12 @@ fn sidebar_carries_the_switch_and_the_slide() {
     assert!(sidebar.contains("mode.label(), count"), "each segment names its count");
     assert!(sidebar.contains("aria_selected(selected)"), "segments carry selected state");
     assert!(
-        sidebar.contains("RailItem::nav(\"Browse\", IconName::Globe)"),
-        "the rail toggles to Browse"
+        sidebar.contains("RailItem::nav(\"mode\", IconName::Globe)"),
+        "the rail toggle is one lowercase mode cell"
     );
     assert!(
-        sidebar.contains("RailItem::nav(\"Sessions\", IconName::Globe)"),
-        "the rail toggles back to Sessions"
+        sidebar.contains("\"Switch to Browse\"") && sidebar.contains("\"Switch to Sessions\""),
+        "the toggle names both directions"
     );
     assert!(
         sidebar.contains("SpringKind::Layout, window, cx"),
