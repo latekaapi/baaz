@@ -416,6 +416,9 @@ pub(crate) fn cleanup_screenshots() {
     }
 }
 
+/// One live permission ask as the router reads it: id, origin, kinds.
+type LiveAsk = (u64, String, Vec<aui_webview::PermissionKind>);
+
 impl Harness {
     /// The registry key whose webview the pane shows: the active session's
     /// id, or the home key with no session open.
@@ -2846,7 +2849,7 @@ impl Harness {
     /// the shown tab's live asks, so a page dismissal drops it with no
     /// Baaz state to clear.
     fn route_browse_permissions(&mut self, shown: Option<TabId>, mark_background: bool, cx: &mut Context<Self>) {
-        let live: Vec<(TabId, Vec<(u64, String, Vec<aui_webview::PermissionKind>)>)> = self
+        let live: Vec<(TabId, Vec<LiveAsk>)> = self
             .browser
             .states
             .iter()
