@@ -195,16 +195,6 @@ fn is_loopback_host(host: &str) -> bool {
 /// `ftp:`), except `host:port` (`localhost:3000`), which still navigates.
 /// Bare loopbacks (`localhost`, `localhost:3000`, `[::1]:3000`,
 /// `127.0.0.1:8080`) earn `http://`, everything else `https://`.
-///
-/// The search engine is [`SearchEngine::Google`] here; the window's
-/// commit path reads the Settings engine through
-/// [`classify_address_input_with`].
-pub(crate) fn classify_address_input(text: &str) -> NavTarget {
-    classify_address_input_with(text, SearchEngine::Google)
-}
-
-/// Decide what Enter on `text` does with `engine`: the contract above,
-/// with searches landing on that engine instead of Google.
 pub(crate) fn classify_address_input_with(text: &str, engine: SearchEngine) -> NavTarget {
     let typed = text.trim();
     if typed.is_empty() {
@@ -773,45 +763,45 @@ mod tests {
     #[test]
     fn enter_decides_url_vs_search() {
         assert_eq!(
-            classify_address_input("example.com"),
+            classify_address_input_with("example.com", SearchEngine::Google),
             NavTarget::Url("https://example.com".to_owned())
         );
         assert_eq!(
-            classify_address_input("localhost:3000"),
+            classify_address_input_with("localhost:3000", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000".to_owned())
         );
         assert_eq!(
-            classify_address_input("  https://x.y/z  "),
+            classify_address_input_with("  https://x.y/z  ", SearchEngine::Google),
             NavTarget::Url("https://x.y/z".to_owned())
         );
         assert_eq!(
-            classify_address_input("file:///tmp/a.html"),
+            classify_address_input_with("file:///tmp/a.html", SearchEngine::Google),
             NavTarget::Url("file:///tmp/a.html".to_owned())
         );
         assert_eq!(
-            classify_address_input("foo bar"),
+            classify_address_input_with("foo bar", SearchEngine::Google),
             NavTarget::Search(SearchEngine::Google.search_url("foo bar"))
         );
     }
 
     #[test]
     fn enter_edge_cases() {
-        assert_eq!(classify_address_input(""), NavTarget::Search(String::new()), "empty restores");
+        assert_eq!(classify_address_input_with("", SearchEngine::Google), NavTarget::Search(String::new()), "empty restores");
         assert_eq!(
-            classify_address_input("  "),
+            classify_address_input_with("  ", SearchEngine::Google),
             NavTarget::Search(String::new()),
             "blank restores"
         );
         assert!(
-            matches!(classify_address_input("foo"), NavTarget::Search(_)),
+            matches!(classify_address_input_with("foo", SearchEngine::Google), NavTarget::Search(_)),
             "a bare word searches"
         );
         assert_eq!(
-            classify_address_input("localhost:3000/a/b"),
+            classify_address_input_with("localhost:3000/a/b", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000/a/b".to_owned())
         );
         assert_eq!(
-            classify_address_input("about:blank"),
+            classify_address_input_with("about:blank", SearchEngine::Google),
             NavTarget::Url("about:blank".to_owned())
         );
     }
@@ -942,7 +932,11 @@ mod tests {
             ("foo bar", search("foo bar")),
         ];
         for (input, expected) in cases {
-            assert_eq!(&classify_address_input(input), expected, "classify {input:?}");
+            assert_eq!(
+                &classify_address_input_with(input, SearchEngine::Google),
+                expected,
+                "classify {input:?}"
+            );
         }
     }
 
@@ -1045,10 +1039,14 @@ mod tests {
         // `https://` prefix — while a host with a numeric port still does.
         let search = |query: &str| NavTarget::Search(SearchEngine::Google.search_url(query));
         for input in ["ms-settings:privacy", "MS-SETTINGS:privacy", "ftp:files", "gopher:hole"] {
-            assert_eq!(classify_address_input(input), search(input), "classify {input:?}");
+            assert_eq!(
+                classify_address_input_with(input, SearchEngine::Google),
+                search(input),
+                "classify {input:?}"
+            );
         }
         assert_eq!(
-            classify_address_input("localhost:3000"),
+            classify_address_input_with("localhost:3000", SearchEngine::Google),
             NavTarget::Url("http://localhost:3000".to_owned()),
             "a numeric port still reads as a host"
         );
@@ -1059,5 +1057,67 @@ mod tests {
         let view = address_view("https://EXAMPLE.COM/Docs", PageSecurity::Secure, false);
         assert_eq!(view.host, "example.com", "the bright host reads lowercased");
         assert_eq!(view.path, "/Docs", "the quiet path keeps its case");
+    }
+
+    /// B2a-H6: every engine builds its own search URL — names, slugs
+    /// and parse round-trip, and queries encode the same everywhere.
+    #[test]
+    fn search_engines_build_their_own_urls() {
+        assert_eq!(SearchEngine::default(), SearchEngine::Google);
+        assert_eq!(
+            SearchEngine::ALL.map(|engine| engine.slug()),
+            ["google", "duckduckgo", "bing", "kagi"]
+        );
+        assert_eq!(
+            SearchEngine::ALL.map(|engine| engine.name()),
+            ["Google", "DuckDuckGo", "Bing", "Kagi"]
+        );
+        assert_eq!(SearchEngine::parse("Google"), Some(SearchEngine::Google));
+        assert_eq!(SearchEngine::parse(" duckduckgo "), Some(SearchEngine::DuckDuckGo));
+        assert_eq!(SearchEngine::parse("BING"), Some(SearchEngine::Bing));
+        assert_eq!(SearchEngine::parse("kagi"), Some(SearchEngine::Kagi));
+        assert_eq!(SearchEngine::parse("yahoo"), None);
+        assert_eq!(
+            SearchEngine::Google.search_url("foo bar"),
+            "https://www.google.com/search?q=foo%20bar"
+        );
+        assert_eq!(
+            SearchEngine::DuckDuckGo.search_url("foo bar"),
+            "https://duckduckgo.com/?q=foo%20bar"
+        );
+        assert_eq!(
+            SearchEngine::Bing.search_url("a/b?c"),
+            "https://www.bing.com/search?q=a%2Fb%3Fc"
+        );
+        assert_eq!(SearchEngine::Kagi.search_url("foo bar"), "https://kagi.com/search?q=foo%20bar");
+    }
+
+    /// B2a-H6: Enter searches the Settings engine — URLs never touch it.
+    #[test]
+    fn classify_with_engine_searches_there() {
+        assert_eq!(
+            classify_address_input_with("foo bar", SearchEngine::Kagi),
+            NavTarget::Search("https://kagi.com/search?q=foo%20bar".to_owned())
+        );
+        assert_eq!(
+            classify_address_input_with("example.com", SearchEngine::Bing),
+            NavTarget::Url("https://example.com".to_owned()),
+            "a host navigates whatever the engine"
+        );
+        assert_eq!(
+            classify_address_input_with("", SearchEngine::DuckDuckGo),
+            NavTarget::Search(String::new()),
+            "empty still restores"
+        );
+    }
+
+    /// B2a-H6: the omnibox's engine row names the Settings engine and
+    /// loads its URL.
+    #[test]
+    fn omnibox_engine_row_names_the_settings_engine() {
+        let rows = rank_omnibox("ledger", &[], &[], &[], SearchEngine::DuckDuckGo);
+        let last = rows.last().expect("a query always ranks the engine row");
+        assert_eq!(last.suggestion.title, "Search with DuckDuckGo for ledger");
+        assert_eq!(last.target, OmniTarget::Search("https://duckduckgo.com/?q=ledger".to_owned()));
     }
 }

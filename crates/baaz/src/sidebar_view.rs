@@ -38,6 +38,9 @@ use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::AccountStateKind;
 
 use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
+/// The sidebar tab drag, shared with the horizontal strip's chips so a
+/// drag reorders from either side.
+use crate::browser::BrowseTabDrag;
 use crate::login::Auth;
 use crate::overlays::MenuKind;
 use crate::sidebar::{Grouping, SessionEntry};
@@ -279,6 +282,7 @@ pub(crate) struct SidebarKey {
     tab_count: usize,
     browse_tabs: Vec<(u64, bool, bool)>,
     tabs_generation: u64,
+    tabs_layout: crate::layout::BrowserTabs,
     browse_flags: Vec<(u64, bool, bool, bool, bool)>,
     browse_groups: Vec<BrowseGroupPrint>,
     browse_expanded: Vec<String>,
@@ -288,17 +292,17 @@ pub(crate) struct SidebarKey {
 }
 
 /// One person tab the Browse sidebar draws, with the live page facts
-/// behind its row state.
+/// behind its row state. Shared with the horizontal strip's chips.
 pub(crate) struct BrowseTabSnap {
-    id: crate::browser::TabId,
-    title: String,
-    initial: String,
-    active: bool,
-    pinned: bool,
-    loading: bool,
-    audible: bool,
-    crashed: bool,
-    discarded: bool,
+    pub(crate) id: crate::browser::TabId,
+    pub(crate) title: String,
+    pub(crate) initial: String,
+    pub(crate) active: bool,
+    pub(crate) pinned: bool,
+    pub(crate) loading: bool,
+    pub(crate) audible: bool,
+    pub(crate) crashed: bool,
+    pub(crate) discarded: bool,
 }
 
 /// One session tab under From sessions, still owned by its session.
@@ -445,13 +449,9 @@ pub(crate) fn agents_needing_review(
         .collect()
 }
 
-/// The sidebar tab drag: the dragged person tab's id. Tab rows accept
-/// drops of exactly this type and reorder before the drop row.
-#[derive(Clone, Copy)]
-struct BrowseTabDrag(crate::browser::TabId);
-
-/// The drag ghost: the dragged tab's title on a raised chip.
-struct BrowseTabGhost(String);
+/// The drag ghost: the dragged tab's title on a raised chip. Shared
+/// with the horizontal strip's chips, which drag the same payload.
+pub(crate) struct BrowseTabGhost(pub(crate) String);
 
 impl Render for BrowseTabGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -533,6 +533,7 @@ impl SidebarKey {
             tab_count,
             browse_tabs,
             tabs_generation,
+            tabs_layout: baaz.layout.browser_tabs,
             browse_flags,
             browse_groups,
             browse_expanded,
@@ -874,27 +875,44 @@ impl Harness {
         let snaps = self.browse_person_snaps(cx);
         let (pinned, unpinned): (Vec<BrowseTabSnap>, Vec<BrowseTabSnap>) =
             snaps.into_iter().partition(|snap| snap.pinned);
+        // B2a-H6: horizontal shows the tabs in the strip above the page,
+        // so the sidebar keeps only New tab and From sessions (no Tabs
+        // list) — the Agents strip below is untouched either way.
+        let show_tabs = self.layout.browser_tabs == crate::layout::BrowserTabs::Vertical;
         // The scrollable middle: New tab, the pinned grid (hidden when
         // there are none), the Tabs caption and rows, then From
         // sessions. The switch above and the footer (plus the Agents
         // strip) below stay put.
         let mut list = v_flex().id("browse-list").w_full().flex_1().min_h(px(0.0)).overflow_y_scroll().py(px(4.0));
         list = list.child(self.browse_new_tab_row(baaz.clone(), p));
-        if !pinned.is_empty() {
-            list = list.child(self.browse_pinned_grid(&pinned, baaz.clone(), p));
-        }
-        list = list.child(group_row("browse-tabs", "Tabs"));
-        for snap in &unpinned {
-            let drop_line = self.browse_drop_target == Some(snap.id);
-            if drop_line {
-                list = list.child(div().w_full().flex_none().h(px(2.0)).bg(p.accent));
+        if show_tabs {
+            if !pinned.is_empty() {
+                list = list.child(self.browse_pinned_grid(&pinned, baaz.clone(), p));
             }
-            list = list.child(self.browse_tab_row(snap, false, baaz.clone(), p));
+            // The caption's own box, so the drawn tests can seat the
+            // Tabs list's presence on something the library's row does
+            // not register.
+            list = list.child(
+                div()
+                    .id("browse-tabs-caption")
+                    .debug_selector(|| "browse-tabs-caption".into())
+                    .w_full()
+                    .flex_none()
+                    .child(group_row("browse-tabs", "Tabs")),
+            );
+            for snap in &unpinned {
+                let drop_line = self.browse_drop_target == Some(snap.id);
+                if drop_line {
+                    list = list.child(div().w_full().flex_none().h(px(2.0)).bg(p.accent));
+                }
+                list = list.child(self.browse_tab_row(snap, false, baaz.clone(), p));
+            }
         }
         // The drop-at-end slot below the last row: a drag resting past
         // every row lands here and appends at the end. Quiet (8 px) until
-        // armed, then the same 2 px accent line the rows draw.
-        {
+        // armed, then the same 2 px accent line the rows draw. Only with
+        // the Tabs list: the strip carries its own end slot.
+        if show_tabs {
             let end_armed = self.browse_drop_at_end;
             let end_over = baaz.clone();
             let end_drop = baaz.clone();
@@ -972,8 +990,10 @@ impl Harness {
     }
 
     /// The current project's person tabs with the live page facts
-    /// behind each row's state, in display order (pinned first).
-    fn browse_person_snaps(&self, cx: &gpui::App) -> Vec<BrowseTabSnap> {
+    /// behind each row's state, in display order (pinned first). Shared
+    /// with the horizontal strip's chips, which show the same states
+    /// compact.
+    pub(crate) fn browse_person_snaps(&self, cx: &gpui::App) -> Vec<BrowseTabSnap> {
         if !self.browser.tabs_loaded {
             return Vec::new();
         }
@@ -1057,6 +1077,7 @@ impl Harness {
         let _ = p;
         div()
             .id("browse-new-tab-button")
+            .debug_selector(|| "browse-new-tab-button".into())
             .w_full()
             .flex_none()
             .role(gpui::Role::Button)

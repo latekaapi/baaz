@@ -114,6 +114,7 @@
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
+//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`browser-tabs=horizontal\|vertical`, `search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values record a step failure, free |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
@@ -334,6 +335,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
+    WindowVerb { verb: "settings-set", run: |this, rest, _, cx| this.step_settings_set(rest, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },
