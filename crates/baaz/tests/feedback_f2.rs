@@ -7,7 +7,7 @@
 //! pins is the shipped wiring, by *executing* the artifacts rather than
 //! reading their text: the probe module loads at runtime and its entry
 //! table — the data structure a probe run actually dispatches on — drives
-//! the renamed `feedback-mode:` window verb onto the bar and the pill, with
+//! the renamed `feedback-mode:` window verb onto the header slot, with
 //! no bare `feedback:` window step left to shadow the session verb.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("uiprobe", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-print(json.dumps({"bar": module.ENTRIES["feedback-bar"], "pill": module.ENTRIES["feedback-pill"], "all": module.ENTRIES}))
+print(json.dumps({"active": module.ENTRIES["feedback-header-active"], "paused": module.ENTRIES["feedback-header-paused"], "all": module.ENTRIES}))
 "#;
     let output = Command::new("python3")
         .arg("-c")
@@ -52,22 +52,46 @@ fn shot_steps(entry: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// The bar entry enters Active through the renamed window verb, and the
-/// pill entry pauses through it: exact `--steps` payloads, read off the
-/// runtime table.
+/// The exact `--steps` payload an entry passes to baaz.
+fn steps_arg(entry: &serde_json::Value) -> String {
+    let args = shot_steps(entry);
+    let mut steps = String::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--steps" {
+            steps = args.next().cloned().unwrap_or_default();
+        }
+    }
+    assert!(!steps.is_empty(), "entry carries a --steps payload: {args:?}");
+    steps
+}
+
+/// The header entries drive the header slot through the renamed window
+/// verb: Active enters through `feedback-mode:on`, Paused pauses with a
+/// note in the draft — exact `--steps` payloads, read off the runtime
+/// table.
 #[test]
 fn probe_entries_drive_feedback_mode_steps() {
     let entries = probe_entries();
-    let bar = shot_steps(&entries["bar"]);
-    assert!(
-        bar.contains(&"--steps".to_owned()) && bar.contains(&"feedback-mode:on".to_owned()),
-        "feedback-bar drives feedback-mode:on, got: {bar:?}"
+    assert_eq!(
+        steps_arg(&entries["active"]),
+        "feedback-mode:on",
+        "feedback-header-active enters Active",
     );
-    let pill = shot_steps(&entries["pill"]);
-    assert!(
-        pill.contains(&"feedback-mode:on;feedback-mode:pause".to_owned()),
-        "feedback-pill drives on then pause, got: {pill:?}"
+    assert_eq!(
+        steps_arg(&entries["paused"]),
+        "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:x;feedback-mode:pause",
+        "feedback-header-paused pauses with a note in the draft",
     );
+}
+
+/// The old floating chrome is gone: no entry drives a bar or a pill.
+#[test]
+fn no_entry_drives_the_removed_bar_or_pill() {
+    let entries = probe_entries();
+    let all = entries["all"].as_object().expect("ENTRIES is a table");
+    assert!(!all.contains_key("feedback-bar"), "the Active bar entry is gone");
+    assert!(!all.contains_key("feedback-pill"), "the Paused pill entry is gone");
 }
 
 /// No probe step uses the bare `feedback:` window verb (it would shadow

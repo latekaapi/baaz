@@ -242,14 +242,15 @@ ENTRIES = {
     # generate on main after merge, never to silence a finding.
     "settings-general":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:general"]},
-    # F2 feedback mode shell: the bar while Active (`feedback-mode:on`
-    # parks the run-only flag and enters Active) and the pill after
-    # `feedback-mode:pause`. Offline, idempotent. No baseline yet —
-    # generate on main after merge, never to silence a finding.
-    "feedback-bar":         {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on"]},
-    "feedback-pill":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:pause"]},
+    # F2 feedback mode shell: the header slot while Active
+    # (`feedback-mode:on` parks the run-only flag and enters Active) and
+    # paused with a note in the draft (`feedback-mode:pause` after a click
+    # and a note). Offline, idempotent. No baseline yet — generate on
+    # main after merge, never to silence a finding.
+    "feedback-header-active": {"shot": ["--no-connect", "--login", "signed-in",
+                                        "--steps", "feedback-mode:on"]},
+    "feedback-header-paused": {"shot": ["--no-connect", "--login", "signed-in",
+                                        "--steps", "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:x;feedback-mode:pause"]},
     # F3 feedback commenting: `feedback-hover` names the header's project
     # button under the outline, `feedback-note` leaves its note popover
     # open, `feedback-pins` saves two notes (an element and a dragged

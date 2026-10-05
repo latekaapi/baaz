@@ -551,7 +551,7 @@ mod find;
 pub(crate) mod lifecycle;
 mod list;
 mod titles;
-/// F2 feedback mode shell (setting, ⌃⌥⌘F, bar + pill, Done). Included by
+/// F2 feedback mode shell (setting, ⌃⌥⌘F, header slot, Done). Included by
 /// path so `feedback/mod.rs` — F1's frozen model/report API — stays
 /// untouched.
 #[path = "feedback/ui.rs"]
@@ -3894,8 +3894,9 @@ impl Harness {
         if let Some(downloads) = downloads {
             cell = cell.child(downloads);
         }
-        // F3c: the Paused feedback pill (or the Done confirmation), just
-        // left of the header icon buttons — the region pages never cover.
+        // R2: the feedback header slot (toggle icon, count, Done and
+        // Discard — or the Done confirmation), just left of the header
+        // icon buttons — the region pages never cover.
         if let Some(slot) = self.render_feedback_header_slot(cx) {
             cell = cell.child(slot);
         }
@@ -4994,8 +4995,9 @@ impl Harness {
             .child(self.browse_forward_button(cx))
             .child(self.browse_reload_button(cx))
             .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx));
-        // F3c: the Paused feedback pill (or the Done confirmation), just
-        // left of the header icon buttons — the region pages never cover.
+        // R2: the feedback header slot (toggle icon, count, Done and
+        // Discard — or the Done confirmation), just left of the header
+        // icon buttons — the region pages never cover.
         let row = match self.render_feedback_header_slot(cx) {
             Some(slot) => row.child(slot),
             None => row,
@@ -5619,7 +5621,8 @@ impl Harness {
             }
         }
         let title: AnyElement = title.into_any_element();
-        // F3c: the Paused feedback pill (or the Done confirmation) sits
+        // R2: the feedback header slot (toggle icon, count, Done and
+        // Discard — or the Done confirmation) sits
         // here, just left of the header icon buttons — the one header
         // region native pages never cover.
         let feedback_slot = self.render_feedback_header_slot(cx);
@@ -7384,14 +7387,13 @@ impl Render for Harness {
             self.render_login(window, cx).into_any_element()
         };
         let dialog = self.render_dialog(window, cx);
-        // F2: the feedback capture layer (Active only) under its chrome
-        // (bar while Active, pill while Paused); both paint above the
-        // palette, dialog, settings and menus, with only toasts above them
-        // (and toasts hide while a capture reads the window). F3 adds the
-        // note popover as a sibling of the layer, never inside its key
-        // context, so typing and Escape reach the note.
+        // F2: the feedback capture layer (Active only); it paints above
+        // the palette, dialog, settings and menus, with only toasts above
+        // it (and toasts hide while a capture reads the window). The
+        // chrome lives in the header slot instead — no floating bar. F3
+        // adds the note popover as a sibling of the layer, never inside
+        // its key context, so typing and Escape reach the note.
         let feedback_layer = self.render_feedback_layer(window, cx);
-        let feedback_chrome = self.render_feedback_chrome(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
@@ -7753,13 +7755,11 @@ impl Render for Harness {
                 .children(account)
                 .children(project_menu)
                 .children(tab_menu)
-                // F2: the feedback capture layer and its chrome (bar while
-                // Active, pill while Paused) paint above the palette,
+                // F2: the feedback capture layer paints above the palette,
                 // dialog, settings and menus, so the layer truly covers
                 // them; only toasts stay above the shell. F3's note popover
-                // rides with them, as the layer's sibling.
+                // rides with it, as the layer's sibling.
                 .children(feedback_layer)
-                .children(feedback_chrome)
                 .children(feedback_popover)
                 .children(toasts)
                 // Painted last: the whole-frame instrument's end. Zero-size,
