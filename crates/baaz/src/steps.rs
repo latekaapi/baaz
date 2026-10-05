@@ -57,7 +57,8 @@
 //! | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
 //! | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
 //! | `choose:<n>` | the n-th choice of the newest pending approval |
-//! | `feedback:<on\\|pause\\|resume\\|off\\|discard\\|done>` | feedback mode shell: `on` turns the setting on for this run and enters Active, `pause`/`resume` move, `off` parks keeping the draft, `discard` clears it, `done` saves; any other text types into the open session's feedback or clarify field instead, free |
+//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; an unknown sub records a step failure, free |
+//! | `feedback:<text>` | type into the open session's approval feedback or question clarify field, without sending, free |
 //! | `answer:<label>` | pick one option on the newest question and send |
 //! | `answers:<a\|b>` | pick several options on the newest question and send |
 //! | `clarify:<text>` | "Explain instead"; with no text, only opens the field |
@@ -348,7 +349,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "settings-set", run: |this, rest, _, cx| this.step_settings_set(rest, cx) },
-    WindowVerb { verb: "feedback", run: |this, rest, window, cx| this.step_feedback(rest, window, cx) },
+    WindowVerb { verb: "feedback-mode", run: |this, rest, window, cx| this.step_feedback(rest, window, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },

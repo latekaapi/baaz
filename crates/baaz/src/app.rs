@@ -7339,7 +7339,8 @@ impl Render for Harness {
         };
         let dialog = self.render_dialog(window, cx);
         // F2: the feedback capture layer (Active only) under its chrome
-        // (bar while Active, pill while Paused), both under toasts.
+        // (bar while Active, pill while Paused); both paint above the
+        // palette, dialog, settings and menus, with only toasts above them.
         let feedback_layer = self.render_feedback_layer(cx);
         let feedback_chrome = self.render_feedback_chrome(cx);
         let settings = self.render_settings(cx);
@@ -7633,9 +7634,6 @@ impl Render for Harness {
                 })
                 .child(body)
                 .children(capture)
-                .children(feedback_layer)
-                .children(feedback_chrome)
-                .children(toasts)
                 .children(palette)
                 .children(dialog)
                 .children(settings)
@@ -7647,6 +7645,13 @@ impl Render for Harness {
                 .children(account)
                 .children(project_menu)
                 .children(tab_menu)
+                // F2: the feedback capture layer and its chrome (bar while
+                // Active, pill while Paused) paint above the palette,
+                // dialog, settings and menus, so the layer truly covers
+                // them; only toasts stay above the shell.
+                .children(feedback_layer)
+                .children(feedback_chrome)
+                .children(toasts)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
                 .child(session::draw_end_marker()),

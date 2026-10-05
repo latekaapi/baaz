@@ -155,14 +155,52 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
 /// Panics on an unknown action name, so a row that names no real action
 /// fails loudly instead of registering nothing.
+///
+/// Past the table rows, every app-level keystroke (a [`KEYMAP`] row in
+/// [`aui::keys::ROOT_CONTEXT`] or with no context, except `ToggleFeedback`
+/// and `QuitApp`, plus the library's own [`AUI_ROOT_KEYS`]) also binds
+/// `NoAction` in [`crate::app::feedback_ui::FEEDBACK_CONTEXT`]: the capture
+/// layer hangs deeper than `AuiRoot`, so while it holds focus the deeper
+/// row wins and consumes the key — the same mechanism the `BaazTerminal`
+/// rows use. Generated, never hand-listed, so a future root shortcut is
+/// covered automatically. `ToggleFeedback` still pauses from the layer and
+/// `QuitApp` stays global. These rows are not [`KEYMAP`] rows, so the
+/// Settings Shortcuts section (built from the table) never lists them.
 pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
-    KEYMAP
+    let mut bindings: Vec<gpui::KeyBinding> = KEYMAP
         .iter()
         .map(|entry| {
             binding_for_action(entry.action, entry.keystroke, entry.context)
                 .unwrap_or_else(|| panic!("keymap table names an unknown action: {}", entry.action))
         })
-        .collect()
+        .collect();
+    let feedback = crate::app::feedback_ui::FEEDBACK_CONTEXT;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut swallow = |keystroke: &'static str| {
+        if seen.contains(&keystroke) {
+            return;
+        }
+        seen.push(keystroke);
+        bindings.push(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, Some(feedback)));
+    };
+    for entry in KEYMAP {
+        let app_level = match entry.context {
+            None => true,
+            Some(context) => context == aui::keys::ROOT_CONTEXT,
+        };
+        if !app_level || entry.action == "ToggleFeedback" || entry.action == "QuitApp" {
+            continue;
+        }
+        swallow(entry.keystroke);
+    }
+    for keystroke in AUI_ROOT_KEYS {
+        swallow(keystroke);
+    }
+    // Tab / Shift-Tab move focus (`FocusNext` / `FocusPrev`); while the
+    // layer holds it they must stay on the layer too.
+    swallow("tab");
+    swallow("shift-tab");
+    bindings
 }
 
 /// One [`gpui::KeyBinding`] for a table action name, or `None` when the name
