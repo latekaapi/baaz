@@ -1809,6 +1809,24 @@ impl Harness {
         }
     }
 
+    /// Record the feedback header slot's window bounds, notifying whenever
+    /// they first arrive or CHANGE: entering Active widens the slot
+    /// leftwards (and resizes, mode switches and sidebar toggles move it),
+    /// and the floating copy must reseat instead of ghosting at the old
+    /// origin. Steady bounds never schedule work of their own. Slot-only —
+    /// the other triggers keep [`Self::note_trigger_bounds`].
+    pub(crate) fn note_slot_bounds(
+        slot: &mut Option<Bounds<Pixels>>,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Harness>,
+    ) {
+        let changed = *slot != Some(bounds);
+        *slot = Some(bounds);
+        if changed {
+            cx.notify();
+        }
+    }
+
     /// The current project: the open session's project, else the last used —
     /// else the most recently opened adoption whose root is on disk. A
     /// missing root is never current, but stays adopted.
@@ -7349,7 +7367,7 @@ impl Render for Harness {
         // R2b: while Active the slot's second copy floats here, right above
         // the capture layer (which would otherwise swallow its clicks), at
         // the in-header copy's recorded bounds.
-        let feedback_slot_overlay = self.render_feedback_slot_overlay(cx);
+        let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
