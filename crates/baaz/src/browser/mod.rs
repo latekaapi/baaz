@@ -999,6 +999,11 @@ impl Harness {
             crate::steps::record_step_failure("tab-new:");
             return;
         }
+        // A real page opening ends any open address edit (the blank tab
+        // entering Browse opens one), exactly as selecting a tab does.
+        if url != BLANK {
+            self.leave_browse_address(window, cx);
+        }
         self.ensure_tabs_loaded(cx);
         // B2a-H2b: in Browse a new tab is always the person's, even with
         // a session open behind the mode — the session's tabs belong to
