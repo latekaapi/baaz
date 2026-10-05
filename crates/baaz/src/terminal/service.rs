@@ -502,6 +502,22 @@ impl TerminalService {
         self.shared.browsers.lock().expect("browser registry").insert(session.to_owned(), state);
     }
 
+    /// Forget `session`'s webview for `browser_*` tools. Called on the UI
+    /// thread when the session's last tab closes (and defensively when a
+    /// registered page is discarded), so a closed tab stays dead through
+    /// the agent tools. Idempotent; unknown sessions remove nothing.
+    pub fn unregister_browser(&self, session: &str) {
+        self.shared.browsers.lock().expect("browser registry").remove(session);
+    }
+
+    /// The webview `browser_*` tools currently act on for `session`, if
+    /// one is registered. Test-only: the tab switch test pins that the
+    /// agent registration follows the active tab.
+    #[cfg(test)]
+    pub(crate) fn test_browser_state(&self, session: &str) -> Option<Entity<WebviewState>> {
+        self.shared.browsers.lock().expect("browser registry").get(session).cloned()
+    }
+
     /// Remember that `from` (a provider open's spawn-time request id) is now
     /// served as `to` (the lane's thread id): later tool calls naming `from`
     /// resolve to `to`. Called on the UI thread when the lane's thread id
@@ -2855,6 +2871,26 @@ mod tests {
             "the session's page really moved"
         );
         assert_eq!(&*seen.lock().expect("hook log"), &["sb-open".to_owned()], "the pane opens");
+    }
+
+    /// `unregister_browser` forgets the session's page, so a closed tab
+    /// stays dead through the agent tools. Idempotent: unknown sessions
+    /// remove nothing, and other sessions keep their pages.
+    #[gpui::test]
+    fn unregister_browser_forgets_only_that_session(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-unreg");
+        let other = cx.new(|cx| WebviewState::new(Box::new(FakeWebBackend::new()), cx));
+        fx.service.register_browser("sb-unreg-other", other.clone());
+        assert_eq!(fx.service.test_browser_state("sb-unreg"), Some(state.clone()));
+        fx.service.unregister_browser("sb-unreg");
+        assert!(fx.service.test_browser_state("sb-unreg").is_none());
+        assert_eq!(
+            fx.service.test_browser_state("sb-unreg-other"),
+            Some(other.clone()),
+            "other sessions keep their pages"
+        );
+        fx.service.unregister_browser("sb-unreg");
+        fx.service.unregister_browser("sb-never-registered");
     }
 
     /// `browser_open` refuses `javascript:` and `data:` URLs without

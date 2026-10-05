@@ -23,12 +23,14 @@ use std::time::{Duration, Instant};
 
 use aui::data::button;
 use aui::transcript::code_block;
+use aui::util::{interaction_flags, TrackInteraction};
 use aui::workbench::{
     doc_pane, file_card, file_tree, pr_form, ArtifactKind, DocBlock, DocPage, FileNode,
     FileTreeAction, GitAction, PrAction, PrDescription,
 };
-use aui_icons::FileType;
+use aui_icons::{icon, FileType, IconName};
 use aui_protocol::{ChangeKind, Diff, DiffKind, DiffLine, FileChange, Hunk};
+use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{
     div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, ScrollHandle, SharedString,
     WeakEntity, Window,
@@ -36,6 +38,7 @@ use gpui::{
 use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
+use crate::browser::{StripTab, TabId};
 use crate::layout::RightKind;
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
@@ -233,7 +236,10 @@ impl DirListCache {
     /// another root.
     fn for_root(&mut self, root: &Path) {
         if self.root.as_ref() != Some(&root.to_path_buf()) {
-            *self = DirListCache { root: Some(root.to_path_buf()), dirs: HashMap::new() };
+            *self = DirListCache {
+                root: Some(root.to_path_buf()),
+                dirs: HashMap::new(),
+            };
         }
     }
 }
@@ -284,18 +290,27 @@ impl RightCache {
     /// The cached git status for `root`: `None` when never fetched for it,
     /// `Some(None)` when fetched and not a repo.
     pub(crate) fn git_for(&self, root: &Path) -> Option<Option<GitStatus>> {
-        self.git.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+        self.git
+            .as_ref()
+            .filter(|slot| slot.root == root)
+            .map(|slot| slot.value.clone())
     }
 
     /// The cached parsed diff for `root`, or `None` when never fetched for it.
     pub(crate) fn diffs_for(&self, root: &Path) -> Option<ParsedDiffs> {
-        self.diffs.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+        self.diffs
+            .as_ref()
+            .filter(|slot| slot.root == root)
+            .map(|slot| slot.value.clone())
     }
 
     /// The cached file listing and cap flag for `root`, or `None` when never
     /// fetched for it.
     pub(crate) fn files_for(&self, root: &Path) -> Option<(Vec<FileNode>, bool)> {
-        self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+        self.files
+            .as_ref()
+            .filter(|slot| slot.root == root)
+            .map(|slot| slot.value.clone())
     }
 
     /// The directory ids standing open for `root`: empty when nothing was
@@ -323,7 +338,11 @@ impl RightCache {
     /// The scroll handle the Files pane shares between its tree and its
     /// preview for `root`, created on first use.
     pub(crate) fn files_scroll_for(&self, root: &Path) -> ScrollHandle {
-        self.files_scroll.borrow_mut().entry(root.to_path_buf()).or_default().clone()
+        self.files_scroll
+            .borrow_mut()
+            .entry(root.to_path_buf())
+            .or_default()
+            .clone()
     }
 
     /// Note a "reveal in Files" request for `rel` under `root` (B9): the
@@ -331,7 +350,8 @@ impl RightCache {
     /// repeated reveal re-scrolls even to the settled row.
     pub(crate) fn note_reveal(&mut self, root: &Path, rel: &str) {
         self.reveal_seq = self.reveal_seq.wrapping_add(1);
-        self.reveal.insert(root.to_path_buf(), (rel.to_string(), self.reveal_seq));
+        self.reveal
+            .insert(root.to_path_buf(), (rel.to_string(), self.reveal_seq));
     }
 
     /// B8b: the Changes-pane files standing expanded for `root`: empty when
@@ -359,7 +379,10 @@ impl RightCache {
 
     /// B8b: flip the commit row, returning whether it stands open now.
     pub(crate) fn flip_changes_commit(&mut self, root: &Path) -> bool {
-        let open = self.changes_commit_open.entry(root.to_path_buf()).or_insert(false);
+        let open = self
+            .changes_commit_open
+            .entry(root.to_path_buf())
+            .or_insert(false);
         *open = !*open;
         *open
     }
@@ -369,10 +392,16 @@ impl RightCache {
     pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
         match kind {
             RightKind::Browser => None,
-            RightKind::Changes | RightKind::Git | RightKind::Diff => {
-                self.git.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at)
-            }
-            RightKind::Files => self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at),
+            RightKind::Changes | RightKind::Git | RightKind::Diff => self
+                .git
+                .as_ref()
+                .filter(|slot| slot.root == root)
+                .map(|slot| slot.at),
+            RightKind::Files => self
+                .files
+                .as_ref()
+                .filter(|slot| slot.root == root)
+                .map(|slot| slot.at),
         }
     }
 
@@ -380,13 +409,29 @@ impl RightCache {
     /// the landing instant. A snapshot for another root drops the directory
     /// listing cache: its stamped entries belong to the old tree.
     pub(crate) fn apply_snapshot(&mut self, snapshot: RightSnapshot, at: Instant) {
-        if self.files.as_ref().is_some_and(|slot| slot.root != snapshot.root) {
+        if self
+            .files
+            .as_ref()
+            .is_some_and(|slot| slot.root != snapshot.root)
+        {
             self.dir_lists = DirListCache::default();
         }
         let root = snapshot.root.clone();
-        self.git = Some(Stamped { root: root.clone(), at, value: snapshot.git });
-        self.diffs = Some(Stamped { root: root.clone(), at, value: snapshot.diffs });
-        self.files = Some(Stamped { root, at, value: (snapshot.files, snapshot.files_truncated) });
+        self.git = Some(Stamped {
+            root: root.clone(),
+            at,
+            value: snapshot.git,
+        });
+        self.diffs = Some(Stamped {
+            root: root.clone(),
+            at,
+            value: snapshot.diffs,
+        });
+        self.files = Some(Stamped {
+            root,
+            at,
+            value: (snapshot.files, snapshot.files_truncated),
+        });
     }
 
     /// The directory listing cache, readied for `root`: everything read for
@@ -459,11 +504,15 @@ pub(crate) fn read_snapshot_for_cached(
 ) -> RightSnapshot {
     dir_cache.for_root(root);
     if crate::clock::deterministic() {
-        let (files, files_truncated) = walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
+        let (files, files_truncated) =
+            walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
         return RightSnapshot {
             root: root.to_path_buf(),
             git: Some(fixture_git_status()),
-            diffs: ParsedDiffs { diffs: vec![fixture_diff()], truncated: false },
+            diffs: ParsedDiffs {
+                diffs: vec![fixture_diff()],
+                truncated: false,
+            },
             files,
             files_truncated,
         };
@@ -471,13 +520,27 @@ pub(crate) fn read_snapshot_for_cached(
     let git = read_git_status(root);
     let diffs = match &git {
         Some(status) if !status.files.is_empty() => {
-            let raw = run_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"]).unwrap_or_default();
+            let raw = run_git(
+                root,
+                &["diff", "--no-color", "--no-ext-diff", "--unified=3"],
+            )
+            .unwrap_or_default();
             parse_unified_diff(&raw)
         }
-        _ => ParsedDiffs { diffs: Vec::new(), truncated: false },
+        _ => ParsedDiffs {
+            diffs: Vec::new(),
+            truncated: false,
+        },
     };
-    let (files, files_truncated) = walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
-    RightSnapshot { root: root.to_path_buf(), git, diffs, files, files_truncated }
+    let (files, files_truncated) =
+        walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
+    RightSnapshot {
+        root: root.to_path_buf(),
+        git,
+        diffs,
+        files,
+        files_truncated,
+    }
 }
 
 /// Render the right pane for `kind` from the already-read [`RightCache`].
@@ -515,20 +578,36 @@ pub(crate) fn browser_placeholder_for(pane_open: bool, has_webview: bool) -> Bro
     }
 }
 
+/// What [`render`] needs for the Browser kind: the live page when one
+/// exists, the shown owner's strip rows, and the window tab hover runs on.
+pub(crate) struct BrowserPane<'a> {
+    /// The shown tab's live page; `None` draws the loading/closed states.
+    pub state: Option<&'a Entity<aui_webview::WebviewState>>,
+    /// The shown owner's tabs; empty draws no strip.
+    pub tabs: &'a [StripTab],
+    /// The window, for tab hover tracking.
+    pub window: &'a mut Window,
+}
+
 pub(crate) fn render(
     kind: RightKind,
     cache: &RightCache,
     project: Option<(PathBuf, String)>,
     session_edits: &[String],
-    browser: Option<&Entity<aui_webview::WebviewState>>,
+    browser: BrowserPane<'_>,
     pane_open: bool,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
     let notify = toast_sink(cx.weak_entity());
     let harness = cx.weak_entity();
     match kind {
-        RightKind::Browser => match browser_placeholder_for(pane_open, browser.is_some()) {
-            BrowserPlaceholder::Page => browser_pane(browser.expect("has_webview means Some"), cx),
+        RightKind::Browser => match browser_placeholder_for(pane_open, browser.state.is_some()) {
+            BrowserPlaceholder::Page => browser_pane(
+                browser.state.expect("has_webview means Some"),
+                browser.tabs,
+                browser.window,
+                cx,
+            ),
             BrowserPlaceholder::Loading => loading_state(
                 "right-browser-loading",
                 "Browser",
@@ -589,25 +668,25 @@ pub(crate) fn render(
                 return text_doc_pane(&doc, harness);
             }
             match project {
-            Some((root, name)) => match cache.files_for(&root) {
-                None => loading_state(
-                    "right-files-loading",
+                Some((root, name)) => match cache.files_for(&root) {
+                    None => loading_state(
+                        "right-files-loading",
+                        "Files",
+                        "Loading files",
+                        "The pane re-reads the project in the background and fills in on its own.",
+                    ),
+                    Some((nodes, truncated)) => {
+                        let selected = cache.selected_for(&root);
+                        let nodes = mark_selected(nodes, selected.as_deref());
+                        files_pane_from(&nodes, truncated, &name, &root, cache, &notify, harness)
+                    }
+                },
+                None => empty_state(
+                    "right-files-empty",
                     "Files",
-                    "Loading files",
-                    "The pane re-reads the project in the background and fills in on its own.",
+                    "No project is open",
+                    "Open or adopt a project to browse its files here.",
                 ),
-                Some((nodes, truncated)) => {
-                    let selected = cache.selected_for(&root);
-                    let nodes = mark_selected(nodes, selected.as_deref());
-                    files_pane_from(&nodes, truncated, &name, &root, cache, &notify, harness)
-                }
-            },
-            None => empty_state(
-                "right-files-empty",
-                "Files",
-                "No project is open",
-                "Open or adopt a project to browse its files here.",
-            ),
             }
         }
     }
@@ -658,7 +737,10 @@ impl Harness {
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let path = root.join(&id);
-            let bytes = cx.background_executor().spawn(async move { std::fs::read(path).ok() }).await;
+            let bytes = cx
+                .background_executor()
+                .spawn(async move { std::fs::read(path).ok() })
+                .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 complete_file_preview(&mut this.right_cache, &root, &id, bytes);
                 cx.notify();
@@ -683,7 +765,10 @@ impl Harness {
         highlight: Option<std::ops::Range<u32>>,
         cx: &mut Context<Self>,
     ) {
-        let name = abs.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = abs
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let Some(is_dir) = is_dir else {
             self.overlays.update(cx, |overlays, _| {
                 overlays.toast("Link", format!("No such file: {name}"));
@@ -733,7 +818,12 @@ impl Harness {
     /// B12: show a transcript card's whole text in the Files pane's
     /// read-only doc view: the pane stands open on Files and the saved
     /// state says so, like a person's own navigation would.
-    pub(crate) fn open_text_doc_for(&mut self, title: String, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_text_doc_for(
+        &mut self,
+        title: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         open_text_doc(&mut self.right_cache, title, text);
         self.layout.right_kind = Some(RightKind::Files);
         self.layout.right_open = true;
@@ -780,7 +870,10 @@ impl Harness {
         // agent in a background session must not flip the person's visible
         // pane — its session's saved state below is all that changes, and
         // it shows when the person switches there.
-        let active = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let active = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx).session_id.clone());
         let foreground = agent_open_flips_visible_pane(active.as_deref(), session_id);
         if foreground {
             self.select_right(RightKind::Browser, cx);
@@ -788,8 +881,11 @@ impl Harness {
             // does — undo the arm `select_right` owes the person.
             self.browser_url_focus_armed = false;
         }
-        let mut right =
-            self.overrides.get(session_id).and_then(|meta| meta.right.clone()).unwrap_or_default();
+        let mut right = self
+            .overrides
+            .get(session_id)
+            .and_then(|meta| meta.right.clone())
+            .unwrap_or_default();
         right.open = true;
         right.kind = RightKind::Browser;
         // B7: agent navigation state is not searchable either — the cheap
@@ -813,7 +909,12 @@ pub(crate) fn agent_open_flips_visible_pane(active: Option<&str>, session_id: &s
 /// Select `id` for `root` from the tree's action closure, which only holds
 /// `&mut App`: upgrade the weak [`Harness`] and run the preview through it.
 /// Silent when the window is already gone.
-pub(crate) fn select_file_preview(harness: WeakEntity<Harness>, root: PathBuf, id: String, cx: &mut App) {
+pub(crate) fn select_file_preview(
+    harness: WeakEntity<Harness>,
+    root: PathBuf,
+    id: String,
+    cx: &mut App,
+) {
     let _ = harness.update(cx, |this, cx| this.begin_file_preview_for(&root, &id, cx));
 }
 
@@ -837,7 +938,12 @@ fn reveal_in_finder(path: &Path) {
 /// The transient placeholder while the background re-read is still out: the
 /// same shape as [`empty_state`], under its own ids so it can never collide
 /// with a baselined settled state.
-fn loading_state(id: &'static str, pane: &'static str, heading: &'static str, detail: &'static str) -> AnyElement {
+fn loading_state(
+    id: &'static str,
+    pane: &'static str,
+    heading: &'static str,
+    detail: &'static str,
+) -> AnyElement {
     empty_state(id, pane, heading, detail)
 }
 
@@ -855,7 +961,12 @@ fn closed_browser_state() -> AnyElement {
 }
 
 /// A labelled placeholder: never a blank pane, always a role and a label.
-fn empty_state(id: &'static str, pane: &'static str, heading: &'static str, detail: &'static str) -> AnyElement {
+fn empty_state(
+    id: &'static str,
+    pane: &'static str,
+    heading: &'static str,
+    detail: &'static str,
+) -> AnyElement {
     v_flex()
         .id(id)
         .role(gpui::Role::Group)
@@ -893,7 +1004,10 @@ fn inert_log_store() -> &'static std::sync::Mutex<Vec<String>> {
 /// What [`inert`] recorded so far, oldest first.
 #[cfg(test)]
 pub(crate) fn inert_log() -> Vec<String> {
-    inert_log_store().lock().map(|log| log.clone()).unwrap_or_default()
+    inert_log_store()
+        .lock()
+        .map(|log| log.clone())
+        .unwrap_or_default()
 }
 
 /// Forget what [`inert`] recorded.
@@ -916,7 +1030,8 @@ fn toast_sink(weak: WeakEntity<Harness>) -> ToastSink {
     Rc::new(move |title, body, cx| {
         if let Some(harness) = weak.upgrade() {
             harness.update(cx, |this, cx| {
-                this.overlays.update(cx, |overlays, _| overlays.toast(title, body));
+                this.overlays
+                    .update(cx, |overlays, _| overlays.toast(title, body));
             });
         }
     })
@@ -986,7 +1101,11 @@ pub(crate) fn middle_truncate(path: &str, max_chars: usize) -> String {
     let keep = max_chars - 1;
     let head = keep.div_ceil(2);
     let tail = keep - head;
-    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
 }
 
 /// B8b: one file's `+N −M` counts, with the design's minus sign (not a
@@ -1031,9 +1150,13 @@ fn edit_covers(status_path: &str, edit: &str, root: &Path) -> bool {
     if status_path == edit {
         return true;
     }
-    let relative =
-        Path::new(edit).strip_prefix(root).ok().map(|relative| relative.to_string_lossy().into_owned());
-    relative.as_deref().is_some_and(|relative| !relative.is_empty() && status_path == relative)
+    let relative = Path::new(edit)
+        .strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().into_owned());
+    relative
+        .as_deref()
+        .is_some_and(|relative| !relative.is_empty() && status_path == relative)
 }
 
 /// B8b: working-tree files with their staged flags, as [`GitStatus`] carries
@@ -1200,7 +1323,9 @@ fn parse_numstat(text: &str) -> HashMap<String, (u32, u32)> {
     let mut counts = HashMap::new();
     for line in text.lines() {
         let mut fields = line.split('\t');
-        let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
+        let (Some(added), Some(removed), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
         let path = path.split(" => ").last().unwrap_or(path);
@@ -1247,29 +1372,94 @@ pub(crate) struct GitStatus {
 /// than what the repository happens to contain today.
 fn fixture_git_status() -> GitStatus {
     let files = vec![
-        (FileChange { path: "crates/baaz/src/right.rs".into(), change: ChangeKind::Modified, added: 148, removed: 12 }, false),
-        (FileChange { path: "crates/baaz/src/layout.rs".into(), change: ChangeKind::Modified, added: 31, removed: 4 }, true),
-        (FileChange { path: "docs/02-app.md".into(), change: ChangeKind::Modified, added: 22, removed: 9 }, false),
-        (FileChange { path: "crates/baaz/src/panes/mod.rs".into(), change: ChangeKind::Added, added: 64, removed: 0 }, false),
-        (FileChange { path: "scripts/old_probe.py".into(), change: ChangeKind::Deleted, added: 0, removed: 37 }, false),
+        (
+            FileChange {
+                path: "crates/baaz/src/right.rs".into(),
+                change: ChangeKind::Modified,
+                added: 148,
+                removed: 12,
+            },
+            false,
+        ),
+        (
+            FileChange {
+                path: "crates/baaz/src/layout.rs".into(),
+                change: ChangeKind::Modified,
+                added: 31,
+                removed: 4,
+            },
+            true,
+        ),
+        (
+            FileChange {
+                path: "docs/02-app.md".into(),
+                change: ChangeKind::Modified,
+                added: 22,
+                removed: 9,
+            },
+            false,
+        ),
+        (
+            FileChange {
+                path: "crates/baaz/src/panes/mod.rs".into(),
+                change: ChangeKind::Added,
+                added: 64,
+                removed: 0,
+            },
+            false,
+        ),
+        (
+            FileChange {
+                path: "scripts/old_probe.py".into(),
+                change: ChangeKind::Deleted,
+                added: 0,
+                removed: 37,
+            },
+            false,
+        ),
     ];
-    GitStatus { files, branch: "right-pane".into(), ahead: 2, behind: 1 }
+    GitStatus {
+        files,
+        branch: "right-pane".into(),
+        ahead: 2,
+        behind: 1,
+    }
 }
 
 /// The diff the fixture's first file shows. Small on purpose: a capture wants
 /// a legible hunk, not a realistic one.
 fn fixture_diff() -> Diff {
-    let line = |kind, old_no, new_no, text: &str| DiffLine { kind, old_no, new_no, text: text.to_string() };
+    let line = |kind, old_no, new_no, text: &str| DiffLine {
+        kind,
+        old_no,
+        new_no,
+        text: text.to_string(),
+    };
     Diff {
         path: "crates/baaz/src/right.rs".into(),
         hunks: vec![Hunk {
             header: "@@ -41,7 +41,9 @@ fn render(kind: RightKind)".into(),
             lines: vec![
-                line(DiffKind::Context, Some(41), Some(41), "    let notify = toast_sink(cx.weak_entity());"),
+                line(
+                    DiffKind::Context,
+                    Some(41),
+                    Some(41),
+                    "    let notify = toast_sink(cx.weak_entity());",
+                ),
                 line(DiffKind::Del, Some(42), None, "    match kind {"),
                 line(DiffKind::Add, None, Some(42), "    match kind {"),
-                line(DiffKind::Add, None, Some(43), "        RightKind::Browser => browser_pane(&notify),"),
-                line(DiffKind::Context, Some(43), Some(44), "        RightKind::Files => files_pane(root, &notify),"),
+                line(
+                    DiffKind::Add,
+                    None,
+                    Some(43),
+                    "        RightKind::Browser => browser_pane(&notify),",
+                ),
+                line(
+                    DiffKind::Context,
+                    Some(43),
+                    Some(44),
+                    "        RightKind::Files => files_pane(root, &notify),",
+                ),
             ],
         }],
         added: 2,
@@ -1281,15 +1471,23 @@ fn read_git_status(root: &Path) -> Option<GitStatus> {
     if crate::clock::deterministic() {
         return Some(fixture_git_status());
     }
-    let porcelain = run_git(root, &["status", "--porcelain=v1", "--untracked-files=normal"])?;
+    let porcelain = run_git(
+        root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?;
     let branch = run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-    let (ahead, behind) = run_git(root, &["rev-list", "--count", "--left-right", "@{upstream}...HEAD"])
-        .and_then(|out| parse_ahead_behind(&out))
-        .unwrap_or((0, 0));
-    let unstaged = run_git(root, &["diff", "--numstat"]).map(|out| parse_numstat(&out)).unwrap_or_default();
+    let (ahead, behind) = run_git(
+        root,
+        &["rev-list", "--count", "--left-right", "@{upstream}...HEAD"],
+    )
+    .and_then(|out| parse_ahead_behind(&out))
+    .unwrap_or((0, 0));
+    let unstaged = run_git(root, &["diff", "--numstat"])
+        .map(|out| parse_numstat(&out))
+        .unwrap_or_default();
     let staged = run_git(root, &["diff", "--cached", "--numstat"])
         .map(|out| parse_numstat(&out))
         .unwrap_or_default();
@@ -1305,12 +1503,22 @@ fn read_git_status(root: &Path) -> Option<GitStatus> {
         };
         let (file_added, file_removed) = counts.copied().unwrap_or((0, 0));
         files.push((
-            FileChange { path, change: kind, added: file_added, removed: file_removed },
+            FileChange {
+                path,
+                change: kind,
+                added: file_added,
+                removed: file_removed,
+            },
             is_staged,
         ));
     }
     files.sort_by(|a, b| a.0.path.cmp(&b.0.path));
-    Some(GitStatus { files, branch, ahead, behind })
+    Some(GitStatus {
+        files,
+        branch,
+        ahead,
+        behind,
+    })
 }
 
 // ── the file walk ────────────────────────────────────────────────────────
@@ -1325,7 +1533,11 @@ fn file_type_for(name: &str) -> FileType {
     } else if lower.ends_with(".ts") {
         FileType::Ts
     } else if lower.ends_with(".json") || lower.ends_with(".lock") {
-        if lower.ends_with(".lock") { FileType::Lock } else { FileType::Json }
+        if lower.ends_with(".lock") {
+            FileType::Lock
+        } else {
+            FileType::Json
+        }
     } else if lower.ends_with(".md") {
         FileType::Md
     } else if lower.ends_with(".css") {
@@ -1359,7 +1571,11 @@ fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
 /// listing short. Test builds only: production walks go through
 /// [`walk_root_expanded_cached`].
 #[cfg(test)]
-fn walk_root_expanded(root: &Path, cap: usize, expanded: &HashSet<String>) -> (Vec<FileNode>, bool) {
+fn walk_root_expanded(
+    root: &Path,
+    cap: usize,
+    expanded: &HashSet<String>,
+) -> (Vec<FileNode>, bool) {
     let mut cache = DirListCache::default();
     walk_root_expanded_cached(root, cap, expanded, &mut cache)
 }
@@ -1378,7 +1594,16 @@ pub(crate) fn walk_root_expanded_cached(
     dir_cache.for_root(root);
     let mut nodes = Vec::new();
     let mut truncated = false;
-    walk_level_cached(root, root, 0, cap, expanded, dir_cache, &mut nodes, &mut truncated);
+    walk_level_cached(
+        root,
+        root,
+        0,
+        cap,
+        expanded,
+        dir_cache,
+        &mut nodes,
+        &mut truncated,
+    );
     (nodes, truncated)
 }
 
@@ -1412,7 +1637,18 @@ fn walk_level_cached(
             note_cache_hit();
             let entries = hit.entries.clone();
             let dir_truncated = hit.dir_truncated;
-            append_cached_entries(root, dir, depth, cap, expanded, dir_cache, &entries, dir_truncated, nodes, truncated);
+            append_cached_entries(
+                root,
+                dir,
+                depth,
+                cap,
+                expanded,
+                dir_cache,
+                &entries,
+                dir_truncated,
+                nodes,
+                truncated,
+            );
             return;
         }
     }
@@ -1449,9 +1685,25 @@ fn walk_level_cached(
     }
     dir_cache.dirs.insert(
         dir.to_path_buf(),
-        CachedDir { mtime, cap, entries: entries.clone(), dir_truncated },
+        CachedDir {
+            mtime,
+            cap,
+            entries: entries.clone(),
+            dir_truncated,
+        },
     );
-    append_cached_entries(root, dir, depth, cap, expanded, dir_cache, &entries, dir_truncated, nodes, truncated);
+    append_cached_entries(
+        root,
+        dir,
+        depth,
+        cap,
+        expanded,
+        dir_cache,
+        &entries,
+        dir_truncated,
+        nodes,
+        truncated,
+    );
 }
 
 /// Append one directory's `(name, is_dir)` entries to `nodes`, recursing
@@ -1488,7 +1740,16 @@ fn append_cached_entries(
             let open = expanded.contains(&id);
             nodes.push(FileNode::dir(id.clone(), name.clone(), open).depth(depth));
             if open {
-                walk_level_cached(root, &dir.join(name), depth + 1, cap, expanded, dir_cache, nodes, truncated);
+                walk_level_cached(
+                    root,
+                    &dir.join(name),
+                    depth + 1,
+                    cap,
+                    expanded,
+                    dir_cache,
+                    nodes,
+                    truncated,
+                );
                 if nodes.len() >= cap {
                     *truncated = true;
                     return;
@@ -1524,7 +1785,11 @@ pub(crate) fn preview_language(name: &str) -> String {
     let extension = lower.rsplit('.').next().unwrap_or("");
     // A leading-dot name (`.gitignore`) has no extension: `rsplit` returns
     // the whole name, which must not read as a language.
-    let extension = if lower.len() > extension.len() + 1 { extension } else { "" };
+    let extension = if lower.len() > extension.len() + 1 {
+        extension
+    } else {
+        ""
+    };
     match extension {
         "rs" => "rust",
         "py" => "python",
@@ -1666,7 +1931,9 @@ pub(crate) fn begin_file_preview_highlight(
                 highlight,
                 size: 0,
                 mtime: None,
-                content: PreviewContent::Card { meta: "The file is gone — it may have been moved or deleted.".into() },
+                content: PreviewContent::Card {
+                    meta: "The file is gone — it may have been moved or deleted.".into(),
+                },
             },
         );
         return false;
@@ -1731,14 +1998,24 @@ pub(crate) fn complete_file_preview(
     let language = current.language.clone();
     let highlight = current.highlight.clone();
     let content = match bytes {
-        None => PreviewContent::Card { meta: "The file could not be read.".into() },
+        None => PreviewContent::Card {
+            meta: "The file could not be read.".into(),
+        },
         Some(bytes) if bytes.len() as u64 > PREVIEW_MAX_BYTES => PreviewContent::Card {
-            meta: format!("{} — too large to preview", friendly_size(bytes.len() as u64)),
+            meta: format!(
+                "{} — too large to preview",
+                friendly_size(bytes.len() as u64)
+            ),
         },
         Some(bytes) => match String::from_utf8(bytes) {
             Ok(text) if is_markdown(&name) => PreviewContent::Markdown { text },
-            Ok(code) => PreviewContent::Text { language: language.clone(), code },
-            Err(_) => PreviewContent::Card { meta: format!("{} — a binary file", friendly_size(current.size)) },
+            Ok(code) => PreviewContent::Text {
+                language: language.clone(),
+                code,
+            },
+            Err(_) => PreviewContent::Card {
+                meta: format!("{} — a binary file", friendly_size(current.size)),
+            },
         },
     };
     cache.previews.insert(
@@ -1784,7 +2061,10 @@ pub(crate) fn preview_reload_for(root: &Path, preview: &FilePreview) -> Option<P
             // Gone now: reload only while the preview still shows bytes from
             // when it existed (`mtime` set) — never loop a gone card.
             return if preview.mtime.is_some() {
-                Some(PreviewReload { id: preview.path.clone(), bytes: None })
+                Some(PreviewReload {
+                    id: preview.path.clone(),
+                    bytes: None,
+                })
             } else {
                 None
             };
@@ -1792,7 +2072,10 @@ pub(crate) fn preview_reload_for(root: &Path, preview: &FilePreview) -> Option<P
     };
     if meta.is_dir() {
         return if preview.mtime.is_some() {
-            Some(PreviewReload { id: preview.path.clone(), bytes: None })
+            Some(PreviewReload {
+                id: preview.path.clone(),
+                bytes: None,
+            })
         } else {
             None
         };
@@ -1802,8 +2085,15 @@ pub(crate) fn preview_reload_for(root: &Path, preview: &FilePreview) -> Option<P
     if mtime == preview.mtime && size == preview.size {
         return None;
     }
-    let bytes = if size > PREVIEW_MAX_BYTES { None } else { std::fs::read(&path).ok() };
-    Some(PreviewReload { id: preview.path.clone(), bytes })
+    let bytes = if size > PREVIEW_MAX_BYTES {
+        None
+    } else {
+        std::fs::read(&path).ok()
+    };
+    Some(PreviewReload {
+        id: preview.path.clone(),
+        bytes,
+    })
 }
 
 /// The preview's shown text, if it shows any: the code for text files, the
@@ -1824,7 +2114,11 @@ pub(crate) fn preview_text_shown(preview: &FilePreview) -> Option<&str> {
 /// not-found card instead of stale text. The stale-landing guard still
 /// holds: a preview that moved on (or closed) is left alone. Returns whether
 /// a preview was updated.
-pub(crate) fn apply_preview_reload(cache: &mut RightCache, root: &Path, reload: PreviewReload) -> bool {
+pub(crate) fn apply_preview_reload(
+    cache: &mut RightCache,
+    root: &Path,
+    reload: PreviewReload,
+) -> bool {
     let Some(current) = cache.preview_for(root) else {
         return false;
     };
@@ -1880,7 +2174,10 @@ fn markdown_blocks(text: &str) -> Vec<DocBlock> {
         if hashes > 0 && hashes <= 3 && trimmed[hashes..].starts_with(' ') {
             push_paragraph(&mut paragraph, &mut blocks);
             if blocks.len() < PREVIEW_MD_BLOCKS_CAP {
-                blocks.push(DocBlock::heading(hashes as u8, trimmed[hashes + 1..].trim().to_string()));
+                blocks.push(DocBlock::heading(
+                    hashes as u8,
+                    trimmed[hashes + 1..].trim().to_string(),
+                ));
             }
             continue;
         }
@@ -1920,7 +2217,9 @@ fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
 
 /// Strip the `a/` or `b/` prefix git puts on diff paths.
 fn strip_diff_prefix(path: &str) -> &str {
-    path.strip_prefix("b/").or_else(|| path.strip_prefix("a/")).unwrap_or(path)
+    path.strip_prefix("b/")
+        .or_else(|| path.strip_prefix("a/"))
+        .unwrap_or(path)
 }
 
 /// Parse a working-tree `git diff` into per-file [`Diff`]s, capped at
@@ -1943,13 +2242,18 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
     // the `--- /dev/null` / `+++ /dev/null` markers below only disambiguate
     // paths, so neither is tracked here.
     let finish_file = |path: &mut Option<String>,
-                           hunks: &mut Vec<Hunk>,
-                           added: &mut u32,
-                           removed: &mut u32,
-                           kept_lines: &mut usize,
-                           diffs: &mut Vec<Diff>| {
+                       hunks: &mut Vec<Hunk>,
+                       added: &mut u32,
+                       removed: &mut u32,
+                       kept_lines: &mut usize,
+                       diffs: &mut Vec<Diff>| {
         if let Some(path) = path.take() {
-            diffs.push(Diff { path, hunks: std::mem::take(hunks), added: *added, removed: *removed });
+            diffs.push(Diff {
+                path,
+                hunks: std::mem::take(hunks),
+                added: *added,
+                removed: *removed,
+            });
         }
         *added = 0;
         *removed = 0;
@@ -1958,7 +2262,14 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            finish_file(&mut path, &mut hunks, &mut added, &mut removed, &mut kept_lines, &mut diffs);
+            finish_file(
+                &mut path,
+                &mut hunks,
+                &mut added,
+                &mut removed,
+                &mut kept_lines,
+                &mut diffs,
+            );
             if diffs.len() >= DIFF_FILES_CAP {
                 truncated = true;
                 break;
@@ -1966,7 +2277,11 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
             let mut sides = rest.split(' ');
             let old_side = sides.next().unwrap_or("");
             let new_side = sides.next().unwrap_or("");
-            let next = if new_side == "/dev/null" { old_side } else { new_side };
+            let next = if new_side == "/dev/null" {
+                old_side
+            } else {
+                new_side
+            };
             let next = strip_diff_prefix(next);
             if !next.is_empty() {
                 path = Some(next.to_string());
@@ -1991,7 +2306,10 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
             let (old_start, new_start) = parse_hunk_header(line).unwrap_or((1, 1));
             old_no = old_start;
             new_no = new_start;
-            hunks.push(Hunk { header: line.to_string(), lines: Vec::new() });
+            hunks.push(Hunk {
+                header: line.to_string(),
+                lines: Vec::new(),
+            });
         } else if line.starts_with('\\') {
             // `\ No newline at end of file`: a marker, not a row.
         } else if path.is_some() && !hunks.is_empty() {
@@ -2034,11 +2352,23 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
                 }
             };
             if let Some(hunk) = hunks.last_mut() {
-                hunk.lines.push(DiffLine { kind, old_no: old, new_no: new, text: text.to_string() });
+                hunk.lines.push(DiffLine {
+                    kind,
+                    old_no: old,
+                    new_no: new,
+                    text: text.to_string(),
+                });
             }
         }
     }
-    finish_file(&mut path, &mut hunks, &mut added, &mut removed, &mut kept_lines, &mut diffs);
+    finish_file(
+        &mut path,
+        &mut hunks,
+        &mut added,
+        &mut removed,
+        &mut kept_lines,
+        &mut diffs,
+    );
     ParsedDiffs { diffs, truncated }
 }
 
@@ -2153,20 +2483,18 @@ fn file_preview_pane(
             .child(format!("Loading {}…", preview.name))
             .into_any_element(),
         PreviewContent::Text { language, code } => {
-            let mut block = code_block(
-                "right-file-code",
-                preview.path.clone(),
-                code.clone(),
-            )
-            .language(language.clone())
-            // The preview is the pane's own scroller: a long file
-            // virtualises against the pane's height (L6 fill mode).
-            .fill(true);
+            let mut block = code_block("right-file-code", preview.path.clone(), code.clone())
+                .language(language.clone())
+                // The preview is the pane's own scroller: a long file
+                // virtualises against the pane's height (L6 fill mode).
+                .fill(true);
             // A B9 link band: highlight the linked lines and start the
             // list there (the library starts at the highlight when no
             // explicit scroll line rides along, so the start doubles).
             if let Some(range) = preview.highlight.clone() {
-                block = block.highlight_lines(range.clone()).scroll_to_line(range.start);
+                block = block
+                    .highlight_lines(range.clone())
+                    .scroll_to_line(range.start);
             }
             block.into_any_element()
         }
@@ -2252,8 +2580,8 @@ fn text_doc_pane(doc: &TextDoc, harness: WeakEntity<Harness>) -> AnyElement {
                 .truncate()
                 .child(doc.title.clone()),
         );
-    let body =
-        code_block("right-text-code", doc.title.clone(), doc.text.clone()).language("text".to_owned());
+    let body = code_block("right-text-code", doc.title.clone(), doc.text.clone())
+        .language("text".to_owned());
     v_flex()
         .id("right-text-doc")
         .role(gpui::Role::Group)
@@ -2271,24 +2599,226 @@ fn text_doc_pane(doc: &TextDoc, harness: WeakEntity<Harness>) -> AnyElement {
 /// come labelled from the library. Intents forward to the harness:
 /// screenshots and annotations land in the active session's composer draft,
 /// Console toasts.
-fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harness>) -> AnyElement {
+fn browser_pane(
+    state: &Entity<aui_webview::WebviewState>,
+    tabs: &[StripTab],
+    window: &mut Window,
+    cx: &mut Context<Harness>,
+) -> AnyElement {
     let harness = cx.weak_entity();
-    let pane = aui_webview::webview_pane("right-browser", state).on_intent(
-        move |intent, window, cx| {
+    let strip_harness = harness.clone();
+    let pane =
+        aui_webview::webview_pane("right-browser", state).on_intent(move |intent, window, cx| {
             if let Some(harness) = harness.upgrade() {
                 harness.update(cx, |harness, cx| {
                     harness.handle_browser_intent(intent, window, cx);
                 });
             }
-        },
-    );
-    v_flex()
+        });
+    let mut column = v_flex()
         .id("right-browser-pane")
         .role(gpui::Role::Group)
         .aria_label("Browser")
-        .size_full()
-        .child(pane)
+        .size_full();
+    if !tabs.is_empty() {
+        column = column.child(browser_tab_strip(tabs, &strip_harness, window, cx));
+    }
+    column.child(pane).into_any_element()
+}
+
+/// How many title chars a strip tab shows before the ellipsis. The row
+/// itself also clips, so a wide pane never stretches the strip.
+const TAB_TITLE_CHARS: usize = 24;
+
+/// The pane's one-line tab strip (B2a-H1): a 30 px row above the page
+/// listing the shown owner's tabs — an initial tile, an ellipsized title,
+/// a close × on hover/active, and a `+` at the end. Clicking selects,
+/// middle-click closes, `+` opens a blank tab with the address focused.
+fn browser_tab_strip(
+    tabs: &[StripTab],
+    harness: &WeakEntity<Harness>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let p = cx.aui().colors;
+    let mut row = h_flex()
+        .id("right-browser-tabs")
+        .h(px(30.0))
+        .items_center()
+        .px(px(4.0))
+        .gap(px(2.0))
+        .bg(p.surface_1)
+        .border_b_1()
+        .border_color(p.line);
+    for tab in tabs {
+        row = row.child(browser_strip_tab(tab, harness, p, window, cx));
+    }
+    row = row.child(browser_new_tab(harness, p));
+    row.into_any_element()
+}
+
+/// One strip tab: the tile, the title, and the close × while hovered or
+/// active. Selecting a tab that closed meanwhile is a no-op (the model
+/// guards it), so a × click racing the row's own select never resurrects
+/// the tab.
+fn browser_strip_tab(
+    tab: &StripTab,
+    harness: &WeakEntity<Harness>,
+    p: aui_tokens::Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let id: ElementId = format!("right-browser-tab:{}", tab.id.0).into();
+    let (tracked, flags) = interaction_flags(id.clone(), window, cx);
+    let ground = if tab.active {
+        p.surface_3
+    } else if flags.hovered {
+        p.surface_2
+    } else {
+        p.surface_1
+    };
+    let ink = if tab.active { p.ink } else { p.ink_2 };
+    let select = harness.clone();
+    let press = harness.clone();
+    let middle = harness.clone();
+    let id_tab = tab.id;
+    // The visible text: the ellipsized title the row draws. Both aria
+    // labels below read this same string, never the untruncated title.
+    let title = ellipsize_tab_title(&tab.title);
+    let mut row = h_flex()
+        .id(id)
+        .flex_1()
+        .min_w(px(0.0))
+        .items_center()
+        .h(px(22.0))
+        .px(px(6.0))
+        .gap(px(6.0))
+        .rounded(px(scale::R_SM))
+        .bg(ground)
+        .text_color(ink)
+        .ui(scale::FS_12)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .cursor_pointer()
+        .track_interaction(&tracked)
+        .role(gpui::Role::Tab)
+        .aria_label(format!("{} tab", title))
+        .child(
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(scale::R_XS))
+                .border_1()
+                .border_color(p.line_strong)
+                .text_color(p.ink_2)
+                .ui(scale::FS_11)
+                .child(tab.initial.clone()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(title.clone()),
+        )
+        .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
+        // Middle-click closes only when the press AND the release land on
+        // this same tab: the down records the pressed tab, the up closes
+        // when it matches — and every middle up clears the press either
+        // way, so no press survives its release.
+        .on_mouse_down(gpui::MouseButton::Middle, move |_, _, cx| {
+            middle_press_action(&press, id_tab, cx);
+        })
+        .on_mouse_up(gpui::MouseButton::Middle, move |_, window, cx| {
+            middle_release_action(&middle, id_tab, window, cx);
+        });
+    if tab.active || flags.hovered {
+        let close = harness.clone();
+        let label = format!("Close {}", title);
+        row = row.child(
+            div()
+                .id(format!("right-browser-tab-close:{}", id_tab.0))
+                .flex_none()
+                .p(px(2.0))
+                .rounded(px(scale::R_XS))
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .cursor_pointer()
+                .child(icon(IconName::X).size(px(12.0)).color(ink))
+                // The × stops propagation: the click must never also
+                // select the tab through the row's own handler.
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    close_tab_action(&close, id_tab, window, cx);
+                }),
+        );
+    }
+    row.into_any_element()
+}
+
+/// The strip's `+`: a blank tab with the address field focused.
+fn browser_new_tab(harness: &WeakEntity<Harness>, p: aui_tokens::Palette) -> AnyElement {
+    let plus = harness.clone();
+    div()
+        .id("right-browser-tab-new")
+        .flex_none()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(scale::R_SM))
+        .text_color(p.ink_2)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("New tab")
+        .child(icon(IconName::Plus).size(px(12.0)).color(p.ink_2))
+        .on_click(move |_, window, cx| {
+            let _ = plus.update(cx, |this, cx| this.new_blank_tab(window, cx));
+        })
         .into_any_element()
+}
+
+/// A strip title in at most [`TAB_TITLE_CHARS`] chars, ending in ….
+fn ellipsize_tab_title(title: &str) -> String {
+    if title.chars().count() <= TAB_TITLE_CHARS {
+        return title.to_owned();
+    }
+    let mut out: String = title.chars().take(TAB_TITLE_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
+/// The row's click: select the tab through the harness (which resolves
+/// the owner's key itself).
+fn select_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.select_browser_tab(id, window, cx));
+}
+
+/// The × or middle-click: close the tab through the harness.
+fn close_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.close_browser_tab(id, window, cx));
+}
+
+/// A middle press on the strip tab: record it for the release to compare.
+fn middle_press_action(harness: &WeakEntity<Harness>, id: TabId, cx: &mut App) {
+    let _ = harness.update(cx, |this, _| this.note_strip_middle_press(id));
+}
+
+/// A middle release on the strip tab: close it only when the press began
+/// on this same tab.
+fn middle_release_action(
+    harness: &WeakEntity<Harness>,
+    id: TabId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = harness.update(cx, |this, cx| {
+        this.close_strip_middle_release(id, window, cx)
+    });
 }
 
 /// One section heading inside the merged Changes view: a labelled row, so
@@ -2343,10 +2873,20 @@ fn session_file_row(
         ChangeKind::Deleted => "D",
         ChangeKind::Modified => "M",
     };
-    let text = if delta.is_empty() { format!("{letter} {shown}") } else { format!("{letter} {shown}  {delta}") };
+    let text = if delta.is_empty() {
+        format!("{letter} {shown}")
+    } else {
+        format!("{letter} {shown}  {delta}")
+    };
     button(format!("right-changes-file:{path}"), text)
-        .accessibility_label(format!("{} diff for {}", if open { "Hide" } else { "Show" }, path))
-        .on_click(move |_, _, cx| toggle_changes_file(&toggle_harness, &toggle_root, &toggle_path, cx))
+        .accessibility_label(format!(
+            "{} diff for {}",
+            if open { "Hide" } else { "Show" },
+            path
+        ))
+        .on_click(move |_, _, cx| {
+            toggle_changes_file(&toggle_harness, &toggle_root, &toggle_path, cx)
+        })
         .into_any_element()
 }
 
@@ -2364,7 +2904,11 @@ fn other_file_row(change: &FileChange, notify: &ToastSink) -> AnyElement {
         ChangeKind::Deleted => "D",
         ChangeKind::Modified => "M",
     };
-    let text = if delta.is_empty() { format!("{letter} {shown}") } else { format!("{letter} {shown}  {delta}") };
+    let text = if delta.is_empty() {
+        format!("{letter} {shown}")
+    } else {
+        format!("{letter} {shown}  {delta}")
+    };
     button(format!("right-changes-other:{path}"), text)
         .accessibility_label(format!("Toggle {path}"))
         .on_click(move |_, window, cx| {
@@ -2419,7 +2963,13 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
     let diffs: HashMap<&str, &Diff> = pane_in
         .parsed
         .as_ref()
-        .map(|parsed| parsed.diffs.iter().map(|diff| (diff.path.as_str(), diff)).collect())
+        .map(|parsed| {
+            parsed
+                .diffs
+                .iter()
+                .map(|diff| (diff.path.as_str(), diff))
+                .collect()
+        })
         .unwrap_or_default();
     let mut pane = v_flex()
         .id("right-changes-pane")
@@ -2427,8 +2977,15 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
         .aria_label("Changes")
         .size_full()
         .overflow_y_scroll()
-        .child(changes_heading("right-changes-session-heading", "This session".into()));
-    if pane_in.parsed.as_ref().is_some_and(|parsed| parsed.truncated) {
+        .child(changes_heading(
+            "right-changes-session-heading",
+            "This session".into(),
+        ));
+    if pane_in
+        .parsed
+        .as_ref()
+        .is_some_and(|parsed| parsed.truncated)
+    {
         pane = pane.child(
             div()
                 .id("right-changes-truncated")
@@ -2453,7 +3010,12 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
     }
     for (change, _) in &session_files {
         let open = pane_in.expanded.contains(&change.path);
-        pane = pane.child(session_file_row(change, open, pane_in.root, pane_in.harness));
+        pane = pane.child(session_file_row(
+            change,
+            open,
+            pane_in.root,
+            pane_in.harness,
+        ));
         if open {
             let text = diffs
                 .get(change.path.as_str())
@@ -2461,9 +3023,13 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                 .filter(|text| !text.is_empty())
                 .unwrap_or_else(|| "No diff available for this file yet.".to_owned());
             pane = pane.child(
-                code_block(format!("right-changes-diff:{}", change.path), change.path.clone(), text)
-                    .language("diff".to_owned())
-                    .into_any_element(),
+                code_block(
+                    format!("right-changes-diff:{}", change.path),
+                    change.path.clone(),
+                    text,
+                )
+                .language("diff".to_owned())
+                .into_any_element(),
             );
         }
     }
@@ -2493,7 +3059,10 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                 .aria_label("Branch sync status")
                 .px(px(16.0))
                 .py(px(4.0))
-                .child(format!("{} ↑{} ↓{}", status.branch, status.ahead, status.behind)),
+                .child(format!(
+                    "{} ↑{} ↓{}",
+                    status.branch, status.ahead, status.behind
+                )),
         );
     }
     let commit_root = pane_in.root.to_path_buf();
@@ -2501,7 +3070,10 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
     let commit_open = pane_in.commit_open;
     pane = pane.child(
         button("right-changes-commit-row", "Commit or open a PR…")
-            .accessibility_label(format!("{} the commit form", if commit_open { "Hide" } else { "Show" }))
+            .accessibility_label(format!(
+                "{} the commit form",
+                if commit_open { "Hide" } else { "Show" }
+            ))
             .on_click(move |_, _, cx| toggle_changes_commit(&commit_harness, &commit_root, cx))
             .into_any_element(),
     );
@@ -2511,7 +3083,10 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                 "right-changes-pr",
                 "main",
                 "",
-                vec![PrDescription::Text(SharedString::from(format!("Head branch: {}", status.branch)))],
+                vec![PrDescription::Text(SharedString::from(format!(
+                    "Head branch: {}",
+                    status.branch
+                )))],
                 Vec::new(),
             )
             .flush()
@@ -2535,7 +3110,10 @@ mod tests {
         open_text_doc(&mut cache, "Artifact".to_owned(), "line1\nline2".to_owned());
         assert_eq!(
             cache.text_doc(),
-            Some(super::TextDoc { title: "Artifact".to_owned(), text: "line1\nline2".to_owned() })
+            Some(super::TextDoc {
+                title: "Artifact".to_owned(),
+                text: "line1\nline2".to_owned()
+            })
         );
         assert!(close_text_doc(&mut cache));
         assert!(cache.text_doc().is_none());
@@ -2614,10 +3192,19 @@ mod tests {
         assert_eq!((parsed.diffs[0].added, parsed.diffs[0].removed), (1, 1));
         let lines = &parsed.diffs[0].hunks[0].lines;
         assert_eq!(lines.len(), 3);
-        assert_eq!((lines[0].kind, lines[0].old_no, lines[0].new_no), (DiffKind::Context, Some(1), Some(1)));
-        assert_eq!((lines[1].kind, lines[1].old_no, lines[1].new_no), (DiffKind::Del, Some(2), None));
+        assert_eq!(
+            (lines[0].kind, lines[0].old_no, lines[0].new_no),
+            (DiffKind::Context, Some(1), Some(1))
+        );
+        assert_eq!(
+            (lines[1].kind, lines[1].old_no, lines[1].new_no),
+            (DiffKind::Del, Some(2), None)
+        );
         assert_eq!(lines[1].text, "old");
-        assert_eq!((lines[2].kind, lines[2].old_no, lines[2].new_no), (DiffKind::Add, None, Some(2)));
+        assert_eq!(
+            (lines[2].kind, lines[2].old_no, lines[2].new_no),
+            (DiffKind::Add, None, Some(2))
+        );
         assert_eq!(lines[2].text, "new");
     }
 
@@ -2654,13 +3241,18 @@ mod tests {
         assert_eq!(parsed.diffs.len(), DIFF_FILES_CAP);
         assert!(parsed.truncated);
 
-        let mut one = String::from("diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1 +1 @@\n");
+        let mut one = String::from(
+            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1 +1 @@\n",
+        );
         for _ in 0..(DIFF_LINES_PER_FILE_CAP + 50) {
             one.push_str("+y\n");
         }
         let parsed = parse_unified_diff(&one);
         assert_eq!(parsed.diffs.len(), 1);
-        assert_eq!(parsed.diffs[0].hunks[0].lines.len(), DIFF_LINES_PER_FILE_CAP);
+        assert_eq!(
+            parsed.diffs[0].hunks[0].lines.len(),
+            DIFF_LINES_PER_FILE_CAP
+        );
         assert!(parsed.truncated);
     }
 
@@ -2668,7 +3260,12 @@ mod tests {
 
     fn status_file(path: &str, added: u32, removed: u32) -> (FileChange, bool) {
         (
-            FileChange { path: path.to_owned(), change: ChangeKind::Modified, added, removed },
+            FileChange {
+                path: path.to_owned(),
+                change: ChangeKind::Modified,
+                added,
+                removed,
+            },
             false,
         )
     }
@@ -2685,8 +3282,14 @@ mod tests {
         ];
         let edits = vec!["src/b.rs".to_owned(), "src/a.rs".to_owned()];
         let (session, other) = partition_session_files(&files, &edits, root);
-        let session_paths: Vec<&str> = session.iter().map(|(change, _)| change.path.as_str()).collect();
-        let other_paths: Vec<&str> = other.iter().map(|(change, _)| change.path.as_str()).collect();
+        let session_paths: Vec<&str> = session
+            .iter()
+            .map(|(change, _)| change.path.as_str())
+            .collect();
+        let other_paths: Vec<&str> = other
+            .iter()
+            .map(|(change, _)| change.path.as_str())
+            .collect();
         assert_eq!(session_paths, vec!["src/b.rs", "src/a.rs"]);
         assert_eq!(other_paths, vec!["docs/guide.md"]);
     }
@@ -2701,7 +3304,11 @@ mod tests {
         assert!(other.is_empty());
         // An edit the tree does not contain matches nothing, and a repeat
         // never duplicates a row.
-        let edits = vec!["nope.rs".to_owned(), "/work/tree/src/a.rs".to_owned(), "src/a.rs".to_owned()];
+        let edits = vec![
+            "nope.rs".to_owned(),
+            "/work/tree/src/a.rs".to_owned(),
+            "src/a.rs".to_owned(),
+        ];
         let (session, other) = partition_session_files(&files, &edits, root);
         assert_eq!(session.len(), 1);
         assert!(other.is_empty());
@@ -2743,7 +3350,10 @@ mod tests {
         // The empty "This session" line names the committed-or-reverted
         // case; only a session with no edits at all keeps the old text.
         assert_eq!(session_empty_text(false), "No edits in this session yet.");
-        assert_eq!(session_empty_text(true), "No uncommitted edits from this session.");
+        assert_eq!(
+            session_empty_text(true),
+            "No uncommitted edits from this session."
+        );
     }
 
     #[test]
@@ -2767,7 +3377,12 @@ mod tests {
         assert!(text.contains("+        RightKind::Browser => browser_pane(&notify),"));
         // An empty diff renders nothing, so the row falls back to its
         // "no diff yet" line instead of an empty block.
-        let empty = Diff { path: "x.rs".into(), hunks: Vec::new(), added: 0, removed: 0 };
+        let empty = Diff {
+            path: "x.rs".into(),
+            hunks: Vec::new(),
+            added: 0,
+            removed: 0,
+        };
         assert!(unified_text(&empty).is_empty());
     }
 
@@ -2776,17 +3391,35 @@ mod tests {
     #[test]
     fn porcelain_letters_map_to_kinds_and_staged_flags() {
         let (path, staged, kind) = parse_porcelain_line("M  src/a.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("src/a.rs", true, ChangeKind::Modified));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("src/a.rs", true, ChangeKind::Modified)
+        );
         let (path, staged, kind) = parse_porcelain_line(" M src/b.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("src/b.rs", false, ChangeKind::Modified));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("src/b.rs", false, ChangeKind::Modified)
+        );
         let (path, staged, kind) = parse_porcelain_line("A  new.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("new.rs", true, ChangeKind::Added));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("new.rs", true, ChangeKind::Added)
+        );
         let (path, staged, kind) = parse_porcelain_line("?? untracked.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("untracked.rs", false, ChangeKind::Added));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("untracked.rs", false, ChangeKind::Added)
+        );
         let (path, staged, kind) = parse_porcelain_line(" D gone.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("gone.rs", false, ChangeKind::Deleted));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("gone.rs", false, ChangeKind::Deleted)
+        );
         let (path, staged, kind) = parse_porcelain_line("R  old.rs -> new.rs").unwrap();
-        assert_eq!((path.as_str(), staged, kind), ("new.rs", true, ChangeKind::Modified));
+        assert_eq!(
+            (path.as_str(), staged, kind),
+            ("new.rs", true, ChangeKind::Modified)
+        );
         assert!(parse_porcelain_line("").is_none());
         assert!(parse_porcelain_line("!! ignored.rs").is_none());
     }
@@ -2848,7 +3481,11 @@ mod tests {
         std::fs::write(root.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         let (nodes, _) = walk_root_capped(&root, FILE_WALK_CAP);
         let names: Vec<String> = nodes.iter().map(|node| node.name.to_string()).collect();
-        assert_eq!(names, vec!["a.txt".to_string()], "a file-shaped .git must be skipped too");
+        assert_eq!(
+            names,
+            vec!["a.txt".to_string()],
+            "a file-shaped .git must be skipped too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2875,8 +3512,12 @@ mod tests {
         }
         let mut cache = RightCache::default();
         reset_io_count();
-        let (nodes, truncated) =
-            walk_root_expanded_cached(&root, FILE_WALK_CAP, &HashSet::new(), cache.dir_cache_for_root(&root));
+        let (nodes, truncated) = walk_root_expanded_cached(
+            &root,
+            FILE_WALK_CAP,
+            &HashSet::new(),
+            cache.dir_cache_for_root(&root),
+        );
         assert!(truncated, "2000 entries over a 300 cap must truncate");
         assert_eq!(nodes.len(), FILE_WALK_CAP);
         assert!(
@@ -2901,30 +3542,48 @@ mod tests {
         expanded.insert("big".to_string());
         let mut cache = RightCache::default();
         reset_io_count();
-        let (nodes, truncated) =
-            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        let (nodes, truncated) = walk_root_expanded_cached(
+            &root,
+            FILE_WALK_CAP,
+            &expanded,
+            cache.dir_cache_for_root(&root),
+        );
         assert!(truncated);
         assert_eq!(nodes.len(), FILE_WALK_CAP);
         let first_reads = io_count();
         assert!(first_reads > 0, "the first refresh must read");
         let first_hits = cache_hit_count();
         // Nothing changed: the second refresh replays both directories.
-        let (again, _) =
-            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        let (again, _) = walk_root_expanded_cached(
+            &root,
+            FILE_WALK_CAP,
+            &expanded,
+            cache.dir_cache_for_root(&root),
+        );
         assert_eq!(again.len(), nodes.len());
         assert_eq!(
             io_count(),
             first_reads,
             "an unchanged tree must not re-read any directory (would re-read on the old wholesale walk)"
         );
-        assert!(cache_hit_count() > first_hits, "both directories must replay from the cache");
+        assert!(
+            cache_hit_count() > first_hits,
+            "both directories must replay from the cache"
+        );
         // A new file moves only `big`'s mtime: only `big` is re-read.
         std::fs::write(root.join("big").join("f2000.txt"), "x").unwrap();
-        let (later, truncated) =
-            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        let (later, truncated) = walk_root_expanded_cached(
+            &root,
+            FILE_WALK_CAP,
+            &expanded,
+            cache.dir_cache_for_root(&root),
+        );
         assert!(truncated);
         assert_eq!(later.len(), FILE_WALK_CAP);
-        assert!(io_count() > first_reads, "a changed directory must be re-read");
+        assert!(
+            io_count() > first_reads,
+            "a changed directory must be re-read"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2947,7 +3606,10 @@ mod tests {
             preview.content
         );
         // Unchanged: no reload.
-        assert!(preview_reload_for(&root, &preview).is_none(), "an unchanged file must not reload");
+        assert!(
+            preview_reload_for(&root, &preview).is_none(),
+            "an unchanged file must not reload"
+        );
         // Rewritten: the next refresh reloads and lands the new bytes.
         std::fs::write(root.join("doc.txt"), "version two, rewritten at length\n").unwrap();
         let preview = cache.preview_for(&root).expect("the preview stays open");
@@ -3052,7 +3714,11 @@ mod tests {
             PreviewContent::Markdown { text } => text,
             other => panic!("expected markdown, got {other:?}"),
         });
-        assert!(matches!(blocks[0], DocBlock::Heading { level: 1, .. }), "first block: {:?}", blocks[0]);
+        assert!(
+            matches!(blocks[0], DocBlock::Heading { level: 1, .. }),
+            "first block: {:?}",
+            blocks[0]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3069,8 +3735,13 @@ mod tests {
         // Open: the child row arrives under its directory.
         assert!(toggle_expanded(&mut cache, &root, "sub"));
         let (nodes, _) = walk_root_expanded(&root, FILE_WALK_CAP, &cache.expanded_for(&root));
-        assert!(nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1));
-        assert!(nodes.iter().find(|node| node.id.as_ref() == "sub").is_some_and(|node| node.open == Some(true)));
+        assert!(nodes
+            .iter()
+            .any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1));
+        assert!(nodes
+            .iter()
+            .find(|node| node.id.as_ref() == "sub")
+            .is_some_and(|node| node.open == Some(true)));
         // Closed again: back to one level.
         assert!(!toggle_expanded(&mut cache, &root, "sub"));
         let (nodes, _) = walk_root_expanded(&root, FILE_WALK_CAP, &cache.expanded_for(&root));
@@ -3120,12 +3791,20 @@ mod tests {
         let mut cache = RightCache::default();
         assert!(begin_file_preview(&mut cache, &root, "a.txt"));
         assert!(close_file_preview(&mut cache, &root));
-        assert!(cache.preview_for(&root).is_none(), "the preview must be gone");
-        assert!(!close_file_preview(&mut cache, &root), "closing twice reports nothing open");
+        assert!(
+            cache.preview_for(&root).is_none(),
+            "the preview must be gone"
+        );
+        assert!(
+            !close_file_preview(&mut cache, &root),
+            "closing twice reports nothing open"
+        );
         // The tree still marks the row the preview showed.
         let (nodes, _) = walk_root_capped(&root, FILE_WALK_CAP);
         let nodes = mark_selected(nodes, cache.selected_for(&root).as_deref());
-        assert!(nodes.iter().any(|node| node.id.as_ref() == "a.txt" && node.selected));
+        assert!(nodes
+            .iter()
+            .any(|node| node.id.as_ref() == "a.txt" && node.selected));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3138,7 +3817,12 @@ mod tests {
         assert!(begin_file_preview(&mut cache, &root, "a.txt"));
         // The selection moved on before the first read landed.
         assert!(begin_file_preview(&mut cache, &root, "b.txt"));
-        assert!(!complete_file_preview(&mut cache, &root, "a.txt", Some(b"a\n".to_vec())));
+        assert!(!complete_file_preview(
+            &mut cache,
+            &root,
+            "a.txt",
+            Some(b"a\n".to_vec())
+        ));
         let preview = cache.preview_for(&root).expect("the preview stays open");
         assert_eq!(preview.path, "b.txt");
         assert_eq!(preview.content, PreviewContent::Loading);
@@ -3186,7 +3870,11 @@ mod tests {
     /// there before. The caller restores with [`restore_harness_dir`].
     fn hermetic_harness_dir(
         name: &str,
-    ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
+    ) -> (
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+        std::path::PathBuf,
+    ) {
         let dir = std::env::temp_dir().join(format!("baaz-right-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("probe state dir");
@@ -3199,7 +3887,11 @@ mod tests {
     /// Undo [`hermetic_harness_dir`].
     #[allow(clippy::needless_pass_by_value)]
     fn restore_harness_dir(
-        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
+        state: (
+            std::sync::MutexGuard<'static, ()>,
+            Option<std::ffi::OsString>,
+            std::path::PathBuf,
+        ),
     ) {
         let (guard, old, dir) = state;
         let _ = std::fs::remove_dir_all(&dir);
@@ -3224,7 +3916,9 @@ mod tests {
     /// length assertions mean anything.
     fn inert_guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn test_sink(toasts: Rc<std::cell::RefCell<Vec<(String, String)>>>) -> ToastSink {
@@ -3255,7 +3949,9 @@ mod tests {
         std::fs::create_dir_all(state.2.join("sub")).unwrap();
         std::fs::write(state.2.join("sub").join("inner.txt"), "inner\n").unwrap();
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+            baaz.update(cx, |harness, cx| {
+                harness.show_right(crate::layout::RightKind::Files, cx)
+            })
         });
         vc.run_until_parked();
         let root = vc
@@ -3265,8 +3961,16 @@ mod tests {
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
         vc.update(|window, cx| {
             let handle = files_handler(test_sink(toasts.clone()), baaz.downgrade(), root.clone());
-            handle(&FileTreeAction::Select(SharedString::from("note.md")), window, cx);
-            handle(&FileTreeAction::Toggle(SharedString::from("sub")), window, cx);
+            handle(
+                &FileTreeAction::Select(SharedString::from("note.md")),
+                window,
+                cx,
+            );
+            handle(
+                &FileTreeAction::Toggle(SharedString::from("sub")),
+                window,
+                cx,
+            );
             handle(&FileTreeAction::Search, window, cx);
             handle(&FileTreeAction::Refresh, window, cx);
         });
@@ -3284,7 +3988,11 @@ mod tests {
             preview.content
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).right_cache.expanded_for(&root).contains("sub")),
+            vc.update(|_, cx| baaz
+                .read(cx)
+                .right_cache
+                .expanded_for(&root)
+                .contains("sub")),
             "toggling sub must expand it"
         );
         // The re-read the toggle requested draws the child row.
@@ -3293,14 +4001,23 @@ mod tests {
             .expect("the refresh lands the listing")
             .0;
         assert!(
-            nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1),
+            nodes
+                .iter()
+                .any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1),
             "an open directory shows its children: {:?}",
-            nodes.iter().map(|node| node.id.to_string()).collect::<Vec<_>>()
+            nodes
+                .iter()
+                .map(|node| node.id.to_string())
+                .collect::<Vec<_>>()
         );
         // Only Search reached the toast.
         let log = inert_log();
         assert_eq!(log.len(), 1, "unexpected inert actions: {log:?}");
-        assert!(log[0].contains("Files") && log[0].contains("Search"), "unexpected: {}", log[0]);
+        assert!(
+            log[0].contains("Files") && log[0].contains("Search"),
+            "unexpected: {}",
+            log[0]
+        );
         let toasts = toasts.borrow();
         assert_eq!(toasts.len(), 1);
         assert!(toasts[0].1.contains("Search"));
@@ -3320,7 +4037,10 @@ mod tests {
             let state = cx.new(|cx| {
                 aui_webview::WebviewState::new(Box::new(aui_webview::FakeWebBackend::new()), cx)
             });
-            assert!(!state.read(cx).is_native(), "the scripted page is gpui, never a native overlay");
+            assert!(
+                !state.read(cx).is_native(),
+                "the scripted page is gpui, never a native overlay"
+            );
             state.update(cx, |state, _| state.navigate("https://example.com"));
             assert_eq!(state.read(cx).url().as_ref(), "https://example.com");
         });
@@ -3347,9 +4067,15 @@ mod tests {
         });
         let log = inert_log();
         assert_eq!(log.len(), 9);
-        assert!(log.iter().any(|line| line.contains("Changes") && line.contains("Commit")));
-        assert!(log.iter().any(|line| line.contains("Changes") && line.contains("Push")));
-        assert!(log.iter().any(|line| line.contains("Pull request") && line.contains("Create")));
+        assert!(log
+            .iter()
+            .any(|line| line.contains("Changes") && line.contains("Commit")));
+        assert!(log
+            .iter()
+            .any(|line| line.contains("Changes") && line.contains("Push")));
+        assert!(log
+            .iter()
+            .any(|line| line.contains("Pull request") && line.contains("Create")));
         assert_eq!(toasts.borrow().len(), 9);
     }
 
@@ -3385,7 +4111,10 @@ mod tests {
         // Insert-only: a second reveal keeps the first folder's state.
         expand_to(&mut cache, &root, "docs");
         let open = cache.expanded_for(&root);
-        assert!(open.contains("crates/baaz/src"), "the earlier folder stays open");
+        assert!(
+            open.contains("crates/baaz/src"),
+            "the earlier folder stays open"
+        );
         assert!(open.contains("docs"), "the new folder opens");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3398,8 +4127,14 @@ mod tests {
         std::fs::create_dir_all(root.join("crates/baaz/src")).unwrap();
         let mut cache = RightCache::default();
         select_dir(&mut cache, &root, "crates/baaz/src");
-        assert_eq!(cache.selected_for(&root).as_deref(), Some("crates/baaz/src"));
-        assert!(cache.preview_for(&root).is_none(), "a folder reveal previews nothing");
+        assert_eq!(
+            cache.selected_for(&root).as_deref(),
+            Some("crates/baaz/src")
+        );
+        assert!(
+            cache.preview_for(&root).is_none(),
+            "a folder reveal previews nothing"
+        );
         let open = cache.expanded_for(&root);
         assert!(open.contains("crates") && open.contains("crates/baaz/src"));
         let _ = std::fs::remove_dir_all(&root);
@@ -3413,9 +4148,16 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         let mut cache = RightCache::default();
-        assert!(begin_file_preview_highlight(&mut cache, &root, "src/main.rs", Some(2..3)));
+        assert!(begin_file_preview_highlight(
+            &mut cache,
+            &root,
+            "src/main.rs",
+            Some(2..3)
+        ));
         assert_eq!(
-            cache.preview_for(&root).and_then(|preview| preview.highlight),
+            cache
+                .preview_for(&root)
+                .and_then(|preview| preview.highlight),
             Some(2..3),
             "the loading state already carries the band"
         );
@@ -3426,9 +4168,12 @@ mod tests {
             Some(b"fn main() {}\n".to_vec())
         ));
         let preview = cache.preview_for(&root).expect("a preview");
-        assert_eq!(preview.highlight, Some(2..3), "the landed bytes keep the band");
+        assert_eq!(
+            preview.highlight,
+            Some(2..3),
+            "the landed bytes keep the band"
+        );
         assert_eq!(preview.language, "rust", "a .rs file previews as rust");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

@@ -88,6 +88,10 @@
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
+//! | `tab-new:<url>` | open a tab on `url` for the shown owner (a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
+//! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
+//! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
+//! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
@@ -288,6 +292,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
+    WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
+    WindowVerb { verb: "tab-select", run: |this, rest, window, cx| this.step_tab_select(rest, window, cx) },
+    WindowVerb { verb: "tab-close", run: |this, rest, window, cx| this.step_tab_close(rest, window, cx) },
+    WindowVerb {
+        verb: "tab-discard-now",
+        run: |this, _, window, cx| this.step_tab_discard_now(window, cx),
+    },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
