@@ -56,7 +56,6 @@ use std::sync::{Arc, Mutex};
 use aui::a11y_text::a11y_text_input;
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, spinner, ButtonSize};
-use aui::util::{interaction, TrackInteraction};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
@@ -1245,7 +1244,7 @@ pub struct Harness {
     /// every frame, and a later list reply must not open a second session
     /// beside it (see [`Harness::open_boot_session`]'s own guard).
     pub(crate) boot_session_attempted: bool,
-    /// The project being renamed through the header crumb's field: the same
+    /// The project being renamed through the header's rename field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
     pub(crate) renaming_project: Option<String>,
@@ -1262,8 +1261,6 @@ pub struct Harness {
     pub(crate) footer_bounds: Option<Bounds<Pixels>>,
     /// The fixed Sessions caption row: the Sessions view menu's trigger.
     pub(crate) sessions_caption: Option<Bounds<Pixels>>,
-    /// The header project crumb: the header project menu's trigger.
-    pub(crate) crumb_bounds: Option<Bounds<Pixels>>,
     /// The header overflow `…` button: the overflow menu's trigger.
     pub(crate) overflow_bounds: Option<Bounds<Pixels>>,
     /// The open project menu's own rect: the Colour submenu's anchor is
@@ -1566,7 +1563,6 @@ impl Harness {
             project_colour_open: false,
             footer_bounds: None,
             sessions_caption: None,
-            crumb_bounds: None,
             overflow_bounds: None,
             project_menu_bounds: None,
             group_menu_bounds: HashMap::new(),
@@ -1830,7 +1826,7 @@ impl Harness {
     pub(crate) fn collapsed_head_label(&self, head: &str, cx: &gpui::App) -> Option<String> {
         // One row-line, cut where the row would truncate it anyway: a pasted
         // brief as the derived title can never fill the whole header, and
-        // the row and the crumb read the same words.
+        // the row and the header read the same words.
         if let Some(entry) = self.visible_sessions(cx).iter().find(|e| e.id == head) {
             let pending = entry.title_pending || self.titles_pending.contains(&entry.id);
             return Some(crate::sidebar::one_line(crate::sidebar::display_label(
@@ -3573,75 +3569,6 @@ impl Harness {
     }
 
 
-    /// The project crumb the centre headers share (Sessions and Browse):
-    /// name and chevron as one click target that opens the project menu
-    /// under it — `project › session`, no marks (owner round 4, O4). With
-    /// no current project it names the unfiled lane — where a session
-    /// started right now would go — and opens the Projects palette, which
-    /// is how one gets filed.
-    fn project_crumb(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let renaming_project_here =
-            self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
-        if renaming_project_here {
-            div().flex_none().child(self.rename_field(window, cx)).into_any_element()
-        } else if let Some(project) = self.current_project() {
-            let id = project.id.clone();
-            let name = project.name.clone();
-            let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if this.renaming_project.is_some() {
-                    return;
-                }
-                this.open_project_menu(Some(id.clone()), true, cx);
-            });
-            let state = interaction("hd-project", window, cx);
-            // The wrapper reports the crumb's own rect: `on_children_prepainted`
-            // fires with the children's bounds, and the crumb is this wrapper's
-            // only child, so its first bounds are the trigger the header
-            // project menu seats at.
-            let crumb_report = cx.entity().downgrade();
-            div()
-                .flex_none()
-                .on_children_prepainted(move |bounds, _, cx| {
-                    if let Some(first) = bounds.first() {
-                        let bounds = *first;
-                        let _ = crumb_report.update(cx, |this, cx| {
-                            Harness::note_trigger_bounds(&mut this.crumb_bounds, bounds, cx);
-                        });
-                    }
-                })
-                .child(
-                    h_flex()
-                        .id("hd-project")
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.0))
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("Project {name}. Open project menu"))
-                        .track_interaction(&state)
-                        .on_click(open)
-                        .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
-                        .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.ink_3)),
-                )
-                .into_any_element()
-        } else {
-            let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.open_projects(false, window, cx);
-            });
-            let state = interaction("hd-project", window, cx);
-            h_flex()
-                .id("hd-project")
-                .flex_none()
-                .items_center()
-                .role(gpui::Role::Button)
-                .aria_label("Open projects")
-                .track_interaction(&state)
-                .on_click(open)
-                .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child(crate::sidebar::UNFILED_LABEL))
-                .into_any_element()
-        }
-    }
-
     /// The right-pane toggle the centre headers share (B2a-H4): ⌘⌥B's
     /// button, lit while the pane stands open. The centre cell is a custom
     /// `header_cell`, not the library's `centre_header`, so the library's
@@ -3780,7 +3707,7 @@ impl Harness {
     }
 
     /// The Browse centre header (B2a-H4): one toolbar row in the 44 px
-    /// centre header cell — project crumb, the ↩ session chip when the
+    /// centre header cell — the ↩ session chip when the
     /// shown tab came from a session's pane, back, forward, reload/stop
     /// with the progress line, the address field, the Extensions and More
     /// placeholders (B2a-H5 owns their menus), and the right-pane toggle.
@@ -3885,8 +3812,7 @@ impl Harness {
                         cx.notify();
                     })),
             );
-        let mut cell =
-            header_cell("hd-browse").child(div().flex_none().child(self.project_crumb(window, cx)));
+        let mut cell = header_cell("hd-browse");
         if let Some(chip) = chip {
             cell = cell.child(chip);
         }
@@ -5563,9 +5489,9 @@ impl Harness {
         chip.into_any_element()
     }
 
-    /// The centre header: the current project's crumb (`mark project ▾`),
-    /// a `·` separator, the active session's label with the provider mark,
-    /// and the overflow menu — and nothing else.
+    /// The centre header: the active session's label with the provider
+    /// mark, and the overflow menu — and nothing else. The project is
+    /// chosen from the sidebar and the Projects palette, never here.
     /// The library's `centre_header` always paints the right-pane toggle and
     /// the right header always paints its close button, so the shell gets a
     /// plain cell with the same title construction instead. The shell's own
@@ -5584,7 +5510,7 @@ impl Harness {
         // the raw id to its head, and the collapsed view row names it —
         // the same label the sidebar's one row wears (Y2a, Y2a3).
         let target = target.map(|id| self.chain_head(&id));
-        // The Skills page names itself after the crumb: "Skills · [project]".
+        // The Skills page names itself plainly while open: "Skills".
         let label = if self.skills.open {
             Some("Skills".to_owned())
         } else {
@@ -5592,15 +5518,13 @@ impl Harness {
         };
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        // The project crumb both centre headers share.
-        let crumb: AnyElement = self.project_crumb(window, cx);
-        // The session half is the label after the `·` separator, with no
-        // provider mark before it. The title flexes
-        // inside the header cell and clips to one line, so a whole first
-        // prompt as the derived title can never push the overflow button
-        // out. There is no width token in aui-tokens, so the flex leftover
-        // — not a fixed max — is the constraint, which also holds on narrow
-        // windows.
+        // The session title leads the row: first child of the header cell,
+        // so its left edge sits where the project crumb's did. The title
+        // flexes inside the header cell and clips to one line, so a whole
+        // first prompt as the derived title can never push the overflow
+        // button out. There is no width token in aui-tokens, so the flex
+        // leftover — not a fixed max — is the constraint, which also holds
+        // on narrow windows.
         let mut title = h_flex()
             .flex_1()
             .min_w(px(0.0))
@@ -5609,9 +5533,17 @@ impl Harness {
             .gap(px(7.0))
             .text_color(p.ink)
             .ui(scale::FS_13)
-            .semibold()
-            .child(crumb);
-        if let Some(label) = label {
+            .semibold();
+        // A project rename (from the project menu) swaps the lead for the
+        // same dense field the sidebar row uses; the commit path is the
+        // same `ConfirmRename`, Escape the same `cancel`.
+        let renaming_project_here =
+            self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
+        if renaming_project_here {
+            title = title.child(
+                div().flex_1().min_w(px(0.0)).overflow_hidden().child(self.rename_field(window, cx)),
+            );
+        } else if let Some(label) = label {
             // Renaming the open session swaps the session label for the same
             // dense field the sidebar row uses (Task A); the commit path is
             // the same `ConfirmRename`, Escape the same `cancel`.
@@ -5620,7 +5552,6 @@ impl Harness {
                 .as_ref()
                 .map(|view| view.read(cx).session_id.clone())
                 .is_some_and(|id| self.renaming.as_deref() == Some(id.as_str()));
-            title = title.child(div().flex_none().text_color(p.ink_4).child("·"));
             if renaming_here {
                 // The field's own root is `w_full`, so the flex item clips:
                 // the overflow button keeps its slot instead of being pushed
@@ -9967,9 +9898,9 @@ mod tests {
     }
 
     /// A 2,000-char first message titles the local row — and the header
-    /// crumb reads the same row — with at most one 80-char line each. The
+    /// title reads the same row — with at most one 80-char line each. The
     /// first-send insert site clamps the prompt on the way in, and the
-    /// crumb clamps whatever the row carries.
+    /// header clamps whatever the row carries.
     #[gpui::test]
     fn a_two_thousand_char_first_message_yields_short_row_and_header_titles(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("long-title");
@@ -9995,7 +9926,7 @@ mod tests {
         let (row_len, head_len) = vc.update(|_, cx| {
             let h = baaz.read(cx);
             let row = h.sessions.iter().find(|e| e.id == "s-long").expect("the row");
-            let head = h.collapsed_head_label("s-long", cx).expect("the header crumb");
+            let head = h.collapsed_head_label("s-long", cx).expect("the header title");
             (row.label.chars().count(), head.chars().count())
         });
         assert!(row_len <= 80, "row title is {row_len} chars");
