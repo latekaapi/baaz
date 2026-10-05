@@ -201,6 +201,20 @@ impl Tabs {
         }
     }
 
+    /// Reopen the closed tab `id`, selecting it for its owner: the new-tab
+    /// page's closed rows. Keeps its identity, space and URL; appended at
+    /// the strip's end. `None` for an unknown (or never-closed) id.
+    pub(crate) fn reopen(&mut self, id: TabId) -> Option<TabId> {
+        let ix = self.closed.iter().position(|tab| tab.id == id)?;
+        let tab = self.closed.remove(ix);
+        // A live tab can never carry the id: ids are never reused, and a
+        // reopened tab left the live set when it closed.
+        debug_assert!(!self.tabs.iter().any(|live| live.id == id));
+        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
+        self.tabs.push(tab);
+        Some(id)
+    }
+
     /// Reopen the most recently closed tab, selecting it for its owner.
     /// Keeps its identity, space and URL; appended at the strip's end.
     /// (Next tasks: the reopen control.)

@@ -40,42 +40,126 @@ fn encode_query(query: &str) -> String {
     out
 }
 
-/// Whether `text` (already known to hold no whitespace and no scheme) reads
-/// as a host: `example.com`, `localhost:3000`, `127.0.0.1:5173/x`. A bare
-/// word (`foo`) is a search, not a host.
+/// Schemes the address field navigates, case-insensitively: anything else
+/// with `://` or a `scheme:` prefix (`javascript:`, `data:`, `vbscript:`,
+/// `blob:`, `mailto:`) is a search, never navigated.
+const NAV_SCHEMES: &[&str] = &["http", "https", "file", "about", "chrome", "devtools"];
+/// Non-navigated schemes with a `scheme:` prefix (no `//`): a search.
+const SEARCH_SCHEMES: &[&str] = &["javascript", "data", "vbscript", "blob", "mailto", "tel"];
+
+/// Whether `head` (the text before the first `:`) reads as a URL scheme:
+/// a leading letter, then letters, digits, `+`, `-` or `.`.
+fn is_scheme_shape(head: &str) -> bool {
+    let mut chars = head.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => (),
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Whether `text` (already known to hold no whitespace and no navigable
+/// scheme) reads as a host: `example.com`, `münchen.de`, `localhost`,
+/// `localhost:3000`, `[::1]:3000`, `127.0.0.1:8080/x`. A bare word
+/// (`foo`), an address (`user@example.com`) and a decimal (`3.14`) are
+/// searches, not hosts.
 fn looks_like_host(text: &str) -> bool {
-    if text.is_empty() || !text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_' | '/' | '?' | '#' | '&' | '=' | '%' | '+' | '@')) {
+    if text.is_empty()
+        || !text.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | ':' | '-' | '_' | '/' | '?' | '#' | '&' | '=' | '%' | '+' | '[' | ']'
+                )
+        })
+    {
         return false;
     }
-    text.contains('.') || text.contains(':')
+    // A bare `user@host` is an address, not a URL (a real userinfo URL
+    // carries a scheme and never reaches here).
+    if text.contains('@') {
+        return false;
+    }
+    // A dotted decimal is a number, not a host — unless it reads as an
+    // IPv4 address.
+    if text.bytes().all(|b| b.is_ascii_digit() || b == b'.') && !is_ipv4(text) {
+        return false;
+    }
+    text.contains('.') || text.contains(':') || is_loopback_host(text)
 }
 
-/// The loopback hosts that earn `http`, not `https`.
+/// Whether `text` reads as a dotted-quad IPv4 address.
+fn is_ipv4(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u8>().is_ok()
+        })
+}
+
+/// The loopback hosts that earn `http`, not `https`: `localhost`,
+/// `*.localhost`, `127.0.0.1` and `::1`, with or without brackets, port
+/// or path.
 fn is_loopback_host(host: &str) -> bool {
-    let host = host.split(':').next().unwrap_or(host).trim_matches(['[', ']']);
-    host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
+    let host = host.split(['/', '?', '#']).next().unwrap_or(host);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if host.matches(':').count() >= 2 {
+        // A bare IPv6 literal (`::1`): the colons are the address, not
+        // a port.
+        host
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    bare.eq_ignore_ascii_case("localhost")
+        || bare.to_ascii_lowercase().ends_with(".localhost")
+        || bare == "127.0.0.1"
+        || bare == "::1"
 }
 
-/// Decide what Enter on `text` does: a URL when it parses or looks like a
-/// host, otherwise a search with the default engine. Empty restores the
-/// field (an empty search), never navigates.
+/// Decide what Enter on `text` does: a URL for an allowlisted scheme or
+/// something that looks like a host, otherwise a search with the default
+/// engine. Empty restores the field (an empty search), never navigates.
+/// Dangerous schemes (`javascript:`, `data:`, …) are searches, never
+/// navigated. Bare loopbacks (`localhost`, `localhost:3000`, `[::1]:3000`,
+/// `127.0.0.1:8080`) earn `http://`, everything else `https://`.
 pub(crate) fn classify_address_input(text: &str) -> NavTarget {
     let typed = text.trim();
     if typed.is_empty() {
         return NavTarget::Search(String::new());
     }
-    if typed.contains("://") || typed.starts_with("about:") || typed.starts_with("data:") || typed.starts_with("file:") {
-        return NavTarget::Url(typed.to_owned());
+    let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+    if let Some((scheme, _)) = typed.split_once("://") {
+        if NAV_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) {
+            return NavTarget::Url(typed.to_owned());
+        }
+        return search(typed);
+    }
+    if let Some((head, _)) = typed.split_once(':') {
+        if !head.contains(['.', '/', '?', '#', '@']) && is_scheme_shape(head) {
+            let scheme = head.to_ascii_lowercase();
+            if NAV_SCHEMES.contains(&scheme.as_str()) {
+                return NavTarget::Url(typed.to_owned());
+            }
+            if SEARCH_SCHEMES.contains(&scheme.as_str()) {
+                return search(typed);
+            }
+            // An unknown `word:` prefix (`localhost:3000`) falls through
+            // to the host rule below; anything host-shaped still navigates.
+        }
     }
     if typed.chars().any(char::is_whitespace) {
-        return NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(typed)));
+        return search(typed);
     }
     if looks_like_host(typed) {
-        let host = typed.split('/').next().unwrap_or(typed);
-        let scheme = if is_loopback_host(host) { "http" } else { "https" };
+        let scheme = if is_loopback_host(typed) { "http" } else { "https" };
         return NavTarget::Url(format!("{scheme}://{typed}"));
     }
-    NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(typed)))
+    search(typed)
 }
 
 /// The address badge: secure gets the tune glyph (never a padlock), Local
@@ -101,6 +185,9 @@ pub(crate) struct AddressView {
     pub badge: Option<AddressBadge>,
     /// The badge's words (`""` for the glyph-only Tune, `"New tab"` needs none).
     pub label: String,
+    /// The quiet userinfo (`"user@"` without the `@` here), or `""`.
+    /// Never bright: `https://google.com@evil.com/` reads `evil.com`.
+    pub userinfo: String,
     /// The bright run: the host, or the file path, or the Baaz page name.
     pub host: String,
     /// The quiet run: the path after the host (`""` when none).
@@ -118,14 +205,37 @@ pub(crate) fn effective_security(url: &str, reported: PageSecurity) -> PageSecur
     }
 }
 
-/// Split `url` into host and path: the scheme stripped, the first `/`
-/// dividing them. `("example.com", "/a/b")`, `("localhost:5173", "/overview")`.
-fn split_host_path(url: &str) -> (String, String) {
-    let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    match after.split_once('/') {
-        Some((host, path)) => (host.to_owned(), format!("/{path}")),
-        None => (after.to_owned(), String::new()),
+/// Split `after` (the text after `://`) into authority and path: the
+/// authority ends at the first `/`, `\`, `?` or `#` — the WHATWG rule the
+/// library's own host extraction uses — and the path keeps its leading
+/// separator. `("example.com", "/a/b")`, `("evil.com", "\@google.com/")`.
+fn split_authority_path(after: &str) -> (&str, &str) {
+    match after.find(['/', '\\', '?', '#']) {
+        Some(ix) => (&after[..ix], &after[ix..]),
+        None => (after, ""),
     }
+}
+
+/// Split an authority into userinfo and host at the last `@`: the display
+/// host is what the library classifies (userinfo stripped), so
+/// `google.com@evil.com` shows `evil.com` bright and `google.com` quiet.
+fn split_userinfo(authority: &str) -> (String, String) {
+    match authority.rsplit_once('@') {
+        Some((user, host)) => (user.to_owned(), host.to_owned()),
+        None => (String::new(), authority.to_owned()),
+    }
+}
+
+/// Split `url` into quiet userinfo, bright host and quiet path: the scheme
+/// stripped, the authority ending at the first `/ \ ? #`, the host after
+/// the last `@`. Mirrors the library's host extraction (`userinfo`
+/// stripped, `\ ? #` ending the authority) without lowercasing, so the
+/// display reads what was typed.
+fn split_host_path(url: &str) -> (String, String, String) {
+    let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let (authority, path) = split_authority_path(after);
+    let (userinfo, host) = split_userinfo(authority);
+    (userinfo, host, path.to_owned())
 }
 
 /// The pure address state for `url` under `security`: badge, host and path.
@@ -133,30 +243,30 @@ fn split_host_path(url: &str) -> (String, String) {
 /// through untouched and no badge.
 pub(crate) fn address_view(url: &str, security: PageSecurity, editing: bool) -> AddressView {
     if editing {
-        return AddressView { badge: None, label: String::new(), host: url.to_owned(), path: String::new() };
+        return AddressView { badge: None, label: String::new(), userinfo: String::new(), host: url.to_owned(), path: String::new() };
     }
     match effective_security(url, security) {
         PageSecurity::Secure => {
-            let (host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Tune), label: String::new(), host, path }
+            let (userinfo, host, path) = split_host_path(url);
+            AddressView { badge: Some(AddressBadge::Tune), label: String::new(), userinfo, host, path }
         }
         PageSecurity::Local => {
-            let (host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Dev), label: ">_ dev".to_owned(), host, path }
+            let (userinfo, host, path) = split_host_path(url);
+            AddressView { badge: Some(AddressBadge::Dev), label: ">_ dev".to_owned(), userinfo, host, path }
         }
         PageSecurity::NotSecure => {
-            let (host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Warn), label: "⚠ Not secure".to_owned(), host, path }
+            let (userinfo, host, path) = split_host_path(url);
+            AddressView { badge: Some(AddressBadge::Warn), label: "⚠ Not secure".to_owned(), userinfo, host, path }
         }
         PageSecurity::File => {
             let path = url.strip_prefix("file://").unwrap_or(url).to_owned();
-            AddressView { badge: Some(AddressBadge::File), label: "File".to_owned(), host: String::new(), path }
+            AddressView { badge: Some(AddressBadge::File), label: "File".to_owned(), userinfo: String::new(), host: String::new(), path }
         }
         PageSecurity::Internal => {
             let name = if url == "about:blank" { "New tab".to_owned() } else { url.split_once(':').map(|(_, rest)| rest.trim_start_matches('/').to_owned()).unwrap_or_else(|| url.to_owned()) };
-            AddressView { badge: Some(AddressBadge::Baaz), label: "✦ Baaz".to_owned(), host: name, path: String::new() }
+            AddressView { badge: Some(AddressBadge::Baaz), label: "✦ Baaz".to_owned(), userinfo: String::new(), host: name, path: String::new() }
         }
-        PageSecurity::Unknown => AddressView { badge: None, label: String::new(), host: url.to_owned(), path: String::new() },
+        PageSecurity::Unknown => AddressView { badge: None, label: String::new(), userinfo: String::new(), host: url.to_owned(), path: String::new() },
     }
 }
 
@@ -195,6 +305,10 @@ pub(crate) struct Suggestion {
     pub title: String,
     /// The row's key hint (`"⌘↵"`, `"↵"`, `""`).
     pub hint: String,
+    /// What Tab writes into the field for this row: the tab's URL, the
+    /// session's title, the history URL — `None` for Ask and Search rows,
+    /// which are not completable.
+    pub complete: Option<String>,
 }
 
 /// What an omnibox row activates: the tab or session to show, the URL to
@@ -227,21 +341,42 @@ const MAX_TAB_SUGGESTIONS: usize = 5;
 const MAX_SESSION_SUGGESTIONS: usize = 5;
 const MAX_HISTORY_SUGGESTIONS: usize = 4;
 
-fn matches(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(needle)
+/// How `needle` matches `haystack`: a prefix beats a word start, which
+/// beats a mid-word substring. `None` is no match at all.
+fn match_tier(haystack: &str, needle: &str) -> Option<u8> {
+    let haystack = haystack.to_lowercase();
+    if haystack.starts_with(needle) {
+        return Some(0);
+    }
+    if haystack
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| !word.is_empty() && word.starts_with(needle))
+    {
+        return Some(1);
+    }
+    if haystack.contains(needle) {
+        return Some(2);
+    }
+    None
+}
+
+/// The best tier over several fields (a tab's title or its URL).
+fn best_tier(fields: &[&str], needle: &str) -> Option<u8> {
+    fields.iter().filter_map(|field| match_tier(field, needle)).min()
 }
 
 /// Rank the omnibox rows for `query` over this project's open tabs
-/// (`(id, title, url)`), sessions (`(id, name)`) and read history
-/// (`(title, url)`): Ask first, then matching tabs and sessions, then
-/// matching history — the history section omitted when empty — then the
-/// engine row. The palette's lists filter on the same substring rule; this
-/// mirrors it for the address field's own rows.
+/// (`(id, title, url, recency_ms)`), sessions (`(id, name, recency_ms)`)
+/// and read history (`(title, url, recency_ms)`): Ask first, then matching
+/// tabs and sessions, then matching history — the history section omitted
+/// when empty — then the engine row. Inside a section a prefix match beats
+/// a word-start, which beats a substring, and recency breaks ties (later
+/// `recency_ms` first; `0` is unknown and sorts last among equals).
 pub(crate) fn rank_omnibox(
     query: &str,
-    tabs: &[(super::TabId, String, String)],
-    sessions: &[(String, String)],
-    history: &[(String, String)],
+    tabs: &[(super::TabId, String, String, u64)],
+    sessions: &[(String, String, u64)],
+    history: &[(String, String, u64)],
 ) -> Vec<OmniRow> {
     let q = query.trim();
     if q.is_empty() {
@@ -249,47 +384,86 @@ pub(crate) fn rank_omnibox(
     }
     let needle = q.to_lowercase();
     let mut rows = vec![OmniRow {
-        suggestion: Suggestion { kind: SuggestKind::Ask, title: format!("Ask: {q}"), hint: "⌘↵".to_owned() },
+        suggestion: Suggestion {
+            kind: SuggestKind::Ask,
+            title: format!("Ask: {q}"),
+            hint: "⌘↵".to_owned(),
+            complete: None,
+        },
         target: OmniTarget::Ask(q.to_owned()),
     }];
-    for (id, title, url) in tabs {
-        if rows.iter().filter(|row| row.suggestion.kind == SuggestKind::Tab).count() >= MAX_TAB_SUGGESTIONS {
-            break;
-        }
-        if matches(title, &needle) || matches(url, &needle) {
-            rows.push(OmniRow {
-                suggestion: Suggestion { kind: SuggestKind::Tab, title: title.clone(), hint: String::new() },
-                target: OmniTarget::Tab(*id),
-            });
-        }
-    }
-    for (id, name) in sessions {
-        if rows.iter().filter(|row| row.suggestion.kind == SuggestKind::Session).count() >= MAX_SESSION_SUGGESTIONS {
-            break;
-        }
-        if matches(name, &needle) {
-            rows.push(OmniRow {
-                suggestion: Suggestion { kind: SuggestKind::Session, title: name.clone(), hint: String::new() },
-                target: OmniTarget::Session(id.clone()),
-            });
+    let mut tab_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
+    for (id, title, url, recency) in tabs {
+        if let Some(tier) = best_tier(&[title, url], &needle) {
+            tab_rows.push((
+                tier,
+                *recency,
+                OmniRow {
+                    suggestion: Suggestion {
+                        kind: SuggestKind::Tab,
+                        title: title.clone(),
+                        hint: String::new(),
+                        complete: Some(url.clone()),
+                    },
+                    target: OmniTarget::Tab(*id),
+                },
+            ));
         }
     }
-    for (title, url) in history {
-        if rows.iter().filter(|row| row.suggestion.kind == SuggestKind::History).count() >= MAX_HISTORY_SUGGESTIONS {
-            break;
+    tab_rows.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    for (_, _, row) in tab_rows.into_iter().take(MAX_TAB_SUGGESTIONS) {
+        rows.push(row);
+    }
+    let mut session_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
+    for (id, name, recency) in sessions {
+        if let Some(tier) = match_tier(name, &needle) {
+            session_rows.push((
+                tier,
+                *recency,
+                OmniRow {
+                    suggestion: Suggestion {
+                        kind: SuggestKind::Session,
+                        title: name.clone(),
+                        hint: String::new(),
+                        complete: Some(name.clone()),
+                    },
+                    target: OmniTarget::Session(id.clone()),
+                },
+            ));
         }
-        if matches(title, &needle) || matches(url, &needle) {
-            rows.push(OmniRow {
-                suggestion: Suggestion { kind: SuggestKind::History, title: title.clone(), hint: String::new() },
-                target: OmniTarget::History(url.clone()),
-            });
+    }
+    session_rows.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    for (_, _, row) in session_rows.into_iter().take(MAX_SESSION_SUGGESTIONS) {
+        rows.push(row);
+    }
+    let mut history_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
+    for (title, url, recency) in history {
+        if let Some(tier) = best_tier(&[title, url], &needle) {
+            history_rows.push((
+                tier,
+                *recency,
+                OmniRow {
+                    suggestion: Suggestion {
+                        kind: SuggestKind::History,
+                        title: title.clone(),
+                        hint: String::new(),
+                        complete: Some(url.clone()),
+                    },
+                    target: OmniTarget::History(url.clone()),
+                },
+            ));
         }
+    }
+    history_rows.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    for (_, _, row) in history_rows.into_iter().take(MAX_HISTORY_SUGGESTIONS) {
+        rows.push(row);
     }
     rows.push(OmniRow {
         suggestion: Suggestion {
             kind: SuggestKind::Search,
             title: format!("Search with {SEARCH_ENGINE_NAME} for {q}"),
             hint: "↵".to_owned(),
+            complete: None,
         },
         target: OmniTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(q))),
     });
@@ -345,16 +519,23 @@ pub(crate) fn relative_ago(ms: u64) -> String {
 }
 
 /// One tab's Baaz-tracked back/forward stacks (B2a-H4): the library owns the
-/// real history and exposes no back/forward/​reload calls, so the header
-/// toolbar tracks the URLs the sync reports and navigates within them. An
-/// outside navigation (the library row's own back button, a link) lands
-/// through [`Self::note_navigated`], which clears the forward stack exactly
-/// like a fresh navigation does.
+/// real history and exposes no back/forward/​reload calls (its engine
+/// stepping is private to the pane), so the header toolbar tracks the URLs
+/// the sync reports and navigates within them. An outside navigation (a
+/// link, the pane's own controls before Browse hid them) lands through
+/// [`Self::note_navigated`], which clears the forward stack exactly like a
+/// fresh navigation does.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BackForward {
     past: Vec<String>,
     future: Vec<String>,
     current: Option<String>,
+    /// The URL the page still shows after [`Self::go_back`] stepped the
+    /// stacks ahead of it: the per-frame sync reports the old URL until
+    /// the navigation lands, and that stale echo must not undo the step.
+    /// Consumed once — a genuine later navigation to the same URL heals
+    /// on the next frame, since the sync re-reports it.
+    stale: Option<String>,
 }
 
 const HISTORY_CAP: usize = 50;
@@ -362,9 +543,22 @@ const HISTORY_CAP: usize = 50;
 impl BackForward {
     /// Record the tab showing `url`: a new URL pushes the old current back
     /// and clears the forward stack; the same URL (or an empty one) is a
-    /// no-op, so one sync per frame never grows the stacks.
+    /// no-op, so one sync per frame never grows the stacks. The one stale
+    /// echo after a [`Self::go_back`]/[`Self::go_forward`] step is ignored,
+    /// so the step is never undone by the page reporting late.
     pub(crate) fn note_navigated(&mut self, url: &str) {
-        if url.is_empty() || self.current.as_deref() == Some(url) {
+        if url.is_empty() {
+            return;
+        }
+        if self.current.as_deref() == Some(url) {
+            // The stacks already read this URL: settled, so any armed
+            // stale echo is over.
+            self.stale = None;
+            return;
+        }
+        if self.stale.as_deref() == Some(url) {
+            // The pre-navigation echo of a step: swallow once.
+            self.stale = None;
             return;
         }
         if let Some(current) = self.current.take() {
@@ -376,6 +570,7 @@ impl BackForward {
             }
         }
         self.future.clear();
+        self.stale = None;
         self.current = Some(url.to_owned());
     }
 
@@ -394,25 +589,67 @@ impl BackForward {
         !self.future.is_empty()
     }
 
-    /// Step back: the URL to navigate to, or `None` at the start.
+    /// Step back: the URL to navigate to, or `None` at the start. Arms
+    /// the stale echo (the URL the page still shows) so the per-frame
+    /// [`Self::note_navigated`] cannot undo the step.
     pub(crate) fn go_back(&mut self) -> Option<String> {
         let prev = self.past.pop()?;
         if let Some(current) = self.current.take() {
+            if self.stale.is_none() {
+                self.stale = Some(current.clone());
+            }
             self.future.push(current);
         }
         self.current = Some(prev.clone());
         Some(prev)
     }
 
-    /// Step forward: the URL to navigate to, or `None` at the end.
+    /// Step forward: the URL to navigate to, or `None` at the end. Arms
+    /// the stale echo like [`Self::go_back`] does.
     pub(crate) fn go_forward(&mut self) -> Option<String> {
         let next = self.future.pop()?;
         if let Some(current) = self.current.take() {
+            if self.stale.is_none() {
+                self.stale = Some(current.clone());
+            }
             self.past.push(current);
         }
         self.current = Some(next.clone());
         Some(next)
     }
+
+    /// Step back `steps` entries at once: what picking a back-history menu
+    /// row does, so the stacks stay right (the entries above the target
+    /// move forward, the target becomes current). `0` steps back once.
+    pub(crate) fn go_back_steps(&mut self, steps: usize) -> Option<String> {
+        let mut target = None;
+        for _ in 0..steps.max(1) {
+            target = self.go_back();
+            if target.is_none() {
+                break;
+            }
+        }
+        target
+    }
+}
+
+/// The Ask draft text for `query` over `existing`: an empty composer takes
+/// the question as is, otherwise the question appends on a new line —
+/// never replacing, never sent.
+pub(crate) fn ask_draft_text(existing: &str, query: &str) -> String {
+    if existing.trim().is_empty() {
+        query.to_owned()
+    } else {
+        format!("{}\n{query}", existing.trim_end())
+    }
+}
+
+/// Whether the reload control reads as stop: the tab has a tracked load in
+/// flight and the page reports mid-load progress. A tracked load that never
+/// reaches 1.0 still ends when the stop lands (the caller untracks it) —
+/// the button never sticks on Stop.
+pub(crate) fn stop_armed(tracked_loading: bool, progress: f32) -> bool {
+    tracked_loading && is_loading(progress)
 }
 
 #[cfg(test)]
@@ -509,12 +746,14 @@ mod tests {
     fn omnibox_ranks_ask_tabs_sessions_history_search() {
         use super::super::TabId;
         let tabs = vec![
-            (TabId(1), "Recharts API reference".to_owned(), "https://recharts.org/api".to_owned()),
-            (TabId(2), "Weekend weather".to_owned(), "https://weather.example/weekend".to_owned()),
+            (TabId(1), "Recharts API reference".to_owned(), "https://recharts.org/api".to_owned(), 0),
+            (TabId(2), "Weekend weather".to_owned(), "https://weather.example/weekend".to_owned(), 0),
         ];
-        let sessions =
-            vec![("s-1".to_owned(), "Fix ledger chart".to_owned()), ("s-2".to_owned(), "Recharts spike".to_owned())];
-        let history = vec![("Recharts gallery".to_owned(), "https://recharts.org/gallery".to_owned())];
+        let sessions = vec![
+            ("s-1".to_owned(), "Fix ledger chart".to_owned(), 0),
+            ("s-2".to_owned(), "Recharts spike".to_owned(), 0),
+        ];
+        let history = vec![("Recharts gallery".to_owned(), "https://recharts.org/gallery".to_owned(), 0)];
         let rows = rank_omnibox("recharts", &tabs, &sessions, &history);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(
@@ -602,5 +841,142 @@ mod tests {
         assert!(!is_loading(0.0));
         assert!(is_loading(0.5));
         assert!(!is_loading(1.0));
+    }
+
+    #[test]
+    fn classify_table_allowlists_schemes_and_loopbacks() {
+        type Case<'a> = (&'a str, NavTarget);
+        let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+        let cases: &[Case] = &[
+            ("http://example.com/a", NavTarget::Url("http://example.com/a".to_owned())),
+            ("HTTP://example.com/a", NavTarget::Url("HTTP://example.com/a".to_owned())),
+            ("https://example.com", NavTarget::Url("https://example.com".to_owned())),
+            ("file:///tmp/a.html", NavTarget::Url("file:///tmp/a.html".to_owned())),
+            ("about:blank", NavTarget::Url("about:blank".to_owned())),
+            ("About:Blank", NavTarget::Url("About:Blank".to_owned())),
+            ("chrome://version", NavTarget::Url("chrome://version".to_owned())),
+            ("devtools://devtools/bundled/inspector.html", NavTarget::Url("devtools://devtools/bundled/inspector.html".to_owned())),
+            ("example.com", NavTarget::Url("https://example.com".to_owned())),
+            ("münchen.de", NavTarget::Url("https://münchen.de".to_owned())),
+            ("localhost", NavTarget::Url("http://localhost".to_owned())),
+            ("localhost:3000", NavTarget::Url("http://localhost:3000".to_owned())),
+            ("[::1]:3000", NavTarget::Url("http://[::1]:3000".to_owned())),
+            ("127.0.0.1:8080", NavTarget::Url("http://127.0.0.1:8080".to_owned())),
+            ("1.2.3.4", NavTarget::Url("https://1.2.3.4".to_owned())),
+            ("javascript:alert(1)", search("javascript:alert(1)")),
+            ("JAVASCRIPT:alert(1)", search("JAVASCRIPT:alert(1)")),
+            ("data:text/html,<h1>hi</h1>", search("data:text/html,<h1>hi</h1>")),
+            ("vbscript:msgbox(1)", search("vbscript:msgbox(1)")),
+            ("blob:https://example.com/1", search("blob:https://example.com/1")),
+            ("javascript://example.com/x", search("javascript://example.com/x")),
+            ("user@example.com", search("user@example.com")),
+            ("3.14", search("3.14")),
+            ("foo", search("foo")),
+            ("foo bar", search("foo bar")),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(&classify_address_input(input), expected, "classify {input:?}");
+        }
+    }
+
+    #[test]
+    fn address_view_strips_userinfo_spoofing() {
+        let view = address_view("https://google.com@evil.com/", PageSecurity::Secure, false);
+        assert_eq!(view.host, "evil.com", "the phish host reads bright");
+        assert_eq!(view.userinfo, "google.com", "the spoof reads quiet");
+        assert_eq!(view.path, "/");
+        let view = address_view("https://evil.com\\@google.com/", PageSecurity::Secure, false);
+        assert_eq!(view.host, "evil.com", "a backslash ends the authority");
+        assert_eq!(view.userinfo, "", "no userinfo past the backslash");
+        let view = address_view("https://example.com/a?b#c", PageSecurity::Secure, false);
+        assert_eq!(view.host, "example.com");
+        assert_eq!(view.path, "/a?b#c");
+        let plain = address_view("https://example.com/a", PageSecurity::Secure, false);
+        assert_eq!(plain.userinfo, "", "no userinfo without an @");
+    }
+
+    #[test]
+    fn omnibox_tiers_prefix_wordstart_substring_then_recency() {
+        use super::super::TabId;
+        let tabs = vec![
+            (TabId(1), "A tapir story".to_owned(), "https://hive.example/1".to_owned(), 30),
+            (TabId(2), "The best apiary".to_owned(), "https://hive.example/2".to_owned(), 20),
+            (TabId(3), "Apiary".to_owned(), "https://hive.example/3".to_owned(), 10),
+        ];
+        let rows = rank_omnibox("api", &tabs, &[], &[]);
+        let ids: Vec<TabId> = rows
+            .iter()
+            .filter_map(|row| match row.target {
+                OmniTarget::Tab(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![TabId(3), TabId(2), TabId(1)], "prefix, then word-start, then substring");
+        // Same tier: the more recently shown tab wins.
+        let tabs = vec![
+            (TabId(1), "Apiary one".to_owned(), "https://hive.example/1".to_owned(), 10),
+            (TabId(2), "Apiary two".to_owned(), "https://hive.example/2".to_owned(), 50),
+        ];
+        let rows = rank_omnibox("api", &tabs, &[], &[]);
+        let ids: Vec<TabId> = rows
+            .iter()
+            .filter_map(|row| match row.target {
+                OmniTarget::Tab(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![TabId(2), TabId(1)], "recency breaks prefix ties");
+    }
+
+    #[test]
+    fn omnibox_completion_text_by_row_kind() {
+        use super::super::TabId;
+        let tabs = vec![(TabId(7), "Ledger".to_owned(), "https://ledger.example/".to_owned(), 0)];
+        let sessions = vec![("s-9".to_owned(), "Ledger fix".to_owned(), 0)];
+        let rows = rank_omnibox("ledger", &tabs, &sessions, &[]);
+        let tab = rows.iter().find(|row| row.suggestion.kind == SuggestKind::Tab).expect("a tab row");
+        assert_eq!(tab.suggestion.complete.as_deref(), Some("https://ledger.example/"), "Tab completes the URL");
+        let session =
+            rows.iter().find(|row| row.suggestion.kind == SuggestKind::Session).expect("a session row");
+        assert_eq!(session.suggestion.complete.as_deref(), Some("Ledger fix"), "sessions complete the title");
+        for kind in [SuggestKind::Ask, SuggestKind::Search] {
+            let row = rows.iter().find(|row| row.suggestion.kind == kind).expect("the row");
+            assert_eq!(row.suggestion.complete, None, "{kind:?} rows are not completable");
+        }
+    }
+
+    #[test]
+    fn back_step_survives_the_stale_echo() {
+        let mut history = BackForward::default();
+        history.note_navigated("https://a.example/");
+        history.note_navigated("https://b.example/");
+        history.note_navigated("https://c.example/");
+        assert_eq!(history.go_back_steps(2).as_deref(), Some("https://a.example/"));
+        assert!(history.can_forward());
+        // The page still shows the old URL until the navigation lands.
+        history.note_navigated("https://c.example/");
+        assert!(!history.can_back(), "the stale echo steps nothing");
+        assert!(history.can_forward(), "the forward stack survives the echo");
+        assert_eq!(history.go_forward().as_deref(), Some("https://b.example/"));
+        history.note_navigated("https://b.example/");
+        assert!(history.can_back() && history.can_forward());
+    }
+
+    #[test]
+    fn ask_draft_appends_on_a_new_line() {
+        assert_eq!(ask_draft_text("", "what is this page?"), "what is this page?");
+        assert_eq!(ask_draft_text("   ", "what is this page?"), "what is this page?");
+        assert_eq!(
+            ask_draft_text("summarise this", "what is this page?"),
+            "summarise this\nwhat is this page?"
+        );
+    }
+
+    #[test]
+    fn stop_armed_needs_a_tracked_mid_load() {
+        assert!(!stop_armed(false, 0.5), "untracked progress never reads as stop");
+        assert!(!stop_armed(true, 0.0));
+        assert!(stop_armed(true, 0.5));
+        assert!(!stop_armed(true, 1.0), "a finished load reads as reload");
     }
 }

@@ -1325,6 +1325,11 @@ impl Harness {
         if self.mode == crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
+        // A new session (possibly in another project) unparks any carried
+        // Browse tab and leaves the address field even when the mode never
+        // changed and `set_mode` early-returned.
+        self.browser.centre_override = None;
+        self.leave_browse_address(window, cx);
         // A `new` while a provider switch is pending is the person doing
         // something else: the switch is cancelled (its open lands stale
         // and is discarded) and this opens as a normal new session on the
@@ -3680,6 +3685,15 @@ impl Harness {
                 view.set_draft(draft, window, cx);
                 view.focus_composer(window, cx);
             });
+        }
+        // The omnibox Ask (B2a-H4c): the question lands in the session that
+        // just landed — targeted by its id, never by `self.active` — as a
+        // draft only, never sent. A reused draft that already holds text
+        // keeps it, with the question appended on a new line.
+        if let Some(query) = self.pending_ask_draft.take() {
+            let existing = view.read(cx).draft_text(cx);
+            let next = crate::browser::toolbar::ask_draft_text(&existing, &query);
+            view.update(cx, |view, cx| view.set_draft(next, window, cx));
         }
         self.send_scripted(window, cx);
         // No `maybe_run_steps` here: activations fire on every swap,
