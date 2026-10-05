@@ -6767,6 +6767,532 @@ mod tests {
         restore_state(state);
     }
 
+    /// Adopt the hermetic dir as a project and point at it, so `new`
+    /// opens a local draft there — what the Ask tests start sessions on.
+    fn adopt_test_project(
+        vc: &mut gpui::VisualTestContext,
+        baaz: &gpui::Entity<Harness>,
+        dir: &std::path::Path,
+    ) {
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                let id = h.projects.add(dir).id.clone();
+                h.projects.current = Some(id.clone());
+                h.current_project = Some(id);
+            })
+        });
+    }
+
+    /// B2a-H4d(1): an Ask drafts into the session it started — never
+    /// whatever is open. While an unrelated session is open, `browse_ask`
+    /// starts the new session and the draft lands only there; a `new`
+    /// refused by a switch already in flight drops the draft, leaving no
+    /// session with it.
+    #[gpui::test]
+    fn ask_draft_is_keyed_to_its_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("ask-keyed");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        adopt_test_project(&mut *vc, &baaz, &state.2);
+        open_test_session(&mut *vc, &baaz, &state.2);
+        let unrelated = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session is open"));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("what is this page?", window, cx)));
+        vc.run_until_parked();
+        let landed = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let active = h.active.clone().expect("the Ask opened a session");
+            let active_id = active.read(cx).session_id.clone();
+            assert_ne!(active_id, "s-1", "the Ask starts a new session, never reuses the open one");
+            assert_eq!(active.read(cx).draft_text(cx), "what is this page?");
+            assert!(h.pending_ask_draft.is_none(), "the landed draft is taken");
+            assert_eq!(unrelated.read(cx).draft_text(cx), "", "the unrelated session keeps no draft");
+            active_id
+        });
+        // A `new` refused by a switch already in flight drops the draft:
+        // no session gets it.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| h.session_switch_pending = true);
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("a second question", window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.pending_ask_draft.is_none(), "the refused Ask leaves nothing armed");
+            let active = h.active.clone().expect("the session is still open");
+            assert_eq!(active.read(cx).session_id, landed, "no session opened");
+            assert_eq!(
+                active.read(cx).draft_text(cx),
+                "what is this page?",
+                "the refused question appends nowhere"
+            );
+            assert_eq!(unrelated.read(cx).draft_text(cx), "", "the unrelated session still keeps no draft");
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H4d(1): an armed Ask waits for its keyed session. Landing an
+    /// unrelated session first leaves the draft armed and that session's
+    /// draft untouched; only the keyed session's landing takes it.
+    #[gpui::test]
+    fn ask_draft_waits_for_its_keyed_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("ask-waits");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        let view_a = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session is open"));
+        let view_b = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: state.2.to_string_lossy().into_owned(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx))
+            })
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.pending_ask_draft = Some(crate::app::PendingAsk {
+                    target: Some("s-2".to_owned()),
+                    query: "keyed question".to_owned(),
+                });
+            });
+        });
+        // An unrelated landing takes nothing.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.activate(view_a.clone(), false, window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated landing takes no draft");
+            assert!(
+                h.pending_ask_draft.as_ref().is_some_and(|ask| ask.query == "keyed question"),
+                "the draft stays armed for its session"
+            );
+        });
+        // Its own session's landing takes it, once.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.activate(view_b.clone(), false, window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(view_b.read(cx).draft_text(cx), "keyed question");
+            assert!(h.pending_ask_draft.is_none(), "the landed draft is taken");
+            assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated draft stays empty");
+        });
+        restore_state(state);
+    }
+
+    /// A scriptable fake backend for the stop/reload test: the harness
+    /// holds the shared fake while the state owns this delegate, so the
+    /// test scripts engine `Loading` edges the state then drains.
+    struct SharedFake(std::rc::Rc<std::cell::RefCell<aui_webview::FakeWebBackend>>);
+
+    impl aui_webview::WebBackend for SharedFake {
+        fn navigate(&mut self, url: &str) {
+            self.0.borrow_mut().navigate(url);
+        }
+
+        fn stop(&mut self) {
+            self.0.borrow_mut().stop();
+        }
+
+        fn back(&mut self) {
+            self.0.borrow_mut().back();
+        }
+
+        fn forward(&mut self) {
+            self.0.borrow_mut().forward();
+        }
+
+        fn reload(&mut self) {
+            self.0.borrow_mut().reload();
+        }
+
+        fn eval(&mut self, js: &str) {
+            self.0.borrow_mut().eval(js);
+        }
+
+        fn set_annotate(&mut self, on: bool) {
+            self.0.borrow_mut().set_annotate(on);
+        }
+
+        fn poll_events(&mut self) -> Vec<aui_webview::WebEvent> {
+            self.0.borrow_mut().poll_events()
+        }
+    }
+
+    /// B2a-H4d(3): the stop/reload control follows the engine's `loading`,
+    /// never progress and never a Baaz-tracked set. A load the engine
+    /// reports — even at progress 0.0 — stops; progress without a load
+    /// reloads instead of sticking on Stop.
+    #[gpui::test]
+    fn stop_follows_the_engine_loading_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("stop-engine");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        let fake = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                let id = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Person,
+                    "https://example.com",
+                    None,
+                );
+                h.schedule_tabs_write(cx);
+                let fake =
+                    std::rc::Rc::new(std::cell::RefCell::new(aui_webview::FakeWebBackend::new()));
+                let page = cx.new(|cx| {
+                    aui_webview::WebviewState::new(Box::new(SharedFake(fake.clone())), cx)
+                });
+                h.browser.states.insert(id, page);
+                fake
+            })
+        });
+        // The engine reports a load at progress 0.0: the control stops it.
+        fake.borrow_mut().script_loading(true);
+        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.run_until_parked();
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                assert!(
+                    h.browse_centre_state().expect("a page shows").read(cx).loading(),
+                    "the scripted load edge drains into the state"
+                );
+                h.browse_reload_or_stop(window, cx);
+            })
+        });
+        assert_eq!(fake.borrow().stop_calls(), 1, "an engine load stops, even at progress 0.0");
+        // The load ends with progress alone left mid-way: the control
+        // reloads instead of sticking on Stop.
+        fake.borrow_mut().script_loading(false);
+        fake.borrow_mut().script_progress(0.5);
+        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.run_until_parked();
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_reload_or_stop(window, cx)));
+        assert_eq!(fake.borrow().stop_calls(), 1, "progress without a load never reads as stop");
+        restore_state(state);
+    }
+
+    /// B2a-H4d(4): the back-history render is pure. With the menu open but
+    /// nothing to show it draws nothing and leaves the menu state alone —
+    /// "nothing to show" is the opener's decision, never a render-time
+    /// mutation. With history behind it, it draws the menu.
+    #[gpui::test]
+    fn back_history_render_is_pure(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("back-history-pure");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.ensure_browse_tab(window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(crate::overlays::MenuKind::BackHistory, cx)));
+        // Nothing to show: no menu drawn, menu state untouched.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                assert!(h.render_back_history_menu(cx).is_none(), "an empty stack draws nothing");
+                assert!(
+                    h.overlays.read(cx).is_open(crate::overlays::MenuKind::BackHistory),
+                    "the empty render mutates nothing, not even the menu"
+                );
+            })
+        });
+        // History behind it: the menu draws.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let id = h.browse_centre_shown().expect("a tab shows");
+                h.browser.histories.entry(id).or_default().note_navigated("https://a.example/");
+                h.browser.histories.entry(id).or_default().note_navigated("https://b.example/");
+                h.back_bounds = Some(gpui::Bounds::new(
+                    gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                    gpui::size(gpui::px(10.0), gpui::px(10.0)),
+                ));
+                let _ = window;
+                assert!(
+                    h.render_back_history_menu(cx).is_some(),
+                    "a stack with past draws the menu"
+                );
+            })
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H4d(5): Tab remembers the completed ROW, not an index. Completing
+    /// a tab row then re-ranking the list (the completion's own write does)
+    /// still opens that row on Enter — and a stale highlight clamps to the
+    /// rows instead of missing into nothing.
+    #[gpui::test]
+    fn complete_remembers_the_row_not_the_index(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("complete-row");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        // Two person tabs whose URLs match different queries.
+        let (alpha, beta) = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                let alpha = h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://alpha.example/1",
+                    None,
+                );
+                let beta = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Person,
+                    "https://beta.example/2",
+                    None,
+                );
+                h.schedule_tabs_write(cx);
+                (alpha, beta)
+            })
+        });
+        // Type "alpha", highlight its tab row, Tab: the field takes the URL
+        // and the ROW is remembered.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.focus_browse_address_with("alpha", window, cx);
+                h.move_omnibox(1, cx);
+                h.complete_omnibox(window, cx);
+            })
+        });
+        // Typing on re-ranks to a different row at the same index — Enter
+        // still opens the completed tab, not the row now sitting there.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let input = h.browse_address.clone().expect("the field is open");
+                input.update(cx, |input, cx| input.set_value("beta", window, cx));
+                h.commit_browse_address(window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let shown = baaz.read(cx).browse_centre_shown().expect("a tab shows");
+            assert_eq!(shown, alpha, "Enter opens the completed row, not the re-ranked index");
+            assert_ne!(shown, beta, "the row now at that index does not open");
+        });
+        // A stale highlight clamps: with two rows and index 99, Enter opens
+        // the last row (the search) instead of missing.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.focus_browse_address_with("zzz-no-match-xyz", window, cx);
+                h.browse_omnibox_selected = 99;
+                h.browse_omnibox_moved = true;
+                h.browse_completed = None;
+                h.commit_browse_address(window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let id = h.browse_centre_shown().expect("a tab shows");
+            let url = h.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+            assert!(
+                url.starts_with(crate::browser::toolbar::DEFAULT_SEARCH_ENGINE),
+                "a clamped Enter searches instead of missing: {url}"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H4d(6): blur only ends editing — never moves focus. With the
+    /// address open, moving focus elsewhere (which blurs the input) drops
+    /// the field and leaves focus where the user put it, instead of
+    /// handing it back to the page.
+    #[gpui::test]
+    fn blur_ends_editing_without_moving_focus(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("blur-no-steal");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_browse_tab(window, cx);
+                h.browse_centre_page(window, cx).expect("the centre builds its page");
+                h.focus_browse_address_with("https://example.com", window, cx);
+                // The page held the keyboard: a restore would hand focus
+                // back to it — blur must not.
+                h.browse_address_page_focus = true;
+            })
+        });
+        // The input's own blur — exactly what a click on something
+        // focusable delivers — through the real subscription arm.
+        let held = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let input = h.browse_address.clone().expect("the field is open");
+                let held = window.focused(cx);
+                input.update(cx, |_, cx| cx.emit(gpui_kit::base::input::InputEvent::Blur));
+                held
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|window, cx| {
+            let h = baaz.read(cx);
+            assert!(h.browse_address.is_none(), "blur ends the edit");
+            assert_eq!(
+                window.focused(cx),
+                held,
+                "blur never moves focus: whatever held it keeps it"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H4d(7): selecting a sidebar tab moves the selection first, then
+    /// leaves the address — so focus lands on the newly shown page (or the
+    /// root), never the old page.
+    #[gpui::test]
+    fn select_leaves_the_address_onto_the_new_page(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("select-new-page");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        let (first, second) = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                let first = h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://first.example/",
+                    None,
+                );
+                let second = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Person,
+                    "https://second.example/",
+                    None,
+                );
+                h.schedule_tabs_write(cx);
+                (first, second)
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.select_browse_sidebar_tab(first, window, cx);
+                h.focus_browse_address_with("https://first.example/", window, cx);
+                // The old page held the keyboard: leaving restores to a
+                // page — which must be the newly shown one.
+                h.browse_address_page_focus = true;
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.select_browse_sidebar_tab(second, window, cx)));
+        vc.update(|window, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.browse_centre_shown(), Some(second), "the selection moved");
+            assert!(h.browse_address.is_none(), "selecting leaves the address");
+            let new_page = h.browse_centre_state().expect("the new page exists");
+            assert_eq!(
+                window.focused(cx),
+                Some(new_page.read(cx).focus_handle().clone()),
+                "focus lands on the newly shown page, never the old one"
+            );
+            assert_ne!(first, second, "the test selected a different tab");
+        });
+        restore_state(state);
+    }
+
+    /// B2a-H4d(8): the mouse-down/click pair's second call is a no-op.
+    /// Selecting the same tab, reopening an already-reopened tab and
+    /// resetting an already-reset zoom all settle on the first call.
+    #[gpui::test]
+    fn paired_row_presses_are_idempotent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("paired-presses");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        let (first, second) = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.current_project_id();
+                let first = h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://first.example/",
+                    None,
+                );
+                let second = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Person,
+                    "https://second.example/",
+                    None,
+                );
+                h.schedule_tabs_write(cx);
+                (first, second)
+            })
+        });
+        // Selecting the same tab twice settles once.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.select_browse_sidebar_tab(first, window, cx);
+                h.select_browse_sidebar_tab(first, window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                baaz.read(cx).browse_centre_shown(),
+                Some(first),
+                "the tab stays selected"
+            );
+        });
+        // Reopening a closed tab twice reopens exactly it, once.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let key = h.browser_key(cx);
+                h.close_tab(&key, second, window, cx);
+                h.reopen_browse_closed_tab(second, window, cx);
+                h.reopen_browse_closed_tab(second, window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.browse_centre_shown(), Some(second), "the reopened tab shows");
+            assert_eq!(
+                h.browser.tabs.tabs.iter().filter(|tab| tab.id == second).count(),
+                1,
+                "the tab reopens exactly once"
+            );
+        });
+        // Resetting the zoom twice lands on 100%.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.browse_centre_page(window, cx).expect("the centre builds its page");
+                let page = h.browse_centre_state().expect("a page shows");
+                page.update(cx, |page, _| page.set_zoom(125));
+                h.browse_reset_zoom(window, cx);
+                h.browse_reset_zoom(window, cx);
+                assert_eq!(
+                    h.browse_centre_state().expect("a page shows").read(cx).zoom(),
+                    100,
+                    "the zoom settles on 100%"
+                );
+            })
+        });
+        restore_state(state);
+    }
+
     /// B7fix2: a rename inside the debounce window survives on disk.
     /// Newest wins: the debounced write serialises the CURRENT overrides
     /// at fire time, and the synchronous rename cancels the armed
