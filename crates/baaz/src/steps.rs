@@ -88,7 +88,7 @@
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
-//! | `tab-new:<url>` | open a tab on `url` for the shown owner (a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
+//! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
 //! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |

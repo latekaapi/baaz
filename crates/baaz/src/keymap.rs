@@ -212,6 +212,11 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             crate::app::ToggleBrowseMode,
             context,
         )),
+        "NewBrowserTab" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::NewBrowserTab,
+            context,
+        )),
         "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
         "TerminalSigint" => Some(gpui::KeyBinding::new(keystroke, crate::app::TerminalSigint, context)),
         "SkillsUp" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsUp, context)),

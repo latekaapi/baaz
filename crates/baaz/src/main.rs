@@ -810,9 +810,13 @@ fn main() {
                                     .clone()
                                     .downcast::<crate::app::Harness>()
                                     .map(|harness| {
-                                        harness.update(cx, |this, _| {
+                                        harness.update(cx, |this, cx| {
                                             this.flush_right_save();
                                             this.flush_tabs_save();
+                                            // B2a-H2b: a Dock/signal quit in
+                                            // Browse keeps what Browse had
+                                            // live, like the menu quit.
+                                            this.persist_layout(cx);
                                         })
                                     })
                                     .unwrap_or(())
