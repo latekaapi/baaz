@@ -2640,7 +2640,17 @@ impl Harness {
                     // Blur only ends editing — never moves focus (the user
                     // clicked something focusable). Focus restore belongs
                     // only to Escape / Enter / row activation.
-                    InputEvent::Blur => this.drop_browse_address(cx),
+                    // A blur while the window is not key is the keyboard
+                    // leaving for one of our own page windows (a new tab's
+                    // hidden Chromium window is key for a moment when it is
+                    // created — found live) or another app: the edit stays.
+                    // A real click into a visible page ends it through the
+                    // page-took-the-keyboard rule in `sync_browser`.
+                    InputEvent::Blur => {
+                        if window.is_window_active() {
+                            this.drop_browse_address(cx);
+                        }
+                    }
                     InputEvent::Focus => {
                         this.browse_omnibox_selected = 0;
                         this.browse_omnibox_moved = false;

@@ -128,6 +128,10 @@ impl FindStrips {
 
 /// The find strip's count: "3 / 12".
 pub(crate) fn find_count_text(active: u32, total: u32) -> String {
+    // Chromium's first, non-final result reports ordinal 0 while it already
+    // selects the first match (found live: "0 / 12", then Enter showed
+    // "2 / 12"), so a search with matches never reads 0.
+    let active = if total > 0 { active.max(1) } else { 0 };
     format!("{active} / {total}")
 }
 
@@ -997,5 +1001,12 @@ mod tests {
         assert_eq!(tabs.get(popup).expect("popup").url, "https://popup.example/");
         let order: Vec<TabId> = tabs.tabs.iter().map(|tab| tab.id).collect();
         assert_eq!(order[1], popup, "the popup sits right after its opener");
+    }
+
+    #[test]
+    fn find_count_never_reads_zero_with_matches() {
+        assert_eq!(find_count_text(0, 12), "1 / 12");
+        assert_eq!(find_count_text(3, 12), "3 / 12");
+        assert_eq!(find_count_text(0, 0), "0 / 0");
     }
 }
