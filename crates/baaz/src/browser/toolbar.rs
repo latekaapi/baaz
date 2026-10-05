@@ -421,7 +421,8 @@ mod tests {
 
     #[test]
     fn address_states_badge_host_and_path() {
-        let cases: &[(&str, PageSecurity, Option<AddressBadge>, &str, &str, &str)] = &[
+        type Case<'a> = (&'a str, PageSecurity, Option<AddressBadge>, &'a str, &'a str, &'a str);
+        let cases: &[Case] = &[
             ("https://example.com/docs/a", PageSecurity::Secure, Some(AddressBadge::Tune), "", "example.com", "/docs/a"),
             ("https://example.com", PageSecurity::Secure, Some(AddressBadge::Tune), "", "example.com", ""),
             ("https://example.com/docs/a", PageSecurity::Unknown, Some(AddressBadge::Tune), "", "example.com", "/docs/a"),
