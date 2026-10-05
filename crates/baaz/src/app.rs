@@ -3503,12 +3503,18 @@ impl Harness {
             })
             .on_mouse_down(MouseButton::Right, back_menu)
             .child(
-                icon_button("hd-browse-back", IconName::ArrowLeft)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .disabled(!can_back)
-                    .accessibility_label("Back")
-                    .on_click(go_back),
+                div()
+                    .id("hd-browse-back-tip")
+                    .role(gpui::Role::Button)
+                    .aria_label("Back")
+                    .child(
+                        icon_button("hd-browse-back", IconName::ArrowLeft)
+                            .ghost()
+                            .size(ButtonSize::Sm)
+                            .disabled(!can_back)
+                            .accessibility_label("Back")
+                            .on_click(go_back),
+                    ),
             );
         // Forward ›.
         let go_forward = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
@@ -3725,7 +3731,11 @@ impl Harness {
         let focus = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.focus_browse_address_with(&prefill, window, cx);
         });
-        slot = slot.cursor_pointer().on_click(focus);
+        slot = slot
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label("Address and search")
+            .on_click(focus);
         let view = address_view(&url, security, false);
         // The site button: the tune glyph on secure, words otherwise.
         let badge: AnyElement = match view.badge {
@@ -5603,6 +5613,13 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
                 .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                    // ⌘T lands on the new-tab page with the field focused
+                    // (B2a-H4): in Browse it opens a blank person tab,
+                    // never a chat session.
+                    if this.mode == layout::Mode::Browse {
+                        this.new_browse_sidebar_tab(window, cx);
+                        return;
+                    }
                     // ⌘N leaves Settings only when the new session actually
                     // lands: `activate` exits for the navigation, so a ⌘N
                     // that starts nothing keeps the page.
