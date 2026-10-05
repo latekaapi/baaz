@@ -125,7 +125,9 @@ fn is_loopback_host(host: &str) -> bool {
 /// something that looks like a host, otherwise a search with the default
 /// engine. Empty restores the field (an empty search), never navigates.
 /// Dangerous schemes (`javascript:`, `data:`, …) are searches, never
-/// navigated. Bare loopbacks (`localhost`, `localhost:3000`, `[::1]:3000`,
+/// navigated — and so is any unknown `scheme:` prefix (`ms-settings:`,
+/// `ftp:`), except `host:port` (`localhost:3000`), which still navigates.
+/// Bare loopbacks (`localhost`, `localhost:3000`, `[::1]:3000`,
 /// `127.0.0.1:8080`) earn `http://`, everything else `https://`.
 pub(crate) fn classify_address_input(text: &str) -> NavTarget {
     let typed = text.trim();
@@ -139,7 +141,7 @@ pub(crate) fn classify_address_input(text: &str) -> NavTarget {
         }
         return search(typed);
     }
-    if let Some((head, _)) = typed.split_once(':') {
+    if let Some((head, rest)) = typed.split_once(':') {
         if !head.contains(['.', '/', '?', '#', '@']) && is_scheme_shape(head) {
             let scheme = head.to_ascii_lowercase();
             if NAV_SCHEMES.contains(&scheme.as_str()) {
@@ -148,8 +150,14 @@ pub(crate) fn classify_address_input(text: &str) -> NavTarget {
             if SEARCH_SCHEMES.contains(&scheme.as_str()) {
                 return search(typed);
             }
-            // An unknown `word:` prefix (`localhost:3000`) falls through
-            // to the host rule below; anything host-shaped still navigates.
+            // An unknown `scheme:` prefix (`ms-settings:`, `ftp:`) is a
+            // search, never `https://scheme:...` — except `host:port`
+            // (`localhost:3000`), which falls through to the host rule
+            // below and still navigates.
+            let port = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return search(typed);
+            }
         }
     }
     if typed.chars().any(char::is_whitespace) {
@@ -229,13 +237,13 @@ fn split_userinfo(authority: &str) -> (String, String) {
 /// Split `url` into quiet userinfo, bright host and quiet path: the scheme
 /// stripped, the authority ending at the first `/ \ ? #`, the host after
 /// the last `@`. Mirrors the library's host extraction (`userinfo`
-/// stripped, `\ ? #` ending the authority) without lowercasing, so the
-/// display reads what was typed.
+/// stripped, `\ ? #` ending the authority, host lowercased like the
+/// library's own `host_of`) — only the path keeps what was typed.
 fn split_host_path(url: &str) -> (String, String, String) {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let (authority, path) = split_authority_path(after);
     let (userinfo, host) = split_userinfo(authority);
-    (userinfo, host, path.to_owned())
+    (userinfo, host.to_ascii_lowercase(), path.to_owned())
 }
 
 /// The pure address state for `url` under `security`: badge, host and path.
@@ -273,12 +281,6 @@ pub(crate) fn address_view(url: &str, security: PageSecurity, editing: bool) -> 
 /// The zoom pill's text, or `None` at 100%: only a non-default zoom wears one.
 pub(crate) fn zoom_pill(zoom: u16) -> Option<String> {
     if zoom == 100 { None } else { Some(format!("{zoom}%")) }
-}
-
-/// Whether `progress` means the page is still loading: strictly between idle
-/// (0) and done (1). The reload button is a stop button exactly then.
-pub(crate) fn is_loading(progress: f32) -> bool {
-    progress > 0.0 && progress < 1.0
 }
 
 /// What an omnibox suggestion opens.
@@ -644,14 +646,6 @@ pub(crate) fn ask_draft_text(existing: &str, query: &str) -> String {
     }
 }
 
-/// Whether the reload control reads as stop: the tab has a tracked load in
-/// flight and the page reports mid-load progress. A tracked load that never
-/// reaches 1.0 still ends when the stop lands (the caller untracks it) —
-/// the button never sticks on Stop.
-pub(crate) fn stop_armed(tracked_loading: bool, progress: f32) -> bool {
-    tracked_loading && is_loading(progress)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,13 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn loading_is_strictly_between_idle_and_done() {
-        assert!(!is_loading(0.0));
-        assert!(is_loading(0.5));
-        assert!(!is_loading(1.0));
-    }
-
-    #[test]
     fn classify_table_allowlists_schemes_and_loopbacks() {
         type Case<'a> = (&'a str, NavTarget);
         let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
@@ -973,10 +960,24 @@ mod tests {
     }
 
     #[test]
-    fn stop_armed_needs_a_tracked_mid_load() {
-        assert!(!stop_armed(false, 0.5), "untracked progress never reads as stop");
-        assert!(!stop_armed(true, 0.0));
-        assert!(stop_armed(true, 0.5));
-        assert!(!stop_armed(true, 1.0), "a finished load reads as reload");
+    fn unknown_scheme_prefixes_are_a_search() {
+        // `ms-settings:` and `ftp:` are not navigated — and never gain an
+        // `https://` prefix — while a host with a numeric port still does.
+        let search = |query: &str| NavTarget::Search(format!("{DEFAULT_SEARCH_ENGINE}{}", encode_query(query)));
+        for input in ["ms-settings:privacy", "MS-SETTINGS:privacy", "ftp:files", "gopher:hole"] {
+            assert_eq!(classify_address_input(input), search(input), "classify {input:?}");
+        }
+        assert_eq!(
+            classify_address_input("localhost:3000"),
+            NavTarget::Url("http://localhost:3000".to_owned()),
+            "a numeric port still reads as a host"
+        );
+    }
+
+    #[test]
+    fn address_view_lowercases_the_host() {
+        let view = address_view("https://EXAMPLE.COM/Docs", PageSecurity::Secure, false);
+        assert_eq!(view.host, "example.com", "the bright host reads lowercased");
+        assert_eq!(view.path, "/Docs", "the quiet path keeps its case");
     }
 }

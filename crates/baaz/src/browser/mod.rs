@@ -716,22 +716,17 @@ impl Harness {
         browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
     }
 
-    /// The Browse centre page's rect for the window's `content` box:
-    /// the column above minus the webview's nav row. The single source
-    /// behind placement and release: `sync_browser` stores it every
-    /// frame ([`BrowserRegistry::centre_page_rect`]) and the mouse-down
+    /// The Browse centre page's rect for the window's `content` box: the
+    /// whole column above — the centre page draws with
+    /// [`WebviewPane::without_nav`](aui_webview::WebviewPane::without_nav),
+    /// so no nav row offsets it. The single source behind placement and
+    /// release: `sync_browser` stores it every frame
+    /// ([`BrowserRegistry::centre_page_rect`]) and the mouse-down
     /// hand-back reads the stored rect, so the slide — a translate
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
     fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
-        let centre = self.browse_centre_content_rect(content, window);
-        Bounds::new(
-            gpui::point(centre.origin.x, centre.origin.y + gpui::px(BROWSER_NAV_PX)),
-            gpui::size(
-                centre.size.width,
-                (centre.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.)),
-            ),
-        )
+        self.browse_centre_content_rect(content, window)
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -784,7 +779,9 @@ impl Harness {
     /// Select the Browse sidebar's tab `id` (B2a-H2): the model
     /// activates and the page builds when discarded. A closed — or a
     /// session-owned — `id` is a no-op, so a × click racing the row's
-    /// own select never resurrects the tab.
+    /// own select never resurrects the tab. The selection moves first and
+    /// the address drops after, so focus lands on the newly shown page
+    /// (or the root) — never the old page.
     pub(crate) fn select_browse_sidebar_tab(
         &mut self,
         id: TabId,
@@ -794,7 +791,6 @@ impl Harness {
         // Selecting a person tab unparks any carried session tab: the
         // centre shows the person's tab from here on.
         self.browser.centre_override = None;
-        self.leave_browse_address(window, cx);
         self.ensure_tabs_loaded(cx);
         if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
@@ -803,6 +799,7 @@ impl Harness {
             self.schedule_tabs_write(cx);
         }
         self.ensure_tab_page(HOME_KEY, id, window, cx);
+        self.leave_browse_address(window, cx);
         cx.notify();
     }
 
@@ -1086,9 +1083,6 @@ impl Harness {
                 }
             }
         });
-        // A fresh page starts loading its URL at once: tracked until the
-        // page reports done or the stop lands.
-        self.browser.loading_tabs.insert(id);
         self.browser.states.insert(id, state.clone());
         self.register_tab_page(key, id, &state);
         state
@@ -1601,23 +1595,11 @@ impl Harness {
         // The header toolbar's back/forward stacks follow every live page:
         // whatever the page reports becomes the stack's current URL, so an
         // outside navigation (a link) lands here and clears the forward
-        // stack exactly like a fresh one. A page reporting done (progress
-        // 1.0) ends its tracked load; a load that stalls below 1.0 ends
-        // only on the stop (see `browse_reload_or_stop`) — the library
-        // reports no `Loading(false)` Baaz could observe.
+        // stack exactly like a fresh one. Whether a load runs is the
+        // engine's own `WebviewState::loading`, read where the stop/reload
+        // control needs it — never tracked here.
         for (id, url, _) in &live {
             self.browser.histories.entry(*id).or_default().note_navigated(url);
-        }
-        let done: Vec<TabId> = self
-            .browser
-            .states
-            .iter()
-            .filter(|(id, _)| self.browser.loading_tabs.contains(id))
-            .filter(|(_, state)| state.read(cx).progress() >= 1.0)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in done {
-            self.browser.loading_tabs.remove(&id);
         }
         // A Screenshot whose bytes were not there yet attaches on arrival.
         // Stays pending across tab switches: it attaches when its own
@@ -1961,6 +1943,7 @@ impl Harness {
     ) {
         self.browse_omnibox_selected = 0;
         self.browse_omnibox_moved = false;
+        self.browse_completed = None;
         self.browse_address_page_focus =
             self.browse_centre_state().is_some_and(|state| state.read(cx).holds_keyboard());
         let text = text.to_owned();
@@ -1987,8 +1970,21 @@ impl Harness {
                     // so Ask never also fires the plain-enter commit.
                     InputEvent::PressEnter { secondary: true, .. } => this.ask_from_browse_address(window, cx),
                     InputEvent::PressEnter { .. } => this.commit_browse_address(window, cx),
-                    InputEvent::Blur => this.leave_browse_address(window, cx),
-                    InputEvent::Focus | InputEvent::Change => {
+                    // Blur only ends editing — never moves focus (the user
+                    // clicked something focusable). Focus restore belongs
+                    // only to Escape / Enter / row activation.
+                    InputEvent::Blur => this.drop_browse_address(cx),
+                    InputEvent::Focus => {
+                        this.browse_omnibox_selected = 0;
+                        this.browse_omnibox_moved = false;
+                        this.browse_completed = None;
+                        cx.notify();
+                    }
+                    InputEvent::Change => {
+                        // Typing resets the highlight — but never the
+                        // completed ROW: a Tab completion survives the
+                        // re-rank its own write (and later typing) causes,
+                        // so Enter still opens that row.
                         this.browse_omnibox_selected = 0;
                         this.browse_omnibox_moved = false;
                         cx.notify();
@@ -2011,13 +2007,15 @@ impl Harness {
             self.browse_address_sub = None;
             self.browse_omnibox_selected = 0;
             self.browse_omnibox_moved = false;
+            self.browse_completed = None;
             cx.notify();
         }
     }
 
     /// Leave the address field without navigating: the resting view falls
-    /// back to the page URL on the next frame. Runs on input blur, on
-    /// Escape, and on the per-frame keyboard hand-back (7b). While still
+    /// back to the page URL on the next frame. Runs on Escape, on Enter
+    /// (commit/Ask paths) and on row activation — never on blur, which
+    /// only ends editing without moving focus. While still
     /// in Browse, focus returns to the page when it held the keyboard
     /// before the edit, else to the root — never a destroyed handle (the
     /// page counts only while its state still exists).
@@ -2042,8 +2040,9 @@ impl Harness {
     /// Navigate the Browse centre's shown tab to `url`: the model records
     /// it first so a discarded page rebuilds there, then the live page
     /// navigates when one exists. A navigation ends the address edit, like
-    /// committing it does, and marks the tab's load tracked until the page
-    /// reports done (or the stop lands).
+    /// committing it does. Whether a load runs is the engine's own
+    /// [`WebviewState::loading`](aui_webview::WebviewState::loading), never
+    /// a Baaz-tracked set.
     pub(crate) fn navigate_browse_tab(
         &mut self,
         id: TabId,
@@ -2052,7 +2051,6 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.leave_browse_address(window, cx);
-        self.browser.loading_tabs.insert(id);
         self.ensure_tabs_loaded(cx);
         let title = self.browser.tabs.get(id).map(|tab| tab.title.clone()).unwrap_or_default();
         if self.browser.tabs.set_url_title(id, url, &title) {
@@ -2077,8 +2075,15 @@ impl Harness {
     /// the default engine — and empty restores the field, never navigating.
     /// Runs on the input's enter.
     pub(crate) fn commit_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A Tab completion remembers its ROW: Enter opens that row even
+        // after the ranking moved under it — never an index into the
+        // re-ranked list.
+        if let Some(target) = self.browse_completed.clone() {
+            return self.activate_omnibox_target(target, window, cx);
+        }
         if self.browse_omnibox_moved {
-            let index = self.browse_omnibox_selected;
+            let rows = self.browse_suggestions(cx);
+            let index = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
             return self.activate_omnibox_row(index, window, cx);
         }
         let typed = self.browse_address_text(cx);
@@ -2124,23 +2129,22 @@ impl Harness {
     }
 
     /// Reload the shown tab — or stop its load while one is running (the
-    /// progress line's button). The library exposes no reload call, so a
-    /// reload re-navigates the shown URL. Stopping untracks the load, so
-    /// the button reads Reload again even when progress never reached 1.0.
+    /// progress line's button). The button follows the engine's own
+    /// [`WebviewState::loading`](aui_webview::WebviewState::loading): stop
+    /// exactly while the engine reports a load, reload otherwise. The
+    /// library exposes no reload call, so a reload re-navigates the shown
+    /// URL.
     pub(crate) fn browse_reload_or_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         let Some(id) = self.browse_centre_shown() else {
             return;
         };
         let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
-        let tracked = self.browser.loading_tabs.contains(&id);
-        if toolbar::stop_armed(tracked, state.read(cx).progress()) {
+        if state.read(cx).loading() {
             state.update(cx, |state, _cx| state.stop());
-            self.browser.loading_tabs.remove(&id);
         } else {
             let url = state.read(cx).url().to_string();
             if !url.is_empty() {
-                self.browser.loading_tabs.insert(id);
                 state.update(cx, |state, _cx| state.navigate(&url));
             }
         }
@@ -2208,18 +2212,38 @@ impl Harness {
     /// Ask the agent about `query` (the omnibox's Ask row, ⌘↵): a new
     /// session in this project with the text as its first prompt draft —
     /// never sent, never navigated. The draft rides
-    /// [`Self::pending_ask_draft`](crate::app::Harness::pending_ask_draft)
-    /// and lands when the new session's view lands (see `activate`), never
-    /// on whatever `self.active` happens to be right now.
+    /// [`Self::pending_ask_draft`](crate::app::Harness::pending_ask_draft),
+    /// keyed by the session id `new_session_in` creates (or the draft id
+    /// it reuses) — and lands when that session's view lands (see
+    /// `activate`), never on whatever `self.active` happens to be right
+    /// now. Any early return in `new_session_in` drops it, so no unrelated
+    /// resume ever takes it.
     pub(crate) fn browse_ask(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let query = query.trim().to_owned();
         if query.is_empty() {
             return;
         }
         self.leave_browse_address(window, cx);
-        self.pending_ask_draft = Some(query);
+        self.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query });
         self.new_session(window, cx);
         cx.notify();
+    }
+
+    /// Key the armed Ask draft to `session`: the id `new_session_in`
+    /// created (or the draft id it reused). Called on every path that opens
+    /// the Ask's session, before its view lands — so `activate` takes the
+    /// draft only for this session.
+    pub(crate) fn key_pending_ask(&mut self, session: &str) {
+        if let Some(pending) = self.pending_ask_draft.as_mut() {
+            pending.target = Some(session.to_owned());
+        }
+    }
+
+    /// Drop the armed Ask draft: every early return in `new_session_in`
+    /// (a switch already pending, no params, a failed or async-never-landing
+    /// provider open) drops it, so no unrelated resume ever takes it.
+    pub(crate) fn drop_pending_ask(&mut self) {
+        self.pending_ask_draft = None;
     }
 
     /// ⌘↵ inside the address field: Ask about the field's text. Runs from
@@ -2278,7 +2302,8 @@ impl Harness {
     }
 
     /// Move the omnibox highlight by `delta`, wrapping over the rows the
-    /// field currently ranks.
+    /// field currently ranks. An explicit move supersedes any Tab
+    /// completion: the highlight, not the completed row, now owns Enter.
     pub(crate) fn move_omnibox(&mut self, delta: isize, cx: &mut Context<Self>) {
         let rows = self.browse_suggestions(cx);
         if rows.is_empty() {
@@ -2288,14 +2313,16 @@ impl Harness {
         let next = (self.browse_omnibox_selected as isize + delta).rem_euclid(len);
         self.browse_omnibox_selected = next as usize;
         self.browse_omnibox_moved = true;
+        self.browse_completed = None;
         cx.notify();
     }
 
     /// Complete the highlighted row's text into the field (Tab): tabs write
     /// their URL, sessions their title; Ask and Search rows are not
     /// completable and Tab leaves them alone. The selection is clamped to
-    /// the rows and kept, so Enter opens the completed row. The row stays
-    /// open for Enter or ⌘↵.
+    /// the rows and kept, and the completed ROW's identity is remembered —
+    /// never an index into the re-ranked list — so Enter opens that row.
+    /// The row stays open for Enter or ⌘↵.
     pub(crate) fn complete_omnibox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.browse_suggestions(cx);
         if rows.is_empty() {
@@ -2313,10 +2340,12 @@ impl Harness {
                 input.focus(window, cx);
             });
         }
-        // The input's own Change arm resets the highlight; the completed
-        // row keeps it.
+        // The input's own Change arm resets the highlight (keeping the
+        // completion, which survives the re-rank); the completed row keeps
+        // the highlight too, and its identity owns Enter.
         self.browse_omnibox_selected = index;
         self.browse_omnibox_moved = true;
+        self.browse_completed = Some(row.target.clone());
         cx.notify();
     }
 
@@ -2324,13 +2353,27 @@ impl Harness {
     /// selects in Browse (clearing any carried tab), a session tab opens
     /// its session in Sessions (updating the sidebar selection there), a
     /// session opens in Sessions, and history/search URLs load in the
-    /// shown tab.
+    /// shown tab. The index clamps to the rows, so a stale highlight can
+    /// never miss into nothing.
     pub(crate) fn activate_omnibox_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.browse_suggestions(cx);
+        let index = index.min(rows.len().saturating_sub(1));
         let Some(row) = rows.get(index).cloned() else {
             return;
         };
-        match row.target {
+        self.activate_omnibox_target(row.target, window, cx);
+    }
+
+    /// Activate an omnibox row by identity (a Tab completion's remembered
+    /// row): the same destinations as [`Self::activate_omnibox_row`],
+    /// without re-resolving an index into a re-ranked list.
+    pub(crate) fn activate_omnibox_target(
+        &mut self,
+        target: OmniTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
             OmniTarget::Ask(query) => self.browse_ask(&query, window, cx),
             OmniTarget::Tab(id) => {
                 let owner = self.browser.tabs.get(id).map(|tab| tab.owner.clone());
@@ -2338,16 +2381,24 @@ impl Harness {
                     Some(Owner::Person) => self.select_browse_sidebar_tab(id, window, cx),
                     Some(Owner::Session(session)) => {
                         self.leave_browse_address(window, cx);
-                        self.set_mode(crate::layout::Mode::Sessions, window, cx);
-                        self.resume(session, window, cx);
+                        // A mouse-down already opened it: the click that
+                        // follows is a no-op, never a second open.
+                        if self.active_id(cx).as_deref() != Some(session.as_str()) {
+                            self.set_mode(crate::layout::Mode::Sessions, window, cx);
+                            self.resume(session, window, cx);
+                        }
                     }
                     None => {}
                 }
             }
             OmniTarget::Session(session) => {
                 self.leave_browse_address(window, cx);
-                self.set_mode(crate::layout::Mode::Sessions, window, cx);
-                self.resume(session, window, cx);
+                // A mouse-down already opened it: the click that follows
+                // is a no-op, never a second open.
+                if self.active_id(cx).as_deref() != Some(session.as_str()) {
+                    self.set_mode(crate::layout::Mode::Sessions, window, cx);
+                    self.resume(session, window, cx);
+                }
             }
             OmniTarget::History(url) | OmniTarget::Search(url) => {
                 self.leave_browse_address(window, cx);
@@ -2705,11 +2756,6 @@ pub(crate) struct BrowserRegistry {
     /// the URLs the sync reports, since the library exposes no back,
     /// forward or reload calls to drive.
     pub histories: HashMap<TabId, BackForward>,
-    /// Tabs with a Baaz-driven load in flight (B2a-H4c): marked on every
-    /// navigation and cleared when the page reports done or the stop
-    /// lands — so the reload control reads as stop only mid-load and
-    /// never sticks there when progress stalls below 1.0.
-    pub loading_tabs: HashSet<TabId>,
 }
 
 impl BrowserRegistry {
@@ -2730,7 +2776,6 @@ impl BrowserRegistry {
             centre_page_rect: None,
             centre_override: None,
             histories: HashMap::new(),
-            loading_tabs: HashSet::new(),
         }
     }
 }
