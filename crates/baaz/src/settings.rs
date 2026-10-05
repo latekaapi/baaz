@@ -78,6 +78,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
     ("sidebar", "Sidebar"),
+    ("browser", "Browser"),
     ("providers", "Providers"),
     ("shortcuts", "Shortcuts"),
     ("archived", "Archived"),
@@ -88,6 +89,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
+        "browser" => "Links from other apps land in Baaz tabs here.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
@@ -165,6 +167,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
     match section {
         "general" => crumbs.push("General".to_owned()),
         "sidebar" => crumbs.push("Sidebar".to_owned()),
+        "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
         "archived" => crumbs.push("Archived".to_owned()),
@@ -265,7 +268,7 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 pub(crate) struct SettingsPageState {
     /// Whether the page stands open (`Route::Settings`).
     pub open: bool,
-    /// The page id: `general` | `sidebar` | `providers` |
+    /// The page id: `general` | `sidebar` | `browser` | `providers` |
     /// `providers/<wire>` | `shortcuts` | `archived`.
     pub section: String,
     /// Last-visited section this run (⌘, reopens it; General on first open).
@@ -400,8 +403,9 @@ impl Harness {
     }
 
     /// Open the Settings page on legacy dialog index `section` (menu rows,
-    /// ⌘,): 0 General, 1 Sidebar, 2 Providers, 3 Shortcuts, 4 Archived.
-    /// Idempotent (open, never toggle). Menus, palette and modal go first.
+    /// ⌘,): 0 General, 1 Sidebar, 2 Browser, 3 Providers, 4 Shortcuts,
+    /// 5 Archived. Idempotent (open, never toggle). Menus, palette and
+    /// modal go first.
     pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
         let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
         self.open_settings_page(target, cx);
@@ -791,6 +795,7 @@ impl Harness {
         let body: AnyElement = match section.as_str() {
             "general" => self.settings_general_page(cx),
             "sidebar" => self.settings_sidebar_page(cx),
+            "browser" => self.settings_browser_page(cx),
             "providers" => self.settings_providers_overview(window, cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "archived" => self.settings_archived_page(cx),
@@ -962,6 +967,69 @@ impl Harness {
             .gap(px(scale::SP_4))
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
+            .into_any_element()
+    }
+
+    /// Browser (B2a-H7): where links from other apps go, and which app
+    /// owns them. The Default-browser row renders the cached `https`
+    /// handler only — the frame hook owns the LaunchServices lookup —
+    /// and Make default claims `http` and `https` for Baaz (macOS shows
+    /// its own confirmation and applies it asynchronously, so the row
+    /// waits until the next re-read). The button is the only place that
+    /// ever changes the system default.
+    fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let handler = self.default_browser_handler().map(str::to_owned);
+        let status =
+            crate::default_browser::status_text(handler.as_deref(), self.default_browser_confirm_pending);
+        // B2a-H7
+        let mut row = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Default browser".to_string()))
+                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(status)),
+            );
+        if crate::default_browser::offers_make_default(handler.as_deref()) {
+            let make = cx.listener(|this: &mut Self, _: &(), _, cx| {
+                if !crate::default_browser::make_baaz_default() {
+                    crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
+                }
+                // macOS confirms asynchronously: wait for the re-read
+                // (~1 s) and the next focus-regain instead of showing a
+                // stale handler.
+                this.default_browser_confirm_pending = true;
+                this.default_browser_recheck_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                cx.notify();
+            });
+            row = row.child(
+                button("settings-browser-make-default", "Make default")
+                    .accessibility_label("Make Baaz your default browser")
+                    .on_click(move |_, window, cx| make(&(), window, cx)),
+            );
+        }
+        v_flex()
+            .w_full()
+            .gap(px(scale::SP_4))
+            .child(self.settings_group(
+                "Default browser",
+                vec![row.into_any_element()],
+                cx,
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .flex_none()
+                    .ui(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .child("Links from other apps open as person tabs in Browse.".to_string()),
+            )
             .into_any_element()
     }
 

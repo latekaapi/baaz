@@ -89,6 +89,7 @@
 //! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
 //! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
+//! | `open-url:<url>` | the scripted form of a real open-URL event: the same classify/queue/open path `App::on_open_urls` drains into (a person tab in the current project, Browse mode, window to the front; queued before sign-in); empty records a step failure, free |
 //! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
 //! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range records a step failure, free |
@@ -298,6 +299,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "mode", run: |this, rest, window, cx| this.step_mode(rest, window, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
+    WindowVerb { verb: "open-url", run: |this, rest, window, cx| this.step_open_url(rest, window, cx) },
     WindowVerb { verb: "tab-select", run: |this, rest, window, cx| this.step_tab_select(rest, window, cx) },
     WindowVerb { verb: "tab-close", run: |this, rest, window, cx| this.step_tab_close(rest, window, cx) },
     WindowVerb { verb: "tab-pin", run: |this, rest, _, cx| this.step_tab_pin(rest, cx) },
