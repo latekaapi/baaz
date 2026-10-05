@@ -65,8 +65,6 @@ pub(crate) const FEEDBACK_HOVER_THROTTLE: Duration = Duration::from_millis(30);
 /// (or the idle shell) before it fails loudly instead of racing the
 /// async capture.
 pub(crate) const FEEDBACK_STEP_WAIT: Duration = Duration::from_secs(2);
-/// The step pump's tick: how often queued steps retry across frames.
-pub(crate) const FEEDBACK_STEP_TICK: Duration = Duration::from_millis(50);
 /// The top strip the Active bar floats in: the hover chip never parks its
 /// top edge inside it.
 pub(crate) const FEEDBACK_BAR_ZONE_H: f32 = 64.0;
@@ -218,11 +216,10 @@ pub struct FeedbackUi {
     pub capture_task: Option<gpui::Task<()>>,
     /// Step-driven pointing actions waiting behind an in-flight capture,
     /// oldest first, each with the moment it queued (bounding the
-    /// [`FEEDBACK_STEP_WAIT`] wait).
+    /// [`FEEDBACK_STEP_WAIT`] wait). Drained by the frame loop — see
+    /// [`FeedbackUi::step_pump_tick`] — so no task is ever spawned for
+    /// them.
     pub step_queue: VecDeque<(QueuedStep, Instant)>,
-    /// The step pump task, while queued steps are waiting. One slot: the
-    /// pump exits (clearing this) once the queue drains.
-    pub step_task: Option<gpui::Task<()>>,
     /// The open note popover, if the owner is writing one.
     pub popover: Option<PendingNote>,
     /// A click that hit-tested nothing, waiting for the tree to warm.
@@ -265,7 +262,6 @@ impl FeedbackUi {
             capture_pending: None,
             capture_task: None,
             step_queue: VecDeque::new(),
-            step_task: None,
             popover: None,
             pending_click: None,
             discard_armed: false,
@@ -451,10 +447,12 @@ impl FeedbackUi {
     /// Turning the setting off mid-session: Off, but the draft survives
     /// so the next toggle resumes it. Clears the run-only
     /// [`Self::forced_on`]: the shell is fully off, not parked for a run.
+    /// Queued steps die with it — their popovers will never open.
     pub fn setting_off(&mut self) {
         self.forced_on = false;
         if self.phase != FeedbackPhase::Off {
             self.cancel_note();
+            self.step_queue.clear();
             self.disarm_discard();
             self.phase = FeedbackPhase::Off;
         }
@@ -491,9 +489,10 @@ impl FeedbackUi {
     }
 
     /// A finished Done write: Off with a cleared draft, and the in-flight
-    /// guard lifted.
+    /// guard lifted. Queued steps die with it.
     pub fn done_applied(&mut self) {
         self.cancel_note();
+        self.step_queue.clear();
         self.disarm_discard();
         self.saving = false;
         self.phase = FeedbackPhase::Off;
@@ -938,7 +937,7 @@ impl crate::app::Harness {
             } else if self.feedback.popover.is_some()
                 || self.feedback.capture_pending.is_some()
                 || self.feedback.pending_click.is_some()
-                || self.feedback.step_task.is_some()
+                || !self.feedback.step_queue.is_empty()
             {
                 // The popover is not open yet (or an earlier step is still
                 // queued): wait behind the capture across frames instead of
@@ -1012,7 +1011,6 @@ impl crate::app::Harness {
         if self.feedback.capture_pending.is_some()
             || self.feedback.pending_click.is_some()
             || !self.feedback.step_queue.is_empty()
-            || self.feedback.step_task.is_some()
         {
             self.queue_step(step, cx);
             return;
@@ -1031,57 +1029,35 @@ impl crate::app::Harness {
         }
     }
 
-    /// Push a step onto the queue and make sure the pump is draining it.
+    /// Push a step onto the queue: the frame loop's poll drains it from
+    /// there, so no task is ever spawned for it.
     pub(crate) fn queue_step(&mut self, step: QueuedStep, cx: &mut Context<Self>) {
         self.feedback.step_queue.push_back((step, Instant::now()));
-        self.ensure_step_pump(cx);
+        cx.notify();
     }
 
-    /// Start the step pump unless one is already draining the queue: a
-    /// single task that ticks the queue across frames until it drains,
-    /// then clears its own slot.
-    pub(crate) fn ensure_step_pump(&mut self, cx: &mut Context<Self>) {
-        if self.feedback.step_task.is_some() {
-            return;
-        }
-        let pump = cx.spawn(async move |this, cx| {
-            loop {
-                let finished = this
-                    .update_in(cx, |this, window, cx| this.step_pump_tick(window, cx))
-                    .unwrap_or(true);
-                if finished {
-                    break;
-                }
-                cx.background_executor().timer(FEEDBACK_STEP_TICK).await;
-            }
-            let _ = this.update(cx, |this, _| {
-                this.feedback.step_task = None;
-            });
-        });
-        self.feedback.step_task = Some(pump);
-    }
-
-    /// One pump tick. Returns true when the pump should exit: the queue is
-    /// empty (a parked click or capture without queued steps belongs to
-    /// the frame loop, not the pump), the shell left Active (queued steps
-    /// only run there — each is failed loudly), or there is nothing left
-    /// to wait on.
-    pub(crate) fn step_pump_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// One pump tick, driven by the layer's per-frame poll (never a task,
+    /// so queued steps resolve wherever frames do — the real window, a
+    /// headless `--steps` run, or a test draw). A `note:` fills and saves
+    /// once its popover opens; a `click:`/`drag:` runs once the shell is
+    /// idle; anything still waiting past [`FEEDBACK_STEP_WAIT`] fails
+    /// loudly under its own step name.
+    pub(crate) fn step_pump_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.phase != FeedbackPhase::Active {
             while let Some((queued, _)) = self.feedback.step_queue.pop_front() {
                 crate::steps::record_step_failure(queued.step());
             }
             cx.notify();
-            return true;
+            return;
         }
         let Some((_, since)) = self.feedback.step_queue.front() else {
-            return true;
+            return;
         };
         if since.elapsed() >= FEEDBACK_STEP_WAIT {
             let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
             crate::steps::record_step_failure(queued.step());
             cx.notify();
-            return self.feedback.step_queue.is_empty();
+            return;
         }
         if self.feedback.popover.is_some() {
             // A click or drag behind an open popover waits for the popover
@@ -1091,21 +1067,19 @@ impl crate::app::Harness {
             let front_is_note =
                 matches!(self.feedback.step_queue.front(), Some((QueuedStep::Note { .. }, _)));
             if !front_is_note {
-                cx.notify();
-                return false;
+                return;
             }
             let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
             let QueuedStep::Note { text, .. } = queued else { unreachable!("front checked") };
             self.fill_feedback_note(&text, window, cx);
             self.save_feedback_note(window, cx);
             cx.notify();
-            return false;
+            return;
         }
         if self.feedback.capture_pending.is_some() || self.feedback.pending_click.is_some() {
-            // Still resolving: keep the cold retry moving even when no
-            // frames arrive (headless `--steps` runs), and wait.
-            self.feedback_poll(window, cx);
-            return false;
+            // Still resolving: wait for the capture (or the cold retry the
+            // poll runs right after this) to land.
+            return;
         }
         // Idle with no popover: a note has nothing to fill — fail it — and
         // a click or drag runs through the real handlers now.
@@ -1125,7 +1099,6 @@ impl crate::app::Harness {
             }
         }
         cx.notify();
-        false
     }
 
     /// Where the app was, for a note's [`ScreenContext`]: the mode, the
@@ -1349,12 +1322,19 @@ impl crate::app::Harness {
     }
 
     /// The layer's per-frame poll (it renders every frame while Active):
-    /// retry a parked click's hit-test while the tree may still be cold,
-    /// then fall back to the 60×40 area; and retry a cleared hover the
-    /// same way so the outline appears when the tree warms.
+    /// first drain queued steps (a `note:` waiting for its popover, a
+    /// `click:`/`drag:` waiting for the idle shell), then retry a parked
+    /// click's hit-test while the tree may still be cold, falling back to
+    /// the 60×40 area; and retry a cleared hover the same way so the
+    /// outline appears when the tree warms.
     pub(crate) fn feedback_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.phase != FeedbackPhase::Active
-            || self.feedback.capturing
+        if self.feedback.phase != FeedbackPhase::Active {
+            return;
+        }
+        if !self.feedback.step_queue.is_empty() {
+            self.step_pump_tick(window, cx);
+        }
+        if self.feedback.capturing
             || self.feedback.popover.is_some()
             || self.feedback.capture_pending.is_some()
         {
@@ -1502,8 +1482,10 @@ impl crate::app::Harness {
     }
 
     /// Close the open popover (or drop its in-flight capture) without
-    /// saving, staying Active. Escape and Cancel land here.
+    /// saving, staying Active. Escape and Cancel land here. Queued steps
+    /// die with it — their popovers will never open.
     pub(crate) fn cancel_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.step_queue.clear();
         if self.feedback.popover.is_none() && self.feedback.capture_pending.is_none() {
             return;
         }
@@ -1575,11 +1557,12 @@ impl crate::app::Harness {
         self.feedback.expire_discard();
         self.feedback_poll(window, cx);
         // Keep frames coming while anything is waiting on one: a parked
-        // cold-tree click, a cold hover retry, or an in-flight capture all
-        // stall forever in an idle window otherwise.
+        // cold-tree click, a cold hover retry, an in-flight capture, or a
+        // queued step all stall forever in an idle window otherwise.
         if self.feedback.pending_click.is_some()
             || self.feedback.hover_since.is_some()
             || self.feedback.capture_pending.is_some()
+            || !self.feedback.step_queue.is_empty()
         {
             window.request_animation_frame();
         }
@@ -2858,8 +2841,8 @@ mod tests {
     }
 
     /// Drive the real frame path: run parked tasks (firing the capture's
-    /// 120 ms bound and the step pump's ticks) and deliver two painted
-    /// frames for the capture's nested `on_next_frame` pair.
+    /// 120 ms bound) and deliver two painted frames for the capture's
+    /// nested `on_next_frame` pair.
     fn drive_frames(vc: &mut gpui::VisualTestContext) {
         vc.run_until_parked();
         vc.update(|window, cx| {
@@ -2867,6 +2850,24 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         vc.run_until_parked();
+    }
+
+    /// Draw a real frame: the full render runs the layer (its poll ticks
+    /// the queued steps and retries cold clicks) inside the paint phase,
+    /// where requesting the next frame is legal.
+    fn draw_frame(vc: &mut gpui::VisualTestContext) {
+        vc.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    /// Drive the queued-step flow the way frames do: each pass draws (the
+    /// layer's poll ticks the queue), lands captures, and fires timers.
+    fn pump_frames(vc: &mut gpui::VisualTestContext, passes: usize) {
+        for _ in 0..passes {
+            draw_frame(vc);
+            drive_frames(vc);
+        }
     }
 
     /// Press and release at one point, then complete the capture the way
@@ -3010,10 +3011,10 @@ mod tests {
     }
 
     /// A click on no hit parks a warm retry; when the tree stays cold past
-    /// a second, the render's poll falls back to a 60×40 area centred on
+    /// a second, a real frame's poll falls back to a 60×40 area centred on
     /// the point — driven through the real frame path (the step handler,
-    /// the clock, a layer render, then frames), never by calling the poll
-    /// or the capture finish by hand.
+    /// a draw, then frames), never by calling the poll or the capture
+    /// finish by hand.
     #[gpui::test]
     fn click_off_any_hit_falls_back_to_a_centred_area(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3-click-miss");
@@ -3031,9 +3032,9 @@ mod tests {
             "the miss parks a retry"
         );
         // Let the tree stay cold past the warm window (wall-clock: the
-        // retry bounds on `Instant`, not the test clock), then render the
-        // layer the way a frame would: its poll falls back to the area and
-        // starts the capture, which the frames below land.
+        // retry bounds on `Instant`, not the test clock), then draw a real
+        // frame: its poll falls back to the area and starts the capture,
+        // which the frames below land.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 if let Some(pending) = h.feedback.pending_click.as_mut() {
@@ -3041,11 +3042,7 @@ mod tests {
                 }
             })
         });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let _ = h.render_feedback_layer(window, cx);
-            })
-        });
+        draw_frame(vc);
         drive_frames(vc);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Area { rect, region }) => {
@@ -3320,7 +3317,7 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_feedback("note:Too much space here", window, cx))
         });
-        vc.run_until_parked();
+        pump_frames(vc, 8);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.note_count(), 2, "click → note → drag → note files 2 notes");
