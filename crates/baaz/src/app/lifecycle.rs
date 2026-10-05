@@ -1342,6 +1342,7 @@ impl Harness {
         // claimed it for its replacement (see `switch_claim`).
         if self.session_switch_pending && self.switch_claim.take().is_none() {
             crate::baaz_log!("new: a session is already opening; keeping it");
+            self.drop_pending_ask();
             return;
         }
         if switch_cancelled {
@@ -1401,6 +1402,10 @@ impl Harness {
                     // draft under a provider pick (or the reverse) is stale,
                     // dropped below, and started fresh on the pick.
                     let wanted = ProviderId::parse(&self.new_provider);
+                    // The Ask rides only this reused draft: key it before
+                    // the view lands, so `activate` takes it here — and
+                    // only here.
+                    self.key_pending_ask(&draft_id);
                     if self.draft_serves(&draft_id, wanted, cx) && self.open_draft(&draft_id, window, cx)
                     {
                         return;
@@ -1460,6 +1465,7 @@ impl Harness {
             // used to read as a script that ran — exit 0, screenshot
             // written — while having started nothing.
             crate::baaz_log!("new: current project is unavailable; starting nothing");
+            self.drop_pending_ask();
             return;
         };
         // `new_session_params` already ran the guarded muse catalog
@@ -1507,9 +1513,14 @@ impl Harness {
                 // is parked or persisted, and the person's view is untouched.
                 if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
                     crate::baaz_log!("session/start landed for a stale switch; discarding it");
+                    this.drop_pending_ask();
                     return;
                 }
                 let session_id = started.session.session_id.clone();
+                // The Ask's session just earned its id: key the draft to
+                // it before the view lands, so `activate` takes it here —
+                // and only here.
+                this.key_pending_ask(&session_id);
                 this.open(session_id.clone(), false, false, window, cx);
                 // The result carries the session object `session/started`
                 // would have carried, and it is the only place a mode set
@@ -1587,6 +1598,7 @@ impl Harness {
                 // its view, or dialog.
                 if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
                     crate::baaz_log!("session/start failed for a stale switch: {error}");
+                    this.drop_pending_ask();
                     return;
                 }
                 // No switch is coming: release the session verbs waiting on
@@ -1597,6 +1609,7 @@ impl Harness {
                 this.session_switch_pending = false;
                 this.abort_replacing(cx);
                 this.fail_pending_handoff(error.to_string(), cx);
+                this.drop_pending_ask();
                 this.report(&error, cx);
             }
         });
@@ -1623,6 +1636,7 @@ impl Harness {
         // flight owns the next session unless a provider switch claimed it.
         if self.session_switch_pending && self.switch_claim.take().is_none() {
             crate::baaz_log!("new: a session is already opening; keeping it");
+            self.drop_pending_ask();
             return;
         }
         self.new_session_in_root_open(root, window, cx, None);
@@ -1678,9 +1692,11 @@ impl Harness {
                 // the wire, never opened, parked, or persisted.
                 if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
                     crate::baaz_log!("session/start landed for a stale switch; discarding it");
+                    this.drop_pending_ask();
                     return;
                 }
                 let session_id = started.session.session_id.clone();
+                this.key_pending_ask(&session_id);
                 // Before `open`, which asks `session_workspace` where this
                 // session lives and has nothing else to go on.
                 this.starting_root =
@@ -1708,11 +1724,13 @@ impl Harness {
                 // Stale switch: nobody waits, nobody is dialogued.
                 if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
                     crate::baaz_log!("new-in: session/start failed for a stale switch: {error}");
+                    this.drop_pending_ask();
                     return;
                 }
                 crate::baaz_log!("new-in: session/start failed: {error}");
                 this.session_switch_pending = false;
                 this.abort_replacing(cx);
+                this.drop_pending_ask();
                 this.report(&error, cx);
             }
         });
@@ -1823,6 +1841,7 @@ impl Harness {
     fn open_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.current_project_id() else {
             crate::baaz_log!("new: no current project; starting nothing");
+            self.drop_pending_ask();
             return;
         };
         if projects::start_params(
@@ -1834,6 +1853,7 @@ impl Harness {
         .is_none()
         {
             crate::baaz_log!("new: no current project; starting nothing");
+            self.drop_pending_ask();
             return;
         }
         let moving = self.pending_draft.take();
@@ -1855,6 +1875,9 @@ impl Harness {
             cx.notify();
         });
         view.update(cx, |view, cx| view.load_history(cx));
+        // The Ask's session is this draft: key the draft to it before the
+        // view lands, so `activate` takes it here — and only here.
+        self.key_pending_ask(&draft_id);
         self.activate(view, false, window, cx);
         // No row exists for a draft, so the empty state and the later
         // `turn/started` row read the project straight from the store.
@@ -2424,6 +2447,7 @@ impl Harness {
                         "provider open failed for a stale ask ({}): {error}",
                         provider_id.label()
                     );
+                    this.drop_pending_ask();
                     return;
                 }
                 // No switch is coming: release the session verbs waiting on
@@ -2491,6 +2515,7 @@ impl Harness {
                         "scripted provider open failed for a stale ask ({}): {reason}",
                         provider_id.label()
                     );
+                    self.drop_pending_ask();
                     return;
                 }
                 crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
@@ -2521,8 +2546,12 @@ impl Harness {
                 provider_id.as_str()
             );
             provider.shutdown();
+            self.drop_pending_ask();
             return;
         }
+        // The Ask's session just earned its id: key the draft to it before
+        // the view lands, so `activate` takes it here — and only here.
+        self.key_pending_ask(&session_id);
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         // The terminal relay's route lands here too: the ack's session id
         // is what the lane serves from now on — for Codex that is the
@@ -2814,6 +2843,8 @@ impl Harness {
         self.park_active(cx);
         self.subscriptions.clear();
         self.session_switch_pending = false;
+        // A failed open lands no session: the Ask has nowhere to go.
+        self.drop_pending_ask();
         if let Some(id) = session_id.clone() {
             self.pending_id = Some(id.clone());
             self.restore_right_for_session(&id, cx);
@@ -3686,13 +3717,21 @@ impl Harness {
                 view.focus_composer(window, cx);
             });
         }
-        // The omnibox Ask (B2a-H4c): the question lands in the session that
-        // just landed — targeted by its id, never by `self.active` — as a
-        // draft only, never sent. A reused draft that already holds text
-        // keeps it, with the question appended on a new line.
-        if let Some(query) = self.pending_ask_draft.take() {
+        // The omnibox Ask (B2a-H4d): the question lands in the session that
+        // just landed — keyed by its id, never by `self.active` — as a
+        // draft only, never sent. An unrelated landing (or one while an
+        // async open is still in flight, with no key yet) leaves it armed;
+        // an early return in `new_session_in` dropped it already. A reused
+        // draft that already holds text keeps it, with the question
+        // appended on a new line.
+        let ask = self
+            .pending_ask_draft
+            .clone()
+            .filter(|ask| ask.target.as_deref() == Some(session_id.as_str()));
+        if let Some(ask) = ask {
+            self.pending_ask_draft = None;
             let existing = view.read(cx).draft_text(cx);
-            let next = crate::browser::toolbar::ask_draft_text(&existing, &query);
+            let next = crate::browser::toolbar::ask_draft_text(&existing, &ask.query);
             view.update(cx, |view, cx| view.set_draft(next, window, cx));
         }
         self.send_scripted(window, cx);
