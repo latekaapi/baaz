@@ -60,6 +60,11 @@ pub(crate) struct BrowserVisibility {
     pub pane_open: bool,
     /// The pane shows the Browser kind.
     pub kind_browser: bool,
+    /// The frame shows Browse mode's centre page instead of the pane's:
+    /// the current project's person-tab page, which needs no open pane
+    /// and no Browser kind. Sessions mode always leaves this false, so
+    /// its visibility reads exactly as before.
+    pub centre_browse: bool,
     /// This webview's session is the active one.
     pub session_active: bool,
     /// The Settings page stands open.
@@ -88,11 +93,13 @@ pub(crate) struct BrowserVisibility {
     pub window_active: bool,
 }
 
-/// Whether `inputs`' native view may show: open, on the Browser kind, for
-/// the active session, with no overlay over the pane and a live window.
+/// Whether `inputs`' native view may show: the pane open on the Browser
+/// kind for the active session — or, in Browse, the centre page — with
+/// no overlay over it and a live window. The covering rules are the
+/// same for both: the palette, menus, dialogs and settings obscure the
+/// centre page exactly as they obscure the pane's.
 pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
-    inputs.pane_open
-        && inputs.kind_browser
+    (inputs.pane_open && inputs.kind_browser || inputs.centre_browse)
         && inputs.session_active
         && !inputs.settings_open
         && !inputs.palette_open
@@ -135,6 +142,31 @@ pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) 
             y: content.origin.y + gpui::px(HEADER_PX),
         },
         size: gpui::size(right_width, content.size.height - gpui::px(HEADER_PX)),
+    }
+}
+
+/// The Browse centre page's rectangle in window coordinates (B2a-H2):
+/// the content box under the header, between the sidebar (`0` when
+/// collapsed) and the right pane (`0` when closed), above the terminal
+/// dock (`0` when closed). The dock stacks below the centre in the same
+/// column — beside it, never over it — so its height subtracts from
+/// both placement and the mouse-down hand-back, and it never covers
+/// the page. Pure so tests can drive it.
+pub(crate) fn browser_centre_bounds(
+    content: Bounds<Pixels>,
+    sidebar: Pixels,
+    right: Pixels,
+    dock: Pixels,
+) -> Bounds<Pixels> {
+    Bounds {
+        origin: Point {
+            x: content.origin.x + sidebar,
+            y: content.origin.y + gpui::px(HEADER_PX),
+        },
+        size: gpui::size(
+            content.size.width - sidebar - right,
+            content.size.height - gpui::px(HEADER_PX) - dock,
+        ),
     }
 }
 
@@ -611,6 +643,142 @@ impl Harness {
         self.session_page(session_id).is_some()
     }
 
+    /// The Browse centre's shown tab, when Browse shows one (B2a-H2):
+    /// the current project's person-tab page. `None` in Sessions mode,
+    /// before the tabs load, or with no tab yet.
+    pub(crate) fn browse_centre_shown(&self) -> Option<TabId> {
+        if self.mode != crate::layout::Mode::Browse || !self.browser.tabs_loaded {
+            return None;
+        }
+        let space = self.current_project_id();
+        self.browser.tabs.active_of(&Owner::Person, space.as_deref())
+    }
+
+    /// The Browse centre's live page, when one already exists — the
+    /// person tab's state — never creating. The mouse-down hand-back
+    /// reads this instead of the pane's page while in Browse.
+    fn browse_centre_state(&self) -> Option<Entity<WebviewState>> {
+        let id = self.browse_centre_shown()?;
+        self.browser.states.get(&id).cloned()
+    }
+
+    /// The open terminal dock's height in window pixels, else zero
+    /// (B2a-H2b): the one height behind the centre rect, the sync's
+    /// dock bounds and the mouse-down hand-back — computed once here,
+    /// reused everywhere, so the three can never disagree.
+    fn open_dock_height_px(&self, window: &Window) -> Pixels {
+        if !self.layout.terminal_open {
+            return gpui::px(0.0);
+        }
+        let centre_height = f32::from(window.bounds().size.height).max(0.0) - HEADER_PX;
+        let want =
+            self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
+        gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
+    }
+
+    /// The Browse centre column's rect for the window's `content` box:
+    /// past the sidebar when open, short of the right pane when open,
+    /// above the open dock. The dock stacks below the centre in the
+    /// same `v_flex` — beside it, never over it — so its height
+    /// subtracts here, and the column the `webview_pane` fills is
+    /// exactly this rect.
+    fn browse_centre_content_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+        let sidebar = if self.sidebar_open {
+            gpui::px(self.resize.width)
+        } else {
+            gpui::px(0.0)
+        };
+        let right = if self.layout.right_open {
+            gpui::px(self.right_resize.width)
+        } else {
+            gpui::px(0.0)
+        };
+        browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
+    }
+
+    /// The Browse centre page's rect for the window's `content` box:
+    /// the column above minus the webview's nav row. The single source
+    /// behind placement and release: `sync_browser` stores it every
+    /// frame ([`BrowserRegistry::centre_page_rect`]) and the mouse-down
+    /// hand-back reads the stored rect, so the slide — a translate
+    /// inside the clipped sidebar, which moves no column — changes
+    /// nothing either side computes.
+    fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+        let centre = self.browse_centre_content_rect(content, window);
+        Bounds::new(
+            gpui::point(centre.origin.x, centre.origin.y + gpui::px(BROWSER_NAV_PX)),
+            gpui::size(
+                centre.size.width,
+                (centre.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.)),
+            ),
+        )
+    }
+
+    /// The Browse centre's page (B2a-H2b): the current project's person
+    /// tab, when one is open — never creating. Tab creation lives on
+    /// the events that need it (entering Browse, closing the last
+    /// person tab, the New-tab affordances), never in render: with no
+    /// tab the centre draws its empty state instead. The page is built
+    /// here, where the centre shows it — the centre twin of
+    /// [`Self::browser_for`].
+    pub(crate) fn browse_centre_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<WebviewState>> {
+        self.ensure_tabs_loaded(cx);
+        let space = self.current_project_id();
+        let id = self.browser.tabs.active_of(&Owner::Person, space.as_deref())?;
+        Some(self.ensure_tab_page(HOME_KEY, id, window, cx))
+    }
+
+    /// Entering Browse ensures the project has a person tab to show
+    /// (B2a-H2): with none, one blank tab opens with the URL field
+    /// focused. A project that already has tabs is untouched — and in
+    /// particular never steals focus.
+    pub(crate) fn ensure_browse_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let space = self.current_project_id();
+        if self.browser.tabs.active_of(&Owner::Person, space.as_deref()).is_none() {
+            self.new_browse_sidebar_tab(window, cx);
+        }
+    }
+
+    /// Open a blank person tab in the current project and select it, with
+    /// the address focused: the Browse sidebar's "New tab" row and the
+    /// entering-Browse ensure share this one path.
+    pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let space = self.current_project_id();
+        let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
+        let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
+        self.schedule_tabs_write(cx);
+        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
+        state.update(cx, |state, cx| state.begin_editing(window, cx));
+        cx.notify();
+    }
+
+    /// Select the Browse sidebar's tab `id` (B2a-H2): the model
+    /// activates and the page builds when discarded. A closed — or a
+    /// session-owned — `id` is a no-op, so a × click racing the row's
+    /// own select never resurrects the tab.
+    pub(crate) fn select_browse_sidebar_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
+            return;
+        }
+        if self.browser.tabs.activate(id) {
+            self.schedule_tabs_write(cx);
+        }
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        cx.notify();
+    }
+
     /// Prepare the shown tab's webview ahead of the pane animating
     /// (B7): `toggle_right`/`show_right` call this when they land open on
     /// Browser, so the opening frame shows the page instead of paying the
@@ -620,6 +788,11 @@ impl Harness {
     /// focuses: focus rides only on the person's own open through
     /// [`Self::ensure_browser_person`].
     pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
+        // B2a-H2b: in Browse the pane never shows a page, so nothing
+        // prewarms one for it — the centre builds its own on show.
+        if self.mode == crate::layout::Mode::Browse {
+            return;
+        }
         if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
         {
             return;
@@ -662,6 +835,11 @@ impl Harness {
     /// existing one is reused), never focused: focus rides only on the
     /// person's own open through [`Self::ensure_browser_person`].
     pub(crate) fn prewarm_browser_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // B2a-H2b: like `prewarm_browser_if_needed` — no pane page in
+        // Browse, so no prewarm for one.
+        if self.mode == crate::layout::Mode::Browse {
+            return;
+        }
         if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
         {
             return;
@@ -783,9 +961,10 @@ impl Harness {
         cx.notify();
     }
 
-    /// `tab-new:<url>`: open a tab on `url` for the shown owner — a session
-    /// tab in the active session, a person tab with no session open — and
-    /// select it. Empty records a step failure. A blank URL focuses the
+    /// `tab-new:<url>`: open a tab on `url` — a person tab in Browse
+    /// mode, otherwise a tab for the shown owner (a session tab in the
+    /// active session, a person tab with no session open) — and select
+    /// it. Empty records a step failure. A blank URL focuses the
     /// address field, like a by-hand open. Free: no turn, no wire.
     pub(crate) fn step_tab_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let url = rest.trim();
@@ -794,12 +973,22 @@ impl Harness {
             return;
         }
         self.ensure_tabs_loaded(cx);
-        let owner = self.shown_tab_owner(cx);
+        // B2a-H2b: in Browse a new tab is always the person's, even with
+        // a session open behind the mode — the session's tabs belong to
+        // Sessions.
+        let owner = if self.mode == crate::layout::Mode::Browse {
+            Owner::Person
+        } else {
+            self.shown_tab_owner(cx)
+        };
         let space = self.current_project_id();
         let after = self.browser.tabs.active_of(&owner, space.as_deref());
         let id = self.browser.tabs.open(space, owner.clone(), url, after);
         self.schedule_tabs_write(cx);
-        let key = self.browser_key(cx);
+        let key = match &owner {
+            Owner::Person => HOME_KEY.to_owned(),
+            Owner::Session(_) => self.browser_key(cx),
+        };
         let state = self.ensure_tab_page(&key, id, window, cx);
         if url == BLANK {
             state.update(cx, |state, cx| state.begin_editing(window, cx));
@@ -1018,6 +1207,19 @@ impl Harness {
         let next = self.browser.tabs.close(id);
         self.browser.states.remove(&id);
         self.schedule_tabs_write(cx);
+        // B2a-H2b: closing the current project's last person tab while
+        // in Browse opens a fresh blank one — entering Browse and this
+        // close are the two events that create tabs, never render. Other
+        // spaces and Sessions mode keep the closed state: emptiness
+        // there is honest, and the centre is not showing.
+        if self.mode == crate::layout::Mode::Browse
+            && tab.owner == Owner::Person
+            && tab.space == self.current_project_id()
+            && self.browser.tabs.person_tabs(tab.space.as_deref()).is_empty()
+        {
+            self.new_browse_sidebar_tab(window, cx);
+            return;
+        }
         if !was_active {
             cx.notify();
             return;
@@ -1086,7 +1288,8 @@ impl Harness {
         let owner = self.shown_tab_owner(cx);
         let space = self.owner_space(&owner);
         let shown = self.browser.tabs.active_of(&owner, space.as_deref());
-        self.discard_hidden_tabs(true, shown, cx);
+        let centre = self.browse_centre_shown();
+        self.discard_hidden_tabs(true, shown, centre, cx);
         cx.notify();
     }
 
@@ -1197,9 +1400,16 @@ impl Harness {
     /// Drop hidden tabs' live pages. On the frame (`force` false) only
     /// tabs idle past the timeout go; `tab-discard-now` forces every hidden
     /// page at once. Audible pages, pinned tabs and the agent's active
-    /// tabs are always spared; the shown tab is never a candidate.
-    /// Showing a dropped tab again rebuilds its page at its URL.
-    fn discard_hidden_tabs(&mut self, force: bool, shown: Option<TabId>, cx: &mut Context<Self>) {
+    /// tabs are always spared; the shown tabs — the pane's and Browse's
+    /// centre — are never candidates. Showing a dropped tab again
+    /// rebuilds its page at its URL.
+    fn discard_hidden_tabs(
+        &mut self,
+        force: bool,
+        shown: Option<TabId>,
+        centre: Option<TabId>,
+        cx: &mut Context<Self>,
+    ) {
         let now = tabs::now_ms();
         let agent: std::collections::HashSet<TabId> =
             self.browser.agent_tabs.values().copied().collect();
@@ -1215,7 +1425,7 @@ impl Harness {
             .collect();
         let mut dropped = Vec::new();
         for (id, audible, pinned) in live {
-            if Some(id) == shown || audible || pinned || agent.contains(&id) {
+            if Some(id) == shown || Some(id) == centre || audible || pinned || agent.contains(&id) {
                 continue;
             }
             let last = self.browser.tabs.get(id).and_then(|tab| tab.last_shown);
@@ -1250,13 +1460,16 @@ impl Harness {
         }
     }
 
-    /// Set every live page's obscured flag from the shown tab: the shown
-    /// tab's page shows, every other page hides. Blank pages stay hidden
-    /// (WKWebView paints `about:blank` white over the dark pane).
+    /// Set every live page's obscured flag from the shown tabs: the
+    /// pane's page shows while the frame is live, Browse's centre page
+    /// while the centre is live, every other page hides. Blank pages stay
+    /// hidden (WKWebView paints `about:blank` white over the dark pane).
     fn apply_page_visibility(
         &mut self,
         shown: Option<TabId>,
         frame_live: bool,
+        centre: Option<TabId>,
+        centre_live: bool,
         cx: &mut Context<Self>,
     ) {
         let pages: Vec<(TabId, Entity<WebviewState>)> = self
@@ -1267,7 +1480,8 @@ impl Harness {
             .collect();
         for (id, state) in pages {
             let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
-            let visible = frame_live && Some(id) == shown && !blank;
+            let visible =
+                (frame_live && Some(id) == shown || centre_live && Some(id) == centre) && !blank;
             state.update(cx, |state, _cx| state.set_obscured(!visible));
         }
     }
@@ -1279,6 +1493,16 @@ impl Harness {
     /// native view that is not the shown tab. Called with the
     /// already-computed overlay elements (`None` is closed), so this reads
     /// state only.
+    /// Whether the Browse centre may show its page this frame (B2a-H2b):
+    /// the current project's person tab is there and nothing covers it —
+    /// the Skills page and a pending provider switch hide it exactly
+    /// like the palette, menus, dialogs and settings hide the pane's.
+    pub(crate) fn browse_centre_live(&self, cx: &gpui::App) -> bool {
+        self.browse_centre_shown().is_some()
+            && self.pending_switch_dest(cx).is_none()
+            && !self.skills.open
+    }
+
     pub(crate) fn sync_browser(
         &mut self,
         overflow: bool,
@@ -1406,17 +1630,7 @@ impl Harness {
                 } else {
                     gpui::px(0.0)
                 });
-            let centre_height = f32::from(window.bounds().size.height).max(0.0) - HEADER_PX;
-            let want = self
-                .layout
-                .terminal_height
-                .unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
-            terminal_dock_bounds(
-                content,
-                left,
-                right,
-                gpui::px(crate::terminal::clamp_dock_height(want, centre_height)),
-            )
+            terminal_dock_bounds(content, left, right, self.open_dock_height_px(window))
         });
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
@@ -1441,9 +1655,19 @@ impl Harness {
                     .active_of(&shown_owner, shown_space.as_deref())
             })
             .flatten();
+        // Who holds the keyboard, once per frame: both the pane's and the
+        // centre's liveness read it, and only the really shown page ever
+        // counts (see below).
+        let holds: HashMap<TabId, bool> = self
+            .browser
+            .states
+            .iter()
+            .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
+            .collect();
         let base = BrowserVisibility {
             pane_open: self.layout.right_open,
             kind_browser: kind == RightKind::Browser,
+            centre_browse: false,
             session_active: false,
             settings_open,
             palette_open,
@@ -1460,15 +1684,7 @@ impl Harness {
             // active while it or the currently SHOWN page holds the
             // keyboard — a hidden or obscured page can never keep it
             // "active", or its native view would show under an overlay.
-            window_active: {
-                let holds: HashMap<TabId, bool> = self
-                    .browser
-                    .states
-                    .iter()
-                    .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
-                    .collect();
-                shown_window_active(window.is_window_active(), shown, &holds)
-            },
+            window_active: shown_window_active(window.is_window_active(), shown, &holds),
         };
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
@@ -1477,26 +1693,53 @@ impl Harness {
             session_active: true,
             ..base
         });
-        self.apply_page_visibility(shown, frame_live, cx);
-        // The shown page stamps its tab when it really shows (never a
+        // B2a-H2b: in Browse the pane never shows a page — one tab, one
+        // page — so the session page can neither share the centre's tab
+        // nor paint behind the mode. The render path shows the Changes
+        // fallback instead, and the sync hides every pane page here.
+        let in_browse = self.mode == crate::layout::Mode::Browse;
+        let (shown, frame_live) = if in_browse { (None, false) } else { (shown, frame_live) };
+        // B2a-H2: in Browse the centre shows the current project's
+        // person-tab page under the same covering rules as the pane.
+        // The dock stacks below the centre in the same column — beside
+        // it, never over it — so no dock intersection can cover the
+        // page and `terminal_covering` stays false; the Skills page and
+        // a pending provider switch hide it exactly like the
+        // palette/menus/dialogs/settings do. The centre rect is stored
+        // for the mouse-down hand-back: the single source behind
+        // placement and release.
+        let centre_page = self.browse_centre_page_rect(content, window);
+        self.browser.centre_page_rect = in_browse.then_some(centre_page);
+        let centre_shown = self.browse_centre_shown();
+        let centre_live = browser_visible(BrowserVisibility {
+            centre_browse: centre_shown.is_some(),
+            session_active: self.browse_centre_live(cx),
+            terminal_covering: false,
+            window_active: shown_window_active(window.is_window_active(), centre_shown, &holds),
+            ..base
+        });
+        self.apply_page_visibility(shown, frame_live, centre_shown, centre_live, cx);
+        // The shown pages stamp their tabs when they really show (never a
         // blank), so discard measures real hiding — in memory only, never
         // a write on its own.
-        if frame_live {
-            if let Some(id) = shown {
-                let blank = self
-                    .browser
-                    .states
-                    .get(&id)
-                    .map(|state| matches!(state.read(cx).url().as_ref(), "" | BLANK))
-                    .unwrap_or(true);
-                if !blank {
-                    self.browser.tabs.mark_shown(id, tabs::now_ms());
+        for (id, live) in [(shown, frame_live), (centre_shown, centre_live)] {
+            if live {
+                if let Some(id) = id {
+                    let blank = self
+                        .browser
+                        .states
+                        .get(&id)
+                        .map(|state| matches!(state.read(cx).url().as_ref(), "" | BLANK))
+                        .unwrap_or(true);
+                    if !blank {
+                        self.browser.tabs.mark_shown(id, tabs::now_ms());
+                    }
                 }
             }
         }
         // Long-hidden pages drop their native views (but keep their tabs);
-        // the shown tab is never a candidate.
-        self.discard_hidden_tabs(false, shown, cx);
+        // the shown tabs are never candidates.
+        self.discard_hidden_tabs(false, shown, centre_shown, cx);
         if tabs_dirty {
             self.schedule_tabs_write(cx);
         }
@@ -1515,6 +1758,30 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // In Browse the keyboard sits with the centre page, whose rect
+        // is the stored centre rect — the very rect the sync placed —
+        // never the pane's and never a second computation. Before the
+        // first sync the live computation stands in.
+        if self.mode == crate::layout::Mode::Browse {
+            let Some(state) = self.browse_centre_state() else {
+                return;
+            };
+            let page = match self.browser.centre_page_rect {
+                Some(page) => page,
+                None => {
+                    let content = window_content_bounds(window);
+                    self.browse_centre_page_rect(content, window)
+                }
+            };
+            if should_release_keyboard_on_mouse_down(
+                state.read(cx).holds_keyboard(),
+                event.position,
+                Some(page),
+            ) {
+                state.update(cx, |state, _| state.release_keyboard());
+            }
+            return;
+        }
         if !browser_pane_showing(
             self.layout.right_open,
             crate::layout::right_kind(&self.layout) == RightKind::Browser,
@@ -1552,6 +1819,14 @@ impl Harness {
     /// it ([`aui_webview::FocusAddress`]). Already editing is a no-op, so
     /// a press that already reached the pane does not restart the edit.
     pub(crate) fn focus_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // In Browse ⌘L reaches the centre page, which needs no open pane.
+        if self.mode == crate::layout::Mode::Browse {
+            self.ensure_browse_tab(window, cx);
+            if let Some(state) = self.browse_centre_page(window, cx) {
+                state.update(cx, |state, cx| state.begin_editing(window, cx));
+            }
+            return;
+        }
         if !browser_pane_showing(
             self.layout.right_open,
             crate::layout::right_kind(&self.layout) == RightKind::Browser,
@@ -1576,6 +1851,15 @@ impl Harness {
     /// pane's own focus handle — the same hand-over an explicit person open
     /// performs. Free: no turn, no wire.
     pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // In Browse the active page is the centre's, not the pane's.
+        if self.mode == crate::layout::Mode::Browse {
+            self.ensure_browse_tab(window, cx);
+            if let Some(state) = self.browse_centre_page(window, cx) {
+                let focus = state.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+            }
+            return;
+        }
         let key = self.browser_key(cx);
         let state = self.browser_for(&key, false, window, cx);
         let focus = state.read(cx).focus_handle().clone();
@@ -1605,6 +1889,10 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         if let Some(state) = self.existing_browser(cx) {
+            state.update(cx, |state, _| state.release_keyboard());
+        }
+        // In Browse the keyboard may sit with the centre page instead.
+        if let Some(state) = self.browse_centre_state() {
             state.update(cx, |state, _| state.release_keyboard());
         }
         #[cfg(feature = "cef")]
@@ -1745,6 +2033,11 @@ pub(crate) struct BrowserRegistry {
     /// compared on middle mouse up (only the same tab closes), cleared on
     /// every middle up. Never rendered — pure press/release pairing.
     pub middle_pressed: Option<TabId>,
+    /// The Browse centre page's rect, stored by `sync_browser` every
+    /// frame: the mouse-down hand-back measures against this same rect
+    /// (see `browse_centre_page_rect`), never a second computation.
+    /// `None` outside Browse and before the first sync.
+    pub centre_page_rect: Option<Bounds<Pixels>>,
 }
 
 impl BrowserRegistry {
@@ -1762,6 +2055,7 @@ impl BrowserRegistry {
             tabs_save_pending: false,
             agent_tabs: HashMap::new(),
             middle_pressed: None,
+            centre_page_rect: None,
         }
     }
 }
@@ -1769,10 +2063,11 @@ impl BrowserRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_session_active,
-        browser_visible, initial_url, middle_release_closes, should_release_keyboard_on_mouse_down,
-        should_remember, shown_window_active, terminal_covers_browser, terminal_dock_bounds,
-        Annotation, BrowserVisibility, FakeWebBackend, WebviewState,
+        annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
+        browser_session_active, browser_visible, initial_url, middle_release_closes,
+        should_release_keyboard_on_mouse_down, should_remember, shown_window_active,
+        terminal_covers_browser, terminal_dock_bounds, Annotation, BrowserVisibility, FakeWebBackend,
+        WebviewState,
     };
     use super::{Owner, TabId};
     use aui_webview::WebBackend as _;
@@ -1782,6 +2077,27 @@ mod tests {
         BrowserVisibility {
             pane_open: true,
             kind_browser: true,
+            centre_browse: false,
+            session_active: true,
+            settings_open: false,
+            palette_open: false,
+            menu_open: false,
+            plus_open: false,
+            account_menu_open: false,
+            dialog_open: false,
+            drop_cover: false,
+            terminal_covering: false,
+            window_active: true,
+        }
+    }
+
+    /// Browse's centre page, all clear: no open pane and no Browser kind
+    /// needed — the centre flag carries the showing half on its own.
+    fn centre_clear() -> BrowserVisibility {
+        BrowserVisibility {
+            pane_open: false,
+            kind_browser: false,
+            centre_browse: true,
             session_active: true,
             settings_open: false,
             palette_open: false,
@@ -1798,6 +2114,81 @@ mod tests {
     #[test]
     fn native_view_shows_only_with_pane_open_on_active_browser() {
         assert!(browser_visible(all_clear()));
+    }
+
+    #[test]
+    fn browse_centre_shows_with_no_pane_and_no_browser_kind() {
+        assert!(
+            browser_visible(centre_clear()),
+            "the centre page needs no open pane and no Browser kind"
+        );
+    }
+
+    #[test]
+    fn browse_centre_hides_without_a_shown_tab() {
+        let mut inputs = centre_clear();
+        inputs.session_active = false;
+        assert!(
+            !browser_visible(inputs),
+            "no shown tab, no centre page — like the pane's inactive session"
+        );
+    }
+
+    #[test]
+    fn every_cover_hides_the_browse_centre_too() {
+        // The palette, the settings page and a dead window obscure the
+        // centre page exactly as they obscure the pane's: the same
+        // covering rules, not a second set.
+        let mut palette = centre_clear();
+        palette.palette_open = true;
+        assert!(!browser_visible(palette), "the palette obscures the centre page");
+        let mut settings = centre_clear();
+        settings.settings_open = true;
+        assert!(!browser_visible(settings), "settings obscure the centre page");
+        let mut dead = centre_clear();
+        dead.window_active = false;
+        assert!(!browser_visible(dead), "a dead window hides the centre page");
+    }
+
+    #[test]
+    fn sessions_visibility_needs_no_centre_flag() {
+        // Sessions mode leaves the flag false, so its visibility reads
+        // exactly as before: closed pane hides, whatever the flag's
+        // absence says.
+        let mut inputs = all_clear();
+        inputs.pane_open = false;
+        assert!(!browser_visible(inputs), "a closed pane still hides the page");
+        assert!(!inputs.centre_browse, "sessions never sets the centre flag");
+    }
+
+    #[test]
+    fn centre_bounds_fill_between_sidebar_right_and_dock() {
+        // A 1440x900 window, sidebar open at 260, right pane at 400, dock
+        // at 260: the centre page is what is left under the 44 px header.
+        let content = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(1440.0), gpui::px(900.0)),
+        };
+        let page = browser_centre_bounds(
+            content,
+            gpui::px(260.0),
+            gpui::px(400.0),
+            gpui::px(260.0),
+        );
+        assert_eq!(page.origin.x, gpui::px(260.0));
+        assert_eq!(page.origin.y, gpui::px(44.0));
+        assert_eq!(page.size.width, gpui::px(780.0));
+        assert_eq!(page.size.height, gpui::px(900.0 - 44.0 - 260.0));
+        // Collapsed chrome is zero, not absent: the full content width.
+        let full = browser_centre_bounds(
+            content,
+            gpui::px(0.0),
+            gpui::px(0.0),
+            gpui::px(0.0),
+        );
+        assert_eq!(full.origin.x, gpui::px(0.0));
+        assert_eq!(full.size.width, gpui::px(1440.0));
+        assert_eq!(full.size.height, gpui::px(900.0 - 44.0));
     }
 
     #[test]
@@ -2447,7 +2838,7 @@ mod tests {
                     "registration follows the active tab"
                 );
                 // Only the active tab's page is unobscured.
-                harness.apply_page_visibility(Some(second), true, cx);
+                harness.apply_page_visibility(Some(second), true, None, false, cx);
                 assert!(
                     !page_second.read(cx).obscured(),
                     "the active tab's page shows"
@@ -2465,12 +2856,12 @@ mod tests {
                     Some(page_first.clone()),
                     "registration follows the switch"
                 );
-                harness.apply_page_visibility(Some(first), true, cx);
+                harness.apply_page_visibility(Some(first), true, None, false, cx);
                 assert!(!page_first.read(cx).obscured());
                 assert!(page_second.read(cx).obscured());
                 // Scoped discard drops only the hidden page: the tab keeps
                 // its URL, and showing it again rebuilds at that URL.
-                harness.discard_hidden_tabs(true, Some(first), cx);
+                harness.discard_hidden_tabs(true, Some(first), None, cx);
                 assert_eq!(
                     harness.browser.states.len(),
                     1,

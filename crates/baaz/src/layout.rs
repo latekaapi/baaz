@@ -124,6 +124,157 @@ impl RightKind {
     }
 }
 
+/// Which half of the window the person is in (B2a-H2): today's sessions
+/// column and transcript, or the person's own tabs with a tab's page in
+/// the centre. The window, the project switcher, the switch itself and
+/// the account footer stay put across both; everything between the
+/// switch and the footer slides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Today's Baaz: the sessions sidebar and the open session.
+    #[default]
+    Sessions,
+    /// The person's tabs: the tab list in the sidebar, a tab's page in
+    /// the centre, the right pane closed unless the person opened it here.
+    Browse,
+}
+
+impl Mode {
+    /// The machine name: what `layout.json` stores and `mode:` parses.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Mode::Sessions => "sessions",
+            Mode::Browse => "browse",
+        }
+    }
+
+    /// The inverse of [`Mode::slug`]: `None` for an unknown string, so an
+    /// old or hand-edited file reads as today's behaviour, never an error.
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "sessions" => Some(Mode::Sessions),
+            "browse" => Some(Mode::Browse),
+            _ => None,
+        }
+    }
+
+    /// The other half of the window: what ⌥⌘B toggles to.
+    pub fn other(self) -> Mode {
+        match self {
+            Mode::Sessions => Mode::Browse,
+            Mode::Browse => Mode::Sessions,
+        }
+    }
+
+    /// The user-visible name: the sidebar switch's segment and the rail's
+    /// toggle label name the mode they show, not the one they leave.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Sessions => "Sessions",
+            Mode::Browse => "Browse",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Mode {
+    /// What [`Mode::parse`] says, falling back to sessions: a stored
+    /// mode from a newer build — or a hand-edited file — never fails
+    /// the whole read, it just opens today's Baaz. Anything that is not
+    /// a known mode string (`null`, a number, an object, an unknown
+    /// slug) reads as sessions, so one bad value never fails the file.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Mode::parse).unwrap_or(Mode::Sessions))
+    }
+}
+
+/// A sidebar scroll position in persistable form: the list item and the
+/// pixels into it, the same pair [`gpui::ListOffset`] carries. Pure
+/// data, so each mode's offset survives a restart in `layout.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScrollPos {
+    /// The top item's index.
+    #[serde(default)]
+    pub item: usize,
+    /// The pixels into the top item.
+    #[serde(default)]
+    pub offset: f32,
+}
+
+/// What one mode remembers while the person is in the other (B2a-H2):
+/// the right pane's open state, kind and width, the sidebar's scroll
+/// offset, and which session or tab was selected. Saved on the way out,
+/// restored on the way back in — see [`ModeSlots::switch`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModeState {
+    /// Whether the right pane stood open in this mode.
+    #[serde(rename = "rightOpen", default)]
+    pub right_open: bool,
+    /// The settled right-pane width in window pixels, if ever set here.
+    #[serde(rename = "rightWidth", default, skip_serializing_if = "Option::is_none")]
+    pub right_width: Option<f32>,
+    /// Which right-pane kind was last shown here, if ever opened here.
+    #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
+    pub right_kind: Option<RightKind>,
+    /// The sidebar's scroll offset while in this mode, if ever scrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<ScrollPos>,
+    /// The selected session while in Sessions mode, if any was open.
+    #[serde(rename = "selectedSession", default, skip_serializing_if = "Option::is_none")]
+    pub selected_session: Option<String>,
+    /// The selected person-tab id while in Browse mode, if any.
+    #[serde(rename = "selectedTab", default, skip_serializing_if = "Option::is_none")]
+    pub selected_tab: Option<u64>,
+}
+
+impl ModeState {
+    /// Whether nothing was ever remembered here: what keeps an untouched
+    /// mode out of `layout.json`, so old files read unchanged.
+    pub fn is_default(&self) -> bool {
+        *self == ModeState::default()
+    }
+}
+
+/// Both modes' remembered states, as one `layout.json` object.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModeSlots {
+    /// What Sessions mode remembers.
+    #[serde(default, skip_serializing_if = "ModeState::is_default")]
+    pub sessions: ModeState,
+    /// What Browse mode remembers.
+    #[serde(default, skip_serializing_if = "ModeState::is_default")]
+    pub browse: ModeState,
+}
+
+impl ModeSlots {
+    /// The remembered state for `mode`.
+    pub fn get(&self, mode: Mode) -> &ModeState {
+        match mode {
+            Mode::Sessions => &self.sessions,
+            Mode::Browse => &self.browse,
+        }
+    }
+
+    /// Leave `from` carrying `leaving` and answer with what `to`
+    /// remembered: the one pure step behind every mode switch, so the
+    /// leaving mode's state is saved before the entering mode's is
+    /// restored, never the other way round.
+    pub fn switch(&mut self, from: Mode, leaving: ModeState, to: Mode) -> ModeState {
+        match from {
+            Mode::Sessions => self.sessions = leaving,
+            Mode::Browse => self.browse = leaving,
+        }
+        self.get(to).clone()
+    }
+
+    /// Whether neither mode remembered anything: what keeps the whole
+    /// object out of `layout.json` until the first real switch.
+    pub fn is_default_all(&self) -> bool {
+        self.sessions.is_default() && self.browse.is_default()
+    }
+}
+
 /// Whether provider sessions may inherit the owner's own MCP servers
 /// and connectors (Z5). Off means inherit-nothing: Codex sessions carry
 /// the full-table disables (plus plugin disables) and Claude Code
@@ -246,6 +397,18 @@ pub struct Layout {
     /// Providers page (see [`UseOwnMcp`]).
     #[serde(rename = "useOwnMcp", default)]
     pub use_own_mcp: UseOwnMcp,
+    /// Which half of the window the person is in (B2a-H2): sessions or
+    /// browse. `None` in an old file reads as sessions — today's Baaz —
+    /// and `BAAZ_DETERMINISTIC=1` keeps that default, like every other
+    /// preference, so captures never depend on the owner's last mode.
+    #[serde(rename = "mode", default)]
+    pub mode: Mode,
+    /// What each mode remembers while the person is in the other: the
+    /// right pane's open state, kind and width, the sidebar scroll and
+    /// the selection. Untouched modes stay out of the file, so old files
+    /// read unchanged.
+    #[serde(rename = "modeMemory", default, skip_serializing_if = "ModeSlots::is_default_all")]
+    pub mode_memory: ModeSlots,
 }
 
 /// The default for the auto-title and auto-summary switches: ON. A missing
@@ -280,6 +443,8 @@ impl Default for Layout {
             right_width: None,
             right_kind: None,
             use_own_mcp: UseOwnMcp::default(),
+            mode: Mode::Sessions,
+            mode_memory: ModeSlots::default(),
         }
     }
 }
@@ -308,8 +473,13 @@ pub fn read() -> Layout {
 /// Write the store, atomically.
 ///
 /// Best-effort: a store that cannot be written loses a width, which is a
-/// nuisance, and never a session, which would be a loss.
+/// nuisance, and never a session, which would be a loss. A deterministic
+/// capture writes nothing at all: like [`read`], the owner's file must
+/// never gain a capture's widths, modes or per-mode memory.
 pub fn write(layout: &Layout) {
+    if crate::clock::deterministic() {
+        return;
+    }
     if let Ok(text) = serde_json::to_vec_pretty(layout) {
         let _ = crate::store::write_atomic(&path(), &text);
     }
@@ -396,6 +566,24 @@ mod tests {
         assert_eq!(sidebar_width(&Layout::default()), aui::shell::SIDEBAR_WIDTH);
     }
 
+    /// B2a-H2b: the mode reads tolerantly — `null`, a number, an object
+    /// or an unknown slug all open Sessions, and none of them fails the
+    /// whole file.
+    #[test]
+    fn a_non_string_or_unknown_mode_reads_as_sessions() {
+        for raw in ["null", "7", "{\"slug\":\"browse\"}", "\"spaceship\"", "\"browse\""] {
+            let text = format!("{{\"mode\":{raw}}}");
+            let back: Layout = serde_json::from_str(&text)
+                .unwrap_or_else(|_| panic!("mode {raw} must not fail the read"));
+            assert_eq!(
+                back.mode,
+                if raw == "\"browse\"" { Mode::Browse } else { Mode::Sessions },
+                "mode {raw} decodes"
+            );
+        }
+        assert_eq!(Layout::default().mode, Mode::Sessions);
+    }
+
     #[test]
     fn the_new_preferences_default_and_round_trip() {
         let layout = Layout::default();
@@ -427,6 +615,18 @@ mod tests {
             right_width: Some(420.0),
             right_kind: Some(RightKind::Changes),
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
+            mode: Mode::Browse,
+            mode_memory: ModeSlots {
+                sessions: ModeState {
+                    right_open: true,
+                    right_width: Some(420.0),
+                    right_kind: Some(RightKind::Changes),
+                    scroll: None,
+                    selected_session: Some("s-1".to_owned()),
+                    selected_tab: None,
+                },
+                browse: ModeState::default(),
+            },
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -444,6 +644,8 @@ mod tests {
         assert!(text.contains("\"rightWidth\":420.0"));
         assert!(text.contains("\"rightKind\":\"changes\""));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
+        assert!(text.contains("\"mode\":\"browse\""));
+        assert!(text.contains("\"modeMemory\":{\"sessions\":{\"rightOpen\":true"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
@@ -461,8 +663,16 @@ mod tests {
         assert_eq!(back.right_kind, Some(RightKind::Changes));
         assert!(back.use_own_mcp.codex);
         assert!(!back.use_own_mcp.claude_code);
+        assert_eq!(back.mode, Mode::Browse);
+        assert!(back.mode_memory.sessions.right_open);
+        assert_eq!(back.mode_memory.sessions.right_width, Some(420.0));
+        assert_eq!(back.mode_memory.sessions.right_kind, Some(RightKind::Changes));
+        assert_eq!(back.mode_memory.sessions.selected_session.as_deref(), Some("s-1"));
+        assert!(back.mode_memory.browse.is_default());
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
+        assert_eq!(old.mode, Mode::Sessions);
+        assert!(old.mode_memory.is_default_all());
         assert_eq!(old.group_by, None);
         assert!(old.expanded_groups.is_empty());
         assert!(old.search_all_projects);
@@ -525,6 +735,62 @@ mod tests {
         assert_eq!(RightKind::parse("nope"), None);
         assert_eq!(RightKind::parse(""), None);
         assert_eq!(RightKind::parse("DIFF"), None);
+    }
+
+    #[test]
+    fn the_mode_defaults_to_sessions_and_round_trips() {
+        assert_eq!(Layout::default().mode, Mode::Sessions);
+        assert_eq!(Mode::Sessions.slug(), "sessions");
+        assert_eq!(Mode::Browse.slug(), "browse");
+        assert_eq!(Mode::parse("sessions"), Some(Mode::Sessions));
+        assert_eq!(Mode::parse("browse"), Some(Mode::Browse));
+        assert_eq!(Mode::parse("nope"), None);
+        assert_eq!(Mode::parse(""), None);
+        assert_eq!(Mode::parse("Sessions"), None);
+        assert_eq!(Mode::Sessions.other(), Mode::Browse);
+        assert_eq!(Mode::Browse.other(), Mode::Sessions);
+        assert_eq!(Mode::Sessions.label(), "Sessions");
+        assert_eq!(Mode::Browse.label(), "Browse");
+        // Unknown stored modes read as sessions, never an error.
+        let old: Layout = serde_json::from_str("{\"mode\":\"tabs\"}").unwrap();
+        assert_eq!(old.mode, Mode::Sessions);
+    }
+
+    #[test]
+    fn switching_saves_the_leaving_mode_and_restores_the_entering_one() {
+        let mut slots = ModeSlots::default();
+        let sessions_left = ModeState {
+            right_open: true,
+            right_width: Some(420.0),
+            right_kind: Some(RightKind::Files),
+            scroll: Some(ScrollPos { item: 3, offset: 4.0 }),
+            selected_session: Some("s-1".to_owned()),
+            selected_tab: None,
+        };
+        // Into Browse for the first time: the sessions frame is saved,
+        // and Browse restores its default (pane closed, nothing selected).
+        let entering = slots.switch(Mode::Sessions, sessions_left.clone(), Mode::Browse);
+        assert_eq!(entering, ModeState::default());
+        assert_eq!(slots.get(Mode::Sessions), &sessions_left);
+        // Back to Sessions: Browse's frame is saved, Sessions restores
+        // exactly what it left with.
+        let browse_left = ModeState {
+            right_open: false,
+            right_width: None,
+            right_kind: None,
+            scroll: None,
+            selected_session: None,
+            selected_tab: Some(7),
+        };
+        let back = slots.switch(Mode::Browse, browse_left.clone(), Mode::Sessions);
+        assert_eq!(back, sessions_left);
+        assert_eq!(slots.get(Mode::Browse), &browse_left);
+        // Untouched slots stay out of the file; remembered ones persist.
+        assert!(ModeSlots::default().is_default_all());
+        assert!(!slots.is_default_all());
+        let text = serde_json::to_string(&slots).unwrap();
+        let back: ModeSlots = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, slots);
     }
 
     #[test]
