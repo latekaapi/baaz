@@ -600,15 +600,34 @@ pub fn kill_live_probes() {
     }
 }
 
+/// How long the quit path waits for live probes to drain after the kill,
+/// and how long a [`Pty`] drop spends reaping its child: past either bound
+/// the exit (or the drop) proceeds without the child rather than hanging.
+const QUIT_WAIT: Duration = Duration::from_millis(500);
+
 /// Kill live tier-probe children and wait, bounded, for their drops.
 ///
-/// The one cleanup every exit path runs — the screenshot quit, the window's
-/// should-close hook, the app-quit hook, and the ⌘W / ⌘Q menu actions — so a
-/// probe mid-flight never orphans its `muse` TUI child. Bounded either way:
-/// the close or quit proceeds when the wait expires.
+/// Only the real QUIT path runs this — the screenshot quit, the app-quit
+/// hook, and the ⌘Q menu action — so a probe mid-flight never orphans its
+/// `muse` TUI child. Bounded either way: the quit proceeds when the wait
+/// expires, and the wait is skipped entirely when no probe is live.
 pub fn cleanup_probes() {
     kill_live_probes();
-    wait_for_probes_gone(Duration::from_secs(3));
+    if LIVE_PROBES.lock().map(|live| live.is_empty()).unwrap_or(true) {
+        return;
+    }
+    wait_for_probes_gone(QUIT_WAIT);
+}
+
+/// Signal live tier-probe children without waiting for them.
+///
+/// The ONLY cleanup a window close (the red dot, ⌘W) runs: closing hides
+/// the app rather than quitting, so the probe thread is still alive to reap
+/// its own child on its next pump tick. Nothing in the close path may sleep
+/// on the main thread — a stuck probe must never freeze the hide — so this
+/// never waits, not even boundedly.
+pub fn cleanup_probes_for_close() {
+    kill_live_probes();
 }
 
 /// Wait, bounded, for every live probe to be dropped and reaped after
@@ -1600,21 +1619,54 @@ impl Drop for Pty {
         let pid = self.child.id();
         // SIGKILL, not SIGTERM: the TUI ignores SIGTERM, and a `Child::kill`
         // that named the wrong signal would read as a fix while leaking the
-        // same orphan. The `wait` reaps it, so no zombie outlives the probe
-        // while Baaz is still running.
+        // same orphan.
         // SAFETY: `kill` with a pid and a signal neither reads nor writes.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        let _ = self.child.wait();
+        // Close the master FIRST, before reaping: an exiting child whose
+        // controlling tty still holds unread output blocks in its final tty
+        // close until the master side drains or closes, so `wait` before
+        // `close` deadlocks parent against child (2026-10-06: ⌘W froze the
+        // app for the full close wait every time). Closing first lets the
+        // child's tty close complete, and the reap below is bounded anyway.
+        // SAFETY: `master` is owned by `self` and closed exactly once.
+        unsafe { libc::close(self.master) };
+        self.master = -1;
+        // Reap boundedly (`waitpid` with `WNOHANG`, [`QUIT_WAIT`] ceiling):
+        // a child that still has not exited by then is left for init — its
+        // pid file stays, so the next probe's sweep SIGKILLs it — rather
+        // than blocking this thread. Never `Child::wait` here: it blocks
+        // indefinitely, which is the deadlock above.
+        let deadline = Instant::now() + QUIT_WAIT;
+        let mut reaped = false;
+        loop {
+            // SAFETY: `waitpid` with a pid, a status out-pointer and
+            // `WNOHANG` neither reads nor writes Rust state.
+            let mut status = 0;
+            let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if rc == pid as libc::pid_t || rc == -1 {
+                reaped = rc == pid as libc::pid_t;
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Sync `Child`'s state without blocking: already reaped above, or
+        // still running (left for init).
+        let _ = self.child.try_wait();
+        // Always de-registered, reaped or not, so no exit path ever waits on
+        // this pid again.
         if let Ok(mut live) = LIVE_PROBES.lock() {
             live.retain(|popped| *popped != pid);
         }
-        // Only this probe's own entry: a newer probe may have written the
-        // file since, and removing its pid would blind the next sweep.
-        if read_probe_pid() == Some(pid) {
+        // Only this probe's own entry — and only when reaped: a live child's
+        // pid file stays so the next probe's sweep finds and SIGKILLs it. A
+        // newer probe may also have written the file since, and removing its
+        // pid would blind the next sweep.
+        if reaped && read_probe_pid() == Some(pid) {
             let _ = std::fs::remove_file(probe_pid_path());
         }
-        // SAFETY: `master` is owned by `self` and closed exactly once.
-        unsafe { libc::close(self.master) };
     }
 }
 
@@ -2732,4 +2784,84 @@ mod usage_fraction_tests {
     }
 }
 
+}
+
+/// T1 (2026-10-06): ⌘W / the red dot froze the app because `Pty::drop`
+/// waited on a child that was itself waiting on the pty master, and the
+/// close hooks then slept the full probe wait on the main thread. One
+/// sequential test pins all three bounds, in one function so parallel unit
+/// tests cannot interleave on the shared [`LIVE_PROBES`] registry.
+#[cfg(test)]
+mod t1_close_tests {
+    use super::*;
+
+    fn live_contains(pid: u32) -> bool {
+        LIVE_PROBES.lock().map(|live| live.contains(&pid)).unwrap_or(false)
+    }
+
+    fn live_forget(pid: u32) {
+        if let Ok(mut live) = LIVE_PROBES.lock() {
+            live.retain(|popped| *popped != pid);
+        }
+    }
+
+    #[test]
+    fn window_close_never_waits_and_pty_drop_cannot_deadlock() {
+        // 1. The drop: a real child under the probe's own pty constructor,
+        // flooding the tty with nobody reading the master. Dropping the
+        // `Pty` must return within a second and de-register the pid.
+        let mut flood = std::process::Command::new("/bin/sh");
+        flood.arg("-c").arg("while :; do echo x; done");
+        let pty = Pty::spawn(flood).expect("a pty for the flooding child");
+        let flood_pid = pty.child.id();
+        if let Ok(mut live) = LIVE_PROBES.lock() {
+            live.push(flood_pid);
+        }
+        // Let the child's output fill the pty buffer, so it is blocked in a
+        // tty write exactly like the stuck `muse` TUI was.
+        std::thread::sleep(Duration::from_millis(200));
+        let start = Instant::now();
+        drop(pty);
+        assert!(start.elapsed() < Duration::from_secs(1), "Pty::drop blocked {:?}", start.elapsed());
+        assert!(!live_contains(flood_pid), "the dropped probe stays registered");
+
+        // 2. The window-close cleanup: a live probe that never leaves the
+        // registry (its SIGKILLed child has no `Pty` left to drop it, the
+        // stuck case). Signalling only — it must return in milliseconds.
+        let mut stuck =
+            std::process::Command::new("/bin/sleep").arg("30").spawn().expect("a stuck-probe stand-in");
+        let stuck_pid = stuck.id();
+        if let Ok(mut live) = LIVE_PROBES.lock() {
+            live.push(stuck_pid);
+        }
+        let start = Instant::now();
+        cleanup_probes_for_close();
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "window-close cleanup slept {:?} on a stuck probe",
+            start.elapsed()
+        );
+
+        // 3. The quit cleanup with the same stuck registration: bounded by
+        // `QUIT_WAIT`, never the old multi-second wait.
+        let start = Instant::now();
+        cleanup_probes();
+        assert!(
+            start.elapsed() <= Duration::from_millis(600),
+            "quit cleanup took {:?} with a stuck probe",
+            start.elapsed()
+        );
+
+        // 4. The quit cleanup with nothing live: immediate, no wait at all.
+        live_forget(stuck_pid);
+        let _ = stuck.kill();
+        let _ = stuck.wait();
+        let start = Instant::now();
+        cleanup_probes();
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "quit cleanup with no probe slept {:?}",
+            start.elapsed()
+        );
+    }
 }

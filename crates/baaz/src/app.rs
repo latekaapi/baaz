@@ -387,8 +387,9 @@ pub fn set_menus(cx: &mut App) {
     // listener is available in every state, which is what Quit and Close in
     // particular need. Close walks `cx.windows()` instead of
     // `active_window()`, which is unset while a menu has the focus; this is
-    // a one-window app, so that is the window. Both run the same probe
-    // cleanup as the window-close and app-quit hooks.
+    // a one-window app, so that is the window. Close runs the close-path
+    // probe signal (never a wait); Quit runs the bounded quit cleanup, like
+    // the window-close and app-quit hooks respectively.
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         crate::baaz_log!("CloseWindow");
         // Feedback Active swallows the menu-bar close the way the layer
@@ -415,7 +416,9 @@ pub fn set_menus(cx: &mut App) {
         if blocked {
             return;
         }
-        crate::tier::cleanup_probes();
+        // T1: the close path never sleeps on the main thread — signal only,
+        // no probe wait, same as the red dot hook in `main.rs`.
+        crate::tier::cleanup_probes_for_close();
         // Same as the red dot: hide the app rather than remove the window,
         // so the session and the `muse serve` child survive and the Dock
         // icon or Cmd-Tab bring the same window back (`main.rs`,

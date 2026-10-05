@@ -613,7 +613,9 @@ fn run_bench(args: Args) {
         handle
             .update(cx, |_, window, cx| {
                 window.on_window_should_close(cx, |_, _| {
-                    crate::tier::cleanup_probes();
+                    // T1: the close path never sleeps on the main thread —
+                    // signal only, no probe wait.
+                    crate::tier::cleanup_probes_for_close();
                     true
                 });
             })
@@ -684,14 +686,17 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
     // driving the `muse` TUI would orphan it, the way quitting
     // mid-screenshot once did: the child is its own session leader, so
     // the `Pty` drop that would SIGKILL it never runs. The red dot hides the
-    // app instead of removing the window, after the same bounded probe wait
-    // the app-quit hook runs; macOS does not quit when the last window
-    // closes, and the Dock icon and Cmd-Tab re-activate the hidden window
-    // (or `on_reopen` rebuilds it above).
+    // app instead of removing the window. T1: nothing in the close path may
+    // sleep on the main thread, so the close hook only signals the live
+    // probes and never waits — the app keeps running, and the probe thread
+    // reaps its own child. Only the app-quit hook below keeps a bounded
+    // wait. macOS does not quit when the last window closes, and the Dock
+    // icon and Cmd-Tab re-activate the hidden window (or `on_reopen`
+    // rebuilds it above).
     handle
         .update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, cx| {
-                crate::tier::cleanup_probes();
+                crate::tier::cleanup_probes_for_close();
                 // B7fix2: the red dot hides the app rather than quitting,
                 // but up to 750 ms of debounced pane state still lands
                 // first — the hidden window must come back to its pane.
