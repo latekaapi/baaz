@@ -787,7 +787,9 @@ impl Harness {
         }
         self.browse_session_tab = None;
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         self.browse_drop_target = None;
+        self.browse_drop_at_end = false;
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         cx.notify();
     }
@@ -802,13 +804,19 @@ impl Harness {
         Some(self.current_project_id())
     }
 
-    /// ⌘W in Browse: close the current project's active person tab —
-    /// the model picks the display-order neighbour. A no-op outside
-    /// Browse (where ⌘W keeps closing the window) or with no tab.
+    /// ⌘W in Browse: while a From-sessions tab shows, stop showing it —
+    /// back to the person's active tab, closing nothing. Otherwise close
+    /// the current project's active person tab, the model picking the
+    /// display-order neighbour. A no-op outside Browse (where ⌘W keeps
+    /// closing the window) or with no tab.
     pub(crate) fn close_browse_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
+        if self.browse_session_tab.take().is_some() {
+            cx.notify();
+            return;
+        }
         let owner = Owner::Person;
         let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
             return;
@@ -858,12 +866,16 @@ impl Harness {
     }
 
     /// ⌥⌘↑/⌥⌘↓ in Browse: move the active person tab one display slot.
-    /// A no-op at the edge, across the pinned boundary, or outside
-    /// Browse.
+    /// A no-op while a From-sessions tab shows (the moves act on the
+    /// person's hidden tab otherwise), at the edge, across the pinned
+    /// boundary, or outside Browse.
     pub(crate) fn move_browse_shortcut(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
+        if self.browse_session_tab.is_some() {
+            return;
+        }
         if self.browser.tabs.move_active_by(&Owner::Person, space.as_deref(), delta) {
             self.schedule_tabs_write(cx);
         }
@@ -881,7 +893,9 @@ impl Harness {
             return;
         }
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         self.browse_drop_target = None;
+        self.browse_drop_at_end = false;
         self.close_tab(HOME_KEY, id, window, cx);
     }
 
@@ -893,6 +907,7 @@ impl Harness {
         let pinned = !self.browser.tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
         self.browser.tabs.set_pinned(id, pinned).then_some(pinned)?;
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         self.schedule_tabs_write(cx);
         cx.notify();
         Some(pinned)
@@ -915,14 +930,17 @@ impl Harness {
             self.schedule_tabs_write(cx);
             self.browse_session_tab = None;
             self.tab_menu = None;
+        self.tab_menu_bounds = None;
             self.ensure_tab_page(HOME_KEY, copy, window, cx);
         }
         cx.notify();
     }
 
-    /// Reload the person tab `id` at its own URL: the tab menu's Reload
-    /// row, and what a crashed tab's `!` tile does. When the tab has no
-    /// live page the next show rebuilds it anyway. A closed or
+    /// Reload the person tab `id` at its own URL and show it: the tab
+    /// menu's Reload row, and what a crashed row's click does (the `!`
+    /// tile's promise is reload *and* select). Activating clears a
+    /// From-sessions show, like every person-tab select. When the tab has
+    /// no live page the ensure rebuilds it anyway. A closed or
     /// session-owned `id` is a no-op.
     pub(crate) fn reload_browse_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
@@ -932,12 +950,18 @@ impl Harness {
         if tab.owner != Owner::Person {
             return;
         }
+        if self.browser.tabs.activate(id) {
+            self.schedule_tabs_write(cx);
+        }
+        self.browse_session_tab = None;
         let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
         let url = tab.url.clone();
         if !url.is_empty() {
             state.update(cx, |state, _cx| state.navigate(&url));
         }
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
+        self.browse_drop_target = None;
         cx.notify();
     }
 
@@ -951,27 +975,33 @@ impl Harness {
             }
         }
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         cx.notify();
     }
 
     /// Hand the person tab `id` to another project: the tab menu's Move
     /// to project row. The old project's active pointer falls back to
-    /// its newest remaining tab (or clears); the new project's selects
-    /// the arrival. A closed, session-owned or already-there `id` (beyond
-    /// the menu close) changes nothing.
+    /// its newest remaining tab (or clears — an emptied old project
+    /// shows the empty state in Browse, never an auto-blank); the new
+    /// project's selects the arrival, and its page is ensured when the
+    /// arrival lands in the current project. A closed, session-owned or
+    /// already-there `id` (beyond the menu close) changes nothing.
     pub(crate) fn move_browse_tab_to_project(
         &mut self,
         id: TabId,
         project: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.ensure_tabs_loaded(cx);
         let Some(tab) = self.browser.tabs.get(id).cloned() else {
             self.tab_menu = None;
+        self.tab_menu_bounds = None;
             cx.notify();
             return;
         };
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         if tab.owner != Owner::Person || tab.space == project {
             cx.notify();
             return;
@@ -980,6 +1010,7 @@ impl Harness {
         if let Some(live) = self.browser.tabs.tabs.iter_mut().find(|live| live.id == id) {
             live.space = project.clone();
         }
+        self.browser.tabs.bump();
         let owner = Owner::Person;
         if self.browser.tabs.active_of(&owner, old_space.as_deref()) == Some(id) {
             let fallback = self
@@ -1000,6 +1031,10 @@ impl Harness {
         }
         self.browser.tabs.activate(id);
         self.schedule_tabs_write(cx);
+        if project == self.current_project_id() && self.mode == crate::layout::Mode::Browse {
+            self.browse_session_tab = None;
+            self.ensure_tab_page(HOME_KEY, id, window, cx);
+        }
         cx.notify();
     }
 
@@ -1014,6 +1049,7 @@ impl Harness {
     ) {
         self.ensure_tabs_loaded(cx);
         self.tab_menu = None;
+        self.tab_menu_bounds = None;
         let Some(tab) = self.browser.tabs.get(id).cloned() else {
             cx.notify();
             return;
@@ -1022,15 +1058,16 @@ impl Harness {
             cx.notify();
             return;
         }
-        let closed: Vec<TabId> = self
-            .browser
-            .tabs
-            .tabs
-            .iter()
-            .filter(|other| other.id != id && other.owner == tab.owner && other.space == tab.space)
-            .map(|other| other.id)
-            .collect();
+        // Only the tabs the model actually closes lose their pages:
+        // pinned tabs survive (the model spares them), so their live
+        // pages stay registered.
+        let before: std::collections::HashSet<TabId> =
+            self.browser.tabs.tabs.iter().map(|live| live.id).collect();
         self.browser.tabs.close_others(id);
+        let closed: Vec<TabId> = before
+            .into_iter()
+            .filter(|gone| self.browser.tabs.get(*gone).is_none())
+            .collect();
         for gone in closed {
             self.browser.states.remove(&gone);
         }
@@ -1051,18 +1088,38 @@ impl Harness {
     ) {
         self.ensure_tabs_loaded(cx);
         self.browse_drop_target = None;
+        self.browse_drop_at_end = false;
         if self.browser.tabs.move_before(dragged, before) {
             self.schedule_tabs_write(cx);
         }
         cx.notify();
     }
 
-    /// Open the person tab `id`'s right-click menu. A closed `id` only
-    /// closes whatever stands open.
+    /// Open the person tab `id`'s right-click menu as a floating popup
+    /// anchored at the clicked row (see
+    /// [`Harness::render_tab_menu_popup`]). A closed `id` only closes
+    /// whatever stands open. Opening a menu clears the drag slots: a menu
+    /// never opens mid-drag, and a cancelled drag's stale line must not
+    /// survive under it.
     pub(crate) fn open_tab_menu(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         self.tab_menu = self.browser.tabs.get(id).is_some().then_some(id);
+        self.tab_menu_bounds = None;
+        self.browse_drop_target = None;
+        self.browse_drop_at_end = false;
         cx.notify();
+    }
+
+    /// Close the open tab menu, if any: Escape and click-outside share
+    /// this one path. Answers whether one stood open.
+    pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.tab_menu.take().is_some() {
+            self.tab_menu_bounds = None;
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     /// Flip a From-sessions group open or shut (collapsed by default).
@@ -1891,6 +1948,7 @@ impl Harness {
         view_options: bool,
         account: bool,
         project_menu: bool,
+        tab_menu: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
@@ -1972,10 +2030,14 @@ impl Harness {
         let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
         let settings_open = self.settings_open() || self.muse_sheet;
         let palette_open = overlays.palette.is_some();
+        // The Browse tab menu is pane state, never the overlay stack, so
+        // it arrives as its own flag — and, like every other menu, covers
+        // the native page while open.
         let menu_open = menu_kind.is_some_and(|kind| kind != MenuKind::Account)
             || overflow
             || view_options
-            || project_menu;
+            || project_menu
+            || tab_menu;
         let account_menu_open = menu_kind == Some(MenuKind::Account) || account;
         let dialog_open = overlays.dialog.is_some();
         // The composer's `+` menu is plain view state, never the overlay

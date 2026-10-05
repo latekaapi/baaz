@@ -118,9 +118,23 @@ pub(crate) struct Tabs {
     /// resurrects from a stale `browser_url`.
     #[serde(default)]
     pub migrated: Vec<String>,
+    /// The model generation: bumped on every mutation (open, close,
+    /// activate, pin, reorder, retitle), so the cached sidebar keys the
+    /// Browse fingerprints on this counter plus row state instead of
+    /// rebuilding label strings per frame. Never serialised: a load
+    /// starts a fresh run at zero.
+    #[serde(skip, default)]
+    pub generation: u64,
 }
 
 impl Tabs {
+    /// Bump the model generation: every mutation calls this, so the
+    /// cached sidebar's key moves on any change without comparing
+    /// labels. Wraps on overflow: equality is all the key needs.
+    pub(crate) fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Open a tab for `owner` in `space` on `url`, selecting it. Inserted
     /// directly after `after` when that tab exists, else appended.
     pub(crate) fn open(
@@ -148,6 +162,7 @@ impl Tabs {
             .unwrap_or(self.tabs.len());
         self.tabs.insert(at.min(self.tabs.len()), tab);
         self.active.insert(key, id);
+        self.bump();
         id
     }
 
@@ -178,6 +193,7 @@ impl Tabs {
         while self.closed.len() > CLOSED_CAP {
             self.closed.remove(0);
         }
+        self.bump();
         let key = active_key(&tab.owner, tab.space.as_deref());
         if self.active.get(&key) != Some(&id) {
             return None;
@@ -214,6 +230,7 @@ impl Tabs {
         self.active
             .insert(active_key(&tab.owner, tab.space.as_deref()), id);
         self.tabs.push(tab);
+        self.bump();
         Some(id)
     }
 
@@ -224,6 +241,7 @@ impl Tabs {
                 let tab = tab.clone();
                 self.active
                     .insert(active_key(&tab.owner, tab.space.as_deref()), id);
+                self.bump();
                 true
             }
             None => false,
@@ -257,6 +275,10 @@ impl Tabs {
     /// model order. Person tabs are per project; sessions already belong
     /// to one project, so every session tab shows regardless of `space`.
     pub(crate) fn ordered_tabs(&self, owner: &Owner, space: Option<&str>) -> Vec<&Tab> {
+        // One position walk, then a sort on cached keys: O(n log n), not
+        // the O(n² log n) the per-comparison `position` scan cost.
+        let positions: std::collections::HashMap<TabId, usize> =
+            self.tabs.iter().enumerate().map(|(index, tab)| (tab.id, index)).collect();
         let mut tabs: Vec<&Tab> = self
             .tabs
             .iter()
@@ -264,7 +286,7 @@ impl Tabs {
                 tab.owner == *owner && (tab.owner != Owner::Person || tab.space.as_deref() == space)
             })
             .collect();
-        tabs.sort_by_key(|tab| (!tab.pinned, self.tabs.iter().position(|t| t.id == tab.id)));
+        tabs.sort_by_key(|tab| (!tab.pinned, positions.get(&tab.id).copied().unwrap_or(usize::MAX)));
         tabs
     }
 
@@ -329,6 +351,7 @@ impl Tabs {
             }
         }
         self.active.insert(active_key(&owner, space.as_deref()), id);
+        self.bump();
         true
     }
 
@@ -360,6 +383,7 @@ impl Tabs {
                 .unwrap_or(self.tabs.len())
         };
         self.tabs.insert(at, tab);
+        self.bump();
         true
     }
 
@@ -374,6 +398,7 @@ impl Tabs {
         let tab = self.tabs.remove(from);
         let at = index.min(self.tabs.len());
         self.tabs.insert(at, tab);
+        self.bump();
         true
     }
 
@@ -394,6 +419,7 @@ impl Tabs {
             .and_then(|before| self.tabs.iter().position(|tab| tab.id == before))
             .unwrap_or(self.tabs.len());
         self.tabs.insert(at, tab);
+        self.bump();
         true
     }
 
@@ -423,6 +449,7 @@ impl Tabs {
         match (left, right) {
             (Some(left), Some(right)) => {
                 self.tabs.swap(left, right);
+                self.bump();
                 true
             }
             _ => false,
@@ -466,12 +493,14 @@ impl Tabs {
             },
         );
         self.active.insert(active_key(&tab.owner, tab.space.as_deref()), fresh);
+        self.bump();
         Some(fresh)
     }
 
-    /// Close every tab of `id`'s owner in `id`'s space except `id` itself:
-    /// the tab menu's "Close other tabs". Answers how many closed, and
-    /// selects `id` (it is the only one left).
+    /// Close every unpinned tab of `id`'s owner in `id`'s space except
+    /// `id` itself: the tab menu's "Close other tabs". Pinned tabs are
+    /// spared, the browser convention — a pinned tile never dies from
+    /// another tab's menu. Answers how many closed, and selects `id`.
     pub(crate) fn close_others(&mut self, id: TabId) -> usize {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == id).cloned() else {
             return 0;
@@ -479,7 +508,12 @@ impl Tabs {
         let others: Vec<TabId> = self
             .tabs
             .iter()
-            .filter(|other| other.id != id && other.owner == tab.owner && other.space == tab.space)
+            .filter(|other| {
+                other.id != id
+                    && other.owner == tab.owner
+                    && other.space == tab.space
+                    && !other.pinned
+            })
             .map(|other| other.id)
             .collect();
         let count = others.len();
@@ -487,6 +521,7 @@ impl Tabs {
             self.close(other);
         }
         self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
+        self.bump();
         count
     }
 
@@ -496,7 +531,7 @@ impl Tabs {
     /// an empty or `about:blank` URL (and an empty title) is skipped, so
     /// a rebuild does not overwrite the saved page with blank.
     pub(crate) fn set_url_title(&mut self, id: TabId, url: &str, title: &str) -> bool {
-        match self.tabs.iter_mut().find(|tab| tab.id == id) {
+        let changed = match self.tabs.iter_mut().find(|tab| tab.id == id) {
             Some(tab) => {
                 let mut changed = false;
                 if super::should_remember(url, Some(tab.url.as_str())) {
@@ -516,7 +551,11 @@ impl Tabs {
                 changed
             }
             None => false,
+        };
+        if changed {
+            self.bump();
         }
+        changed
     }
 
     /// Stamp `id` as the just-shown page, in memory only. The stamp never
