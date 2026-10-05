@@ -245,6 +245,11 @@ actions!(
         ToggleFeedback,
         /// Pause feedback mode (Escape on the capture layer).
         FeedbackEscape,
+        /// Save the open feedback note (Enter in the note popover).
+        FeedbackNoteSave,
+        /// Close the open feedback note without saving (Escape in the
+        /// note popover — the layer's pause never fires there).
+        FeedbackNoteCancel,
     ]
 );
 
@@ -1416,10 +1421,7 @@ impl Harness {
             pending_draft: None,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
-            feedback: feedback_ui::FeedbackUi::new(
-                feedback_ui::FeedbackUi::probe_for(browser_fake),
-                cx,
-            ),
+            feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
@@ -7341,8 +7343,11 @@ impl Render for Harness {
         // F2: the feedback capture layer (Active only) under its chrome
         // (bar while Active, pill while Paused); both paint above the
         // palette, dialog, settings and menus, with only toasts above them.
-        let feedback_layer = self.render_feedback_layer(cx);
-        let feedback_chrome = self.render_feedback_chrome(cx);
+        // F3 adds the note popover as a sibling of the layer, never inside
+        // its key context, so typing and Escape reach the note.
+        let feedback_layer = self.render_feedback_layer(window, cx);
+        let feedback_chrome = self.render_feedback_chrome(window, cx);
+        let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = self.render_palette(cx);
@@ -7648,9 +7653,11 @@ impl Render for Harness {
                 // F2: the feedback capture layer and its chrome (bar while
                 // Active, pill while Paused) paint above the palette,
                 // dialog, settings and menus, so the layer truly covers
-                // them; only toasts stay above the shell.
+                // them; only toasts stay above the shell. F3's note popover
+                // rides with them, as the layer's sibling.
                 .children(feedback_layer)
                 .children(feedback_chrome)
+                .children(feedback_popover)
                 .children(toasts)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
