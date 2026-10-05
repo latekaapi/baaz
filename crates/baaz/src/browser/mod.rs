@@ -99,6 +99,10 @@ pub(crate) struct BrowserVisibility {
     pub dialog_open: bool,
     /// The file-drop overlay covers the window.
     pub drop_cover: bool,
+    /// The feedback capture layer covers the window: true only while
+    /// feedback is Active. Paused leaves the app usable, so pages stay
+    /// live; obscured pages paint their screenshot stand-in under it.
+    pub feedback_cover: bool,
     /// The terminal dock covers the browser pane: open AND its laid-out
     /// bounds intersect the pane's. The dock lives in the centre column
     /// and the pane on the right, so with today's layout they never
@@ -136,6 +140,7 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.account_menu_open
         && !inputs.dialog_open
         && !inputs.drop_cover
+        && !inputs.feedback_cover
         && !inputs.terminal_covering
         && !inputs.omnibox_open
         && !inputs.chrome_popover_open
@@ -2290,6 +2295,9 @@ impl Harness {
             account_menu_open,
             dialog_open,
             drop_cover: self.browser.drop_cover,
+            // F2 Active only: Paused leaves the app usable, so its pages
+            // stay live.
+            feedback_cover: self.feedback.covers_app(),
             terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
             // The omnibox drops down over the page, so while it renders
             // rows the page must be obscured (its screenshot stand-in, as
@@ -4209,6 +4217,7 @@ mod tests {
             account_menu_open: false,
             dialog_open: false,
             drop_cover: false,
+            feedback_cover: false,
             terminal_covering: false,
             window_active: true,
             omnibox_open: false,
@@ -4232,6 +4241,7 @@ mod tests {
             account_menu_open: false,
             dialog_open: false,
             drop_cover: false,
+            feedback_cover: false,
             terminal_covering: false,
             window_active: true,
             omnibox_open: false,
@@ -4243,6 +4253,19 @@ mod tests {
     #[test]
     fn native_view_shows_only_with_pane_open_on_active_browser() {
         assert!(browser_visible(all_clear()));
+    }
+
+    /// F2's cover hides the native view while Active, on the pane and on
+    /// the Browse centre alike — the overlay sits over the page's
+    /// screenshot stand-in.
+    #[test]
+    fn feedback_cover_hides_pane_and_centre() {
+        let mut covered = all_clear();
+        covered.feedback_cover = true;
+        assert!(!browser_visible(covered), "Active feedback obscures the pane page");
+        let mut centre_covered = centre_clear();
+        centre_covered.feedback_cover = true;
+        assert!(!browser_visible(centre_covered), "Active feedback obscures the centre page");
     }
 
     #[test]

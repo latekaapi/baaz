@@ -70,6 +70,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "auto_summary" => layout.auto_summary = on,
         "handoff_model_summary" => layout.handoff_model_summary = on,
         "fold_finished_turns" => layout.fold_finished_turns = on,
+        "feedback_mode" => layout.feedback_mode = on,
         _ => return false,
     }
     true
@@ -187,9 +188,8 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
 /// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" => {
-            Some("general")
-        }
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
+        | "feedback_mode" => Some("general"),
         "group_chevron" | "compact_rows" | "group_branch" => Some("sidebar"),
         "browser-tabs" | "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
@@ -235,6 +235,14 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
                 "Settled turns fold their work behind one row; the final answer stays out. Off: every run stays expanded.",
             )),
             on: layout.fold_finished_turns,
+        },
+        SettingsRow::Switch {
+            id: SharedString::from("feedback_mode"),
+            label: SharedString::from("Feedback mode"),
+            detail: Some(SharedString::from(
+                "⌃⌥⌘F points at parts of Baaz to leave notes for Claude. Saves a report folder.",
+            )),
+            on: layout.feedback_mode,
         },
     ]
 }
@@ -595,6 +603,11 @@ impl Harness {
         // just the next frame's settings rows — parked views fold too.
         if id == "fold_finished_turns" {
             self.apply_fold_to_views(on, cx);
+        }
+        // Turning feedback mode off mid-session parks the shell Off but
+        // keeps the draft, so the next toggle resumes it.
+        if id == "feedback_mode" && !on {
+            self.feedback_setting_off(cx);
         }
         self.invalidate_list();
         cx.notify();
@@ -1087,11 +1100,19 @@ impl Harness {
             self.layout.fold_finished_turns,
             cx,
         )];
+        let feedback = vec![self.settings_switch_row(
+            "feedback_mode",
+            "Feedback mode",
+            "⌃⌥⌘F points at parts of Baaz to leave notes for Claude. Saves a report folder.",
+            self.layout.feedback_mode,
+            cx,
+        )];
         v_flex()
             .w_full()
             .gap(px(scale::SP_4))
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
+            .child(self.settings_group("Feedback", feedback, cx))
             .into_any_element()
     }
 
@@ -2107,6 +2128,9 @@ mod tests {
         assert!(!layout.auto_summary);
         assert!(apply_setting(&mut layout, "handoff_model_summary", false));
         assert!(!layout.handoff_model_summary);
+        assert!(!layout.feedback_mode, "feedback mode defaults off");
+        assert!(apply_setting(&mut layout, "feedback_mode", true));
+        assert!(layout.feedback_mode);
         assert!(!apply_setting(&mut layout, "nope", true));
     }
 
@@ -2476,12 +2500,14 @@ mod tests {
             let expected = if page.starts_with("providers/") { "providers/*" } else { page.as_str() };
             assert_eq!(setting_home(id), Some(expected), "the home of {id}");
         }
-        // The six layout switches are all covered, and unknown ids name
-        // no page.
+        // The layout switches are all covered, and unknown ids name no
+        // page.
         for id in [
             "auto_title",
             "auto_summary",
             "handoff_model_summary",
+            "fold_finished_turns",
+            "feedback_mode",
             "group_chevron",
             "compact_rows",
             "group_branch",
