@@ -4452,6 +4452,7 @@ impl Harness {
         let state = self.browse_centre_state()?;
         let zoom = state.read(cx).zoom();
         let devtools = state.read(cx).supports(aui_webview::BackendFeature::DevTools);
+        let zoomable = state.read(cx).supports(aui_webview::BackendFeature::Zoom);
         let annotate_on = state.read(cx).annotating();
         let mut menu = self.browse_popover("browse-more", "More", cx);
         let new_tab = self.browse_menu_row(
@@ -4505,7 +4506,9 @@ impl Harness {
             }),
             cx,
         );
-        menu = menu.child(
+        // Hidden when the engine cannot zoom (Chrome-style CEF today:
+        // Chromium's own ⌘+/⌘− still zoom a focused page).
+        menu = menu.when(zoomable, |menu| menu.child(
             h_flex()
                 .id("browse-more-zoom")
                 .w_full()
@@ -4519,7 +4522,7 @@ impl Harness {
                 .child(zoom_out)
                 .child(zoom_reset)
                 .child(zoom_in),
-        );
+        ));
         let shown = self.browse_centre_shown();
         // Moving tabs between projects is a person-tab operation: session
         // tabs stay with their sessions, so the mover hides for them.
