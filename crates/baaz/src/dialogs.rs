@@ -2264,7 +2264,7 @@ mod tests {
     fn toasts_stay_stacked_with_no_pane(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toast-no-pane");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let mut vc = cx.add_empty_window();
+        let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         assert!(vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)), "no pane, no header chip");
         restore_state(state);
@@ -2278,7 +2278,7 @@ mod tests {
     fn toasts_move_to_the_header_over_the_pane_page(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toast-pane-page");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let mut vc = cx.add_empty_window();
+        let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
@@ -2303,7 +2303,7 @@ mod tests {
     fn toasts_move_to_the_header_over_the_browse_centre(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toast-browse-page");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let mut vc = cx.add_empty_window();
+        let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
@@ -2326,7 +2326,7 @@ mod tests {
     fn toasts_stay_stacked_on_a_blank_new_tab(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toast-blank-tab");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let mut vc = cx.add_empty_window();
+        let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
@@ -2359,7 +2359,7 @@ mod tests {
     fn toasts_stay_stacked_while_settings_open(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toast-settings");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let mut vc = cx.add_empty_window();
+        let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
