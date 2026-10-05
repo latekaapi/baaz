@@ -154,8 +154,11 @@ pub(crate) fn classify_address_input(text: &str) -> NavTarget {
             // search, never `https://scheme:...` — except `host:port`
             // (`localhost:3000`), which falls through to the host rule
             // below and still navigates.
+            // `user:pass@host` is credentials, not a scheme: it falls through
+            // to the host rule like `host:port` does.
             let port = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            let credentials = port.contains('@');
+            if !credentials && (port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit())) {
                 return search(typed);
             }
         }

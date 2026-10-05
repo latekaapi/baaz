@@ -162,6 +162,23 @@ ENTRIES = {
                                       "--steps", "fixture-session:Fix ledger chart"]},
     "sessions-switch":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400"]},
+    # B2a-H3: the full Browse sidebar — 3 person tabs with 1 pinned, one
+    # session with 2 tabs expanded under From sessions. `new` heads the
+    # script so the session exists; `tab-new` in Sessions opens session
+    # tabs, in Browse person tabs. Offline, fake backend, no baselines —
+    # capture and look.
+    "browse-sidebar":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;mode:browse;tab-new:https://example.com/;tab-new:https://rust-lang.org/;tab-pin:2;from-sessions:1"]},
+    # B2a-H3: a person tab's right-click menu, open on the second tab.
+    # Offline, fake backend, no baselines — capture and look.
+    "browse-tab-menu":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-menu:2"]},
+    # B2a-H7: a link from another app, driven through the scripted twin of
+    # the open-URL event (`open-url:` runs the same path `on_open_urls`
+    # drains into): a person tab on wikipedia in Browse. Offline, fake
+    # backend, no baselines — capture and look.
+    "browse-opened-link":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "open-url:https://www.wikipedia.org/"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",

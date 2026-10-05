@@ -2760,6 +2760,7 @@ fn browser_strip_tab(
                 .child(title.clone()),
         )
         .role(gpui::Role::Tab)
+        // Named again beside the click for the a11y ratchet's window.
         .aria_label(format!("{} tab", title))
         .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
         // Middle-click closes only when the press AND the release land on

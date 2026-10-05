@@ -46,7 +46,9 @@ mod byline;
 mod clock;
 mod connect;
 mod conn;
+mod default_browser;
 mod dialogs;
+mod external_urls;
 mod files;
 mod full_output;
 mod handoff;
@@ -773,6 +775,14 @@ fn main() {
             cx.activate(true);
         }
     });
+    // Links from other apps (B2a-H7): the callback owns no window, so
+    // it parks the URLs and kicks a foreground drain — the shell also
+    // drains them on its next frame into person tabs (or waits for
+    // sign-in first). Never changes the default.
+    app.on_open_urls(|urls| {
+        crate::external_urls::enqueue_external_urls(urls);
+        crate::external_urls::kick_external_drain();
+    });
     app.run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(theme, cx);
@@ -792,6 +802,9 @@ fn main() {
 
         crate::log::boot_mark("window-open-requested");
         let (handle, capture) = open_shell_window(&args, cx);
+        // The `on_open_urls` kick above schedules its drain on the
+        // foreground executor, which needs the running app.
+        crate::external_urls::note_shell_app(cx.to_async());
         crate::log::boot_mark("window-shown");
         // Chromium starts on the next main-queue turn, outside any gpui update,
         // so the first browser page finds it ready (B1a, live).
