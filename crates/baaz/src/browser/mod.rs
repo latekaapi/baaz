@@ -2423,7 +2423,15 @@ impl Harness {
         // never blurs and would keep its editing look. The per-frame sync
         // ends it instead — on the rising edge only, so typing in the field
         // (which the page never holds through) never cancels itself.
-        let centre_holds = centre_shown.and_then(|id| holds.get(&id).copied()).unwrap_or(false);
+        // Only a page the person can see and click counts: creating a tab's
+        // (hidden, blank) Chromium window makes it key for a moment, which
+        // dropped the new-tab field ⌘T had just focused (B2a live pass).
+        let centre_blank = centre_shown
+            .and_then(|id| self.browser.tabs.get(id))
+            .is_none_or(|tab| tab.url.is_empty() || tab.url == BLANK);
+        let centre_holds = centre_live
+            && !centre_blank
+            && centre_shown.and_then(|id| holds.get(&id).copied()).unwrap_or(false);
         if in_browse && centre_holds && !self.browse_last_holds {
             // The page just took the keyboard: drop the field with no
             // refocus (the sync owns no `&mut Window`, and handing focus
@@ -4879,6 +4887,43 @@ mod tests {
             None => std::env::remove_var("BAAZ_STATE_DIR"),
         }
         drop(guard);
+    }
+
+    /// Entering Browse lands on the new-tab page with its field focused
+    /// (B2a live pass: typing went nowhere after ⌥⌘B and after ⌘T).
+    #[gpui::test]
+    fn entering_browse_focuses_the_new_tab_field(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("ntfocus");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.run_until_parked();
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.set_mode(crate::layout::Mode::Browse, window, cx));
+        });
+        vc.run_until_parked();
+        let focused = vc.update(|window, cx| {
+            let harness = baaz.read(cx);
+            harness.browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        });
+        assert!(focused, "the new-tab field holds the keyboard after entering Browse");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_browse_sidebar_tab(window, cx));
+        });
+        vc.run_until_parked();
+        let focused = vc.update(|window, cx| {
+            let harness = baaz.read(cx);
+            harness.browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        });
+        assert!(focused, "the new-tab field holds the keyboard after ⌘T");
     }
 
     /// A page-routed keystroke dispatches after the Harness lease ends: the
