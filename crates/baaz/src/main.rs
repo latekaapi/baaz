@@ -49,6 +49,7 @@ mod conn;
 mod default_browser;
 mod dialogs;
 mod external_urls;
+mod feedback;
 mod files;
 mod full_output;
 mod handoff;

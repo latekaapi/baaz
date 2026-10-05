@@ -60,6 +60,13 @@ zip.workspace = true
 # (`crates/baaz/src/tier.rs`); `openpty` and `TIOCSCTTY` are the whole use.
 libc.workspace = true
 
+# Feedback mode's element probe hit-tests the window through macOS
+# accessibility, in-process (`crates/baaz/src/feedback/probe.rs`).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSArray"] }
+raw-window-handle = "0.6"
+
 [package.metadata.cargo-machete]
 # `gpui_platform` has no direct `use` in this crate's source, so cargo-machete
 # flags it, but it is not dead: its `test-support` feature is what makes
