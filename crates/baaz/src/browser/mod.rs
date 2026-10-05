@@ -794,7 +794,7 @@ impl Harness {
 
     /// Whether the Browse tab shortcuts may fire: only in Browse mode.
     /// The `BaazBrowse` key context scopes them; this is the belt.
-    fn browse_command_ready(&mut self, cx: &mut Context<Self>) -> Option<String> {
+    fn browse_command_ready(&mut self, cx: &mut Context<Self>) -> Option<Option<String>> {
         if self.mode != crate::layout::Mode::Browse {
             return None;
         }
@@ -987,8 +987,7 @@ impl Harness {
                 .tabs
                 .ordered_tabs(&owner, old_space.as_deref())
                 .iter()
-                .filter(|live| live.id != id)
-                .last()
+                .rfind(|live| live.id != id)
                 .map(|live| live.id);
             match fallback {
                 Some(next) => {

@@ -1342,7 +1342,7 @@ mod tests {
         let rows = binding_rows(&loaded.bindings);
         let kept: Vec<_> = rows
             .iter()
-            .filter(|(_, key, context)| key == "cmd-alt-y" && context.as_deref() == Some("AuiRoot"))
+            .filter(|(_, key, context)| (key == "cmd-alt-y" || key == "alt-cmd-y") && context.as_deref() == Some("AuiRoot"))
             .collect();
         assert_eq!(kept.len(), 1, "exactly one cmd-alt-y survives: {kept:?}");
         assert_eq!(kept[0].0, "NewSession", "the first entry wins");
