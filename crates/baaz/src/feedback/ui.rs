@@ -558,6 +558,11 @@ impl FeedbackUi {
     /// Queued steps die with it — their popovers will never open.
     pub fn setting_off(&mut self) {
         self.forced_on = false;
+        // The slot row stops rendering with the setting off, so its recorded
+        // bounds go stale the moment the setting does: drop them here (a place
+        // with `&mut self`), and the next paint re-records them if the slot
+        // still shows. The overlay and `slot_contains` never reuse them.
+        self.slot_bounds = None;
         if self.phase != FeedbackPhase::Off {
             self.cancel_note();
             self.step_queue.clear();
@@ -1852,6 +1857,11 @@ impl crate::app::Harness {
         // must not rewrite it.
         let context = self.feedback_context(window, cx);
         self.feedback.capturing = true;
+        // While capturing the slot row does not render, so its recorded
+        // bounds go stale the moment the capture starts: drop them here (a
+        // place with `&mut self`), and the next paint after the capture
+        // re-records them. The overlay and `slot_contains` never reuse them.
+        self.feedback.slot_bounds = None;
         self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
         let seq = self.feedback.capture_seq;
         self.feedback.capture_pending = Some((target, field, context));
@@ -2295,7 +2305,9 @@ impl crate::app::Harness {
     }
 
     /// Where the floating copy seats: the recorded slot's right edge and
-    /// top, for tests to assert against without painting.
+    /// top, for tests to assert against without painting. Test-only, so the
+    /// normal build (where nothing calls it) stays warning-free.
+    #[cfg(test)]
     pub(crate) fn feedback_slot_overlay_right_top(&self) -> Option<(f32, f32)> {
         let bounds = self.feedback.slot_bounds?;
         Some((f32::from(bounds.right()), f32::from(bounds.top())))
@@ -3370,6 +3382,265 @@ mod tests {
         assert!(
             std::path::PathBuf::from(latest.trim()).join("report.md").is_file(),
             "the clicked Done writes the report"
+        );
+        restore_state(state);
+    }
+
+    /// R2c2: the overlay seats by drawing, never by hand-set bounds. Off
+    /// with the setting on (icon-only slot) draws, then Active draws twice;
+    /// the overlay's right edge equals the recorded in-header slot's right
+    /// edge — and a simulated click at the overlay Done's centre writes the
+    /// report, the note arriving first through the real `click:`/`note:`
+    /// steps with real frames. No direct handler calls, no hand-set bounds.
+    #[gpui::test]
+    fn overlay_drawn_right_edge_and_done_click_saves(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("overlay-drawn-done");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        // Off with the setting on: the icon-only slot draws and records its
+        // bounds, but the overlay never exists while Off.
+        draw_window(vc);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
+            "the icon-only slot records its bounds"
+        );
+        assert!(
+            vc.update(|window, cx| baaz
+                .update(cx, |h, cx| h.render_feedback_slot_overlay(window, cx).is_none())),
+            "Off renders no overlay"
+        );
+        enter_active(&baaz, vc);
+        draw_window(vc);
+        draw_window(vc);
+        let (bounds, seat) = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            (
+                harness.feedback.slot_bounds.expect("the Active slot records its bounds"),
+                harness.feedback_slot_overlay_right_top().expect("the overlay seats with bounds"),
+            )
+        });
+        assert_eq!(
+            seat.0,
+            f32::from(bounds.right()),
+            "the overlay's right edge is the in-header slot's right edge"
+        );
+        assert_eq!(seat.1, f32::from(bounds.top()), "the overlay seats at the slot's top");
+        assert!(
+            vc.update(|window, cx| baaz
+                .update(cx, |h, cx| h.render_feedback_slot_overlay(window, cx).is_some())),
+            "Active with bounds renders the overlay"
+        );
+        // One note through the real steps with real frames: the click opens
+        // the capture, the note files it once the popover lands.
+        let failures_before = crate::steps::step_failures();
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_feedback("note:drawn note", window, cx))
+        });
+        pump_frames(vc, 8);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.note_count(), 1, "the steps file one note");
+            assert_eq!(harness.feedback.draft.notes[0].text, "drawn note");
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "filing stays Active");
+        });
+        assert_eq!(
+            crate::steps::step_failures(),
+            failures_before,
+            "no step failed along the way"
+        );
+        // Done paints now: two draws seat the overlay over the layer, then
+        // the simulated click at its recorded centre writes the report.
+        draw_window(vc);
+        draw_window(vc);
+        let done = vc
+            .update(|_, cx| baaz.read(cx).feedback.done_bounds)
+            .expect("Done paints while Active with a note");
+        vc.simulate_click(bounds_center(done), gpui::Modifiers::default());
+        vc.run_until_parked();
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off),
+            "the clicked Done parks Off"
+        );
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            "the write clears the draft"
+        );
+        let report_root = crate::feedback::feedback_root();
+        let latest = std::fs::read_to_string(report_root.join("latest")).expect("Done writes latest");
+        assert!(
+            std::path::PathBuf::from(latest.trim()).join("report.md").is_file(),
+            "the clicked Done writes the report"
+        );
+        restore_state(state);
+    }
+
+    /// R2c2: the overlay is absent when Off and when Paused — drawn, then
+    /// read off the real render. Pausing through the drawn toggle keeps the
+    /// (still-painting) slot's bounds; only the overlay goes away.
+    #[gpui::test]
+    fn overlay_absent_off_and_paused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("overlay-off-paused");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        let overlay = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.render_feedback_slot_overlay(window, cx).is_some()))
+        };
+        draw_window(vc);
+        assert!(!overlay(vc), "Off renders no overlay");
+        enter_active(&baaz, vc);
+        draw_window(vc);
+        draw_window(vc);
+        assert!(overlay(vc), "Active with bounds renders the overlay");
+        let toggle = vc
+            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .expect("the toggle paints while Active");
+        vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "the drawn toggle click pauses"
+        );
+        draw_window(vc);
+        assert!(!overlay(vc), "Paused renders no overlay");
+        restore_state(state);
+    }
+
+    /// R2c2: stale slot bounds are never reused — drawn, never hand-set.
+    /// Entering Active draws bounds on record; starting a capture (the slot
+    /// row stops rendering) clears them, the next paint re-records them;
+    /// turning the setting off clears them, and a further draw records
+    /// nothing while the slot stays unrendered.
+    #[gpui::test]
+    fn stale_slot_bounds_never_reused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("stale-bounds");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        draw_window(vc);
+        draw_window(vc);
+        let old_centre = vc.update(|_, cx| {
+            bounds_center(baaz.read(cx).feedback.slot_bounds.expect("the Active slot draws bounds"))
+        });
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(
+                harness.feedback.slot_bounds.is_none(),
+                "starting the capture clears the unpainted slot's bounds"
+            );
+            assert!(
+                !harness.feedback.slot_contains(old_centre),
+                "the cleared bounds silence nothing and own nothing"
+            );
+        });
+        // The capture lands and the next paint re-records the slot.
+        drive_frames(vc);
+        draw_window(vc);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
+            "the next paint re-records the slot"
+        );
+        // The setting goes off: cleared at once, and no later draw revives
+        // the bounds while the slot stays unrendered.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.layout.feedback_mode = false;
+                h.feedback_setting_off(cx);
+            })
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
+            "the setting going off clears the bounds"
+        );
+        draw_window(vc);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(
+                harness.feedback.slot_bounds.is_none(),
+                "no draw revives bounds while the slot is unrendered"
+            );
+            assert!(
+                !harness.feedback.slot_contains(old_centre),
+                "the old rect is never reused"
+            );
+        });
+        assert!(
+            vc.update(|window, cx| baaz
+                .update(cx, |h, cx| h.render_feedback_slot_overlay(window, cx).is_none())),
+            "no overlay seats at stale bounds"
+        );
+        restore_state(state);
+    }
+
+    /// R2c2: while Active exactly ONE accessible `Done — save feedback
+    /// report` exists — the floating copy's. The window's debug a11y tree is
+    /// the first witness; platform a11y stays inactive in tests, so the
+    /// armed AX probe (which hears every rendered label) is the working one:
+    /// each label exactly once proves the decorative in-header copy renders
+    /// no labels of its own (its `-ghost` ids stay structural).
+    #[gpui::test]
+    fn active_names_done_exactly_once(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("done-once");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        add_draft_note(&baaz, vc, "kept");
+        draw_window(vc);
+        draw_window(vc);
+        let tree = vc.update(|window, _| window.debug_a11y_tree_json());
+        match tree {
+            Some(json) => {
+                assert_eq!(
+                    json.matches("Done — save feedback report").count(),
+                    1,
+                    "the debug a11y tree names Done once: {json}"
+                );
+            }
+            None => {
+                aui::data::arm_ax_probe(true);
+                draw_window(vc);
+                let labels = aui::data::take_ax_labels();
+                aui::data::arm_ax_probe(false);
+                for label in
+                    ["Feedback mode", "Done — save feedback report", "Discard feedback notes"]
+                {
+                    assert_eq!(
+                        labels.iter().filter(|heard| heard.as_str() == label).count(),
+                        1,
+                        "a11y is inactive in tests; the probe hears {label} once \
+                         (the decorative copy renders no label): {labels:?}"
+                    );
+                }
+            }
+        }
+        restore_state(state);
+    }
+
+    /// R2c2: the paused probe's exact step sequence through `step_feedback`
+    /// with real frames ends Paused with 1 note and no recorded step
+    /// failure. The scripted probe stands in for the hero button at
+    /// 846,551; every verb runs through the real step dispatch in order —
+    /// `pause` queues behind the in-flight capture instead of dropping it.
+    #[gpui::test]
+    fn paused_probe_sequence_files_one_note_and_pauses(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("paused-sequence");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        inject_hits(&baaz, vc, vec![f3_hit(800.0, 530.0, 100.0, 40.0, "New session")]);
+        let failures_before = crate::steps::step_failures();
+        for sub in ["on", "click:846,551", "note:x", "pause"] {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback(sub, window, cx)));
+        }
+        pump_frames(vc, 8);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the sequence ends Paused");
+            assert_eq!(harness.feedback.note_count(), 1, "the sequence files one note");
+            assert_eq!(harness.feedback.draft.notes[0].text, "x");
+            assert!(harness.feedback.step_queue.is_empty(), "the pump drained the queue");
+        });
+        assert_eq!(
+            crate::steps::step_failures(),
+            failures_before,
+            "the exact probe sequence records no step failure"
         );
         restore_state(state);
     }
