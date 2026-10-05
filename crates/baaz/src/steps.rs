@@ -93,6 +93,7 @@
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
+//! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
@@ -291,6 +292,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "mode", run: |this, rest, window, cx| this.step_mode(rest, window, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
     WindowVerb { verb: "tab-select", run: |this, rest, window, cx| this.step_tab_select(rest, window, cx) },
@@ -484,6 +486,26 @@ impl Harness {
             self.right_resize.width = width;
         }
         cx.notify();
+    }
+
+    /// `mode:<sessions|browse>`: set the window's mode, idempotently —
+    /// asking for the current mode sets nothing and never toggles, so a
+    /// capture script lands where it says on every run. Entering Browse
+    /// with no person tab opens one blank tab, like the switch does. An
+    /// unknown payload records a step failure instead of capturing a
+    /// window where nothing happened. Free: no turn, no wire.
+    pub(crate) fn step_mode(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::layout::Mode::parse(rest.trim()) {
+            Some(mode) => self.set_mode(mode, window, cx),
+            None => {
+                record_step_failure(&format!("mode:{rest}"));
+                crate::baaz_log!(
+                    "unknown mode `{rest}`; known modes are {}, {}",
+                    crate::layout::Mode::Sessions.slug(),
+                    crate::layout::Mode::Browse.slug()
+                );
+            }
+        }
     }
 
     /// `key:<keystroke>`: post a real keypress for that keystroke — down and
@@ -1042,6 +1064,13 @@ mod tests {
     fn a_window_only_script_is_recognised() {
         assert!(all_window_steps(&["right:files".into(), "right-width:400".into()]));
         assert!(all_window_steps(&["right:files".into(), "wait:100".into()]));
+        // The mode switch is window-owned too: both directions, and mixed
+        // with the tab verbs the Browse captures run.
+        assert!(all_window_steps(&["mode:browse".into()]));
+        assert!(all_window_steps(&["mode:sessions".into()]));
+        assert!(all_window_steps(&["mode:browse".into(), "tab-new:https://example.com".into()]));
+        assert!(super::is_known_step("mode:browse"));
+        assert!(super::is_known_step("mode:sessions"));
         // One session verb is enough to need a session.
         assert!(!all_window_steps(&["right:files".into(), "draft:hello".into()]));
         // An unknown verb is not a window verb; the run must not be let

@@ -150,7 +150,7 @@ actions!(
         ConfirmRename,
         /// Toggle the terminal dock (⌃`).
         ToggleTerminal,
-        /// Toggle the right pane (⌘-backslash, from the library; ⌥⌘B is free).
+        /// Toggle the right pane (⌘-backslash, from the library).
         ToggleRightPane,
         /// Show Changes in the right pane (⌘⇧D).
         ShowRightChanges,
@@ -158,6 +158,8 @@ actions!(
         ShowRightFiles,
         /// Show Browser in the right pane (⌘⇧B).
         ShowRightBrowser,
+        /// Switch between Sessions and Browse (⌥⌘B).
+        ToggleBrowseMode,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -445,6 +447,10 @@ pub fn set_menus(cx: &mut App) {
         ]),
         gpui::Menu::new("View").items([
             gpui::MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            // One item toggles both ways (native menus are static, so it
+            // cannot rename itself to "Sessions" in Browse); the ⌥⌘B
+            // shortcut reads off the keymap.
+            gpui::MenuItem::action("Browse", ToggleBrowseMode),
             gpui::MenuItem::action("Command Palette\u{2026}", TogglePalette),
             gpui::MenuItem::action("Find in Sessions", FocusSearch),
             gpui::MenuItem::separator(),
@@ -858,6 +864,15 @@ pub struct Harness {
     sessions_list_stale: bool,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
+    /// Which half of the window the person is in (B2a-H2): sessions or
+    /// browse. Persists in `layout.json` ([`layout::Layout::mode`]); what
+    /// each mode remembers — right-pane state, scroll, selection —
+    /// persists beside it ([`layout::Layout::mode_memory`]).
+    pub(crate) mode: layout::Mode,
+    /// Until when the sidebar keeps re-arming its cached pane after a
+    /// mode switch, so the slide runs to rest on animation frames instead
+    /// of freezing on its first frame.
+    mode_slide_until: Option<std::time::Instant>,
     /// The Settings Shortcuts section's live rows, re-read when the dialog
     /// opens and after every shortcut edit. The dialog builds from state
     /// every frame, and a file read per frame is not state.
@@ -1342,7 +1357,20 @@ impl Harness {
             hover_trace_last_shown: None,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
+            mode: layout::read().mode,
+            mode_slide_until: None,
         };
+        // Booting into Browse restores what Browse remembered for the
+        // right pane (closed on a fresh file) — the live width and the
+        // divider seeding together; booting into Sessions keeps the
+        // stored globals exactly as before.
+        if this.mode == layout::Mode::Browse {
+            let remembered = this.layout.mode_memory.browse.clone();
+            this.layout.right_open = remembered.right_open;
+            this.layout.right_width = remembered.right_width;
+            this.layout.right_kind = remembered.right_kind;
+            this.right_resize.width = layout::right_width(&this.layout);
+        }
         // When the agent opens a URL the Browser pane opens on it — never
         // focused, so the person's keyboard stays where it was while they
         // watch. Deferred for the same re-entrancy reason as the dock hook
@@ -2179,6 +2207,131 @@ impl Harness {
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
+    }
+
+    /// Switch between Sessions and Browse (⌥⌘B, the sidebar switch, the
+    /// rail toggle, the View menu): whatever the window shows now, show
+    /// the other half.
+    pub(crate) fn toggle_browse_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(self.mode.other(), window, cx);
+    }
+
+    /// Set the window's mode, idempotently: asking for the current mode
+    /// sets nothing (in Browse it still ensures the blank tab, so
+    /// `mode:browse` twice never strands an empty centre) and never
+    /// toggles. Leaving saves the mode's right-pane state, scroll and
+    /// selection into `layout.json`; entering restores what it
+    /// remembered. The right pane is closed in Browse by default: a fresh
+    /// Browse slot remembers closed, so the first switch closes it.
+    pub(crate) fn set_mode(&mut self, mode: layout::Mode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            if mode == layout::Mode::Browse {
+                self.ensure_browse_tab(window, cx);
+            }
+            return;
+        }
+        let leaving = self.mode_state(cx);
+        let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
+        self.mode = mode;
+        self.layout.mode = mode;
+        self.layout.right_open = entering.right_open;
+        self.layout.right_width = entering.right_width;
+        self.layout.right_kind = entering.right_kind;
+        layout::write(&self.layout);
+        // The cached sidebar slides to rest on animation frames (a
+        // `SpringKind::Layout` translate, snapped under reduced motion);
+        // `on_frame` re-arms the pane until this deadline passes.
+        self.mode_slide_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
+        if mode == layout::Mode::Browse {
+            self.ensure_browse_tab(window, cx);
+            self.restore_browse_tab(&entering, cx);
+        } else {
+            self.restore_sessions_selection(&entering, window, cx);
+        }
+        // The entering mode's scroll offset goes back on. The sessions
+        // list owns the scroll state, so a Browse offset simply waits
+        // there until Sessions returns; the Browse list (B2a-H3's) is a
+        // plain column with nothing to restore yet.
+        if let Some(scroll) = entering.scroll {
+            self.sidebar_list.scroll_to(gpui::ListOffset {
+                item_ix: scroll.item,
+                offset_in_item: gpui::px(scroll.offset),
+            });
+        }
+        self.prewarm_browser_if_needed(cx);
+        self.refresh_right_now(cx);
+        cx.notify();
+    }
+
+    /// The live values a mode switch saves: the right pane, the sidebar
+    /// scroll and the selection — the open session, or the person's tab
+    /// in the current project.
+    fn mode_state(&self, cx: &gpui::App) -> layout::ModeState {
+        let top = self.sidebar_list_top();
+        let selected_session = self
+            .pending_id
+            .clone()
+            .or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()))
+            .map(|id| self.chain_head(&id));
+        let space = self.current_project_id();
+        let selected_tab = self
+            .browser
+            .tabs_loaded
+            .then(|| self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref()))
+            .flatten()
+            .map(|id| id.0);
+        layout::ModeState {
+            right_open: self.layout.right_open,
+            right_width: self.layout.right_width,
+            right_kind: self.layout.right_kind,
+            scroll: Some(layout::ScrollPos {
+                item: top.item_ix,
+                offset: f32::from(top.offset_in_item),
+            }),
+            selected_session,
+            selected_tab,
+        }
+    }
+
+    /// Reopen the session Sessions mode remembered, when it still has a
+    /// row and is not already open: the same quiet open a sidebar click
+    /// does, with no reveal and no list steering.
+    fn restore_sessions_selection(
+        &mut self,
+        entering: &layout::ModeState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = entering.selected_session.clone() else {
+            return;
+        };
+        let current = self
+            .pending_id
+            .clone()
+            .or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        if current.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        if self.sessions.iter().any(|entry| entry.id == id) {
+            self.resume_quiet(id, window, cx);
+        }
+    }
+
+    /// Reselect the person tab Browse mode remembered, when it still
+    /// exists: the model activates and the centre builds its page on the
+    /// next frame. Anything else — an unknown or session-owned id —
+    /// leaves the current tab alone.
+    fn restore_browse_tab(&mut self, entering: &layout::ModeState, cx: &mut Context<Self>) {
+        let Some(tab) = entering.selected_tab else {
+            return;
+        };
+        let id = crate::browser::TabId(tab);
+        let person =
+            self.browser.tabs.get(id).is_some_and(|tab| tab.owner == crate::browser::Owner::Person);
+        if person && self.browser.tabs.activate(id) {
+            self.schedule_tabs_write(cx);
+        }
     }
 
     /// Open the right pane on `kind`: records the kind, forces the pane
@@ -3510,6 +3663,30 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The Browse centre (B2a-H2): the current project's active person
+    /// tab's page — the existing `webview_pane` with its own nav row for
+    /// now; B2a-H4 replaces the header/toolbar. The page is built here,
+    /// where it shows, never as a render side effect elsewhere.
+    fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.browse_centre_page(window, cx);
+        let harness = cx.weak_entity();
+        v_flex()
+            .size_full()
+            .id("browse-centre")
+            .role(gpui::Role::Group)
+            .aria_label("Browse")
+            .child(aui_webview::webview_pane("browse-centre-page", &state).on_intent(
+                move |intent, window, cx| {
+                    if let Some(harness) = harness.upgrade() {
+                        harness.update(cx, |harness, cx| {
+                            harness.handle_browser_intent(intent, window, cx);
+                        });
+                    }
+                },
+            ))
+            .into_any_element()
+    }
+
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The one write left in the render tree, and it only ever fires on a
         // `--replay` window's first frame: `open_replay` starts a stream
@@ -3533,6 +3710,8 @@ impl Harness {
         let pending_dest = self.pending_switch_dest(cx);
         let body = if self.skills.open {
             self.render_skills_page(window, cx)
+        } else if self.mode == layout::Mode::Browse {
+            self.render_browse_centre(window, cx)
         } else if pending_dest.is_some() {
             self.render_pending_switch(cx)
         } else {
@@ -4162,6 +4341,19 @@ impl Harness {
         // it here, before anything draws, so a transcript notify alone never
         // rebuilds the column.
         self.sync_sidebar_pane(cx);
+        // A mode switch slides the sidebar body to rest, but the pane is
+        // cached: after the key change above re-arms it once, nothing
+        // would re-render it mid-flight. Keep re-arming on animation
+        // frames until the spring has settled, then stop — steady frames
+        // reuse the retained subtree exactly as before.
+        if let Some(until) = self.mode_slide_until {
+            if std::time::Instant::now() < until {
+                window.request_animation_frame();
+                self.sidebar_pane.update(cx, |_, cx| cx.notify());
+            } else {
+                self.mode_slide_until = None;
+            }
+        }
         // The frame trace's per-tick row: written
         // here, not from `render_transcript`, because this runs once per
         // `Harness::render` regardless of which subtree actually rebuilt —
@@ -4703,6 +4895,12 @@ impl Render for Harness {
                     // B7fix2: the key builds the real webview itself, with
                     // the window — render never constructs first.
                     this.prewarm_browser_in(window, cx);
+                }))
+                // ⌥⌘B anywhere in the window, including while a native
+                // page holds the keyboard (the keymap claims it at the
+                // CEF router, and this root binding carries it there).
+                .on_action(cx.listener(|this, _: &ToggleBrowseMode, window, cx| {
+                    this.toggle_browse_mode(window, cx);
                 }))
                 // ⌘L at window level: the webview's own `cmd-l` binding
                 // only fires while gpui holds the keyboard, so this root
