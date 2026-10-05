@@ -4920,6 +4920,10 @@ impl Harness {
                     .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
             );
         let mut row = header_cell("hd-minimal")
+            // The rail column is gone in this mode, so the row clears the
+            // native traffic lights itself (found live: the sidebar toggle
+            // and Back sat under them).
+            .child(div().flex_none().w(px(aui::shell::NATIVE_LIGHTS_WIDTH - 12.0)))
             .child(
                 div()
                     .id("hd-minimal-sidebar")
