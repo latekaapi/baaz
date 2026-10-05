@@ -242,7 +242,7 @@ fn split_userinfo(authority: &str) -> (String, String) {
 /// the last `@`. Mirrors the library's host extraction (`userinfo`
 /// stripped, `\ ? #` ending the authority, host lowercased like the
 /// library's own `host_of`) — only the path keeps what was typed.
-fn split_host_path(url: &str) -> (String, String, String) {
+pub(crate) fn split_host_path(url: &str) -> (String, String, String) {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let (authority, path) = split_authority_path(after);
     let (userinfo, host) = split_userinfo(authority);

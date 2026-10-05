@@ -4036,10 +4036,16 @@ impl Harness {
             .filter(|found| found.query == query)
             .map(|found| (find_count_text(found.active, found.total), found.active, found.total));
         let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
-            match event.keystroke.key.as_str() {
-                "escape" => this.close_browse_find(window, cx),
-                "enter" if event.keystroke.modifiers.shift => this.step_browse_find(false, cx),
-                _ => {}
+            if event.keystroke.key.as_str() == "escape" {
+                this.close_browse_find(window, cx);
+            }
+        });
+        // Shift+Enter steps back in the capture phase and stops there, so
+        // the input never also sees it and emits its own forward PressEnter.
+        let back = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _window, cx| {
+            if event.keystroke.key.as_str() == "enter" && event.keystroke.modifiers.shift {
+                this.step_browse_find(false, cx);
+                cx.stop_propagation();
             }
         });
         let mut row = h_flex()
@@ -4055,6 +4061,7 @@ impl Harness {
             .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Find in page")
+            .capture_key_down(back)
             .on_key_down(keys)
             .child(
                 div()
@@ -4166,7 +4173,12 @@ impl Harness {
                     .ui(scale::FS_13)
                     .semibold()
                     .text_color(p.ink)
-                    .child(request.origin.clone()),
+                    // The host, as the toolbar shows it (userinfo and scheme
+                    // dropped) — never a spoofable raw origin string.
+                    .child({
+                        let (_, host, _) = crate::browser::toolbar::split_host_path(&request.origin);
+                        if host.is_empty() { request.origin.clone() } else { host }
+                    }),
             )
             .child(
                 div()
@@ -6008,6 +6020,7 @@ impl Harness {
     /// forward by however long that composition takes, and the reference
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_find_resync(window, cx);
         // A running dot advances on the pulse loop's ticks, not on animation
         // frames: make sure the loop is up exactly while a sampled dot is on
         // screen. Cheap when it is already running (one `is_some`) and when

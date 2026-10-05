@@ -2298,6 +2298,14 @@ impl Harness {
         // without dismissing, so a `--steps` popover opens onto its own
         // first frame.
         let switched = self.browser.last_centre_shown.is_some() && self.browser.last_centre_shown != centre_shown;
+        if switched {
+            // Every route to a new centre tab (close, ⌘T, popup, omnibox,
+            // From sessions) — not only a sidebar click — moves find: the
+            // tab left stops highlighting, and the shared input picks up
+            // the new tab's query on the next frame (`on_frame` holds the
+            // mutable window that `set_value` needs).
+            self.browser.find_resync = Some((self.browser.last_centre_shown, centre_shown));
+        }
         if switched || !in_browse {
             self.browser.downloads_open = false;
             self.browser.extensions_open = false;
@@ -2712,6 +2720,22 @@ impl Harness {
     /// Clear the tab's find highlight as it is left behind (a switch or a
     /// crash): the strip itself stays as it stood, so returning restores
     /// the query — only the page's highlight drops.
+    /// Apply a pending centre switch to find (from `on_frame`): stop the
+    /// left tab's highlight, point the shared input at the shown tab's
+    /// query and search it again so its count and highlight come back.
+    pub(crate) fn apply_find_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((left, shown)) = self.browser.find_resync.take() else { return };
+        if let Some(left) = left {
+            self.stop_find_on_tab(left, cx);
+        }
+        if let Some(shown) = shown {
+            self.sync_find_input_to_tab(shown, window, cx);
+            if self.browser.find_strips.visible(Some(shown)).is_some() {
+                self.step_browse_find(true, cx);
+            }
+        }
+    }
+
     fn stop_find_on_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         let open = self.browser.find_strips.for_tab(id).open;
         if open {
@@ -4061,6 +4085,8 @@ pub(crate) struct BrowserRegistry {
     /// popovers (they point at the old tab's state) but never the find
     /// strip, which is per tab and restores on return.
     pub last_centre_shown: Option<TabId>,
+    /// A centre switch waiting for find to follow it: (left, shown).
+    pub find_resync: Option<(Option<TabId>, Option<TabId>)>,
 }
 
 impl BrowserRegistry {
@@ -4092,6 +4118,7 @@ impl BrowserRegistry {
             fake_scripts: Vec::new(),
             download_started: HashMap::new(),
             last_centre_shown: None,
+            find_resync: None,
         }
     }
 }
