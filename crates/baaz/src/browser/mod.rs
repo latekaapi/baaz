@@ -2327,6 +2327,17 @@ impl Harness {
             && ((self.browser.downloads_open && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
                 || (self.browser.extensions_open && centre_shown.is_some())
                 || (self.browser.more_open && centre_has_state));
+        // A crashed page hides the find strip: the highlight stops and the
+        // strip closes, so the error page owns the rect alone. First, so
+        // the stored rect below never reserves a row for a strip that just
+        // closed.
+        if let Some(id) = centre_shown {
+            if let Some(state) = self.browser.states.get(&id).cloned() {
+                if state.read(cx).crashed().is_some() && self.browser.find_strips.for_tab(id).close() {
+                    state.update(cx, |state, _| state.stop_find());
+                }
+            }
+        }
         // The find and permission strips are in-flow rows above the page,
         // so the stored page rect starts below them: placement and the
         // mouse-down release share this one rect.
@@ -2341,15 +2352,6 @@ impl Harness {
             centre_page.size.height = (centre_page.size.height - gpui::px(stack)).max(gpui::px(0.0));
         }
         self.browser.centre_page_rect = in_browse.then_some(centre_page);
-        // A crashed page hides the find strip: the highlight stops and the
-        // strip closes, so the error page owns the rect alone.
-        if let Some(id) = centre_shown {
-            if let Some(state) = self.browser.states.get(&id).cloned() {
-                if state.read(cx).crashed().is_some() && self.browser.find_strips.for_tab(id).close() {
-                    state.update(cx, |state, _| state.stop_find());
-                }
-            }
-        }
         // Tabs that navigated away (or closed) drop their "while visiting"
         // grants; then trusted origins auto-answer and background asks
         // mark their rows while in Browse.
