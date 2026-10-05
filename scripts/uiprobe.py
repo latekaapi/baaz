@@ -159,6 +159,12 @@ ENTRIES = {
     # Offline, fake backend, no baselines — capture and look.
     "browse-tab-menu":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-menu:2"]},
+    # B2a-H7: a link from another app, driven through the scripted twin of
+    # the open-URL event (`open-url:` runs the same path `on_open_urls`
+    # drains into): a person tab on wikipedia in Browse. Offline, fake
+    # backend, no baselines — capture and look.
+    "browse-opened-link":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "open-url:https://www.wikipedia.org/"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
