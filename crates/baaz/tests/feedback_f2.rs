@@ -77,7 +77,7 @@ fn probe_entries_drive_feedback_mode_steps() {
 fn no_entry_uses_the_shadowed_bare_feedback_verb() {
     let entries = probe_entries();
     let all = entries["all"].as_object().expect("ENTRIES is a table");
-    let subs = ["on", "pause", "resume", "off", "discard", "done"];
+    let subs = ["on", "pause", "resume", "off", "discard", "done", "cancel"];
     for (name, entry) in all {
         let kinds = entry.as_object().unwrap_or_else(|| panic!("{name} is an entry"));
         for kind in ["shot", "idle"] {
@@ -100,8 +100,13 @@ fn no_entry_uses_the_shadowed_bare_feedback_verb() {
                     "{name} still drives the shadowed bare verb: {step}"
                 );
                 if verb == "feedback-mode" {
+                    let rest = rest.trim();
+                    let pointing = rest.starts_with("hover:")
+                        || rest.starts_with("click:")
+                        || rest.starts_with("drag:")
+                        || rest.starts_with("note:");
                     assert!(
-                        subs.contains(&rest.trim()),
+                        subs.contains(&rest) || pointing,
                         "{name} drives an unknown sub: {step}"
                     );
                 }
