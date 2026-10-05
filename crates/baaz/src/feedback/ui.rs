@@ -160,10 +160,12 @@ pub(crate) struct PendingClick {
     pub since: Instant,
 }
 
-/// A step-driven pointing action waiting behind an in-flight capture: a
-/// `click:`/`drag:` issued while a capture is pending queues here instead
-/// of cancelling it, and a `note:` waits here for its popover. Each item
-/// carries its full step name so the pump can fail it loudly on expiry.
+/// A step-driven action waiting behind an in-flight capture or an earlier
+/// queued step: a `click:`/`drag:` issued while a capture is pending queues
+/// here instead of cancelling it, a `note:` waits here for its popover,
+/// and a `pause`/`resume`/`done`/`discard` waits here for its turn instead
+/// of running ahead of them. Each item carries its full step name so the
+/// pump can run it in order — or fail it loudly on expiry.
 #[derive(Clone, Debug)]
 pub(crate) enum QueuedStep {
     /// A queued `click:x,y`.
@@ -189,6 +191,26 @@ pub(crate) enum QueuedStep {
         /// The owner's words, filled into the popover once it opens.
         text: String,
     },
+    /// A queued `pause`.
+    Pause {
+        /// The full `feedback-mode:pause` step name, for the failure log.
+        step: String,
+    },
+    /// A queued `resume`.
+    Resume {
+        /// The full `feedback-mode:resume` step name, for the failure log.
+        step: String,
+    },
+    /// A queued `done`.
+    Done {
+        /// The full `feedback-mode:done` step name, for the failure log.
+        step: String,
+    },
+    /// A queued `discard`.
+    Discard {
+        /// The full `feedback-mode:discard` step name, for the failure log.
+        step: String,
+    },
 }
 
 impl QueuedStep {
@@ -197,7 +219,11 @@ impl QueuedStep {
         match self {
             QueuedStep::Click { step, .. }
             | QueuedStep::Drag { step, .. }
-            | QueuedStep::Note { step, .. } => step,
+            | QueuedStep::Note { step, .. }
+            | QueuedStep::Pause { step }
+            | QueuedStep::Resume { step }
+            | QueuedStep::Done { step }
+            | QueuedStep::Discard { step } => step,
         }
     }
 }
@@ -1054,9 +1080,11 @@ impl crate::app::Harness {
     /// capture across frames, bounded ~2 s), `cancel` closes the popover
     /// unsaved. Coordinates are window-logical pixels. A `click:`/`drag:`
     /// issued while a capture is pending queues behind it instead of
-    /// cancelling it. A note sub with no popover and nothing pending, an
-    /// empty text, an unparseable coordinate, or a pointing sub while not
-    /// Active records a step failure.
+    /// cancelling it, and a `pause`/`resume`/`done`/`discard` issued while
+    /// anything is still pending queues behind it too, running in order
+    /// when the queue reaches it. A note sub with no popover and nothing
+    /// pending, an empty text, an unparseable coordinate, or a pointing
+    /// sub while not Active records a step failure.
     pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.saving {
             return;
@@ -1137,16 +1165,30 @@ impl crate::app::Harness {
                 }
             }
             "pause" => {
-                self.feedback.pause();
+                // Behind pending steps the pause waits its turn instead of
+                // clearing the queue out from under the note it follows —
+                // otherwise `…;note:x;pause` fails the note it just filed.
+                if self.has_pending_steps() {
+                    self.queue_step(
+                        QueuedStep::Pause { step: format!("feedback-mode:{rest}") },
+                        cx,
+                    );
+                } else {
+                    self.feedback.pause();
+                }
                 cx.notify();
             }
             "resume" => {
-                if self.feedback.phase == FeedbackPhase::Paused {
+                if self.has_pending_steps() {
+                    self.queue_step(
+                        QueuedStep::Resume { step: format!("feedback-mode:{rest}") },
+                        cx,
+                    );
+                } else if self.feedback.phase == FeedbackPhase::Paused {
                     self.feedback.resume();
                     self.enter_feedback_active(window, cx);
-                } else {
-                    cx.notify();
                 }
+                cx.notify();
             }
             "off" => {
                 self.feedback.forced_on = false;
@@ -1154,15 +1196,41 @@ impl crate::app::Harness {
                 cx.notify();
             }
             "discard" => {
-                self.feedback.discard_all();
+                if self.has_pending_steps() {
+                    self.queue_step(
+                        QueuedStep::Discard { step: format!("feedback-mode:{rest}") },
+                        cx,
+                    );
+                } else {
+                    self.feedback.discard_all();
+                }
                 cx.notify();
             }
-            "done" => self.finish_feedback(window, cx),
+            "done" => {
+                if self.has_pending_steps() {
+                    self.queue_step(
+                        QueuedStep::Done { step: format!("feedback-mode:{rest}") },
+                        cx,
+                    );
+                    cx.notify();
+                } else {
+                    self.finish_feedback(window, cx);
+                }
+            }
             _ => {
                 crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
                 cx.notify();
             }
         }
+    }
+
+    /// Whether a control sub (`pause`/`resume`/`done`/`discard`) must wait
+    /// its turn: anything is still resolving — an in-flight capture, a
+    /// parked cold-tree retry, or an earlier queued step.
+    pub(crate) fn has_pending_steps(&self) -> bool {
+        self.feedback.capture_pending.is_some()
+            || self.feedback.pending_click.is_some()
+            || !self.feedback.step_queue.is_empty()
     }
 
     /// Run a step `click:`/`drag:` now when the shell is idle, or queue it
@@ -1175,10 +1243,7 @@ impl crate::app::Harness {
         cx: &mut Context<Self>,
     ) {
         debug_assert!(matches!(step, QueuedStep::Click { .. } | QueuedStep::Drag { .. }));
-        if self.feedback.capture_pending.is_some()
-            || self.feedback.pending_click.is_some()
-            || !self.feedback.step_queue.is_empty()
-        {
+        if self.has_pending_steps() {
             self.queue_step(step, cx);
             return;
         }
@@ -1192,7 +1257,11 @@ impl crate::app::Harness {
                 self.feedback_drag_at(end, cx);
                 self.feedback_release_at(end, window, cx);
             }
-            QueuedStep::Note { .. } => {}
+            QueuedStep::Note { .. }
+            | QueuedStep::Pause { .. }
+            | QueuedStep::Resume { .. }
+            | QueuedStep::Done { .. }
+            | QueuedStep::Discard { .. } => {}
         }
     }
 
@@ -1203,14 +1272,71 @@ impl crate::app::Harness {
         cx.notify();
     }
 
+    /// Run one queued control sub (`pause`/`resume`/`done`/`discard`) with
+    /// the same effect as its immediate step verb. Unlike the interrupting
+    /// [`FeedbackUi::pause`], this never fails the steps queued behind it:
+    /// they were filed after it and run in order on later ticks (a note
+    /// filed after a pause fails on the next tick instead, when the Paused
+    /// branch below sees it).
+    fn run_queued_control(&mut self, queued: QueuedStep, window: &mut Window, cx: &mut Context<Self>) {
+        match queued {
+            QueuedStep::Pause { .. } => {
+                if self.feedback.phase == FeedbackPhase::Active && !self.feedback.saving {
+                    self.feedback.clear_transient();
+                    self.feedback.disarm_discard();
+                    self.feedback.phase = FeedbackPhase::Paused;
+                }
+            }
+            QueuedStep::Resume { .. } => {
+                if self.feedback.phase == FeedbackPhase::Paused {
+                    self.feedback.resume();
+                    self.enter_feedback_active(window, cx);
+                }
+            }
+            QueuedStep::Done { .. } => {
+                self.finish_feedback(window, cx);
+                return;
+            }
+            QueuedStep::Discard { .. } => {
+                self.feedback.discard_all();
+            }
+            QueuedStep::Click { .. } | QueuedStep::Drag { .. } | QueuedStep::Note { .. } => {}
+        }
+        cx.notify();
+    }
+
+    /// Whether the queue's front is a control sub.
+    fn front_is_control(&self) -> bool {
+        matches!(
+            self.feedback.step_queue.front(),
+            Some((
+                QueuedStep::Pause { .. }
+                | QueuedStep::Resume { .. }
+                | QueuedStep::Done { .. }
+                | QueuedStep::Discard { .. },
+                _,
+            ))
+        )
+    }
+
     /// One pump tick, driven by the layer's per-frame poll (never a task,
     /// so queued steps resolve wherever frames do — the real window, a
     /// headless `--steps` run, or a test draw). A `note:` fills and saves
     /// once its popover opens; a `click:`/`drag:` runs once the shell is
-    /// idle; anything still waiting past [`FEEDBACK_STEP_WAIT`] fails
-    /// loudly under its own step name.
+    /// idle; a queued control sub runs with its verb's effect once the
+    /// steps ahead of it have drained; anything still waiting past
+    /// [`FEEDBACK_STEP_WAIT`] fails loudly under its own step name.
     pub(crate) fn step_pump_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.phase != FeedbackPhase::Active {
+            // Paused still runs a queued control's own effect in order (a
+            // `resume` climbs back to Active, a `done` saves); pointing
+            // steps and notes can never resolve off Active, so they fail.
+            // Off fails everything.
+            if self.feedback.phase == FeedbackPhase::Paused && self.front_is_control() {
+                let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+                self.run_queued_control(queued, window, cx);
+                return;
+            }
             while let Some((queued, _)) = self.feedback.step_queue.pop_front() {
                 crate::steps::record_step_failure(queued.step());
             }
@@ -1224,6 +1350,16 @@ impl crate::app::Harness {
             let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
             crate::steps::record_step_failure(queued.step());
             cx.notify();
+            return;
+        }
+        if self.front_is_control() {
+            if self.feedback.capture_pending.is_some() || self.feedback.pending_click.is_some() {
+                // An earlier pointing step is still resolving: the control
+                // waits behind it rather than dropping its capture.
+                return;
+            }
+            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            self.run_queued_control(queued, window, cx);
             return;
         }
         if self.feedback.popover.is_some() {
@@ -1263,6 +1399,13 @@ impl crate::app::Harness {
                 self.feedback_press_at(start, window, cx);
                 self.feedback_drag_at(end, cx);
                 self.feedback_release_at(end, window, cx);
+            }
+            control @ (QueuedStep::Pause { .. }
+            | QueuedStep::Resume { .. }
+            | QueuedStep::Done { .. }
+            | QueuedStep::Discard { .. }) => {
+                self.run_queued_control(control, window, cx);
+                return;
             }
         }
         cx.notify();
@@ -1389,12 +1532,20 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Over the header slot the floating copy owns the point: no outline —
+        // and any live one clears, so it never freezes over the slot.
+        if self.feedback.slot_contains(point) {
+            if self.feedback.hover.is_some() {
+                self.feedback.hover = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.feedback.phase != FeedbackPhase::Active
             || self.feedback.capturing
             || self.feedback.popover.is_some()
             || self.feedback.capture_pending.is_some()
             || self.feedback.press.is_some()
-            || self.feedback.slot_contains(point)
         {
             return;
         }
@@ -2072,24 +2223,29 @@ impl crate::app::Harness {
     /// nothing shows while capturing, when the window must read clean.
     /// The three header variants all call this just left of their icon
     /// buttons — a region native pages never cover. While Active a second
-    /// copy floats above the capture layer at the slot's recorded bounds
-    /// (see [`Self::render_feedback_slot_overlay`]), so the toggle, Done
-    /// and Discard stay clickable under the layer; the in-header copy stays
-    /// for layout. Setting on: always the toggle icon; while Active or with
-    /// notes in the draft, the `N notes` count plus the Done and Discard
-    /// icons follow it; a fresh Done flash replaces the count and the
-    /// actions for its ~4 s.
+    /// copy floats above the capture layer, anchored by the slot's recorded
+    /// right edge (see [`Self::render_feedback_slot_overlay`]), so the
+    /// toggle, Done and Discard stay clickable under the layer; the
+    /// in-header copy stays for layout. Setting on: always the toggle icon;
+    /// while Active or with notes in the draft, the `N notes` count plus
+    /// the Done and Discard icons follow it; a fresh Done flash replaces
+    /// the count and the actions for its ~4 s.
     pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let row = self.feedback_slot_row(cx)?;
+        // While Active the floating copy (above the capture layer) is the
+        // one that shows and clicks; this copy only holds the space and the
+        // bounds — as a non-accessible placeholder, so the tree names each
+        // control once. Drawing both ghosted them a few pixels apart (seen
+        // in a capture).
+        let covered = self.feedback.phase == FeedbackPhase::Active && self.feedback.slot_bounds.is_some();
+        let row = self.feedback_slot_row(cx, covered)?;
         // Record the slot's window bounds every frame it paints: the
         // floating copy seats at these, and the capture layer ignores
         // points inside them. The row is this wrapper's only child, so its
         // first bounds are the slot's own rect — the `crumb_bounds` pattern.
+        // Notified on every CHANGE (never just the first arrival): entering
+        // Active widens the slot leftwards, and resizes, mode switches and
+        // sidebar toggles move it — the overlay must reseat, never ghost.
         let report = cx.entity().downgrade();
-        // While Active the floating copy (above the capture layer) is the
-        // one that shows; this copy only holds the space and the bounds.
-        // Drawing both ghosted them a few pixels apart (seen in a capture).
-        let covered = self.feedback.phase == FeedbackPhase::Active && self.feedback.slot_bounds.is_some();
         Some(
             div()
                 .when(covered, |d| d.opacity(0.0))
@@ -2097,7 +2253,7 @@ impl crate::app::Harness {
                     if let Some(first) = bounds.first() {
                         let bounds = *first;
                         let _ = report.update(cx, |this, cx| {
-                            Self::note_trigger_bounds(&mut this.feedback.slot_bounds, bounds, cx);
+                            Self::note_slot_bounds(&mut this.feedback.slot_bounds, bounds, cx);
                         });
                     }
                 })
@@ -2107,32 +2263,52 @@ impl crate::app::Harness {
         )
     }
 
-    /// The floating slot copy: the same row, absolutely positioned at the
-    /// recorded bounds AFTER the capture layer, so it paints over the layer
-    /// — pixel-exactly over the in-header copy, which never shows through —
-    /// and owns the clicks while Active. Active only, and only with bounds
-    /// on record: Paused needs no cover, and before the first paint there is
-    /// nothing to seat at yet.
-    pub(crate) fn render_feedback_slot_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The floating slot copy: the same row, absolutely positioned AFTER
+    /// the capture layer, so it paints over the layer — pixel-exactly over
+    /// the in-header copy, which never shows through — and owns the clicks
+    /// while Active. Anchored by its RIGHT edge (`right = viewport width −
+    /// recorded right`) and top: entering Active widens the slot leftwards,
+    /// so a left-anchored copy would seat at the stale origin until the
+    /// next repaint. Active only, and only with bounds on record: Paused
+    /// needs no cover, and before the first paint there is nothing to seat
+    /// at yet.
+    pub(crate) fn render_feedback_slot_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.feedback.phase != FeedbackPhase::Active {
             return None;
         }
         let bounds = self.feedback.slot_bounds?;
-        let row = self.feedback_slot_row(cx)?;
+        let row = self.feedback_slot_row(cx, false)?;
+        let viewport = window.viewport_size();
+        let right = f32::from(viewport.width) - f32::from(bounds.right());
         Some(
             div()
                 .absolute()
-                .left(px(f32::from(bounds.origin.x)))
-                .top(px(f32::from(bounds.origin.y)))
+                .right(px(right))
+                .top(px(f32::from(bounds.top())))
                 .child(row)
                 .into_any_element(),
         )
     }
 
+    /// Where the floating copy seats: the recorded slot's right edge and
+    /// top, for tests to assert against without painting.
+    pub(crate) fn feedback_slot_overlay_right_top(&self) -> Option<(f32, f32)> {
+        let bounds = self.feedback.slot_bounds?;
+        Some((f32::from(bounds.right()), f32::from(bounds.top())))
+    }
+
     /// The slot's row: the toggle icon, then the count and the action icons
     /// (or the Done flash). Both the in-header copy and the floating copy
     /// build this, so the overlay covers the header copy pixel-exactly.
-    fn feedback_slot_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// While covered the in-header copy is `decorative`: the same layout at
+    /// the same size, but with no element ids, no roles or labels, no
+    /// handlers and no bounds recorders — a screen reader hears each
+    /// control once, from the floating copy.
+    fn feedback_slot_row(&self, cx: &mut Context<Self>, decorative: bool) -> Option<AnyElement> {
         if self.feedback.capturing {
             return None;
         }
@@ -2146,50 +2322,81 @@ impl crate::app::Harness {
                 .saved_flash
                 .as_ref()
                 .is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH);
+        // The decorative copy gets its own id (ids must be unique) and none
+        // of the occlusion, role or label the live copy carries.
         let mut row = h_flex()
-            .id("feedback-header")
-            .occlude()
+            .id(if decorative { "feedback-header-ghost" } else { "feedback-header" })
             .flex_none()
             .items_center()
             .gap(px(8.0))
-            .child(self.render_feedback_toggle(cx, active));
+            .when(!decorative, |row| row.occlude());
+        row = row.child(self.render_feedback_toggle(cx, active, decorative));
         if flashing {
-            row = row.child(self.render_feedback_flash(cx));
+            row = row.child(self.render_feedback_flash(cx, decorative));
         } else if active || !self.feedback.draft.is_empty() {
             let count = self.feedback.notes_label();
+            let count_row = div()
+                .id(if decorative { "feedback-count-ghost" } else { "feedback-count" })
+                .flex_none()
+                .mono(11.5)
+                .text_color(cx.aui().colors.ink_3)
+                .whitespace_nowrap()
+                .child(count.clone())
+                .when(!decorative, |row| row.role(gpui::Role::Status).aria_label(count));
             row = row
-                .child(
-                    div()
-                        .id("feedback-count")
-                        .flex_none()
-                        .mono(11.5)
-                        .text_color(cx.aui().colors.ink_3)
-                        .whitespace_nowrap()
-                        .role(gpui::Role::Status)
-                        .aria_label(count.clone())
-                        .child(count),
-                )
-                .child(self.render_feedback_done(cx))
-                .child(self.render_feedback_discard(cx));
+                .child(count_row)
+                .child(self.render_feedback_done(cx, decorative))
+                .child(self.render_feedback_discard(cx, decorative));
         }
         Some(row.into_any_element())
+    }
+
+    /// A decorative stand-in for a square small header icon button: the
+    /// same box at the same size, but a plain glyph with no id, no role or
+    /// label, no handler and no bounds recorder.
+    fn decorative_slot_icon(content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let box_side = cx.aui().metrics.control_sm;
+        div()
+            .flex_none()
+            .size(box_side)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(content)
+            .into_any_element()
     }
 
     /// The header's feedback icon: the same ghost small icon button as the
     /// neighbouring header buttons, toggling exactly like ⌃⌥⌘F (Off or
     /// Paused → Active, Active → Paused). While Active the glyph reads
     /// tinted on an accent-soft wash, and the toggled state names it for
-    /// the accessibility tree.
-    fn render_feedback_toggle(&self, cx: &mut Context<Self>, active: bool) -> AnyElement {
+    /// the accessibility tree. Decorative: the same layout with none of
+    /// that — no id, role, label, handler or recorder.
+    fn render_feedback_toggle(
+        &self,
+        cx: &mut Context<Self>,
+        active: bool,
+        decorative: bool,
+    ) -> AnyElement {
         let accent = feedback_accent(cx);
-        let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.toggle_feedback(window, cx);
-        });
         let glyph = if active {
             icon(IconName::MessagePlus).size(px(14.0)).color(accent)
         } else {
             icon(IconName::MessagePlus).size(px(14.0))
         };
+        if decorative {
+            return div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(scale::R_SM))
+                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
+                .into_any_element();
+        }
+        let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.toggle_feedback(window, cx);
+        });
         let toggled = if active { gpui::Toggled::True } else { gpui::Toggled::False };
         // One named element for the control: the wrapper owns the role, the
         // label and the toggled state (the button has no toggled builder),
@@ -2229,9 +2436,16 @@ impl crate::app::Harness {
 
     /// The header's Done icon: accent ink, dimmed while there is nothing
     /// to save, writing the report and copying its path like the old Done
-    /// button did.
-    fn render_feedback_done(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// button did. Decorative: the same layout with none of that.
+    fn render_feedback_done(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
         let accent = feedback_accent(cx);
+        let glyph = icon(IconName::Check).size(px(14.0)).color(accent);
+        if decorative {
+            return div()
+                .flex_none()
+                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
+                .into_any_element();
+        }
         let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.finish_feedback(window, cx);
         });
@@ -2253,23 +2467,28 @@ impl crate::app::Harness {
             .flex_none()
             .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
             .child(
-                icon_content_button(
-                    "feedback-done-button",
-                    icon(IconName::Check).size(px(14.0)).color(accent),
-                )
-                .ghost()
-                .size(ButtonSize::Sm)
-                .accessibility_label("Done — save feedback report")
-                .disabled(!self.feedback.done_enabled(cx))
-                .on_click(done),
+                icon_content_button("feedback-done-button", glyph)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("Done — save feedback report")
+                    .disabled(!self.feedback.done_enabled(cx))
+                    .on_click(done),
             )
             .into_any_element()
     }
 
     /// The header's Discard icon: the first click arms it (danger ink,
     /// naming the notes the second click drops) for 4 s; the second click
-    /// inside the window clears the draft, staying in phase.
-    fn render_feedback_discard(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// inside the window clears the draft, staying in phase. Decorative:
+    /// the same layout with none of that.
+    fn render_feedback_discard(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
+        let glyph = icon(IconName::Trash).size(px(14.0));
+        if decorative {
+            return div()
+                .flex_none()
+                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
+                .into_any_element();
+        }
         let armed = self.feedback.discard_armed_live();
         let label = if armed {
             format!("Confirm: discard {}", self.feedback.notes_label())
@@ -2284,7 +2503,7 @@ impl crate::app::Harness {
         let discard = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.discard_feedback(window, cx);
         });
-        let mut button = icon_content_button("feedback-discard-button", icon(IconName::Trash).size(px(14.0)))
+        let mut button = icon_content_button("feedback-discard-button", glyph)
             .ghost()
             .size(ButtonSize::Sm)
             .accessibility_label(label)
@@ -2314,15 +2533,16 @@ impl crate::app::Harness {
 
     /// After Done lands: `Saved · N notes — path copied` for ~4 s, so the
     /// save is visible even when a page covers the toast area. Replaces
-    /// the count and the action icons for its show.
-    fn render_feedback_flash(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// the count and the action icons for its show. Decorative: the same
+    /// layout with no id, role or label.
+    fn render_feedback_flash(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
         let flash = self.feedback.saved_flash.as_ref().expect("flash checked");
         let unit = if flash.notes == 1 { "note" } else { "notes" };
         let p = cx.aui().colors;
         let accent = feedback_accent(cx);
-        h_flex()
-            .id("feedback-saved")
-            .occlude()
+        let label = format!("Feedback saved to {}", flash.path);
+        let row = h_flex()
+            .id(if decorative { "feedback-saved-ghost" } else { "feedback-saved" })
             .flex_none()
             .items_center()
             .gap(px(6.0))
@@ -2332,9 +2552,8 @@ impl crate::app::Harness {
             .bg(p.surface_1)
             .border_1()
             .border_color(p.line_strong)
-            .role(gpui::Role::Group)
-            .aria_label(format!("Feedback saved to {}", flash.path))
-            .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
+            .when(!decorative, |row| row.occlude().role(gpui::Role::Group).aria_label(label));
+        row.child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
             .child(
                 div()
                     .flex_none()
