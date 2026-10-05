@@ -189,8 +189,9 @@ fn address_shows_the_page_with_tab_fallback() {
     let app = source("app.rs");
     let toolbar = fn_body(&app, "render_browse_toolbar");
     assert!(toolbar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
-    assert!(toolbar.contains("state.read(cx).loading()"), "the stop button reads the engine loading state");
-    assert!(!toolbar.contains("loading_tabs"), "no Baaz-tracked load set feeds the button");
+    let reload = fn_body(&app, "browse_reload_button");
+    assert!(reload.contains("state.read(cx).loading()"), "the stop button reads the engine loading state");
+    assert!(!reload.contains("loading_tabs"), "no Baaz-tracked load set feeds the button");
 }
 
 /// The Browse centre draws no library nav row: the pane leaves it out
@@ -283,9 +284,9 @@ fn ask_draft_lands_on_arrival_never_sent() {
 #[test]
 fn back_history_menu_guards_clears_and_steps() {
     let app = source("app.rs");
-    let toolbar = fn_body(&app, "render_browse_toolbar");
-    assert!(toolbar.contains("history.can_back()"), "the opener checks back first");
-    assert!(toolbar.contains("open_menu(MenuKind::BackHistory, cx)"), "the opener opens the menu");
+    let back = fn_body(&app, "browse_back_button");
+    assert!(back.contains("history.can_back()"), "the opener checks back first");
+    assert!(back.contains("open_menu(MenuKind::BackHistory, cx)"), "the opener opens the menu");
     let dialogs = source("dialogs.rs");
     let menu = fn_body(&dialogs, "render_back_history_menu");
     assert!(menu.contains("overlays.menu = None"), "an empty render clears the menu");

@@ -129,6 +129,28 @@ const HEADER_PX: f32 = 44.0;
 /// draws at a 38 px minimum above the native page.
 const BROWSER_NAV_PX: f32 = 38.0;
 
+/// The horizontal tab strip's height in pixels (B2a-H6): the row above
+/// the page when [`crate::layout::BrowserTabs::Horizontal`] is set. The
+/// native page rect and the gpui strip share this one const, so the page
+/// hangs exactly under the row with no gap.
+pub(crate) const BROWSE_TAB_STRIP_PX: f32 = 34.0;
+
+/// A person tab mid-drag between tab rows: the sidebar's rows and the
+/// horizontal strip's chips share this one payload, so a drag reorders
+/// from either side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BrowseTabDrag(pub TabId);
+
+/// How far the native page hangs below the centre column's top: the
+/// strip's height when horizontal, zero when the tabs live down the
+/// sidebar. Pure, so tests pin the rect without a window.
+pub(crate) fn browse_strip_offset(tabs: crate::layout::BrowserTabs) -> Pixels {
+    match tabs {
+        crate::layout::BrowserTabs::Horizontal => gpui::px(BROWSE_TAB_STRIP_PX),
+        crate::layout::BrowserTabs::Vertical => gpui::px(0.0),
+    }
+}
+
 /// The window's content box in window coordinates. `Window::content_mask`
 /// is only valid while painting (a debug assertion aborts a debug build when
 /// it is read from a mouse handler); the viewport is valid at any time and,
@@ -734,7 +756,15 @@ impl Harness {
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
     fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
-        self.browse_centre_content_rect(content, window)
+        let content = self.browse_centre_content_rect(content, window);
+        // B2a-H6: the horizontal strip hangs its gpui row above the page,
+        // so the native page hangs below it by the same const — one source
+        // for placement and release, never a gap.
+        let strip = browse_strip_offset(self.layout.browser_tabs);
+        Bounds {
+            origin: Point { x: content.origin.x, y: content.origin.y + strip },
+            size: gpui::size(content.size.width, (content.size.height - strip).max(gpui::px(0.))),
+        }
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person

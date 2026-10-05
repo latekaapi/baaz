@@ -987,4 +987,66 @@ mod tests {
         assert_eq!(sidebar_width(&with_width(10_000.0)), aui::shell::SIDEBAR_MAX_WIDTH);
         assert_eq!(sidebar_width(&with_width(300.0)), 300.0);
     }
+
+    /// B2a-H6: the sidebar's open state rides per mode — open by
+    /// default, so a file from before this feature reads as today's
+    /// behaviour — surviving a switch each way.
+    #[test]
+    fn sidebar_open_defaults_open_and_rides_each_mode() {
+        assert!(ModeState::default().sidebar_open);
+        assert!(ModeState::default().is_default());
+        let old: ModeState = serde_json::from_str("{}").unwrap();
+        assert!(old.sidebar_open, "a file from before H6 reads open");
+        let hidden: ModeState = serde_json::from_str("{\"sidebarOpen\":false}").unwrap();
+        assert!(!hidden.sidebar_open);
+        assert!(!hidden.is_default(), "hidden persists instead of reading as untouched");
+        let text = serde_json::to_string(&hidden).unwrap();
+        assert!(text.contains("\"sidebarOpen\":false"));
+        let back: ModeState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, hidden);
+        // A switch carries each mode's own sidebar both ways.
+        let mut slots = ModeSlots::default();
+        slots.switch(Mode::Sessions, ModeState::default(), Mode::Browse);
+        let browse_hidden = ModeState { sidebar_open: false, ..ModeState::default() };
+        let back = slots.switch(Mode::Browse, browse_hidden.clone(), Mode::Sessions);
+        assert!(back.sidebar_open, "Sessions kept its own open sidebar");
+        assert_eq!(slots.get(Mode::Browse), &browse_hidden);
+    }
+
+    /// B2a-H6: tabs live down the sidebar unless horizontal is stored —
+    /// old files read vertical, and the slugs round-trip.
+    #[test]
+    fn browser_tabs_default_vertical_and_round_trip() {
+        assert_eq!(BrowserTabs::default(), BrowserTabs::Vertical);
+        assert_eq!(Layout::default().browser_tabs, BrowserTabs::Vertical);
+        assert_eq!(BrowserTabs::parse("horizontal"), Some(BrowserTabs::Horizontal));
+        assert_eq!(BrowserTabs::parse(" Vertical "), Some(BrowserTabs::Vertical));
+        assert_eq!(BrowserTabs::parse("diagonal"), None);
+        assert_eq!(BrowserTabs::Horizontal.slug(), "horizontal");
+        assert_eq!(BrowserTabs::Vertical.label(), "Vertical");
+        assert_eq!(BrowserTabs::Horizontal.label(), "Horizontal");
+        assert_eq!(BrowserTabs::ALL, [BrowserTabs::Vertical, BrowserTabs::Horizontal]);
+        let old: Layout = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.browser_tabs, BrowserTabs::Vertical, "old files read vertical");
+        let text = serde_json::to_string(&BrowserTabs::Horizontal).unwrap();
+        assert_eq!(text, "\"horizontal\"");
+    }
+
+    /// B2a-H6: downloads land in `~/Downloads` until chosen, and the row
+    /// shows `~/…` for home paths.
+    #[test]
+    fn download_dir_defaults_and_tildes() {
+        let layout = Layout::default();
+        assert_eq!(layout.download_dir, None);
+        let dir = browser_download_dir(&layout);
+        assert!(dir.ends_with("Downloads"), "the default is a Downloads folder: {}", dir.display());
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            assert_eq!(tilde_path(&home.join("Downloads")), "~/Downloads");
+            assert_eq!(tilde_path(&home), "~");
+        }
+        assert_eq!(tilde_path(std::path::Path::new("/tmp/baaz-x")), "/tmp/baaz-x");
+        let chosen =
+            Layout { download_dir: Some(PathBuf::from("/tmp/baaz-picked")), ..Layout::default() };
+        assert_eq!(browser_download_dir(&chosen), PathBuf::from("/tmp/baaz-picked"));
+    }
 }
