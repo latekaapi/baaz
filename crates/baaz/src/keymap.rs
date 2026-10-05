@@ -321,10 +321,11 @@ fn claimable_keystroke(keystroke: &gpui::Keystroke) -> bool {
 /// The `BaazBrowse` rows join the set unconditionally — not only while
 /// Browse is current. Claiming only takes the keystroke back from the page;
 /// gpui's own context dispatch still scopes what fires, so in Sessions ⌘W
-/// reaches `CloseWindow` (no `BaazBrowse` element exists) while in Browse
-/// the deeper `BaazBrowse` wrapper wins with `CloseBrowseTab`. A
-/// mode-dependent snapshot would go stale on every switch; the union never
-/// does.
+/// reaches `CloseWindow` while in Browse the outer `BaazBrowse` wrapper
+/// wins with `CloseBrowseTab`. A mode-dependent snapshot would go stale on
+/// every switch; the union never does. The live-mode filter lives one
+/// layer down, in [`claims_keystroke`]: `BaazBrowse`-only chords claim
+/// only while Browse is live, so a page in Sessions keeps them.
 pub(crate) fn claimed_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
     let mut claimed: Vec<gpui::Keystroke> = Vec::new();
     for keystroke in AUI_ROOT_KEYS {
@@ -378,12 +379,79 @@ thread_local! {
     /// which it must not do from inside the CEF callback.
     static CLAIMED_KEYS: std::cell::RefCell<Vec<gpui::Keystroke>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The `BaazBrowse`-only chords inside that snapshot (bound in
+    /// `BaazBrowse` and nowhere app-level): ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓. ⌘W and ⌘T
+    /// also bind outside Browse, so they never land here.
+    static BROWSE_ONLY_KEYS: std::cell::RefCell<Vec<gpui::Keystroke>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The live mode the claim check filters `BaazBrowse` rows by: set by
+    /// [`crate::app::Harness::set_mode`], read by [`claims_keystroke`].
+    /// The CEF callback cannot borrow gpui state, so the flag rides here.
+    static BROWSE_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Note the live mode for the claim check: true while Browse is current,
+/// so a page in Sessions keeps the `BaazBrowse`-only chords. Called by
+/// [`crate::app::Harness::set_mode`] (and at startup for the initial
+/// mode); the snapshot itself never changes on a switch.
+pub(crate) fn set_claim_live_browse(live: bool) {
+    BROWSE_LIVE.with(|slot| slot.set(live));
 }
 
 /// Recompute the claimed-set snapshot from freshly installed bindings.
 /// Called by [`crate::app::bind_keys`], so every (re)install refreshes it.
+/// The `BaazBrowse`-only subset refreshes alongside, from the same rows.
 pub(crate) fn refresh_claimed_keys(bindings: &[gpui::KeyBinding]) {
     CLAIMED_KEYS.with(|slot| *slot.borrow_mut() = claimed_shortcuts(bindings));
+    BROWSE_ONLY_KEYS.with(|slot| *slot.borrow_mut() = browse_only_shortcuts(bindings));
+}
+
+/// The claimed keystrokes bound in `BaazBrowse` and in no app-level
+/// context (global or `AuiRoot`): ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓. ⌘W and ⌘T also bind
+/// at the root, so they never land here. [`claims_keystroke`] filters
+/// these by the live mode; the snapshot itself is mode-independent, so
+/// a rebind (never a mode switch) is what refreshes it. Pure, so unit
+/// tests pin both modes' membership without a page.
+pub(crate) fn browse_only_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
+    let mut browse: Vec<gpui::Keystroke> = Vec::new();
+    let mut app_level: Vec<gpui::Keystroke> = Vec::new();
+    for binding in bindings {
+        if binding.keystrokes().len() != 1 {
+            continue;
+        }
+        let Some(keystroke) = binding.keystrokes().first() else {
+            continue;
+        };
+        let parsed = keystroke.inner().clone();
+        let no_action = binding.action().name().rsplit("::").next() == Some("NoAction");
+        match binding.predicate() {
+            None => {
+                if no_action {
+                    app_level.retain(|claimed| claimed != &parsed);
+                } else if !app_level.contains(&parsed) {
+                    app_level.push(parsed);
+                }
+            }
+            Some(predicate) => {
+                let context = predicate.to_string();
+                if context == crate::app::BROWSE_CONTEXT {
+                    if no_action {
+                        browse.retain(|claimed| claimed != &parsed);
+                    } else if !browse.contains(&parsed) {
+                        browse.push(parsed);
+                    }
+                } else if context == aui::keys::ROOT_CONTEXT {
+                    if no_action {
+                        app_level.retain(|claimed| claimed != &parsed);
+                    } else if !app_level.contains(&parsed) {
+                        app_level.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    browse.retain(|keystroke| !app_level.contains(keystroke));
+    browse
 }
 
 /// Recompute the claimed-set snapshot from disk, after a binding is set,
@@ -399,6 +467,11 @@ pub(crate) fn refresh_claimed_from_disk() {
 /// membership in the current claimed-set snapshot, compared structurally so
 /// modifier order never matters. Unparseable input claims nothing.
 ///
+/// `BaazBrowse`-only chords (see [`browse_only_shortcuts`]) claim only
+/// while Browse is live ([`BROWSE_LIVE`]): a page in Sessions keeps
+/// ⌘1–⌘9, ⌘⇧T and ⌥⌘↑/↓. Chords that also bind at the root (⌘W, ⌘T)
+/// claim in both modes, as their Sessions handlers require.
+///
 /// Only built where something reads it: the `cef` router and the unit tests.
 /// Without either it would be dead code, and `-D warnings` says so loudly.
 #[cfg(any(test, feature = "cef"))]
@@ -406,6 +479,11 @@ pub(crate) fn claims_keystroke(keystroke: &str) -> bool {
     let Ok(incoming) = gpui::Keystroke::parse(keystroke) else {
         return false;
     };
+    if !BROWSE_LIVE.with(|slot| slot.get())
+        && BROWSE_ONLY_KEYS.with(|slot| slot.borrow().contains(&incoming))
+    {
+        return false;
+    }
     CLAIMED_KEYS.with(|slot| slot.borrow().contains(&incoming))
 }
 

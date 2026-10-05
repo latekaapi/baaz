@@ -917,9 +917,17 @@ pub struct Harness {
     /// The tab row a drag hovers over: the 2 px accent line's slot while
     /// a tab drag is in flight. Transient (cleared on drop), never keyed.
     pub(crate) browse_drop_target: Option<crate::browser::TabId>,
+    /// The drop-at-end slot below the last tab row: the accent line's
+    /// slot when a tab drag rests past every row (drops append at the
+    /// end). Transient like the row target, never keyed.
+    pub(crate) browse_drop_at_end: bool,
     /// The tab whose right-click menu stands open in the Browse sidebar
     /// (`None` while none does). Part of the sidebar key.
     pub(crate) tab_menu: Option<crate::browser::TabId>,
+    /// The open tab menu's anchor: the clicked row's bounds, reported by
+    /// the row's own prepaint. The popup seats at this rect; cleared with
+    /// the menu, refilled on the next pane repaint.
+    pub(crate) tab_menu_bounds: Option<(u64, Bounds<Pixels>)>,
     /// A session-owned tab the Browse centre shows (From sessions): it
     /// stays owned by its session. Cleared by any person-tab select.
     /// Part of the sidebar key (and read by the centre every frame).
@@ -1416,7 +1424,9 @@ impl Harness {
             mode_slide: false,
             browse_from_expanded: std::collections::HashSet::new(),
             browse_drop_target: None,
+            browse_drop_at_end: false,
             tab_menu: None,
+            tab_menu_bounds: None,
             browse_session_tab: None,
             browse_hovered_tab: None,
         };
@@ -1431,6 +1441,9 @@ impl Harness {
             this.layout.right_kind = remembered.right_kind;
             this.right_resize.width = layout::right_width(&this.layout);
         }
+        // The CEF claim check's live-mode flag starts where the window
+        // starts; every switch after this rides `set_mode`.
+        crate::keymap::set_claim_live_browse(this.mode == layout::Mode::Browse);
         // When the agent opens a URL the Browser pane opens on it — never
         // focused, so the person's keyboard stays where it was while they
         // watch. Deferred for the same re-entrancy reason as the dock hook
@@ -2304,6 +2317,9 @@ impl Harness {
         let leaving = self.mode_state(cx);
         let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
+        // The CEF claim check filters `BaazBrowse` rows by this flag, set
+        // here (never read from gpui state inside the router callback).
+        crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
         self.layout.mode = mode;
         self.layout.right_open = entering.right_open;
         self.layout.right_width = entering.right_width;
@@ -4929,6 +4945,7 @@ impl Render for Harness {
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
         let project_menu = self.render_project_menu(cx);
+        let tab_menu = self.render_tab_menu_popup(cx);
         // Z7a, the native-overlay rule: persist real navigations, resolve
         // pending screenshot attaches, and hide every native webview this
         // frame covers (the page is composited above gpui, so gpui cannot
@@ -4938,6 +4955,7 @@ impl Render for Harness {
             view_options.is_some(),
             account.is_some(),
             project_menu.is_some(),
+            tab_menu.is_some(),
             window,
             cx,
         );
@@ -5002,17 +5020,7 @@ impl Render for Harness {
             window.focus(&self.focus_root, cx);
         }
         self.overlay_was_open = overlay_now;
-        // B2a-H3: while in Browse the window wears `BaazBrowse` on a
-        // wrapper around the shell, inside the `AuiRoot` root above — so
-        // both contexts apply and the tab shortcuts (⌘W, ⌘⇧T, ⌘1–⌘9,
-        // ⌥⌘↑/↓) bind here while Sessions keeps ⌘W closing the window.
-        // Never in Sessions: the wrapper is what carries the context.
-        let body: AnyElement = if self.mode == layout::Mode::Browse {
-            div().size_full().key_context(BROWSE_CONTEXT).child(body).into_any_element()
-        } else {
-            body
-        };
-        aui::keys::track_pointer(
+        let root = aui::keys::track_pointer(
             div()
                 .size_full()
                 .relative()
@@ -5150,10 +5158,23 @@ impl Render for Harness {
                 .children(view_options)
                 .children(account)
                 .children(project_menu)
+                .children(tab_menu)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
                 .child(session::draw_end_marker()),
-        )
+        );
+        // B2a-H3b: while in Browse the window wears `BaazBrowse` on an
+        // ancestor of the focus-root div below (which owns `track_focus`
+        // and `AuiRoot`), never in Sessions. Focus resting on the root —
+        // the first frame, after overlays close, after a routed page key —
+        // still carries both contexts, so ⌘W closes a tab in Browse and
+        // the window in Sessions; a child wrapper would sit below the
+        // focused node and never apply.
+        if self.mode == layout::Mode::Browse {
+            div().size_full().key_context(BROWSE_CONTEXT).child(root).into_any_element()
+        } else {
+            root.into_any_element()
+        }
     }
 }
 
@@ -5235,6 +5256,11 @@ impl Harness {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
             cx.notify();
+            return;
+        }
+        // The Browse tab menu is pane state, never the overlay stack:
+        // Escape closes it here, before the Settings and Skills pages.
+        if self.close_tab_menu(cx) {
             return;
         }
         if !matches!(self.auth, Auth::SignedIn(_)) {
