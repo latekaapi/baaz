@@ -1010,7 +1010,7 @@ mod tests {
         assert!(ctx.page_url.is_none(), "no page shows");
         assert!(ctx.settings_section.is_none(), "settings starts closed");
         assert!(ctx.session_id.is_none(), "no session is open");
-        assert!(ctx.project.is_none(), "no project is current");
+        assert!(ctx.project.is_some(), "the explicit workspace is current");
         restore_state(state);
     }
 }
