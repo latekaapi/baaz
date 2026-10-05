@@ -97,6 +97,9 @@ pub enum MenuKind {
     /// The target project id lives on [`Menu::project`] (`None` is "Other
     /// workspaces"), because the kind itself stays `Copy`.
     Project,
+    /// The Browse header back button's history (B2a-H4): this tab's back
+    /// stack, newest first, anchored under the back button.
+    BackHistory,
 }
 
 /// An open menu: which one, where the keyboard is, and what has been typed.

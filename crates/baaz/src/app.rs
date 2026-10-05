@@ -53,6 +53,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use aui::a11y_text::a11y_text_input;
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
 use aui::util::{interaction, TrackInteraction};
@@ -71,9 +72,9 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle,
-    Focusable, ListState, SharedString, Subscription, Task, Window,
+    Bounds, MouseButton, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
+    FocusHandle, Focusable, ListState, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -736,6 +737,33 @@ pub struct Harness {
     /// the window is at hand. The fake backend navigates without a window
     /// and never arms this. Never persists.
     pub(crate) browser_pending_url: Option<String>,
+    /// The Browse address field's live input (B2a-H4): `Some` while the
+    /// toolbar or the new-tab field is being edited, `None` at rest. One
+    /// input for both fields — only one ever renders it per frame — so the
+    /// omnibox suggestions read one value everywhere. Never persists.
+    pub(crate) browse_address: Option<Entity<InputState>>,
+    /// The address input's event subscription (Enter commits, blur
+    /// restores): held while [`Self::browse_address`] is `Some`, dropped
+    /// with it. Never persists.
+    pub(crate) browse_address_sub: Option<gpui::Subscription>,
+    /// The omnibox suggestion list's highlighted row, across all sections
+    /// in order (like the palette's `selected`). Meaningful only while
+    /// [`Self::browse_address`] is `Some`. Never persists.
+    pub(crate) browse_omnibox_selected: usize,
+    /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
+    /// activates the highlighted row once moved, and commits the raw text
+    /// otherwise — so plain Enter navigates instead of asking. Set by
+    /// `move_omnibox`, cleared by typing and whenever editing ends. Never
+    /// persists.
+    pub(crate) browse_omnibox_moved: bool,
+    /// The header back button's rect (B2a-H4): what the back-history menu
+    /// seats at, reported the way `overflow_bounds` is. Never persists.
+    pub(crate) back_bounds: Option<Bounds<Pixels>>,
+    /// Whether the Browse centre's page held the keyboard on the last
+    /// `sync_browser` (B2a-H4 7b): the rising edge ends address editing,
+    /// since a click into a Chromium page moves no gpui focus and the input
+    /// never blurs. Never persists.
+    pub(crate) browse_last_holds: bool,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1250,6 +1278,12 @@ impl Harness {
             browser_idle_warmed: false,
             browser_url_focus_armed: false,
             browser_pending_url: None,
+            browse_address: None,
+            browse_address_sub: None,
+            browse_omnibox_selected: 0,
+            browse_omnibox_moved: false,
+            back_bounds: None,
+            browse_last_holds: false,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -3322,39 +3356,17 @@ impl Harness {
     }
 
 
-    /// The centre header: the current project's crumb (`mark project ▾`),
-    /// a `·` separator, the active session's label with the provider mark,
-    /// and the overflow menu — and nothing else.
-    /// The library's `centre_header` always paints the right-pane toggle and
-    /// the right header always paints its close button, so the shell gets a
-    /// plain cell with the same title construction instead. The shell's own
-    /// drag region wraps the whole header row, and buttons keep their clicks.
-    fn render_centre_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The project crumb the centre headers share (Sessions and Browse):
+    /// name and chevron as one click target that opens the project menu
+    /// under it — `project › session`, no marks (owner round 4, O4). With
+    /// no current project it names the unfiled lane — where a session
+    /// started right now would go — and opens the Projects palette, which
+    /// is how one gets filed.
+    fn project_crumb(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        // The click's target, from the list entry — never the view, so the
-        // header answers on the click's own frame, before any page arrives.
-        let target =
-            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        // One identity per chain: header, window and selection all resolve
-        // the raw id to its head, and the collapsed view row names it —
-        // the same label the sidebar's one row wears (Y2a, Y2a3).
-        let target = target.map(|id| self.chain_head(&id));
-        // The Skills page names itself after the crumb: "Skills · [project]".
-        let label = if self.skills.open {
-            Some("Skills".to_owned())
-        } else {
-            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
-        };
-        let overflow =
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        // The project crumb: name and chevron as one click target that opens
-        // the project menu under it — `project › session`, no marks (owner
-        // round 4, O4). With no current project it names the unfiled lane —
-        // where a session started right now would go — and opens the
-        // Projects palette, which is how one gets filed.
         let renaming_project_here =
             self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
-        let crumb: AnyElement = if renaming_project_here {
+        if renaming_project_here {
             div().flex_none().child(self.rename_field(window, cx)).into_any_element()
         } else if let Some(project) = self.current_project() {
             let id = project.id.clone();
@@ -3410,7 +3422,434 @@ impl Harness {
                 .on_click(open)
                 .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child(crate::sidebar::UNFILED_LABEL))
                 .into_any_element()
+        }
+    }
+
+    /// The right-pane toggle the centre headers share (B2a-H4): ⌘⌥B's
+    /// button, lit while the pane stands open. The centre cell is a custom
+    /// `header_cell`, not the library's `centre_header`, so the library's
+    /// `on_toggle_right` has no compatible builder here — and the right cell
+    /// collapses to width zero while closed, so a toggle placed there could
+    /// close but never reopen. This is the same ghost `PanelRight` the
+    /// library paints, wired straight to `toggle_right`, with a hover label
+    /// naming what it does.
+    fn right_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let right_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.toggle_right(cx);
+            // B7fix2: the click builds the real webview itself, with the
+            // window — the deferred warmup the toggle armed is then a
+            // no-op, and render never constructs first.
+            this.prewarm_browser_in(window, cx);
+        });
+        let mut right_button =
+            icon_button("hd-centre-toggle-right", IconName::PanelRight)
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Toggle right pane");
+        if self.layout.right_open {
+            right_button = right_button.on_click(right_toggle);
+        } else {
+            right_button = right_button.muted().on_click(right_toggle);
+        }
+        // The tooltip names the button for a pointer; the role and label name
+        // it for everything else. `icon_button` yields a `Button`, which has
+        // no aria builder of its own, so the wrapper carries both.
+        div()
+            .id("hd-centre-toggle-right-tip")
+            .role(gpui::Role::Button)
+            .aria_label("Toggle right pane")
+            .tooltip(|_, cx| cx.new(|_| RightToggleTip).into())
+            .child(right_button)
+            .into_any_element()
+    }
+
+    /// The Browse centre header (B2a-H4): one toolbar row in the 44 px
+    /// centre header cell — project crumb, the ↩ session chip when the
+    /// shown tab came from a session's pane, back, forward, reload/stop
+    /// with the progress line, the address field, the Extensions and More
+    /// placeholders (B2a-H5 owns their menus), and the right-pane toggle.
+    fn render_browse_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let shown = self.browse_centre_shown();
+        let tab = shown.and_then(|id| self.browser.tabs.get(id).cloned());
+        let state = self.browse_centre_state();
+        let url = state.as_ref().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+        let security = state.as_ref().map(|state| state.read(cx).security()).unwrap_or(aui_webview::PageSecurity::Unknown);
+        let progress = state.as_ref().map(|state| state.read(cx).progress()).unwrap_or(0.0);
+        let zoom = state.as_ref().map(|state| state.read(cx).zoom()).unwrap_or(100);
+        let editing = self.browse_address.is_some();
+        let blank = url.is_empty() || url == crate::browser::tabs::BLANK;
+        let (can_back, can_forward) = shown
+            .and_then(|id| self.browser.histories.get(&id).map(|history| (history.can_back(), history.can_forward())))
+            .unwrap_or((false, false));
+        let loading = crate::browser::toolbar::is_loading(progress);
+        // Back ‹, with the tab's back history on right-click.
+        let go_back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.browse_go_back(window, cx);
+        });
+        let back_menu = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+            this.open_menu(MenuKind::BackHistory, cx);
+        });
+        let back_report = cx.entity().downgrade();
+        let back = div()
+            .id("hd-browse-back-tip")
+            .role(gpui::Role::Button)
+            .aria_label("Back")
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = back_report.update(cx, |this, cx| {
+                        Harness::note_trigger_bounds(&mut this.back_bounds, bounds, cx);
+                    });
+                }
+            })
+            .on_mouse_down(MouseButton::Right, back_menu)
+            .child(
+                icon_button("hd-browse-back", IconName::ArrowLeft)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .disabled(!can_back)
+                    .accessibility_label("Back")
+                    .on_click(go_back),
+            );
+        // Forward ›.
+        let go_forward = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.browse_go_forward(window, cx);
+        });
+        let forward = div()
+            .id("hd-browse-forward-tip")
+            .role(gpui::Role::Button)
+            .aria_label("Forward")
+            .child(
+                icon_button("hd-browse-forward", IconName::ArrowRight)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .disabled(!can_forward)
+                    .accessibility_label("Forward")
+                    .on_click(go_forward),
+            );
+        // Reload ⟳, becoming stop × while loading.
+        let reload_stop = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.browse_reload_or_stop(window, cx);
+        });
+        let reload_label = if loading { "Stop loading" } else { "Reload" };
+        let reload_icon = if loading { IconName::Stop } else { IconName::Refresh };
+        let reload = div()
+            .id("hd-browse-reload-tip")
+            .role(gpui::Role::Button)
+            .aria_label(reload_label)
+            .child(
+                icon_button("hd-browse-reload", reload_icon)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label(reload_label)
+                    .on_click(reload_stop),
+            );
+        // The ↩ chip, when the shown tab came from a session's pane: the
+        // tab goes back to that session's pane, no reload.
+        let chip = match tab.as_ref().and_then(|tab| match &tab.owner {
+            crate::browser::Owner::Session(session) => Some(session.clone()),
+            crate::browser::Owner::Person => None,
+        }) {
+            Some(session) => {
+                let name = self.browse_chip_session_name(&session, cx);
+                let back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                    this.browse_chip_back(window, cx);
+                });
+                Some(
+                    div()
+                        .id("hd-browse-chip")
+                        .flex_none()
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Back to {name}"))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(8.0))
+                                .h(px(24.0))
+                                .rounded(px(scale::R_SM))
+                                .bg(p.surface_2)
+                                .text_color(p.ink_2)
+                                .ui(scale::FS_12)
+                                .cursor_pointer()
+                                .on_click(back)
+                                .child("↩")
+                                .child(div().truncate().child(name)),
+                        )
+                        .into_any_element(),
+                )
+            }
+            None => None,
         };
+        let address = self.browse_address_field(url.clone(), blank, editing, security, zoom, tab, window, cx);
+        // Extensions and More are placeholders until B2a-H5 owns their menus.
+        let extensions = div()
+            .id("hd-browse-extensions")
+            .role(gpui::Role::Button)
+            .aria_label("Extensions")
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(p.ink_3)
+                    .ui(scale::FS_13)
+                    .cursor_pointer()
+                    // B2a-H5: the extensions menu.
+                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
+                    .child("🧩"),
+            );
+        let more = div()
+            .id("hd-browse-more")
+            .role(gpui::Role::Button)
+            .aria_label("More")
+            .child(
+                icon_button("hd-browse-more-button", IconName::Dots)
+                    .ghost()
+                    .muted()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("More")
+                    // B2a-H5: the ⋯ menu.
+                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
+            );
+        let cell = header_cell("hd-browse")
+            .child(div().flex_none().child(self.project_crumb(window, cx)))
+            .children(chip)
+            .child(back)
+            .child(forward)
+            .child(reload)
+            .child(address)
+            .child(extensions)
+            .child(more)
+            .child(self.right_toggle(cx));
+        // The 2 px accent progress line along the bottom of the header,
+        // driven by the page's progress: a proportional fill while loading.
+        let progress_bar: Option<AnyElement> = if loading {
+            let fill = progress.clamp(0.0, 1.0);
+            Some(
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .h(px(2.0))
+                    .flex()
+                    .flex_row()
+                    .child(div().h_full().bg(p.accent).flex_grow(fill))
+                    .child(div().h_full().flex_grow(1.0 - fill))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        div().relative().w_full().child(cell).children(progress_bar).into_any_element()
+    }
+
+    /// The address field's live input with its omnibox keys (B2a-H4):
+    /// the one element the toolbar and the new-tab field share — only one
+    /// ever renders it per frame. ↑/↓ move the highlight, Tab completes,
+    /// ⌘↵ asks, Escape restores; plain Enter commits through the input's
+    /// own PressEnter.
+    fn browse_address_input(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(input) = self.browse_address.clone() else {
+            return div().into_any_element();
+        };
+        let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
+            match event.keystroke.key.as_str() {
+                "up" => this.move_omnibox(-1, cx),
+                "down" => this.move_omnibox(1, cx),
+                "tab" => this.complete_omnibox(window, cx),
+                "escape" => this.leave_browse_address(cx),
+                "enter" if event.keystroke.modifiers.platform => {
+                    let query = this.browse_address_text(cx);
+                    this.browse_ask(&query, window, cx);
+                }
+                _ => {}
+            }
+        });
+        div()
+            .id("hd-browse-address-keys")
+            .flex_1()
+            .min_w(px(0.0))
+            .on_key_down(keys)
+            .child(
+                a11y_text_input(("browse-address", "field"), "Address and search", &input, cx)
+                    .flex_1()
+                    .min_w(px(0.0)),
+            )
+            .into_any_element()
+    }
+
+    /// The toolbar's address field (B2a-H4): the resting address view —
+    /// badge, bright host, quiet path, zoom pill, agent chip — or the live
+    /// input while editing (except on a blank tab, where the new-tab field
+    /// owns the input and the toolbar stays at rest).
+    fn browse_address_field(
+        &self,
+        url: String,
+        blank: bool,
+        editing: bool,
+        security: aui_webview::PageSecurity,
+        zoom: u16,
+        tab: Option<crate::browser::tabs::Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::browser::toolbar::{AddressBadge, address_view, zoom_pill};
+        let p = cx.aui().colors;
+        let mut slot = h_flex()
+            .id("hd-browse-address")
+            .flex_1()
+            .min_w(px(0.0))
+            .items_center()
+            .h(px(28.0))
+            .px(px(8.0))
+            .gap(px(6.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_2)
+            .mono(scale::FS_12)
+            .overflow_hidden();
+        if editing && !blank {
+            return slot.child(self.browse_address_input(window, cx)).into_any_element();
+        }
+        // Clicking the resting field edits the full URL.
+        let prefill = if blank { String::new() } else { url.clone() };
+        let focus = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.focus_browse_address_with(&prefill, window, cx);
+        });
+        slot = slot.cursor_pointer().on_click(focus);
+        let view = address_view(&url, security, false);
+        // The site button: the tune glyph on secure, words otherwise.
+        let badge: AnyElement = match view.badge {
+            Some(AddressBadge::Tune) => {
+                icon(IconName::Sliders).size(px(13.0)).color(p.ink_2).into_any_element()
+            }
+            Some(AddressBadge::Dev) => div().flex_none().text_color(p.accent).child(view.label).into_any_element(),
+            Some(AddressBadge::Warn) => {
+                div().flex_none().text_color(p.warning).child(view.label).into_any_element()
+            }
+            Some(AddressBadge::File) => {
+                div().flex_none().text_color(p.ink_2).child(view.label).into_any_element()
+            }
+            Some(AddressBadge::Baaz) => {
+                div().flex_none().text_color(p.ink_2).child(view.label).into_any_element()
+            }
+            None => div().into_any_element(),
+        };
+        slot = slot.child(badge);
+        if !view.host.is_empty() {
+            slot = slot.child(div().flex_none().text_color(p.ink).child(view.host));
+        }
+        if !view.path.is_empty() {
+            slot = slot.child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink_3).child(view.path));
+        }
+        // A non-default zoom wears its pill; clicking resets to 100.
+        if let Some(pill) = zoom_pill(zoom) {
+            let reset = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.browse_reset_zoom(window, cx);
+            });
+            slot = slot.child(
+                div()
+                    .flex_none()
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Zoom {pill}, reset"))
+                    .child(
+                        div()
+                            .px(px(6.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(scale::R_XS))
+                            .border_1()
+                            .border_color(p.line_strong)
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .on_click(reset)
+                            .child(pill),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // The agent-using-this-tab chip: the session tab's session is
+        // Running. Clicking jumps to the session.
+        if let Some(session) = tab.as_ref().and_then(|tab| match &tab.owner {
+            crate::browser::Owner::Session(session) => Some(session.clone()),
+            crate::browser::Owner::Person => None,
+        }) {
+            let running = self.sessions.iter().any(|entry| entry.id == session && entry.running);
+            if running {
+                let jump = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                    this.set_mode(layout::Mode::Sessions, window, cx);
+                    this.resume(session.clone(), window, cx);
+                });
+                slot = slot.child(
+                    div()
+                        .flex_none()
+                        .role(gpui::Role::Button)
+                        .aria_label("Agent using this tab")
+                        .child(
+                            div()
+                                .px(px(6.0))
+                                .h(px(18.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(scale::R_XS))
+                                .bg(p.surface_3)
+                                .text_color(p.ink_2)
+                                .cursor_pointer()
+                                .on_click(jump)
+                                .child("agent using this tab"),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        // The role and label name the field; the input carries its own
+        // while editing.
+        div()
+            .id("hd-browse-address-tip")
+            .flex_1()
+            .min_w(px(0.0))
+            .role(gpui::Role::Button)
+            .aria_label("Address and search")
+            .child(slot)
+            .into_any_element()
+    }
+
+    /// The centre header: the current project's crumb (`mark project ▾`),
+    /// a `·` separator, the active session's label with the provider mark,
+    /// and the overflow menu — and nothing else.
+    /// The library's `centre_header` always paints the right-pane toggle and
+    /// the right header always paints its close button, so the shell gets a
+    /// plain cell with the same title construction instead. The shell's own
+    /// drag region wraps the whole header row, and buttons keep their clicks.
+    fn render_centre_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Browse replaces the session title with the browser toolbar.
+        if self.mode == layout::Mode::Browse {
+            return self.render_browse_toolbar(window, cx);
+        }
+        let p = cx.aui().colors;
+        // The click's target, from the list entry — never the view, so the
+        // header answers on the click's own frame, before any page arrives.
+        let target =
+            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        // One identity per chain: header, window and selection all resolve
+        // the raw id to its head, and the collapsed view row names it —
+        // the same label the sidebar's one row wears (Y2a, Y2a3).
+        let target = target.map(|id| self.chain_head(&id));
+        // The Skills page names itself after the crumb: "Skills · [project]".
+        let label = if self.skills.open {
+            Some("Skills".to_owned())
+        } else {
+            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
+        };
+        let overflow =
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
+        // The project crumb both centre headers share.
+        let crumb: AnyElement = self.project_crumb(window, cx);
         // The session half is the label after the `·` separator, with no
         // provider mark before it. The title flexes
         // inside the header cell and clips to one line, so a whole first
@@ -3467,41 +3906,8 @@ impl Harness {
         } else {
             term_button = term_button.muted().on_click(term_toggle);
         }
-        // The right-pane toggle: ⌘⌥B's button, lit while the pane stands
-        // open. The centre cell is a custom `header_cell` (project crumb,
-        // session rename, overflow seating), not the library's
-        // `centre_header`, so the library's `on_toggle_right` has no
-        // compatible builder here — and the right cell collapses to width
-        // zero while closed, so a toggle placed there could close but never
-        // reopen. This is the same ghost `PanelRight` the library paints,
-        // wired straight to `toggle_right`, with a hover label naming what
-        // it does.
-        let right_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.toggle_right(cx);
-            // B7fix2: the click builds the real webview itself, with the
-            // window — the deferred warmup the toggle armed is then a
-            // no-op, and render never constructs first.
-            this.prewarm_browser_in(window, cx);
-        });
-        let mut right_button =
-            icon_button("hd-centre-toggle-right", IconName::PanelRight)
-                .ghost()
-                .size(ButtonSize::Sm)
-                .accessibility_label("Toggle right pane");
-        if self.layout.right_open {
-            right_button = right_button.on_click(right_toggle);
-        } else {
-            right_button = right_button.muted().on_click(right_toggle);
-        }
-        // The tooltip names the button for a pointer; the role and label name
-        // it for everything else. `icon_button` yields a `Button`, which has
-        // no aria builder of its own, so the wrapper carries both.
-        let right_tip = div()
-            .id("hd-centre-toggle-right-tip")
-            .role(gpui::Role::Button)
-            .aria_label("Toggle right pane")
-            .tooltip(|_, cx| cx.new(|_| RightToggleTip).into())
-            .child(right_button);
+        // The right-pane toggle both centre headers share.
+        let right_tip = self.right_toggle(cx);
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
@@ -3729,24 +4135,233 @@ impl Harness {
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let harness = cx.weak_entity();
         let body = match self.browse_centre_page(window, cx) {
-            Some(state) => aui_webview::webview_pane("browse-centre-page", &state)
-                .on_intent(move |intent, window, cx| {
-                    if let Some(harness) = harness.upgrade() {
-                        harness.update(cx, |harness, cx| {
-                            harness.handle_browser_intent(intent, window, cx);
-                        });
-                    }
-                })
-                .into_any_element(),
+            Some(state) => {
+                let blank =
+                    matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK);
+                // `about:blank` tabs render the Baaz new-tab page instead of
+                // a white page — gpui, since about:blank is hidden by the
+                // library.
+                if blank {
+                    self.render_browse_newtab(window, cx)
+                } else {
+                    aui_webview::webview_pane("browse-centre-page", &state)
+                        .on_intent(move |intent, window, cx| {
+                            if let Some(harness) = harness.upgrade() {
+                                harness.update(cx, |harness, cx| {
+                                    harness.handle_browser_intent(intent, window, cx);
+                                });
+                            }
+                        })
+                        .into_any_element()
+                }
+            }
             None => self.render_browse_empty(cx),
         };
+        // The omnibox dropdown drops down over the page — painted after it,
+        // so gpui draws it above the screenshot stand-in the covering rule
+        // shows while it is open.
+        let omnibox = self.render_omnibox_dropdown(window, cx);
         v_flex()
             .size_full()
+            .relative()
             .id("browse-centre")
             .role(gpui::Role::Group)
             .aria_label("Browse")
             .child(body)
+            .children(omnibox)
             .into_any_element()
+    }
+
+    /// The Baaz new-tab page (B2a-H4): a large centred field with the
+    /// address field's behaviour, the ⌘↵ ask hint, and up to 5 pick-up rows
+    /// from this project's open tabs, recent sessions and closed tabs.
+    fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let editing = self.browse_address.is_some();
+        let field: AnyElement = if editing {
+            div()
+                .w(px(480.0))
+                .h(px(40.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded(px(scale::R_MD))
+                .bg(p.surface_2)
+                .mono(scale::FS_14)
+                .child(self.browse_address_input(window, cx))
+                .into_any_element()
+        } else {
+            let focus = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.focus_browse_address_with("", window, cx);
+            });
+            div()
+                .id("browse-newtab-field")
+                .w(px(480.0))
+                .h(px(40.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded(px(scale::R_MD))
+                .bg(p.surface_2)
+                .text_color(p.ink_3)
+                .ui(scale::FS_14)
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label("New tab. Search, open a page, or ask")
+                .on_click(focus)
+                .child("Search, open a page, or ask")
+                .into_any_element()
+        };
+        let mut column = v_flex()
+            .size_full()
+            .id("browse-newtab")
+            .items_center()
+            .justify_center()
+            .gap(px(scale::SP_4))
+            .role(gpui::Role::Group)
+            .aria_label("New tab")
+            .child(field)
+            .child(div().ui(scale::FS_12).text_color(p.ink_3).child("⌘↵ ask"));
+        let pickup = self.browse_pickup_full();
+        if !pickup.is_empty() {
+            let mut rows = v_flex()
+                .w(px(480.0))
+                .gap(px(2.0))
+                .child(div().ui(scale::FS_12).text_color(p.ink_3).child("Pick up where you left off"));
+            for (row, target) in pickup {
+                let content = h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .h(px(28.0))
+                    .rounded(px(scale::R_SM))
+                    .ui(scale::FS_13)
+                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).child(row.title.clone()))
+                    .child(div().flex_none().text_color(p.ink_3).child(row.detail.clone()));
+                match target {
+                    crate::browser::PickupTarget::Tab(id) => {
+                        let select = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                            this.select_browse_sidebar_tab(id, window, cx);
+                        });
+                        rows = rows.child(
+                            div()
+                                .role(gpui::Role::Button)
+                                .aria_label(format!("Open {}", row.title))
+                                .cursor_pointer()
+                                .on_click(select)
+                                .child(content),
+                        );
+                    }
+                    crate::browser::PickupTarget::Session(session) => {
+                        let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                            this.set_mode(layout::Mode::Sessions, window, cx);
+                            this.resume(session.clone(), window, cx);
+                        });
+                        rows = rows.child(
+                            div()
+                                .role(gpui::Role::Button)
+                                .aria_label(format!("Open {}", row.title))
+                                .cursor_pointer()
+                                .on_click(open)
+                                .child(content),
+                        );
+                    }
+                    crate::browser::PickupTarget::Closed => {
+                        rows = rows.child(content);
+                    }
+                }
+            }
+            column = column.child(rows);
+        }
+        column.into_any_element()
+    }
+
+    /// The omnibox suggestion list (B2a-H4): the palette look — Ask the
+    /// agent, Tabs and sessions, History and pages you read (omitted until
+    /// B2b fills it), then the engine row — dropping down over the page.
+    /// Rows are list-box options; ↑/↓/Tab/⌘↵/Enter ride the field's own
+    /// keys, a click activates.
+    fn render_omnibox_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.browse_omnibox_open() {
+            return None;
+        }
+        let rows = self.browse_suggestions(cx);
+        if rows.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let selected = self.browse_omnibox_selected;
+        let mut list = v_flex()
+            .absolute()
+            .top(px(6.0))
+            .left(px(12.0))
+            .right(px(12.0))
+            .py(px(4.0))
+            .rounded(px(scale::R_MD))
+            .bg(p.surface_1)
+            .border_1()
+            .border_color(p.line_strong)
+            .role(gpui::Role::ListBox)
+            .aria_label("Address suggestions");
+        let mut last_kind: Option<crate::browser::SuggestKind> = None;
+        for (index, row) in rows.iter().enumerate() {
+            let header = match row.suggestion.kind {
+                crate::browser::SuggestKind::Ask => Some("Ask the agent"),
+                crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session
+                    if !matches!(last_kind, Some(crate::browser::SuggestKind::Tab) | Some(crate::browser::SuggestKind::Session)) =>
+                {
+                    Some("Tabs and sessions")
+                }
+                crate::browser::SuggestKind::History
+                    if !matches!(last_kind, Some(crate::browser::SuggestKind::History)) =>
+                {
+                    Some("History and pages you read")
+                }
+                _ => None,
+            };
+            if let Some(header) = header {
+                list = list.child(
+                    div().px(px(10.0)).pt(px(4.0)).ui(scale::FS_11).text_color(p.ink_3).child(header),
+                );
+            }
+            last_kind = Some(row.suggestion.kind);
+            let activate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.activate_omnibox_row(index, window, cx);
+            });
+            let mut item = h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(10.0))
+                .h(px(28.0))
+                .ui(scale::FS_13)
+                .cursor_pointer()
+                .on_click(activate)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(p.ink)
+                        .child(row.suggestion.title.clone()),
+                );
+            if !row.suggestion.hint.is_empty() {
+                item = item.child(div().flex_none().text_color(p.ink_3).child(row.suggestion.hint.clone()));
+            }
+            if index == selected {
+                item = item.bg(p.surface_3);
+            }
+            list = list.child(
+                div()
+                    .id(("browse-omni", index))
+                    .role(gpui::Role::ListBoxOption)
+                    .aria_label(row.suggestion.title.clone())
+                    .child(item),
+            );
+        }
+        let _ = window;
+        Some(list.into_any_element())
     }
 
     /// The Browse centre with no person tab (B2a-H2b): the empty state
@@ -4667,6 +5282,10 @@ impl Render for Harness {
             // so the centre never resizes mid-switch. `right_open` still
             // rides the live layout into the shell, which is what holds
             // the width steady.
+            // B2a-H4: the pane's "Browse" button shows for session owners —
+            // person tabs already live in Browse, so they get none.
+            let carry =
+                matches!(self.shown_tab_owner(cx), crate::browser::Owner::Session(_));
             let right = if pending_neutral {
                 v_flex().size_full().into_any_element()
             } else {
@@ -4679,6 +5298,7 @@ impl Render for Harness {
                         state: browser.as_ref(),
                         tabs: &self.browser_strip(cx),
                         window: &mut *window,
+                        carry,
                     },
                     right_open,
                     cx,
@@ -4875,6 +5495,7 @@ impl Render for Harness {
                     .into_any_element()
             });
         let overflow = self.render_overflow_menu(cx);
+        let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
@@ -5043,6 +5664,7 @@ impl Render for Harness {
                 .children(muse_sheet)
                 .children(row_detail)
                 .children(overflow)
+                .children(back_history)
                 .children(view_options)
                 .children(account)
                 .children(project_menu)
@@ -5904,6 +6526,48 @@ mod tests {
         restore_state(state);
     }
 
+    /// B2a-H4: the ↩ chip round trip keeps the same entity and owner. The
+    /// pane's Browse button carries the session's active tab into Browse —
+    /// the centre renders the same `WebviewState` entity, still
+    /// session-owned — and the chip hands it back to the session's pane
+    /// with no reload: the entity in the pane afterwards is the same one.
+    #[gpui::test]
+    fn browse_chip_round_trip_keeps_the_same_entity_and_owner(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-chip-round-trip");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        let before = vc.update(|_, cx| baaz.read(cx).session_page("s-1").expect("the session has a page"));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.carry_session_tab_to_browse(window, cx)));
+        let carried = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.browse_centre_page(window, cx).expect("the centre shows the carried tab"))
+        });
+        assert_eq!(before, carried, "the same WebviewState moves into Browse: no reload");
+        let owner = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let id = harness.browser.centre_override.expect("a tab is carried");
+            harness.browser.tabs.get(id).expect("the tab exists").owner.clone()
+        });
+        assert!(
+            matches!(owner, crate::browser::Owner::Session(_)),
+            "the carried tab stays session-owned"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_chip_back(window, cx)));
+        let back = vc.update(|_, cx| baaz.read(cx).session_page("s-1").expect("the session keeps its page"));
+        assert_eq!(before, back, "the chip hands the same entity back: no reload");
+        restore_state(state);
+    }
+
     /// B7fix2: a rename inside the debounce window survives on disk.
     /// Newest wins: the debounced write serialises the CURRENT overrides
     /// at fire time, and the synchronous rename cancels the armed
@@ -6378,7 +7042,12 @@ mod tests {
                             &harness.right_cache,
                             project.clone(),
                             &[],
-                            crate::right::BrowserPane { state: None, tabs: &[], window: &mut *window },
+                            crate::right::BrowserPane {
+                                state: None,
+                                tabs: &[],
+                                window: &mut *window,
+                                carry: false,
+                            },
                             true,
                             cx,
                         );

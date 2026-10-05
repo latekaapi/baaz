@@ -92,6 +92,8 @@
 //! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
+//! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
+//! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse with the ↩ chip (the offline `browse-from-session` shot), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
@@ -300,6 +302,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb {
         verb: "tab-discard-now",
         run: |this, _, window, cx| this.step_tab_discard_now(window, cx),
+    },
+    WindowVerb { verb: "omnibox", run: |this, rest, window, cx| this.step_omnibox(rest, window, cx) },
+    WindowVerb {
+        verb: "fixture-session",
+        run: |this, rest, window, cx| this.step_fixture_session(rest, window, cx),
     },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
