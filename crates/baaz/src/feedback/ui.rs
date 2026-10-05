@@ -691,10 +691,7 @@ impl FeedbackUi {
     pub(crate) fn feedback_visual_rows(text: &str) -> usize {
         let per_row = (FEEDBACK_FIELD_INNER_W / FEEDBACK_GLYPH_W).floor().max(1.0) as usize;
         text.split('\n')
-            .map(|line| {
-                let chars = line.chars().count();
-                ((chars + per_row - 1) / per_row).max(1)
-            })
+            .map(|line| line.chars().count().div_ceil(per_row).max(1))
             .sum::<usize>()
             .max(1)
     }
@@ -1361,8 +1358,10 @@ impl crate::app::Harness {
         }
         if let Some(tested) = self.feedback.hover_tested_at {
             if tested.elapsed() < FEEDBACK_HOVER_THROTTLE {
+                // Park the trailing edge; the notify repaints, and the
+                // layer requests the next frame while dirty is set (a
+                // frame request is only legal during paint, never here).
                 self.feedback.hover_dirty = Some(point);
-                window.request_animation_frame();
                 cx.notify();
                 return;
             }
@@ -4054,11 +4053,11 @@ mod tests {
         assert_eq!(FeedbackUi::feedback_visual_rows(""), 1, "empty text is one row");
         assert_eq!(FeedbackUi::feedback_visual_rows("a\n"), 2, "a trailing newline counts");
         assert_eq!(FeedbackUi::feedback_visual_rows("a\nb\n"), 3);
-        let long = "x".repeat(100);
+        let long = "x".repeat(200);
         assert_eq!(
             FeedbackUi::feedback_visual_rows(&long),
-            3,
-            "a 100-char single line wraps into 3 rows at ~36 chars each"
+            6,
+            "a 200-char single line wraps into 6 rows at ~36 chars each"
         );
         assert!(
             FeedbackUi::feedback_popover_height(FeedbackUi::feedback_visual_rows(&long))
@@ -4178,7 +4177,7 @@ mod tests {
                     .read(cx)
                     .toasts
                     .iter()
-                    .any(|t| t.title.to_string() == "Feedback mode is off")
+                    .any(|t| t.title == "Feedback mode is off")
             }),
             "the toast shows while the setting is off"
         );
@@ -4197,7 +4196,7 @@ mod tests {
                     .read(cx)
                     .toasts
                     .iter()
-                    .any(|t| t.title.to_string() == "Feedback mode is off"),
+                    .any(|t| t.title == "Feedback mode is off"),
                 "entering Active dismisses the stale toast"
             );
         });
