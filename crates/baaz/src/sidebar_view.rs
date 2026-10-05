@@ -783,7 +783,7 @@ impl Harness {
 
     /// The Sessions | Browse switch at the very top of the sidebar
     /// column, above "New session" (B2a-H2, restyled B2a-H3): a rounded
-    /// bordered container on the surface-2 ground, each half with its
+    /// container on the surface-2 ground (no outline), each half with its
     /// icon (a sparkle for Sessions, a globe for Browse), its label and
     /// its live count in muted ink — sessions in the current project,
     /// tabs in the current project. The selected half sits on the raised
@@ -801,9 +801,10 @@ impl Harness {
             .p(px(2.0))
             .gap(px(2.0))
             .rounded(px(scale::R_MD))
+            // No outline: the raised selected half 2 px inside it read as
+            // a second border (owner feedback, 2026-10-05). The tinted
+            // ground alone marks the control.
             .bg(p.surface_2)
-            .border_1()
-            .border_color(p.line)
             .role(gpui::Role::TabList)
             .aria_label("Switch between Sessions and Browse")
             .child(Self::mode_segment(
