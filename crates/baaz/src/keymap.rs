@@ -1244,6 +1244,31 @@ mod tests {
         );
     }
 
+    /// The note popover's own context (a sibling of the layer, never
+    /// inside it): `enter` saves, `escape` cancels — so typing shortcuts
+    /// and Escape reach the note instead of pausing the mode.
+    #[test]
+    fn feedback_note_rows_bind_save_and_cancel_in_their_own_context() {
+        let note = crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT;
+        assert_ne!(
+            note,
+            crate::app::feedback_ui::FEEDBACK_CONTEXT,
+            "the popover never lives inside the layer's context"
+        );
+        for (action, keystroke) in
+            [("FeedbackNoteSave", "enter"), ("FeedbackNoteCancel", "escape")]
+        {
+            let row =
+                KEYMAP.iter().find(|row| row.action == action).unwrap_or_else(|| panic!("KEYMAP carries {action}"));
+            assert_eq!(row.keystroke, keystroke);
+            assert_eq!(row.context, Some(note));
+            assert!(
+                super::binding_for_action(row.action, row.keystroke, row.context).is_some(),
+                "{action} builds a binding"
+            );
+        }
+    }
+
     /// No two rows claim the same keystroke in the same context: that is
     /// the conflict check, and the reason a table beats 36 loose calls.
     #[test]
