@@ -971,15 +971,17 @@ impl Harness {
     }
 
     /// Browser (B2a-H7): where links from other apps go, and which app
-    /// owns them. The Default-browser row reads the live `https` handler
-    /// every frame — a switch made in System Settings shows on the next
-    /// regained focus — and Make default claims `http` and `https` for
-    /// Baaz (macOS shows its own confirmation). The button is the only
-    /// place that ever changes the system default.
+    /// owns them. The Default-browser row renders the cached `https`
+    /// handler only — the frame hook owns the LaunchServices lookup —
+    /// and Make default claims `http` and `https` for Baaz (macOS shows
+    /// its own confirmation and applies it asynchronously, so the row
+    /// waits until the next re-read). The button is the only place that
+    /// ever changes the system default.
     fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let handler = crate::default_browser::default_handler_for_https();
-        let status = crate::default_browser::status_line(handler.as_deref());
+        let handler = self.default_browser_handler().map(str::to_owned);
+        let status =
+            crate::default_browser::status_text(handler.as_deref(), self.default_browser_confirm_pending);
         // B2a-H7
         let mut row = h_flex()
             .w_full()
@@ -994,8 +996,16 @@ impl Harness {
                     .child(div().text_color(p.ink_3).ui(scale::FS_12).child(status)),
             );
         if crate::default_browser::offers_make_default(handler.as_deref()) {
-            let make = cx.listener(|_: &mut Self, _: &(), _, cx| {
-                crate::default_browser::make_baaz_default();
+            let make = cx.listener(|this: &mut Self, _: &(), _, cx| {
+                if !crate::default_browser::make_baaz_default() {
+                    crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
+                }
+                // macOS confirms asynchronously: wait for the re-read
+                // (~1 s) and the next focus-regain instead of showing a
+                // stale handler.
+                this.default_browser_confirm_pending = true;
+                this.default_browser_recheck_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
                 cx.notify();
             });
             row = row.child(

@@ -772,10 +772,25 @@ pub struct Harness {
     /// persists.
     pub(crate) pending_external_urls: Vec<String>,
     /// Whether the window held focus on the last frame (B2a-H7): the
-    /// false→true edge re-reads the default-browser row, so the Settings
-    /// page shows a switch made in System Settings without a restart.
-    /// Never persists.
+    /// false→true edge re-reads the default-browser cache, so the
+    /// Settings page shows a switch made in System Settings without a
+    /// restart. Never persists.
     pub(crate) was_window_active: bool,
+    /// The cached `https` default handler (B2a-H7b): `None` until the
+    /// first read, then the lookup result (`None` inside when the lookup
+    /// fails, e.g. off macOS). The Settings page renders this cache
+    /// only — never a live LaunchServices lookup — and [`Self::on_frame`]
+    /// refreshes it on focus-regain, when the Make-default re-read comes
+    /// due, and on the first frame. Never persists.
+    pub(crate) default_browser_cache: Option<Option<String>>,
+    /// A Make-default click is waiting for macOS to confirm: the row
+    /// shows "Waiting for macOS to confirm…" until the next re-read.
+    /// Never persists.
+    pub(crate) default_browser_confirm_pending: bool,
+    /// When the post-Make-default re-read comes due (macOS confirms
+    /// asynchronously — about a second after the click — plus again on
+    /// the next focus-regain). Never persists.
+    pub(crate) default_browser_recheck_at: Option<std::time::Instant>,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1319,6 +1334,9 @@ impl Harness {
             browser_pending_url: None,
             pending_external_urls: Vec::new(),
             was_window_active: false,
+            default_browser_cache: None,
+            default_browser_confirm_pending: false,
+            default_browser_recheck_at: None,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -4407,17 +4425,19 @@ impl Harness {
         // into person tabs (or park them until sign-in), off the frame
         // through a task.
         self.poll_external_urls(cx);
-        // A regained focus re-reads the default-browser row (B2a-H7): the
-        // page renders the live handler every frame, and this edge wakes
-        // one more render so a switch made in System Settings shows
-        // without a restart.
+        // The default-browser cache (B2a-H7b): render reads the cache
+        // only, so the LaunchServices lookup lives here — on regained
+        // focus (a switch made in System Settings shows without a
+        // restart), when the post-Make-default re-read comes due (macOS
+        // confirms asynchronously), and on the first frame so the row
+        // never renders an empty cache.
         let window_active = window.is_window_active();
-        if window_active
-            && !self.was_window_active
-            && self.settings_page.open
-            && crate::settings::settings_parent(&self.settings_page.section) == "browser"
+        let recheck_due = self
+            .default_browser_recheck_at
+            .is_some_and(|at| std::time::Instant::now() >= at);
+        if (window_active && !self.was_window_active) || recheck_due || self.default_browser_cache.is_none()
         {
-            cx.notify();
+            self.refresh_default_browser_cache();
         }
         self.was_window_active = window_active;
         // The window's title is the session's, so a person with three baaz

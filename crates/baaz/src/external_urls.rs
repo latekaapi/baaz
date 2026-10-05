@@ -1,20 +1,21 @@
 //! Links opened from other apps (B2a-H7): macOS delivers them through
 //! `App::on_open_urls`, whose callback fires with no window of its own,
-//! so it only enqueues into the process-wide queue below. The shell
-//! drains that queue on its next frame ([`Harness::poll_external_urls`])
-//! into [`Harness::ingest_external_urls`] — the same path the scripted
+//! so it only enqueues into the process-wide queue below and kicks a
+//! foreground drain ([`kick_external_drain`]). The shell also drains
+//! that queue on every frame ([`Harness::poll_external_urls`]) into
+//! [`Harness::ingest_external_urls`] — the same path the scripted
 //! `open-url:<url>` step drives, so the probe exercises what a Mail
 //! click would trigger.
 //!
 //! Every URL lands as a new **person tab** in the current project, the
-//! window switches to Browse mode, and the window comes to the front.
-//! Before sign-in (the login screen still up) URLs wait in
+//! window switches to Browse mode, and the app and window come to the
+//! front. Before sign-in (the login screen still up) URLs wait in
 //! [`Harness::pending_external_urls`](crate::app::Harness) and open once
 //! the shell is up. Several URLs open several tabs, in order, the last
 //! one active. Baaz's own scheme and anything non-web are ignored with
 //! a log line. Nothing here ever changes the system default browser.
 
-use gpui::{Context, Window};
+use gpui::{AsyncApp, Context, Window};
 
 use crate::app::Harness;
 use crate::login::Auth;
@@ -23,8 +24,8 @@ use crate::login::Auth;
 /// it without a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExternalOpen<'a> {
-    /// `http`/`https`, or a `file:` URL (or bare path) at an HTML
-    /// document: opens as a person tab.
+    /// `http`/`https`, or a `file:` URL at an HTML document: opens as a
+    /// person tab.
     WebTab(&'a str),
     /// Baaz's own scheme: handed to the existing handling with a log
     /// line (none is registered yet, so it stops there).
@@ -33,30 +34,39 @@ pub(crate) enum ExternalOpen<'a> {
     Ignored(&'a str),
 }
 
-/// Decide what `raw` (one `on_open_urls` item, or one `open-url:`
-/// payload) means. Trims wrapping whitespace; scheme matches are
-/// case-insensitive, so `HTTPS://…` still opens.
-pub(crate) fn classify_external_open(raw: &str) -> ExternalOpen<'_> {
+/// Normalize one `on_open_urls` item (or one `open-url:` payload) before
+/// classifying: trims wrapping whitespace and percent-encodes raw spaces
+/// in `file:` URLs. Pure, so unit tests pin it without a window.
+pub(crate) fn normalize_external_url(raw: &str) -> String {
     let trimmed = raw.trim();
-    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.to_ascii_lowercase().starts_with("file:") {
+        return trimmed.replace(' ', "%20");
+    }
+    trimmed.to_owned()
+}
+
+/// Decide what `url` (one normalized `on_open_urls` item, or one
+/// `open-url:` payload) means. Scheme matches are case-insensitive, so
+/// `HTTPS://…` still opens. There is deliberately no bare-path branch:
+/// on macOS gpui delivers `NSURL.absoluteString` (always a URL string,
+/// never a bare filesystem path), so a bare path is ignored with a log
+/// line like anything else non-web.
+pub(crate) fn classify_external_open(url: &str) -> ExternalOpen<'_> {
+    let lower = url.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        return ExternalOpen::WebTab(trimmed);
+        return ExternalOpen::WebTab(url);
     }
     if lower.starts_with("baaz:") {
-        return ExternalOpen::OwnScheme(trimmed);
+        return ExternalOpen::OwnScheme(url);
     }
     if let Some(path) = lower.strip_prefix("file://") {
         let path = path.split(['?', '#']).next().unwrap_or(path);
         if has_html_extension(path) {
-            return ExternalOpen::WebTab(trimmed);
+            return ExternalOpen::WebTab(url);
         }
-        return ExternalOpen::Ignored(trimmed);
+        return ExternalOpen::Ignored(url);
     }
-    // A Finder `.html` open arriving without its `file://` wrapper.
-    if (trimmed.starts_with('/') || trimmed.starts_with('.')) && has_html_extension(&lower) {
-        return ExternalOpen::WebTab(trimmed);
-    }
-    ExternalOpen::Ignored(trimmed)
+    ExternalOpen::Ignored(url)
 }
 
 /// Whether `path` (lowercased) names an HTML document: `.html`, `.htm`
@@ -101,6 +111,59 @@ fn external_queue_len() -> usize {
     external_queue().lock().map(|queue| queue.len()).unwrap_or(0)
 }
 
+// The running app for the `on_open_urls` kick below: stashed once the
+// first shell window opens (the callback itself owns no context).
+// Thread-local because `AsyncApp` is `!Send`: both the stash (inside
+// `run`, on the main thread) and the kick (the AppKit open-URLs
+// delegate, on the main thread) touch it from there only.
+std::thread_local! {
+    static DRAIN_APP: std::cell::RefCell<Option<AsyncApp>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Remember the running app so [`kick_external_drain`] can schedule the
+/// drain on the foreground executor. Called once the shell window opens.
+pub(crate) fn note_shell_app(app: AsyncApp) {
+    DRAIN_APP.with(|slot| *slot.borrow_mut() = Some(app));
+}
+
+/// Schedule a drain on the foreground executor, straight from the
+/// `on_open_urls` callback: a hidden or minimised window paints no
+/// frames, so the frame hook alone would leave the tab unopened until
+/// the window comes back. A no-op until the first shell window opens
+/// (the frame hook covers URLs that arrive before that).
+pub(crate) fn kick_external_drain() {
+    let app = DRAIN_APP.with(|slot| slot.borrow().clone());
+    let Some(app) = app else { return };
+    let executor = app.foreground_executor().clone();
+    executor
+        .spawn(async move {
+            app.update(|cx| {
+                let urls = drain_external_queue();
+                for window in cx.windows() {
+                    let batch = urls.clone();
+                    let _ = window
+                        .downcast::<gpui_kit::component::Root>()
+                        .and_then(|handle| {
+                            handle
+                                .update(cx, |root, window, cx| {
+                                    root.view()
+                                        .clone()
+                                        .downcast::<Harness>()
+                                        .map(|harness| {
+                                            harness.update(cx, |this, cx| {
+                                                this.drain_external_now(batch, window, cx);
+                                            });
+                                        })
+                                        .unwrap_or(())
+                                })
+                                .ok()
+                        });
+                }
+            });
+        })
+        .detach();
+}
+
 impl Harness {
     /// One batch of outside URLs into the shell: web URLs become person
     /// tabs in arrival order (the last ends active); the own scheme and
@@ -115,7 +178,8 @@ impl Harness {
     ) {
         let mut web: Vec<String> = Vec::new();
         for url in urls {
-            match classify_external_open(&url) {
+            let normalized = normalize_external_url(&url);
+            match classify_external_open(&normalized) {
                 ExternalOpen::WebTab(tab) => web.push(tab.to_owned()),
                 ExternalOpen::OwnScheme(own) => {
                     crate::baaz_log!("open-url: own-scheme url ignored (no handler): {own}")
@@ -138,7 +202,9 @@ impl Harness {
 
     /// Open each URL as a person tab in the current project: Browse
     /// mode first, then one tab per URL in order — each open selects,
-    /// so the last URL ends active — and the window to the front.
+    /// so the last URL ends active — and the window to the front. The
+    /// app activates too, so a click in another app lands on Baaz even
+    /// when it was hidden behind it.
     fn open_external_tabs(&mut self, urls: &[String], window: &mut Window, cx: &mut Context<Self>) {
         if self.mode != crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Browse, window, cx);
@@ -146,6 +212,7 @@ impl Harness {
         for url in urls {
             self.step_tab_new(url, window, cx);
         }
+        cx.activate(true);
         window.activate_window();
         cx.notify();
     }
@@ -161,24 +228,41 @@ impl Harness {
         }
     }
 
-    /// Drain the process-wide open-URL queue into the shell: the
-    /// frame's rejoin for the `on_open_urls` callback, which fires
-    /// with no window of its own. Off the frame through a task, never
-    /// inside render.
+    /// Drain the process-wide open-URL queue into the shell, then open
+    /// whatever waited for sign-in: the frame's rejoin for the
+    /// `on_open_urls` callback, which fires with no window of its own.
+    /// Off the frame through a task, never inside render. The pending
+    /// queue flushes on any signed-in frame even when the process queue
+    /// is empty — otherwise URLs parked at the login screen would wait
+    /// for another click that never comes.
     pub(crate) fn poll_external_urls(&mut self, cx: &mut Context<Self>) {
-        if external_queue_len() == 0 {
+        let signed_in = matches!(self.auth, Auth::SignedIn(_));
+        if external_queue_len() == 0 && (!signed_in || self.pending_external_urls.is_empty()) {
             return;
         }
         let urls = drain_external_queue();
-        if urls.is_empty() {
-            return;
-        }
         self.tasks.push(cx.spawn(async move |this, cx| {
             let _ = this.update_in(cx, |this, window, cx| {
-                this.ingest_external_urls(urls, window, cx);
-                this.flush_pending_external_urls(window, cx);
+                this.drain_external_now(urls, window, cx);
             });
         }));
+    }
+
+    /// One synchronous drain with the window at hand: ingest the process
+    /// queue's batch, then open whatever waited for sign-in. The frame
+    /// hook reaches it through a task ([`Self::poll_external_urls`]);
+    /// the foreground kick from the `on_open_urls` callback calls it
+    /// directly, so a hidden window still opens the tab promptly.
+    pub(crate) fn drain_external_now(
+        &mut self,
+        urls: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !urls.is_empty() {
+            self.ingest_external_urls(urls, window, cx);
+        }
+        self.flush_pending_external_urls(window, cx);
     }
 
     /// `open-url:<url>`: the scripted form of a real open-URL event —
@@ -214,10 +298,41 @@ mod tests {
 
     #[test]
     fn the_scheme_match_ignores_case_and_whitespace() {
+        let normalized = normalize_external_url("  HTTPS://example.com/ ");
+        assert_eq!(normalized, "HTTPS://example.com/");
         assert_eq!(
-            classify_external_open("  HTTPS://example.com/ "),
+            classify_external_open(&normalized),
             ExternalOpen::WebTab("HTTPS://example.com/")
         );
+    }
+
+    #[test]
+    fn file_urls_with_raw_spaces_come_out_encoded() {
+        let normalized = normalize_external_url("  file:///tmp/my page.html  ");
+        assert_eq!(normalized, "file:///tmp/my%20page.html");
+        assert!(matches!(
+            classify_external_open(&normalized),
+            ExternalOpen::WebTab("file:///tmp/my%20page.html")
+        ));
+        // Non-file URLs pass through untouched apart from the trim.
+        assert_eq!(
+            normalize_external_url("https://example.com/a b"),
+            "https://example.com/a b"
+        );
+    }
+
+    #[test]
+    fn bare_paths_are_ignored_like_anything_non_web() {
+        // gpui delivers `NSURL.absoluteString` — always a URL string,
+        // never a bare filesystem path — so no bare-path branch exists.
+        for raw in ["/tmp/page.html", "./page.html", "/tmp/photo.png"] {
+            let normalized = normalize_external_url(raw);
+            assert_eq!(
+                classify_external_open(&normalized),
+                ExternalOpen::Ignored(normalized.as_str()),
+                "for {raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -332,10 +447,12 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H7 over a live shell: URLs arriving at the login screen wait,
-    /// then open in order once the shell is up.
+    /// B2a-H7b over a live shell: URLs arriving at the login screen
+    /// wait, then the frame hook opens them in order once the shell is
+    /// up — through [`Harness::poll_external_urls`], never a direct
+    /// flush call, so the test pins the path a real sign-in takes.
     #[gpui::test]
-    fn urls_before_sign_in_queue_then_flush(cx: &mut gpui::TestAppContext) {
+    fn urls_before_sign_in_flush_through_poll(cx: &mut gpui::TestAppContext) {
         use crate::browser::Owner;
         let state = hermetic_state("external-queued");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -365,16 +482,20 @@ mod tests {
                 "nothing opens before the shell is up"
             );
         });
+        // The sign-in transition, then frames: no direct flush anywhere.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.flush_pending_external_urls(window, cx);
             })
         });
         vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| h.poll_external_urls(cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.pending_external_urls.is_empty(), "the flush drains the queue");
+            assert!(h.pending_external_urls.is_empty(), "the frame hook drains the queue");
             let space = h.current_project_id();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             let got: Vec<&str> =
