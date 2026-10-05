@@ -743,7 +743,23 @@ impl Harness {
     pub(crate) fn render_settings_nav(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let selected = settings_parent(&self.settings_page.section);
-        let back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_settings(cx));
+        let back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            // A keyboard/VoiceOver press; a pointer press already closed on
+            // mouse-down (see below), so this is a no-op then.
+            if this.settings_open() {
+                this.close_settings(cx);
+            }
+        });
+        // Close on mouse-down: closing on click (mouse-up) let the same
+        // click land on whatever the closed page uncovered — the
+        // Sessions | Browse switch sits exactly under Back, so leaving
+        // Settings from Browse flipped to Sessions (found live, B2a).
+        let back_down = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+            if this.settings_open() {
+                this.close_settings(cx);
+            }
+            cx.stop_propagation();
+        });
         let mut list = v_flex()
             .id("settings-nav")
             .size_full()
@@ -758,7 +774,8 @@ impl Harness {
                     .py(px(scale::SP_3))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label("Back to sessions")
+                    .aria_label("Back")
+                    .on_mouse_down(gpui::MouseButton::Left, back_down)
                     .on_click(back)
                     .child(div().text_color(p.ink_3).ui(scale::FS_13).child("← Back")),
             )
