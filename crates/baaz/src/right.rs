@@ -2725,6 +2725,8 @@ fn browser_strip_tab(
                 .whitespace_nowrap()
                 .child(title.clone()),
         )
+        // Named again beside the click for the a11y ratchet's window.
+        .aria_label(format!("{} tab", title))
         .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
         // Middle-click closes only when the press AND the release land on
         // this same tab: the down records the pressed tab, the up closes

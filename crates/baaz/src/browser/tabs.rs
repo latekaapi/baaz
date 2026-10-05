@@ -99,7 +99,7 @@ pub(crate) struct StripTab {
 
 /// The whole tab model: ordered tabs, each owner's active tab, and the
 /// recently closed for reopen. Serialisable as one JSON file.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, Serialize, Deserialize)]
 pub(crate) struct Tabs {
     /// Every open tab, in strip order.
     #[serde(default)]
@@ -118,9 +118,36 @@ pub(crate) struct Tabs {
     /// resurrects from a stale `browser_url`.
     #[serde(default)]
     pub migrated: Vec<String>,
+    /// The model generation: bumped on every mutation (open, close,
+    /// activate, pin, reorder, retitle), so the cached sidebar keys the
+    /// Browse fingerprints on this counter plus row state instead of
+    /// rebuilding label strings per frame. Never serialised: a load
+    /// starts a fresh run at zero.
+    #[serde(skip, default)]
+    pub generation: u64,
+}
+
+/// Content equality: the generation is an ephemeral repaint counter —
+/// never serialised, never compared — so a loaded snapshot equals the
+/// model that wrote it.
+impl PartialEq for Tabs {
+    fn eq(&self, other: &Self) -> bool {
+        self.tabs == other.tabs
+            && self.active == other.active
+            && self.next_id == other.next_id
+            && self.closed == other.closed
+            && self.migrated == other.migrated
+    }
 }
 
 impl Tabs {
+    /// Bump the model generation: every mutation calls this, so the
+    /// cached sidebar's key moves on any change without comparing
+    /// labels. Wraps on overflow: equality is all the key needs.
+    pub(crate) fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Open a tab for `owner` in `space` on `url`, selecting it. Inserted
     /// directly after `after` when that tab exists, else appended.
     pub(crate) fn open(
@@ -148,6 +175,7 @@ impl Tabs {
             .unwrap_or(self.tabs.len());
         self.tabs.insert(at.min(self.tabs.len()), tab);
         self.active.insert(key, id);
+        self.bump();
         id
     }
 
@@ -178,6 +206,7 @@ impl Tabs {
         while self.closed.len() > CLOSED_CAP {
             self.closed.remove(0);
         }
+        self.bump();
         let key = active_key(&tab.owner, tab.space.as_deref());
         if self.active.get(&key) != Some(&id) {
             return None;
@@ -214,6 +243,7 @@ impl Tabs {
         self.active
             .insert(active_key(&tab.owner, tab.space.as_deref()), id);
         self.tabs.push(tab);
+        self.bump();
         Some(id)
     }
 
@@ -224,6 +254,7 @@ impl Tabs {
                 let tab = tab.clone();
                 self.active
                     .insert(active_key(&tab.owner, tab.space.as_deref()), id);
+                self.bump();
                 true
             }
             None => false,
@@ -257,6 +288,10 @@ impl Tabs {
     /// model order. Person tabs are per project; sessions already belong
     /// to one project, so every session tab shows regardless of `space`.
     pub(crate) fn ordered_tabs(&self, owner: &Owner, space: Option<&str>) -> Vec<&Tab> {
+        // One position walk, then a sort on cached keys: O(n log n), not
+        // the O(n² log n) the per-comparison `position` scan cost.
+        let positions: std::collections::HashMap<TabId, usize> =
+            self.tabs.iter().enumerate().map(|(index, tab)| (tab.id, index)).collect();
         let mut tabs: Vec<&Tab> = self
             .tabs
             .iter()
@@ -264,7 +299,7 @@ impl Tabs {
                 tab.owner == *owner && (tab.owner != Owner::Person || tab.space.as_deref() == space)
             })
             .collect();
-        tabs.sort_by_key(|tab| (!tab.pinned, self.tabs.iter().position(|t| t.id == tab.id)));
+        tabs.sort_by_key(|tab| (!tab.pinned, positions.get(&tab.id).copied().unwrap_or(usize::MAX)));
         tabs
     }
 
@@ -329,6 +364,7 @@ impl Tabs {
             }
         }
         self.active.insert(active_key(&owner, space.as_deref()), id);
+        self.bump();
         true
     }
 
@@ -360,6 +396,7 @@ impl Tabs {
                 .unwrap_or(self.tabs.len())
         };
         self.tabs.insert(at, tab);
+        self.bump();
         true
     }
 
@@ -374,7 +411,131 @@ impl Tabs {
         let tab = self.tabs.remove(from);
         let at = index.min(self.tabs.len());
         self.tabs.insert(at, tab);
+        self.bump();
         true
+    }
+
+    /// Move `id` directly before `before` in model order, or to the end
+    /// when `before` is `None`: the Browse sidebar's drag-reorder. False
+    /// for an unknown `id`; an unknown `before` also lands at the end.
+    /// Moving before itself is a no-op that still answers true.
+    pub(crate) fn move_before(&mut self, id: TabId, before: Option<TabId>) -> bool {
+        let from = match self.tabs.iter().position(|tab| tab.id == id) {
+            Some(from) => from,
+            None => return false,
+        };
+        if before == Some(id) {
+            return true;
+        }
+        let tab = self.tabs.remove(from);
+        let at = before
+            .and_then(|before| self.tabs.iter().position(|tab| tab.id == before))
+            .unwrap_or(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.bump();
+        true
+    }
+
+    /// Move the owner's active tab one display slot (`delta` of -1 or 1):
+    /// the Browse sidebar's ⌥⌘↑/⌥⌘↓. Display order is pinned-first, so
+    /// only a neighbour in the same pinned class swaps — crossing the
+    /// pinned boundary would need a (un)pin, never a silent reorder.
+    /// False with no active tab, at the edge, or across the boundary.
+    pub(crate) fn move_active_by(&mut self, owner: &Owner, space: Option<&str>, delta: i32) -> bool {
+        let order: Vec<(TabId, bool)> =
+            self.ordered_tabs(owner, space).iter().map(|tab| (tab.id, tab.pinned)).collect();
+        let active = self.active_of(owner, space);
+        let at = active.and_then(|active| order.iter().position(|(id, _)| *id == active));
+        let Some(at) = at else {
+            return false;
+        };
+        let to = at as i32 + delta;
+        if to < 0 || to >= order.len() as i32 {
+            return false;
+        }
+        let to = to as usize;
+        if order[at].1 != order[to].1 {
+            return false;
+        }
+        let (first, second) = (order[at].0, order[to].0);
+        let [left, right] = [first, second].map(|id| self.tabs.iter().position(|tab| tab.id == id));
+        match (left, right) {
+            (Some(left), Some(right)) => {
+                self.tabs.swap(left, right);
+                self.bump();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The display tab ⌘1–⌘8 (`n` = 1-based slot) or ⌘9 (`last`) selects:
+    /// the n-th tab on screen, or the last one. `None` for an empty owner
+    /// or an out-of-range slot.
+    pub(crate) fn nth_tab(&self, owner: &Owner, space: Option<&str>, n: usize, last: bool) -> Option<TabId> {
+        let order = self.ordered_tabs(owner, space);
+        if order.is_empty() {
+            return None;
+        }
+        if last {
+            return order.last().map(|tab| tab.id);
+        }
+        if n == 0 {
+            return None;
+        }
+        order.get(n - 1).map(|tab| tab.id)
+    }
+
+    /// Duplicate `id`: a copy of its URL and title, unpinned, inserted
+    /// directly after it and selected. `None` for an unknown tab.
+    pub(crate) fn duplicate(&mut self, id: TabId) -> Option<TabId> {
+        let tab = self.tabs.iter().find(|tab| tab.id == id)?.clone();
+        let fresh = TabId(self.next_id);
+        self.next_id += 1;
+        let at = self.tabs.iter().position(|tab| tab.id == id).map(|index| index + 1).unwrap_or(self.tabs.len());
+        self.tabs.insert(
+            at.min(self.tabs.len()),
+            Tab {
+                id: fresh,
+                space: tab.space.clone(),
+                owner: tab.owner.clone(),
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+                pinned: false,
+                last_shown: None,
+            },
+        );
+        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), fresh);
+        self.bump();
+        Some(fresh)
+    }
+
+    /// Close every unpinned tab of `id`'s owner in `id`'s space except
+    /// `id` itself: the tab menu's "Close other tabs". Pinned tabs are
+    /// spared, the browser convention — a pinned tile never dies from
+    /// another tab's menu. Answers how many closed, and selects `id`.
+    pub(crate) fn close_others(&mut self, id: TabId) -> usize {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id).cloned() else {
+            return 0;
+        };
+        let others: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|other| {
+                other.id != id
+                    && other.owner == tab.owner
+                    && other.space == tab.space
+                    && !other.pinned
+            })
+            .map(|other| other.id)
+            .collect();
+        let count = others.len();
+        for other in others {
+            self.close(other);
+        }
+        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
+        self.bump();
+        count
     }
 
     /// Record a live page's URL and title on `id`. Answers whether either
@@ -383,7 +544,7 @@ impl Tabs {
     /// an empty or `about:blank` URL (and an empty title) is skipped, so
     /// a rebuild does not overwrite the saved page with blank.
     pub(crate) fn set_url_title(&mut self, id: TabId, url: &str, title: &str) -> bool {
-        match self.tabs.iter_mut().find(|tab| tab.id == id) {
+        let changed = match self.tabs.iter_mut().find(|tab| tab.id == id) {
             Some(tab) => {
                 let mut changed = false;
                 if super::should_remember(url, Some(tab.url.as_str())) {
@@ -403,7 +564,11 @@ impl Tabs {
                 changed
             }
             None => false,
+        };
+        if changed {
+            self.bump();
         }
+        changed
     }
 
     /// Stamp `id` as the just-shown page, in memory only. The stamp never
@@ -1091,6 +1256,170 @@ mod tests {
         // second tab active, closing it lands on the third.
         assert!(model.activate(second));
         assert_eq!(model.close(second), Some(third));
+    }
+
+    #[test]
+    fn drag_reorder_moves_before_the_drop_row() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        assert!(model.move_before(third, Some(first)));
+        let shown: Vec<TabId> = model
+            .ordered_tabs(&session("s"), None)
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(shown, vec![third, first, second]);
+        // Dropping past the end (or onto an unknown row) appends.
+        assert!(model.move_before(first, None));
+        let shown: Vec<TabId> = model
+            .ordered_tabs(&session("s"), None)
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(shown, vec![third, second, first]);
+        // Unknown drags and self-drops change nothing.
+        assert!(!model.move_before(TabId(77), Some(second)));
+        assert!(model.move_before(second, Some(second)));
+        let shown: Vec<TabId> = model
+            .ordered_tabs(&session("s"), None)
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(shown, vec![third, second, first]);
+    }
+
+    #[test]
+    fn option_command_arrows_move_the_active_tab() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        assert!(model.activate(second));
+        assert!(model.move_active_by(&session("s"), None, 1));
+        let shown: Vec<TabId> = model
+            .ordered_tabs(&session("s"), None)
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(shown, vec![first, third, second]);
+        assert!(model.move_active_by(&session("s"), None, -1));
+        let shown: Vec<TabId> = model
+            .ordered_tabs(&session("s"), None)
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(shown, vec![first, second, third]);
+        // At the edge there is nowhere to go.
+        assert!(model.activate(first));
+        assert!(!model.move_active_by(&session("s"), None, -1));
+        assert!(model.activate(third));
+        assert!(!model.move_active_by(&session("s"), None, 1));
+        // Crossing the pinned boundary needs a (un)pin, never a move.
+        assert!(model.set_pinned(first, true));
+        assert!(model.activate(second));
+        assert!(!model.move_active_by(&session("s"), None, -1));
+    }
+
+    #[test]
+    fn command_digits_map_to_display_slots_and_nine_is_last() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        assert_eq!(model.nth_tab(&session("s"), None, 1, false), Some(first));
+        assert_eq!(model.nth_tab(&session("s"), None, 3, false), Some(third));
+        assert_eq!(model.nth_tab(&session("s"), None, 4, false), None);
+        assert_eq!(model.nth_tab(&session("s"), None, 0, false), None);
+        assert_eq!(model.nth_tab(&session("s"), None, 9, false), None);
+        // ⌘9 is the last tab even with fewer than nine open.
+        assert_eq!(model.nth_tab(&session("s"), None, 9, true), Some(third));
+        assert_eq!(model.nth_tab(&session("s"), None, 1, true), Some(third));
+        // Pinned tabs lead the digit order, like the strip.
+        assert!(model.set_pinned(third, true));
+        assert_eq!(model.nth_tab(&session("s"), None, 1, false), Some(third));
+        assert_eq!(model.nth_tab(&session("s"), None, 2, false), Some(first));
+        assert_eq!(model.nth_tab(&session("t"), None, 1, false), None);
+        assert_eq!(model.nth_tab(&session("t"), None, 1, true), None);
+        let _ = second;
+    }
+
+    #[test]
+    fn duplicate_copies_and_selects_behind_the_source() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        assert!(model.set_url_title(first, "https://a.example/", "A"));
+        let copy = model.duplicate(first).expect("a copy");
+        assert_ne!(copy, first);
+        let tab = model.get(copy).expect("the copy");
+        assert_eq!(tab.url, "https://a.example/");
+        assert_eq!(tab.title, "A");
+        assert!(!tab.pinned);
+        assert_eq!(model.active_of(&session("s"), None), Some(copy));
+        assert!(model.duplicate(TabId(77)).is_none());
+    }
+
+    #[test]
+    fn close_others_keeps_only_the_kept_tab_selected() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        let other = model.open(None, session("t"), "https://d.example/", None);
+        assert_eq!(model.close_others(second), 2);
+        assert_eq!(model.active_of(&session("s"), None), Some(second));
+        assert_eq!(model.active_of(&session("t"), None), Some(other));
+        // Reopen still knows the closed ones, newest first.
+        assert_eq!(model.reopen_last(), Some(third));
+        assert_eq!(model.close_others(TabId(77)), 0);
+        let _ = first;
+    }
+
+    #[test]
+    fn close_others_spares_pinned_tabs() {
+        let mut model = tabs();
+        let pinned = model.open(None, session("s"), "https://a.example/", None);
+        let kept = model.open(None, session("s"), "https://b.example/", None);
+        let doomed = model.open(None, session("s"), "https://c.example/", None);
+        assert!(model.set_pinned(pinned, true));
+        assert_eq!(model.close_others(kept), 1, "only the unpinned other closes");
+        assert!(model.get(pinned).is_some(), "the pinned tab survives");
+        assert!(model.get(doomed).is_none(), "the unpinned other closes");
+        assert!(model.get(kept).is_some(), "the kept tab survives");
+        assert_eq!(model.active_of(&session("s"), None), Some(kept));
+    }
+
+    #[test]
+    fn mutations_bump_the_model_generation() {
+        let mut model = tabs();
+        assert_eq!(model.generation, 0, "a fresh model starts at zero");
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let opened = model.generation;
+        assert!(opened > 0, "opening bumps the generation");
+        assert!(model.activate(first));
+        assert!(model.generation > opened, "selecting bumps the generation");
+        let selected = model.generation;
+        assert!(model.set_pinned(first, true));
+        assert!(model.generation > selected, "pinning bumps the generation");
+        let pinned_gen = model.generation;
+        assert!(model.set_url_title(first, "https://a.example/", "A"));
+        assert!(model.generation > pinned_gen, "a retitle bumps the generation");
+        let retitled = model.generation;
+        assert_eq!(
+            model.close(second),
+            None,
+            "closing a background tab answers nothing — and still bumps"
+        );
+        assert!(model.generation > retitled, "closing bumps the generation");
+        assert!(model.duplicate(first).is_some());
+        assert!(model.move_before(first, None));
+        assert!(model.reorder(first, 0));
+        let before = model.generation;
+        assert!(!model.set_url_title(first, "https://a.example/", "A"), "an unchanged report is not a change");
+        assert_eq!(model.generation, before, "an unchanged report bumps nothing");
+        let _ = selected;
     }
 
     #[test]

@@ -19,19 +19,19 @@
 
 use std::rc::Rc;
 
-use aui::data::{icon_button, ButtonSize};
+use aui::data::{icon_button, spinner, ButtonSize};
 use aui::nav::{
     SESSION_DETAIL_GAP, account_menu, anchored_session_detail_at_sidebar, dense_field, ensure_row_visible,
-    flatten_sidebar, group_row, nav_item, rail, row_index_for_session, sidebar_footer, view_menu,
-    virtual_sidebar_view, AccountMenuItem, GroupAction, MenuRow, RailItem, RowAction, SidebarRow,
+    flatten_sidebar, group_header, group_row, nav_item, rail, row_index_for_session, sidebar_footer,
+    view_menu, virtual_sidebar_view, AccountMenuItem, GroupAction, MenuRow, RailItem, RowAction, SidebarRow,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
-use aui_icons::IconName;
+use aui_icons::{icon, IconName};
 use aui_motion::{pulse_phase, spring_phase, SpringKind};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
-    div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset, Pixels, Render,
-    SharedString, WeakEntity, Window,
+    div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset,
+    Pixels, Render, SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::input::TextareaState;
 use gpui_kit::base::{h_flex, v_flex};
@@ -247,6 +247,12 @@ impl Render for SidebarPane {
     }
 }
 
+/// One From-sessions group as the cached sidebar keys it: the session and
+/// its tabs' `(id, session-active)`. Labels never enter the key: a retitle
+/// moves the tabs-model generation (and the visible-rows pointer on a
+/// session rename), which is what the key compares.
+pub(crate) type BrowseGroupPrint = (String, Vec<(u64, bool)>);
+
 /// What the sidebar pane shows, as an equality key.
 ///
 /// Every input `render_sidebar` reads: the cached rows and grouping behind
@@ -271,16 +277,52 @@ pub(crate) struct SidebarKey {
     mode: crate::layout::Mode,
     session_count: usize,
     tab_count: usize,
-    browse_tabs: Vec<(u64, String, bool)>,
+    browse_tabs: Vec<(u64, bool, bool)>,
+    tabs_generation: u64,
+    browse_flags: Vec<(u64, bool, bool, bool, bool)>,
+    browse_groups: Vec<BrowseGroupPrint>,
+    browse_expanded: Vec<String>,
+    browse_session_tab: Option<u64>,
+    agents: Vec<(String, u8, String)>,
+    tab_menu: Option<u64>,
+}
+
+/// One person tab the Browse sidebar draws, with the live page facts
+/// behind its row state.
+pub(crate) struct BrowseTabSnap {
+    id: crate::browser::TabId,
+    title: String,
+    initial: String,
+    active: bool,
+    pinned: bool,
+    loading: bool,
+    audible: bool,
+    crashed: bool,
+    discarded: bool,
+}
+
+/// One session tab under From sessions, still owned by its session.
+pub(crate) struct BrowseSessionTabSnap {
+    id: crate::browser::TabId,
+    title: String,
+    initial: String,
+    active: bool,
+}
+
+/// One Agents-strip row: a session that is running or needs the person.
+pub(crate) struct AgentNeed {
+    session: String,
+    label: String,
+    state: AgentState,
 }
 
 impl SidebarKey {
     /// The Browse sidebar's fingerprint: the current project's person
-    /// tabs as `(id, label, active)` triples. A select, a title change
-    /// or an open/close moves the key, so the cached pane repaints.
-    /// B2a-H3 extends this helper with the From-sessions groups; the
-    /// key field stays as is.
-    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, String, bool)> {
+    /// tabs as `(id, active, pinned)` triples, beside the tabs-model
+    /// generation. A select, a retitle, a (un)pin or an open/close moves
+    /// the key — retitles through the generation, never through a label
+    /// string built per frame — so the cached pane repaints.
+    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, bool, bool)> {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
@@ -291,14 +333,139 @@ impl SidebarKey {
             .tabs
             .person_tabs(space.as_deref())
             .iter()
+            .map(|tab| (tab.id.0, Some(tab.id) == active, tab.pinned))
+            .collect()
+    }
+
+    /// The live page facts behind each person tab's row state, as
+    /// `(id, loading, audible, crashed, discarded)` — read off the
+    /// registered webviews, so a load finishing or a crash landing
+    /// repaints the cached pane. A tab with no live page reads
+    /// discarded (asleep); a blank tab with no progress yet reads
+    /// neither loading nor discarded.
+    pub(crate) fn browse_flags_fingerprint(
+        baaz: &Harness,
+        cx: &gpui::App,
+    ) -> Vec<(u64, bool, bool, bool, bool)> {
+        if !baaz.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = baaz.current_project_id();
+        baaz.browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
             .map(|tab| {
-                (
-                    tab.id.0,
-                    crate::browser::tabs::tab_label(&tab.title, &tab.url),
-                    Some(tab.id) == active,
-                )
+                let page = baaz.browser.states.get(&tab.id).map(|state| state.read(cx));
+                let (loading, audible, crashed, live) = match page {
+                    Some(page) => {
+                        let progress = page.progress();
+                        (
+                            progress > 0.0 && progress < 1.0,
+                            page.audible(),
+                            page.crashed().is_some(),
+                            true,
+                        )
+                    }
+                    None => (false, false, false, false),
+                };
+                let discarded = !live && tab.url != crate::browser::tabs::BLANK && !tab.url.is_empty();
+                (tab.id.0, loading, audible, crashed, discarded)
             })
             .collect()
+    }
+
+    /// The From-sessions groups: one `(session, tabs)` pair per session
+    /// in the current project that owns tabs, in first-seen order, each
+    /// tab as `(id, session-active)`. A session tab opening or closing
+    /// moves the key directly; a retitle moves it through the
+    /// tabs-model generation.
+    pub(crate) fn browse_groups_fingerprint(baaz: &Harness) -> Vec<BrowseGroupPrint> {
+        if !baaz.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = baaz.current_project_id();
+        baaz.browser
+            .tabs
+            .session_tabs(space.as_deref())
+            .iter()
+            .map(|(session, tabs)| {
+                let owner = crate::browser::Owner::Session(session.clone());
+                let active = baaz.browser.tabs.active_of(&owner, None);
+                let rows = tabs.iter().map(|tab| (tab.id.0, Some(tab.id) == active)).collect();
+                (session.clone(), rows)
+            })
+            .collect()
+    }
+
+    /// The Agents strip: up to two sessions of the current project that
+    /// are running or need the person, as `(id, state, label)` — in
+    /// sidebar order (never re-sorted: running does not jump waiting).
+    /// A state flip or a new needy session moves the key.
+    pub(crate) fn agents_fingerprint(baaz: &Harness, cx: &gpui::App) -> Vec<(String, u8, String)> {
+        agents_needing_review(&baaz.visible_sessions(cx), baaz.current_project.as_deref())
+            .iter()
+            .map(|need| {
+                let state = match need.state {
+                    AgentState::Running => 0,
+                    AgentState::Waiting => 1,
+                    AgentState::Done => 2,
+                    AgentState::Failed => 3,
+                    AgentState::Idle => 4,
+                };
+                (need.session.clone(), state, need.label.clone())
+            })
+            .collect()
+    }
+}
+
+/// The Agents strip's rows (B2a-H3): this project's sessions that are
+/// running or waiting ("needs you"), in the sidebar's own order, at
+/// most two. Pure over the visible list, so tests pin the cap and the
+/// order without a window.
+pub(crate) fn agents_needing_review(
+    entries: &[SessionEntry],
+    project: Option<&str>,
+) -> Vec<AgentNeed> {
+    entries
+        .iter()
+        .filter(|entry| entry.project.as_deref() == project)
+        .filter_map(|entry| {
+            let state = entry.state();
+            match state {
+                AgentState::Running | AgentState::Waiting => Some(AgentNeed {
+                    session: entry.id.clone(),
+                    label: entry.label.clone(),
+                    state,
+                }),
+                _ => None,
+            }
+        })
+        .take(2)
+        .collect()
+}
+
+/// The sidebar tab drag: the dragged person tab's id. Tab rows accept
+/// drops of exactly this type and reorder before the drop row.
+#[derive(Clone, Copy)]
+struct BrowseTabDrag(crate::browser::TabId);
+
+/// The drag ghost: the dragged tab's title on a raised chip.
+struct BrowseTabGhost(String);
+
+impl Render for BrowseTabGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = cx.aui().colors;
+        h_flex()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_1)
+            .border_1()
+            .border_color(p.line_strong)
+            .text_color(p.ink)
+            .ui(scale::FS_12)
+            .child(self.0.clone())
     }
 }
 
@@ -324,16 +491,35 @@ impl SidebarKey {
             ),
         };
         // The mode switch shows both counts, so both are key inputs: the
-        // sessions in the current project and the project's person tabs.
+        // sessions in the current project (the switch's own count,
+        // including rowless sessions created this run) and the project's
+        // person tabs.
         let current_project = baaz.current_project.clone();
-        let session_count =
-            visible.iter().filter(|entry| entry.project == current_project).count();
+        let session_count = baaz.mode_session_count(cx);
         let tab_count = if baaz.browser.tabs_loaded {
             baaz.browser.tabs.person_tabs(current_project.as_deref()).len()
         } else {
             0
         };
-        let browse_tabs = Self::browse_tabs_fingerprint(baaz);
+        // The Browse fingerprints cost model walks and label-free triples,
+        // but only Browse shows them: outside Browse they stay empty, so
+        // a Sessions frame never pays for the tab model at all.
+        let browse_mode = baaz.mode == crate::layout::Mode::Browse;
+        let (browse_tabs, tabs_generation, browse_flags, browse_groups) = if browse_mode {
+            (
+                Self::browse_tabs_fingerprint(baaz),
+                baaz.browser.tabs.generation,
+                Self::browse_flags_fingerprint(baaz, cx),
+                Self::browse_groups_fingerprint(baaz),
+            )
+        } else {
+            (Vec::new(), 0, Vec::new(), Vec::new())
+        };
+        let mut browse_expanded: Vec<String> = baaz.browse_from_expanded.iter().cloned().collect();
+        browse_expanded.sort();
+        let browse_session_tab = baaz.browse_session_tab.map(|id| id.0);
+        let agents = Self::agents_fingerprint(baaz, cx);
+        let tab_menu = baaz.tab_menu.map(|id| id.0);
         Self {
             visible: Rc::as_ptr(&visible) as usize,
             grouping: Rc::as_ptr(&grouping) as usize,
@@ -346,6 +532,13 @@ impl SidebarKey {
             session_count,
             tab_count,
             browse_tabs,
+            tabs_generation,
+            browse_flags,
+            browse_groups,
+            browse_expanded,
+            browse_session_tab,
+            agents,
+            tab_menu,
         }
     }
 }
@@ -539,10 +732,40 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Sessions in the current project: the switch's Sessions count.
+    /// Sessions in the current project: the switch's Sessions count. The
+    /// visible rows plus the sessions this run created that have no row
+    /// yet — an unsent session is filtered from the list, but it exists
+    /// (it owns tabs under From sessions, or it is the pending/open
+    /// session filed here), so the switch counts it.
     fn mode_session_count(&self, cx: &gpui::App) -> usize {
         let current = self.current_project.clone();
-        self.visible_sessions(cx).iter().filter(|entry| entry.project == current).count()
+        let mut ids: std::collections::HashSet<String> = self
+            .visible_sessions(cx)
+            .iter()
+            .filter(|entry| entry.project == current)
+            .map(|entry| entry.id.clone())
+            .collect();
+        if self.browser.tabs_loaded {
+            for (session, _) in self.browser.tabs.session_tabs(current.as_deref()) {
+                ids.insert(session);
+            }
+        }
+        let live: Vec<String> = self
+            .pending_id
+            .iter()
+            .cloned()
+            .chain(self.active.as_ref().map(|view| view.read(cx).session_id.clone()))
+            .collect();
+        for id in live {
+            if ids.contains(&id) {
+                continue;
+            }
+            let project = self.overrides.get(&id).and_then(|meta| meta.project.clone());
+            if project == current {
+                ids.insert(id);
+            }
+        }
+        ids.len()
     }
 
     /// The current project's person tabs: the switch's Browse count.
@@ -555,12 +778,12 @@ impl Harness {
     }
 
     /// The Sessions | Browse switch at the very top of the sidebar
-    /// column, above "New session" (B2a-H2): two segments with the live
-    /// counts — sessions in the current project, tabs in the current
-    /// project. A two-button control with the segmented look (the
-    /// library's `segmented` takes plain labels, so the muted counts
-    /// ride as their own ink runs): each segment is a Tab named
-    /// "Sessions, N" / "Browse, M" with its selected state.
+    /// column, above "New session" (B2a-H2, restyled B2a-H3): a rounded
+    /// bordered container on the surface-2 ground, each half with its
+    /// icon (a sparkle for Sessions, a globe for Browse), its label and
+    /// its live count in muted ink — sessions in the current project,
+    /// tabs in the current project. The selected half sits on the raised
+    /// surface. The same control in both modes.
     fn render_mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let sessions = self.mode_session_count(cx);
@@ -573,13 +796,16 @@ impl Harness {
             .items_center()
             .p(px(2.0))
             .gap(px(2.0))
-            .rounded(px(scale::R_SM))
+            .rounded(px(scale::R_MD))
             .bg(p.surface_2)
+            .border_1()
+            .border_color(p.line)
             .role(gpui::Role::TabList)
             .aria_label("Switch between Sessions and Browse")
             .child(Self::mode_segment(
                 "mode-sessions",
                 crate::layout::Mode::Sessions,
+                IconName::Sparkle,
                 sessions,
                 self.mode,
                 p,
@@ -588,6 +814,7 @@ impl Harness {
             .child(Self::mode_segment(
                 "mode-browse",
                 crate::layout::Mode::Browse,
+                IconName::Globe,
                 tabs,
                 self.mode,
                 p,
@@ -596,12 +823,13 @@ impl Harness {
             .into_any_element()
     }
 
-    /// One half of the mode switch: the mode's name in content ink (muted
-    /// off) with its count in muted ink beside it, on the raised surface
-    /// while selected.
+    /// One half of the mode switch: its icon, its name in content ink
+    /// (muted off) and its count in muted ink beside it, on the raised
+    /// surface while selected.
     fn mode_segment(
         id: &'static str,
         mode: crate::layout::Mode,
+        glyph: IconName,
         count: usize,
         current: crate::layout::Mode,
         p: Palette,
@@ -615,11 +843,12 @@ impl Harness {
             .items_center()
             .justify_center()
             .gap(px(4.0))
-            .rounded(px(scale::R_XS))
+            .rounded(px(scale::R_SM))
             .cursor_pointer()
             .role(gpui::Role::Tab)
             .aria_label(format!("{}, {}", mode.label(), count))
             .aria_selected(selected)
+            .child(icon(glyph).size(px(12.0)).color(if selected { p.ink_2 } else { p.ink_3 }))
             .child(div().ui(scale::FS_12).text_color(if selected { p.ink } else { p.ink_3 }).child(mode.label()))
             .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("{count}")));
         if selected {
@@ -632,85 +861,700 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The Browse sidebar's body (B2a-H2): a minimal placeholder list of
-    /// the current project's person tabs — an initial tile plus the
-    /// title, clicked to select — with a "New tab" row that opens one.
-    /// B2a-H3 replaces this with the real Browse sidebar; until then
-    /// this is deliberately plain rows, not the sessions list.
+    /// The Browse sidebar's body (B2a-H3): New tab, the pinned tiles,
+    /// the Tabs list, From sessions, and the open tab's right-click
+    /// menu — the current project's person tabs plus every session in
+    /// the project that owns tabs. (The Agents strip rides below, above
+    /// the account footer; see `render_agents_strip`.) Row metrics match
+    /// the Sessions list's (30 px rows, the same ink and hover), not the
+    /// board's pixels.
     fn render_browse_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let space = self.current_project_id();
-        let tabs: Vec<(crate::browser::TabId, String, String, bool)> = if self.browser.tabs_loaded {
-            let active = self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
-            self.browser
-                .tabs
-                .person_tabs(space.as_deref())
-                .iter()
-                .map(|tab| {
-                    (
-                        tab.id,
-                        crate::browser::tabs::tab_label(&tab.title, &tab.url),
-                        crate::browser::tabs::tab_initial(&tab.title, &tab.url),
-                        Some(tab.id) == active,
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let new_tab = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.new_browse_sidebar_tab(window, cx);
-        });
         let baaz = cx.entity().downgrade();
-        let mut column = v_flex().w_full().flex_1().min_h(px(0.0)).overflow_hidden().py(px(4.0));
-        for (id, title, initial, active) in tabs {
-            let label = title.clone();
-            let mut row = h_flex()
-                .id(("browse-tab", id.0))
-                .w_full()
-                .h(px(30.0))
-                .flex_none()
-                .items_center()
-                .px(px(8.0))
-                .gap(px(8.0))
-                .rounded(px(scale::R_SM))
-                .cursor_pointer()
-                .child(
-                    div()
-                        .size(px(16.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(scale::R_XS))
-                        .border_1()
-                        .border_color(p.line_strong)
-                        .text_color(p.ink_2)
-                        .ui(scale::FS_11)
-                        .child(initial),
-                )
-                .child(div().flex_1().min_w(px(0.0)).truncate().ui(scale::FS_12).text_color(p.ink).child(title));
-            if active {
-                row = row.bg(p.surface_2);
+        let snaps = self.browse_person_snaps(cx);
+        let (pinned, unpinned): (Vec<BrowseTabSnap>, Vec<BrowseTabSnap>) =
+            snaps.into_iter().partition(|snap| snap.pinned);
+        // The scrollable middle: New tab, the pinned grid (hidden when
+        // there are none), the Tabs caption and rows, then From
+        // sessions. The switch above and the footer (plus the Agents
+        // strip) below stay put.
+        let mut list = v_flex().id("browse-list").w_full().flex_1().min_h(px(0.0)).overflow_y_scroll().py(px(4.0));
+        list = list.child(self.browse_new_tab_row(baaz.clone(), p));
+        if !pinned.is_empty() {
+            list = list.child(self.browse_pinned_grid(&pinned, baaz.clone(), p));
+        }
+        list = list.child(group_row("browse-tabs", "Tabs"));
+        for snap in &unpinned {
+            let drop_line = self.browse_drop_target == Some(snap.id);
+            if drop_line {
+                list = list.child(div().w_full().flex_none().h(px(2.0)).bg(p.accent));
             }
-            // The role and label ride directly above the click, so the
-            // accessible name sits in the labelling ratchet's chain.
-            let id = id.0;
-            let baaz = baaz.clone();
-            column = column.child(
-                row.role(gpui::Role::Button).aria_label(format!("Show tab {label}")).on_click(
+            list = list.child(self.browse_tab_row(snap, false, baaz.clone(), p));
+        }
+        // The drop-at-end slot below the last row: a drag resting past
+        // every row lands here and appends at the end. Quiet (8 px) until
+        // armed, then the same 2 px accent line the rows draw.
+        {
+            let end_armed = self.browse_drop_at_end;
+            let end_over = baaz.clone();
+            let end_drop = baaz.clone();
+            let mut end = div()
+                .id("browse-drop-end")
+                .w_full()
+                .flex_none()
+                .h(px(if end_armed { 2.0 } else { 8.0 }))
+                .can_drop(|dragged: &dyn std::any::Any, _, _| dragged.is::<BrowseTabDrag>())
+                .on_drag_move::<BrowseTabDrag>(move |event, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    let _ = end_over.update(cx, |this, cx| {
+                        if this.browse_drop_target.is_some() || !this.browse_drop_at_end {
+                            this.browse_drop_target = None;
+                            this.browse_drop_at_end = true;
+                            this.sidebar_pane.update(cx, |_, cx| cx.notify());
+                        }
+                    });
+                })
+                .on_drop::<BrowseTabDrag>(move |dragged, _, cx| {
+                    let _ = end_drop.update(cx, |this, cx| {
+                        this.reorder_browse_tab(dragged.0, None, cx);
+                    });
+                });
+            if end_armed {
+                end = end.bg(p.accent);
+            }
+            list = list.child(end);
+        }
+        for (group_ix, (session, label, tabs)) in self.browse_session_groups(cx).into_iter().enumerate() {
+            let open = self.browse_from_expanded.contains(&session);
+            // The header names the session (its sidebar name, or "New
+            // session" while it has no row yet — never the bare
+            // "Session"), with the tab count beside it and the open
+            // chevron the library draws.
+            let tab_total = tabs.len();
+            let count = if tab_total == 1 {
+                "1 tab".to_owned()
+            } else {
+                format!("{tab_total} tabs")
+            };
+            let spoken = format!("{label}, {count}");
+            let toggle = {
+                let baaz = baaz.clone();
+                let session = session.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    let _ = baaz.update(cx, |this, cx| this.toggle_from_sessions(session.clone(), cx));
+                }
+            };
+            list = list.child(
+                div()
+                    .id(("browse-from-group", group_ix))
+                    .w_full()
+                    .flex_none()
+                    .role(gpui::Role::Group)
+                    .aria_label(spoken)
+                    .child(
+                        group_header(("browse-from", group_ix), label.clone(), open)
+                            .count(count)
+                            .on_toggle(toggle),
+                    ),
+            );
+            if open {
+                for tab in &tabs {
+                    list = list.child(self.browse_session_row(tab, &label, baaz.clone(), p));
+                }
+            }
+        }
+        // The tab menu no longer renders inline: it floats as a popup
+        // anchored at the clicked row (see `render_tab_menu_popup`), so a
+        // long list never pushes it out of reach.
+        list.into_any_element()
+    }
+
+    /// The current project's person tabs with the live page facts
+    /// behind each row's state, in display order (pinned first).
+    fn browse_person_snaps(&self, cx: &gpui::App) -> Vec<BrowseTabSnap> {
+        if !self.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = self.current_project_id();
+        let active =
+            self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
+        self.browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .map(|tab| {
+                let page = self.browser.states.get(&tab.id);
+                let (loading, audible, crashed) = match page {
+                    Some(state) => {
+                        let page = state.read(cx);
+                        let progress = page.progress();
+                        (progress > 0.0 && progress < 1.0, page.audible(), page.crashed().is_some())
+                    }
+                    None => (false, false, false),
+                };
+                BrowseTabSnap {
+                    id: tab.id,
+                    title: crate::browser::tabs::tab_label(&tab.title, &tab.url),
+                    initial: crate::browser::tabs::tab_initial(&tab.title, &tab.url),
+                    active: Some(tab.id) == active,
+                    pinned: tab.pinned,
+                    loading,
+                    audible,
+                    crashed,
+                    discarded: page.is_none()
+                        && tab.url != crate::browser::tabs::BLANK
+                        && !tab.url.is_empty(),
+                }
+            })
+            .collect()
+    }
+
+    /// Every session in the current project that owns tabs, in
+    /// first-seen order: the session id, its sidebar name (or "New
+    /// session" when it has no row yet), and its tabs.
+    fn browse_session_groups(&self, cx: &gpui::App) -> Vec<(String, String, Vec<BrowseSessionTabSnap>)> {
+        if !self.browser.tabs_loaded {
+            return Vec::new();
+        }
+        let space = self.current_project_id();
+        let visible = self.visible_sessions(cx);
+        self.browser
+            .tabs
+            .session_tabs(space.as_deref())
+            .iter()
+            .map(|(session, tabs)| {
+                let owner = crate::browser::Owner::Session(session.clone());
+                let active = self.browser.tabs.active_of(&owner, None);
+                // The sidebar name, or "New session" while the session
+                // has no row yet (an unsent session is filtered from the
+                // list) — never the bare "Session".
+                let label = visible
+                    .iter()
+                    .find(|entry| entry.id == *session)
+                    .map(|entry| entry.label.clone())
+                    .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
+                let rows = tabs
+                    .iter()
+                    .map(|tab| BrowseSessionTabSnap {
+                        id: tab.id,
+                        title: crate::browser::tabs::tab_label(&tab.title, &tab.url),
+                        initial: crate::browser::tabs::tab_initial(&tab.title, &tab.url),
+                        active: Some(tab.id) == active,
+                    })
+                    .collect();
+                (session.clone(), label, rows)
+            })
+            .collect()
+    }
+
+    /// The New tab row: the library's `nav_item` (plus icon, `⌘T`
+    /// count) under a Button named "New tab" — the item itself owns no
+    /// role, so the wrapper carries it. Opens a blank person tab with
+    /// the URL field focused.
+    fn browse_new_tab_row(&self, baaz: WeakEntity<Harness>, p: Palette) -> AnyElement {
+        let _ = p;
+        div()
+            .id("browse-new-tab-button")
+            .w_full()
+            .flex_none()
+            .role(gpui::Role::Button)
+            .aria_label("New tab")
+            .child(
+                nav_item("browse-new-tab", IconName::Plus, "New tab").count("⌘T").on_click(
                     move |_, window, cx| {
-                        let _ = baaz.update(cx, |this, cx| {
-                            this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
-                        });
+                        let _ = baaz.update(cx, |this, cx| this.new_browse_sidebar_tab(window, cx));
                     },
                 ),
+            )
+            .into_any_element()
+    }
+
+    /// The pinned tiles: a 4-up grid of compact tiles (the tab's initial
+    /// centred) for the project's pinned person tabs — the active tile on
+    /// the raised surface, the rest flat inside a 1 px line border. Click
+    /// selects; right-click opens the same tab menu (Unpin etc.). Hidden
+    /// when there are none (the caller skips it).
+    fn browse_pinned_grid(
+        &self,
+        pinned: &[BrowseTabSnap],
+        baaz: WeakEntity<Harness>,
+        p: Palette,
+    ) -> AnyElement {
+        let mut grid = v_flex().w_full().flex_none().gap(px(8.0)).py(px(4.0));
+        for chunk in pinned.chunks(4) {
+            let mut row = h_flex().w_full().flex_none().gap(px(8.0));
+            for snap in chunk {
+                let id = snap.id.0;
+                let title = snap.title.clone();
+                let initial = snap.initial.clone();
+                let mut tile = div()
+                    .id(("browse-pinned", id))
+                    .flex_1()
+                    .h(px(36.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(scale::R_SM))
+                    .border_1()
+                    .border_color(p.line)
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Pinned: {title}"))
+                    .ui(scale::FS_14)
+                    .text_color(if snap.active { p.ink } else { p.ink_2 })
+                    .child(initial);
+                if snap.active {
+                    tile = tile.bg(p.surface_1);
+                }
+                let select = baaz.clone();
+                let menu = baaz.clone();
+                // Named beside the click for the a11y ratchet's window.
+                let tile = tile
+                    .aria_label(format!("Pinned: {title}"))
+                    .on_click(move |_, window, cx| {
+                        let _ = select.update(cx, |this, cx| {
+                            this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
+                        });
+                    })
+                    .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                        let _ = menu.update(cx, |this, cx| {
+                            this.open_tab_menu(crate::browser::TabId(id), cx)
+                        });
+                    });
+                // The open menu's anchor, exactly as a row reports it: without
+                // it the popup had no seat, never showed, and re-rendered
+                // every frame waiting for one.
+                if self.tab_menu == Some(snap.id) {
+                    let report = baaz.clone();
+                    row = row.child(
+                        div()
+                            .flex_1()
+                            .on_children_prepainted(move |bounds, _, cx| {
+                                if let Some(first) = bounds.first() {
+                                    let bounds = *first;
+                                    let _ = report.update(cx, |this, cx| {
+                                        let fresh = this.tab_menu_bounds.is_none_or(|(known, _)| known != id);
+                                        this.tab_menu_bounds = Some((id, bounds));
+                                        if fresh {
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            })
+                            .child(tile.w_full()),
+                    );
+                } else {
+                    row = row.child(tile);
+                }
+            }
+            // A short last row keeps its tiles square: fillers hold the
+            // grid's four columns.
+            for _ in chunk.len()..4 {
+                row = row.child(div().flex_1());
+            }
+            grid = grid.child(row);
+        }
+        grid.into_any_element()
+    }
+
+    /// One Tabs-list row: the favicon-or-initial tile (a spinner while
+    /// loading, a `!` while crashed), the title with ellipsis (dimmed
+    /// while asleep), the speaker glyph while audible, and the × on
+    /// hover or while active. Loading, crashed, asleep and audible all
+    /// read off the row's snapshot, so the key repaints them.
+    fn browse_tab_row(
+        &self,
+        snap: &BrowseTabSnap,
+        indented: bool,
+        baaz: WeakEntity<Harness>,
+        p: Palette,
+    ) -> AnyElement {
+        let id = snap.id.0;
+        let title = snap.title.clone();
+        let crashed = snap.crashed;
+        let tile: AnyElement = if snap.loading {
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(spinner(("browse-spin", id)).size(px(12.0)))
+                .into_any_element()
+        } else if snap.crashed {
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(scale::R_XS))
+                .border_1()
+                .border_color(p.warning)
+                .text_color(p.warning)
+                .ui(scale::FS_11)
+                .child("!")
+                .into_any_element()
+        } else {
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(scale::R_XS))
+                .border_1()
+                .border_color(p.line_strong)
+                .text_color(p.ink_2)
+                .ui(scale::FS_11)
+                .child(snap.initial.clone())
+                .into_any_element()
+        };
+        let mut row = h_flex()
+            .id(("browse-tab", id))
+            .w_full()
+            .h(px(30.0))
+            .flex_none()
+            .items_center()
+            .px(px(8.0))
+            .gap(px(8.0))
+            .rounded(px(scale::R_SM))
+            .cursor_pointer()
+            .role(gpui::Role::Tab)
+            .aria_label(title.clone())
+            .aria_selected(snap.active)
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .ui(scale::FS_12)
+                    .text_color(if snap.discarded { p.ink_3 } else { p.ink })
+                    .child(title.clone()),
+            );
+        if indented {
+            row = row.pl(px(24.0));
+        }
+        // The speaker glyph while audible. The library offers no mute
+        // call on `WebviewState`, so the glyph is display-only: it never
+        // takes the click.
+        if snap.audible {
+            row = row.child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child("♪"));
+        }
+        // The × on hover or while active: the hover report below owns
+        // the hover bit and notifies the pane directly, so a settle
+        // never clears it mid-gesture.
+        if snap.active || self.browse_hovered_tab == Some(snap.id) {
+            let baaz_close = baaz.clone();
+            row = row.child(
+                icon_button(("browse-close", id), IconName::X)
+                    .ghost()
+                    .size(ButtonSize::Xs)
+                    .icon_size(px(12.0))
+                    .accessibility_label(format!("Close {title}"))
+                    .on_click(move |_, window, cx| {
+                        let _ = baaz_close.update(cx, |this, cx| {
+                            this.close_person_tab(crate::browser::TabId(id), window, cx);
+                        });
+                    }),
             );
         }
-        column
+        if snap.active {
+            row = row.bg(p.surface_2);
+        }
+        // A crashed row's click reloads (the `!` tile's promise) as well
+        // as shows: `reload_browse_tab` activates, clears a From-sessions
+        // show, ensures the page and navigates it again at its own URL.
+        let select = baaz.clone();
+        let hover = baaz.clone();
+        let menu = baaz.clone();
+        let drag = baaz.clone();
+        let over = baaz.clone();
+        let anchor_report = baaz.clone();
+        let ghost_title = title.clone();
+        // Named again beside the click (the same name as at the top of the
+        // chain) so the a11y ratchet's window sees the click is named.
+        let row = row
+            .aria_label(title.clone())
+            .on_click(move |_, window, cx| {
+                let _ = select.update(cx, |this, cx| {
+                    if crashed {
+                        this.reload_browse_tab(crate::browser::TabId(id), window, cx);
+                    } else {
+                        this.select_browse_sidebar_tab(crate::browser::TabId(id), window, cx);
+                    }
+                });
+            })
+            .on_hover(move |hovered, _, cx| {
+                let _ = hover.update(cx, |this, cx| {
+                    let next = hovered.then_some(crate::browser::TabId(id));
+                    if this.browse_hovered_tab != next {
+                        this.browse_hovered_tab = next;
+                        this.sidebar_pane.update(cx, |_, cx| cx.notify());
+                    }
+                });
+            })
+            .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                let _ = menu.update(cx, |this, cx| this.open_tab_menu(crate::browser::TabId(id), cx));
+            })
+            .on_drag(BrowseTabDrag(crate::browser::TabId(id)), move |_, _, _, cx| {
+                cx.new(|_| BrowseTabGhost(ghost_title.clone()))
+            })
+            .on_drag_move::<BrowseTabDrag>(move |event, _, cx| {
+                // Every row fires while a drag moves anywhere over the
+                // pane: only the row under the pointer may touch the drop
+                // line (rows elsewhere resetting it made the last row
+                // processed win), and only a change notifies the pane.
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
+                let _ = over.update(cx, |this, cx| {
+                    let next = Some(crate::browser::TabId(id));
+                    if this.browse_drop_target != next || this.browse_drop_at_end {
+                        this.browse_drop_target = next;
+                        this.browse_drop_at_end = false;
+                        this.sidebar_pane.update(cx, |_, cx| cx.notify());
+                    }
+                });
+            })
+            .on_drop::<BrowseTabDrag>(move |dragged, _, cx| {
+                let _ = drag.update(cx, |this, cx| {
+                    this.reorder_browse_tab(dragged.0, Some(crate::browser::TabId(id)), cx);
+                });
+            })
+            .can_drop(|dragged: &dyn std::any::Any, _, _| dragged.is::<BrowseTabDrag>());
+        // The open menu's anchor: the clicked row reports its own bounds
+        // on prepaint, so the popup seats at the row. Only the menu's row
+        // pays for the report; steady bounds never schedule work.
+        if self.tab_menu == Some(snap.id) {
+            let anchor_id = snap.id.0;
+            return div()
+                .on_children_prepainted(move |bounds, _, cx| {
+                    if let Some(first) = bounds.first() {
+                        let bounds = *first;
+                        let _ = anchor_report.update(cx, |this, cx| {
+                            let fresh = this.tab_menu_bounds.is_none_or(|(known, _)| known != anchor_id);
+                            this.tab_menu_bounds = Some((anchor_id, bounds));
+                            if fresh {
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .child(row)
+                .into_any_element();
+        }
+        row.into_any_element()
+    }
+
+    /// One From-sessions tab row: the same tile and title, indented
+    /// under its group, clicked to show in the centre — ownership never
+    /// moves. No × and no menu: person-tab commands do not apply to a
+    /// session's tab.
+    fn browse_session_row(
+        &self,
+        tab: &BrowseSessionTabSnap,
+        session_label: &str,
+        baaz: WeakEntity<Harness>,
+        p: Palette,
+    ) -> AnyElement {
+        let id = tab.id.0;
+        let title = tab.title.clone();
+        let spoken = format!("Show {title} in {session_label}");
+        let mut row = h_flex()
+            .id(("browse-session-tab", id))
+            .w_full()
+            .h(px(30.0))
+            .flex_none()
+            .items_center()
+            .pl(px(24.0))
+            .pr(px(8.0))
+            .gap(px(8.0))
+            .rounded(px(scale::R_SM))
+            .cursor_pointer()
+            .role(gpui::Role::Tab)
+            .aria_label(spoken.clone())
+            .aria_selected(tab.active)
             .child(
+                div()
+                    .size(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(scale::R_XS))
+                    .border_1()
+                    .border_color(p.line_strong)
+                    .text_color(p.ink_2)
+                    .ui(scale::FS_11)
+                    .child(tab.initial.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .ui(scale::FS_12)
+                    .text_color(p.ink)
+                    .child(title),
+            );
+        if tab.active {
+            row = row.bg(p.surface_2);
+        }
+        // Named again beside the click for the a11y ratchet's window.
+        row.aria_label(spoken).on_click(move |_, window, cx| {
+            let _ = baaz.update(cx, |this, cx| {
+                this.select_session_tab(crate::browser::TabId(id), window, cx);
+            });
+        })
+        .into_any_element()
+    }
+
+    /// The open tab's right-click menu: Reload, Duplicate, Pin/Unpin,
+    /// Copy link, Move to project (the projects list inline), Close tab
+    /// (⌘W), Close other tabs. The agent rows (sending a tab to a session,
+    /// opening it beside one) and muting arrive with later stages.
+    /// Every row closes the menu through its command. Rendered floating
+    /// (see `render_tab_menu_popup`), never inline, at a fixed menu
+    /// width — the list underneath never reflows around it.
+    fn browse_tab_menu(
+        &self,
+        id: crate::browser::TabId,
+        baaz: WeakEntity<Harness>,
+        p: Palette,
+    ) -> AnyElement {
+        let tab = self.browser.tabs.get(id).cloned();
+        let Some(tab) = tab else {
+            return div().into_any_element();
+        };
+        let title = crate::browser::tabs::tab_label(&tab.title, &tab.url);
+        let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
+        let space = tab.space.clone();
+        let projects: Vec<(String, String)> =
+            self.projects.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect();
+        let mut menu = v_flex()
+            .id("tab-menu")
+            .w(px(232.0))
+            .flex_none()
+            .gap(px(2.0))
+            .p(px(4.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_2)
+            .border_1()
+            .border_color(p.line)
+            .role(gpui::Role::Menu)
+            .aria_label(format!("Tab menu for {title}"));
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-reload",
+            "Reload",
+            None,
+            baaz.clone(),
+            move |this, window, cx| this.reload_browse_tab(id, window, cx),
+        ));
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-duplicate",
+            "Duplicate",
+            None,
+            baaz.clone(),
+            move |this, window, cx| this.duplicate_browse_tab(id, window, cx),
+        ));
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-pin",
+            pin_label,
+            None,
+            baaz.clone(),
+            move |this, _, cx| {
+                this.toggle_pin_browse_tab(id, cx);
+            },
+        ));
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-copy",
+            "Copy link",
+            None,
+            baaz.clone(),
+            move |this, _, cx| this.copy_browse_link(id, cx),
+        ));
+        // With no other project the move section hides entirely: a
+        // header with nowhere to go is a dead row.
+        let movers: Vec<(String, String)> =
+            projects.into_iter().filter(|(pid, _)| Some(pid) != space.as_ref()).collect();
+        if !movers.is_empty() {
+            menu = menu.child(
+                div()
+                    .id("tab-menu-move-header")
+                    .flex_none()
+                    .px(px(8.0))
+                    .pt(px(4.0))
+                    .ui(scale::FS_11)
+                    .text_color(p.ink_3)
+                    .role(gpui::Role::Label)
+                    .aria_label("Move to project")
+                    .child("Move to project"),
+            );
+            for (ix, (pid, name)) in movers.iter().enumerate() {
+                let label = format!("Move to {name}");
+                let target = Some(pid.clone());
+                menu = menu.child(Self::tab_menu_row(
+                    ("tab-menu-move", ix),
+                    &label,
+                    None,
+                    baaz.clone(),
+                    move |this, window, cx| {
+                        this.move_browse_tab_to_project(id, target.clone(), window, cx);
+                    },
+                ));
+            }
+        }
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-close",
+            "Close tab",
+            Some("⌘W"),
+            baaz.clone(),
+            move |this, window, cx| this.close_person_tab(id, window, cx),
+        ));
+        menu = menu.child(Self::tab_menu_row(
+            "tab-menu-close-others",
+            "Close other tabs",
+            None,
+            baaz,
+            move |this, window, cx| this.close_other_browse_tabs(id, window, cx),
+        ));
+        menu.into_any_element()
+    }
+
+    /// The Agents strip (B2a-H3): up to two sessions of this project
+    /// that are running or waiting ("needs you") — see
+    /// [`agents_needing_review`] — each a row with a state dot (accent,
+    /// pulsing while running; warning while waiting) + name + state
+    /// word. Clicking reviews: back to Sessions with that session open
+    /// (the Review path). Hidden when nothing needs the person.
+    fn render_agents_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let needs =
+            agents_needing_review(&self.visible_sessions(cx), self.current_project.as_deref());
+        if needs.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let baaz = cx.entity().downgrade();
+        let pulse = self.pulse_phase_value(cx);
+        let mut strip = v_flex().w_full().flex_none().px(px(4.0)).pb(px(4.0));
+        strip = strip.child(div().w_full().flex_none().h(px(1.0)).bg(p.line));
+        for (ix, need) in needs.iter().enumerate() {
+            let baaz = baaz.clone();
+            let waiting = need.state == AgentState::Waiting;
+            let word = if waiting { "Needs you" } else { "Running" };
+            let spoken = format!("{}, {}", need.label, word.to_lowercase());
+            let opacity = match (waiting, pulse) {
+                (false, Some(phase)) => 0.45 + 0.55 * phase,
+                _ => 1.0,
+            };
+            let session = need.session.clone();
+            strip = strip.child(
                 h_flex()
-                    .id("browse-new-tab")
+                    .id(("browse-agent", ix))
                     .w_full()
                     .h(px(30.0))
                     .flex_none()
@@ -720,12 +1564,117 @@ impl Harness {
                     .rounded(px(scale::R_SM))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label("New tab")
-                    .child(div().ui(scale::FS_12).text_color(p.ink_3).child("+"))
-                    .child(div().ui(scale::FS_12).text_color(p.ink_3).child("New tab"))
-                    .on_click(move |event, window, cx| new_tab(event, window, cx)),
-            )
-            .into_any_element()
+                    .aria_label(spoken.clone())
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(if waiting { p.warning } else { p.accent })
+                            .opacity(opacity),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink)
+                            .child(need.label.clone()),
+                    )
+                    .child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(word))
+                    // Named again beside the click for the a11y ratchet's window.
+                    .aria_label(spoken)
+                    .on_click(move |_, window, cx| {
+                        let _ = baaz.update(cx, |this, cx| {
+                            this.review_session(session.clone(), window, cx);
+                        });
+                    }),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
+    /// The open tab menu as a floating popup at the window root: seated
+    /// at the clicked row's bounds (reported by the row's own prepaint),
+    /// in `popover_layer` so it escapes the sidebar's clipping and paints
+    /// above everything — the way the session row and `MenuKind` popups
+    /// render. A click anywhere outside closes it through the catcher;
+    /// Escape closes it through `cancel`. While open the native page
+    /// rule covers what it overlaps (see `sync_browser`'s `tab_menu`
+    /// flag): gpui cannot paint over a composited page, so the host
+    /// takes the view out instead.
+    pub(crate) fn render_tab_menu_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.tab_menu?;
+        // The anchor arrives on the pane repaint the menu's key change
+        // arms: no bounds yet means no menu this frame, never a flash at
+        // a wrong seat. The notify covers the cold open.
+        let Some((known, anchor)) = self.tab_menu_bounds else {
+            cx.notify();
+            return None;
+        };
+        if known != id.0 {
+            cx.notify();
+            return None;
+        }
+        self.browser.tabs.get(id)?;
+        let p = cx.aui().colors;
+        let baaz = cx.entity().downgrade();
+        // A click anywhere outside closes it: the catcher is a sibling of
+        // the menu inside the same deferred draw.
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.close_tab_menu(cx);
+        });
+        let catcher = div()
+            .id("tab-menu-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .role(gpui::Role::Button)
+            .aria_label("Dismiss tab menu")
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        let menu = self.browse_tab_menu(id, baaz, p);
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(catcher)
+                .child(anchored_menu(anchor, MenuSide::Below, MenuAlign::Start, menu))
+                .into_any_element(),
+        )
+    }
+
+    /// One tab-menu row: a MenuItem named by `label`, with an optional
+    /// shortcut hint at the right. The command owns the menu close.
+    fn tab_menu_row(
+        id: impl Into<gpui::ElementId>,
+        label: &str,
+        hint: Option<&str>,
+        baaz: WeakEntity<Harness>,
+        run: impl Fn(&mut Harness, &mut Window, &mut Context<Harness>) + 'static,
+    ) -> AnyElement {
+        let label = label.to_owned();
+        let spoken = label.clone();
+        let mut row = h_flex()
+            .id(id)
+            .w_full()
+            .h(px(28.0))
+            .flex_none()
+            .items_center()
+            .px(px(8.0))
+            .gap(px(8.0))
+            .rounded(px(scale::R_XS))
+            .cursor_pointer()
+            .role(gpui::Role::MenuItem)
+            .aria_label(spoken)
+            .child(div().flex_1().min_w(px(0.0)).truncate().ui(scale::FS_12).child(label));
+        if let Some(hint) = hint {
+            row = row.child(div().flex_none().ui(scale::FS_11).child(hint.to_owned()));
+        }
+        row.on_click(move |_, window, cx| {
+            let _ = baaz.update(cx, |this, cx| run(this, window, cx));
+        })
+        .into_any_element()
     }
 
     /// The slide between modes (B2a-H2): the entering body translates in
@@ -1009,6 +1958,11 @@ impl Harness {
         } else {
             sessions_body
         };
+        // The Agents strip (B2a-H3): Browse only, at the foot above the
+        // account footer — nothing in Sessions.
+        let agents: Option<AnyElement> = (self.mode == crate::layout::Mode::Browse)
+            .then(|| self.render_agents_strip(cx))
+            .flatten();
         let column = v_flex()
             .size_full()
             .child(self.render_mode_switch(cx))
@@ -1024,6 +1978,7 @@ impl Harness {
                     .overflow_hidden()
                     .child(div().size_full().relative().left(self.mode_slide_offset(window, cx)).child(body)),
             )
+            .children(agents)
             .child(self.render_footer(cx));
         div()
             .size_full()
@@ -1607,6 +2562,18 @@ impl Harness {
     pub(crate) fn pulse_needed(&self, cx: &gpui::App) -> bool {
         if cx.reduce_motion() {
             return false;
+        }
+        // The Agents strip's running dot (Browse): a Running need in the
+        // current project paints a sampled dot even when no Sessions row
+        // or rail cell does — without this the strip's pulse froze while
+        // the loop slept. The loop's ticks notify the pane directly (see
+        // `ensure_pulse_task`), so the strip needs no key of its own.
+        if self.mode == crate::layout::Mode::Browse
+            && agents_needing_review(&self.visible_sessions(cx), self.current_project.as_deref())
+                .iter()
+                .any(|need| need.state == AgentState::Running)
+        {
+            return true;
         }
         let running: Vec<String> =
             self.sessions.iter().filter(|e| e.running).map(|e| e.id.clone()).collect();
@@ -3396,6 +4363,249 @@ mod tests {
         let browse_key = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
         assert!(sessions_key != browse_key, "the mode switch re-arms the cached pane");
         assert_eq!(browse_key.mode, crate::layout::Mode::Browse);
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3: the cached pane re-arms when the Browse sidebar's inputs
+    /// change — a select, a pin, a close, an expand and the open tab
+    /// menu all move the key.
+    #[gpui::test]
+    fn sidebar_key_changes_with_browse_tabs(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-key");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                // The Browse fingerprints key only in Browse mode (a
+                // Sessions frame never walks the tab model), so the test
+                // enters Browse the way the switch does.
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.current_project_id();
+                h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://a.example/",
+                    None,
+                );
+                h.browser.tabs.open(space, crate::browser::Owner::Person, "https://b.example/", None);
+            })
+        });
+        let opened = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        // A select moves the key.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                let space = h.current_project_id();
+                let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
+                h.browser.tabs.activate(id);
+            })
+        });
+        let selected = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(opened != selected, "a tab select re-arms the cached pane");
+        // A pin moves the key (the pinned tile appears).
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                let space = h.current_project_id();
+                let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
+                h.browser.tabs.set_pinned(id, true);
+            })
+        });
+        let pinned = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(selected != pinned, "a pin re-arms the cached pane");
+        // A close moves the key.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                let id = h.browser.tabs.tabs[0].id;
+                h.browser.tabs.close(id);
+            })
+        });
+        let closed = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(pinned != closed, "a close re-arms the cached pane");
+        // A From-sessions expand moves the key.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.browse_from_expanded.insert("s-1".to_owned());
+            })
+        });
+        let expanded = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(closed != expanded, "an expand re-arms the cached pane");
+        // The open tab menu is keyed too.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.tab_menu = h.browser.tabs.tabs.first().map(|tab| tab.id);
+            })
+        });
+        let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
+        assert!(expanded != menu, "the tab menu re-arms the cached pane");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3b item 1: with focus on the focus root in Browse, ⌘W's
+    /// handler closes the active person tab; the same handler in
+    /// Sessions is a no-op (the belt), so ⌘W falls through to
+    /// CloseWindow there. The context placement behind the dispatch —
+    /// `BaazBrowse` on an ancestor of the focus-root div, Browse-only —
+    /// is pinned in `browse_h3.rs`; this pins the handler half with
+    /// focus resting on the root (the first frame, after overlays
+    /// close), which is the case the ancestor fixes.
+    #[gpui::test]
+    fn browse_close_shortcut_closes_a_tab_only_in_browse(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-close");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.current_project_id();
+                h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://a.example/",
+                    None,
+                );
+                h.browser.tabs.open(space, crate::browser::Owner::Person, "https://b.example/", None);
+            })
+        });
+        vc.update(|window, cx| window.focus(&baaz.read(cx).focus_root.clone(), cx));
+        vc.update(|window, cx| {
+            assert!(
+                baaz.read(cx).focus_root.is_focused(window),
+                "focus rests on the focus root"
+            );
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 1, "⌘W in Browse closes a tab, not the window");
+        });
+        // Sessions: the same handler must not touch the tabs — the belt
+        // holds, and ⌘W keeps closing the window there.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Sessions;
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 1, "⌘W in Sessions closes no tab");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
+    /// it (back to the person's active tab, closing nothing) and the
+    /// moves are no-ops (they would act on the hidden person tab).
+    #[gpui::test]
+    fn browse_shortcuts_defer_to_the_shown_session_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-session-tab");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.current_project_id();
+                h.browser.tabs.open(
+                    space.clone(),
+                    crate::browser::Owner::Person,
+                    "https://a.example/",
+                    None,
+                );
+                h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://b.example/", None);
+                let shown = h.browser.tabs.open(
+                    space,
+                    crate::browser::Owner::Session("s-1".to_owned()),
+                    "https://c.example/",
+                    None,
+                );
+                h.browser.tabs.activate(shown);
+                h.browse_session_tab = Some(shown);
+            })
+        });
+        let before = vc.update(|_, cx| baaz.read(cx).browser.tabs.generation);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.move_browse_shortcut(1, window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.browse_session_tab.is_some(), "the session show survives the move");
+            assert_eq!(
+                h.browser.tabs.generation, before,
+                "the move touches no person tab while a session tab shows"
+            );
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.close_browse_shortcut(window, cx));
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.browse_session_tab.is_none(), "⌘W stops showing the session tab");
+            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            assert_eq!(tabs.len(), 2, "⌘W closes nothing while a session tab shows");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B2a-H3: the Agents strip keeps sidebar order (running never jumps
+    /// waiting) and caps at two — and only this project's Running and
+    /// Waiting sessions qualify.
+    #[test]
+    fn agents_strip_keeps_sidebar_order_and_caps_at_two() {
+        let mut waiting = hover_entry("s-wait");
+        waiting.project = Some("p".into());
+        waiting.label = "Fix ledger chart".into();
+        waiting.approval_command = Some("rm -rf /tmp/x".into());
+        let mut running = hover_entry("s-run");
+        running.project = Some("p".into());
+        running.running = true;
+        let mut running_late = hover_entry("s-late");
+        running_late.project = Some("p".into());
+        running_late.running = true;
+        let mut elsewhere = hover_entry("s-elsewhere");
+        elsewhere.project = Some("q".into());
+        elsewhere.running = true;
+        let mut idle = hover_entry("s-idle");
+        idle.project = Some("p".into());
+        let entries = vec![waiting, running, running_late, idle, elsewhere];
+        let needs = agents_needing_review(&entries, Some("p"));
+        let ids: Vec<&str> = needs.iter().map(|need| need.session.as_str()).collect();
+        assert_eq!(ids, vec!["s-wait", "s-run"], "sidebar order, capped at two");
+        assert_eq!(needs[0].state, aui_tokens::AgentState::Waiting);
+        assert_eq!(needs[1].state, aui_tokens::AgentState::Running);
+        // Another project never leaks in, and an idle project shows none.
+        assert!(agents_needing_review(&entries, Some("zzz")).is_empty());
+        assert!(agents_needing_review(&entries, Some("q")).iter().any(|need| need.session == "s-elsewhere"));
+    }
+
+    /// B2a-H3: the Agents strip's Review path leaves Browse for Sessions
+    /// with that session open — the quiet open a sidebar click does.
+    #[gpui::test]
+    fn review_switches_mode_and_selects_the_session(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-review");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Browse);
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.review_session("s-review".to_owned(), window, cx));
+        });
+        let (mode, pending) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            (h.mode, h.pending_id.clone())
+        });
+        assert_eq!(mode, crate::layout::Mode::Sessions, "Review leaves Browse for Sessions");
+        assert_eq!(pending.as_deref(), Some("s-review"), "Review selects the session");
         b3c_teardown(&dir, guard, old);
     }
 

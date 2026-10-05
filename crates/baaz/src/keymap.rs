@@ -115,6 +115,20 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
     KeymapEntry { action: "ToggleBrowseMode", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Switch between Sessions and Browse" },
+    KeymapEntry { action: "NewBrowserTab", keystroke: "cmd-t", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "New browser tab" },
+    KeymapEntry { action: "CloseBrowseTab", keystroke: "cmd-w", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Close tab" },
+    KeymapEntry { action: "ReopenBrowseTab", keystroke: "cmd-shift-t", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Reopen closed tab" },
+    KeymapEntry { action: "BrowseTab1", keystroke: "cmd-1", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 1" },
+    KeymapEntry { action: "BrowseTab2", keystroke: "cmd-2", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 2" },
+    KeymapEntry { action: "BrowseTab3", keystroke: "cmd-3", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 3" },
+    KeymapEntry { action: "BrowseTab4", keystroke: "cmd-4", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 4" },
+    KeymapEntry { action: "BrowseTab5", keystroke: "cmd-5", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 5" },
+    KeymapEntry { action: "BrowseTab6", keystroke: "cmd-6", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 6" },
+    KeymapEntry { action: "BrowseTab7", keystroke: "cmd-7", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 7" },
+    KeymapEntry { action: "BrowseTab8", keystroke: "cmd-8", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 8" },
+    KeymapEntry { action: "BrowseTabLast", keystroke: "cmd-9", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select last tab" },
+    KeymapEntry { action: "MoveBrowseTabUp", keystroke: "cmd-alt-up", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Move tab up" },
+    KeymapEntry { action: "MoveBrowseTabDown", keystroke: "cmd-alt-down", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Move tab down" },
     KeymapEntry { action: "FocusAddress", keystroke: "cmd-l", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Focus address bar" },
     KeymapEntry { action: "TerminalSigint", keystroke: "ctrl-c", context: Some(crate::app::TERMINAL_CONTEXT), category: "terminal", label: "Interrupt terminal program" },
     KeymapEntry { action: "NoAction", keystroke: "enter", context: Some("BaazTerminal && !menu"), category: "terminal", label: "Terminal takes the key" },
@@ -217,6 +231,39 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             crate::app::NewBrowserTab,
             context,
         )),
+        "CloseBrowseTab" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::CloseBrowseTab,
+            context,
+        )),
+        "ReopenBrowseTab" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::ReopenBrowseTab,
+            context,
+        )),
+        "BrowseTab1" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab1, context)),
+        "BrowseTab2" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab2, context)),
+        "BrowseTab3" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab3, context)),
+        "BrowseTab4" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab4, context)),
+        "BrowseTab5" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab5, context)),
+        "BrowseTab6" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab6, context)),
+        "BrowseTab7" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab7, context)),
+        "BrowseTab8" => Some(gpui::KeyBinding::new(keystroke, crate::app::BrowseTab8, context)),
+        "BrowseTabLast" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::BrowseTabLast,
+            context,
+        )),
+        "MoveBrowseTabUp" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::MoveBrowseTabUp,
+            context,
+        )),
+        "MoveBrowseTabDown" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::MoveBrowseTabDown,
+            context,
+        )),
         "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
         "TerminalSigint" => Some(gpui::KeyBinding::new(keystroke, crate::app::TerminalSigint, context)),
         "SkillsUp" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsUp, context)),
@@ -264,11 +311,21 @@ fn claimable_keystroke(keystroke: &gpui::Keystroke) -> bool {
 /// The app-level keystrokes claimed while a Chromium page holds the keyboard:
 /// [`AUI_ROOT_KEYS`] first, then the single-keystroke bindings from
 /// `bindings` (the loaded keymap — defaults plus the user file) whose context
-/// is global (`None`) or `AuiRoot`, minus [`PAGE_OWNED`] and typing keys.
+/// is global (`None`), `AuiRoot`, or [`crate::app::BROWSE_CONTEXT`], minus
+/// [`PAGE_OWNED`] and typing keys.
 /// The library keys seed the set before the bindings run so the user file
 /// still gets the last word: a `null` eviction removes a library key exactly
 /// like a table row. Pure and not behind the `cef` feature, so unit tests
 /// pin it without a page.
+///
+/// The `BaazBrowse` rows join the set unconditionally — not only while
+/// Browse is current. Claiming only takes the keystroke back from the page;
+/// gpui's own context dispatch still scopes what fires, so in Sessions ⌘W
+/// reaches `CloseWindow` while in Browse the outer `BaazBrowse` wrapper
+/// wins with `CloseBrowseTab`. A mode-dependent snapshot would go stale on
+/// every switch; the union never does. The live-mode filter lives one
+/// layer down, in [`claims_keystroke`]: `BaazBrowse`-only chords claim
+/// only while Browse is live, so a page in Sessions keeps them.
 pub(crate) fn claimed_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
     let mut claimed: Vec<gpui::Keystroke> = Vec::new();
     for keystroke in AUI_ROOT_KEYS {
@@ -284,7 +341,10 @@ pub(crate) fn claimed_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keys
         }
         let app_level = match binding.predicate() {
             None => true,
-            Some(predicate) => predicate.to_string() == aui::keys::ROOT_CONTEXT,
+            Some(predicate) => {
+                let context = predicate.to_string();
+                context == aui::keys::ROOT_CONTEXT || context == crate::app::BROWSE_CONTEXT
+            }
         };
         if !app_level {
             continue;
@@ -319,12 +379,79 @@ thread_local! {
     /// which it must not do from inside the CEF callback.
     static CLAIMED_KEYS: std::cell::RefCell<Vec<gpui::Keystroke>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The `BaazBrowse`-only chords inside that snapshot (bound in
+    /// `BaazBrowse` and nowhere app-level): ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓. ⌘W and ⌘T
+    /// also bind outside Browse, so they never land here.
+    static BROWSE_ONLY_KEYS: std::cell::RefCell<Vec<gpui::Keystroke>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The live mode the claim check filters `BaazBrowse` rows by: set by
+    /// [`crate::app::Harness::set_mode`], read by [`claims_keystroke`].
+    /// The CEF callback cannot borrow gpui state, so the flag rides here.
+    static BROWSE_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Note the live mode for the claim check: true while Browse is current,
+/// so a page in Sessions keeps the `BaazBrowse`-only chords. Called by
+/// [`crate::app::Harness::set_mode`] (and at startup for the initial
+/// mode); the snapshot itself never changes on a switch.
+pub(crate) fn set_claim_live_browse(live: bool) {
+    BROWSE_LIVE.with(|slot| slot.set(live));
 }
 
 /// Recompute the claimed-set snapshot from freshly installed bindings.
 /// Called by [`crate::app::bind_keys`], so every (re)install refreshes it.
+/// The `BaazBrowse`-only subset refreshes alongside, from the same rows.
 pub(crate) fn refresh_claimed_keys(bindings: &[gpui::KeyBinding]) {
     CLAIMED_KEYS.with(|slot| *slot.borrow_mut() = claimed_shortcuts(bindings));
+    BROWSE_ONLY_KEYS.with(|slot| *slot.borrow_mut() = browse_only_shortcuts(bindings));
+}
+
+/// The claimed keystrokes bound in `BaazBrowse` and in no app-level
+/// context (global or `AuiRoot`): ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓. ⌘W and ⌘T also bind
+/// at the root, so they never land here. [`claims_keystroke`] filters
+/// these by the live mode; the snapshot itself is mode-independent, so
+/// a rebind (never a mode switch) is what refreshes it. Pure, so unit
+/// tests pin both modes' membership without a page.
+pub(crate) fn browse_only_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
+    let mut browse: Vec<gpui::Keystroke> = Vec::new();
+    let mut app_level: Vec<gpui::Keystroke> = Vec::new();
+    for binding in bindings {
+        if binding.keystrokes().len() != 1 {
+            continue;
+        }
+        let Some(keystroke) = binding.keystrokes().first() else {
+            continue;
+        };
+        let parsed = keystroke.inner().clone();
+        let no_action = binding.action().name().rsplit("::").next() == Some("NoAction");
+        match binding.predicate() {
+            None => {
+                if no_action {
+                    app_level.retain(|claimed| claimed != &parsed);
+                } else if !app_level.contains(&parsed) {
+                    app_level.push(parsed);
+                }
+            }
+            Some(predicate) => {
+                let context = predicate.to_string();
+                if context == crate::app::BROWSE_CONTEXT {
+                    if no_action {
+                        browse.retain(|claimed| claimed != &parsed);
+                    } else if !browse.contains(&parsed) {
+                        browse.push(parsed);
+                    }
+                } else if context == aui::keys::ROOT_CONTEXT {
+                    if no_action {
+                        app_level.retain(|claimed| claimed != &parsed);
+                    } else if !app_level.contains(&parsed) {
+                        app_level.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    browse.retain(|keystroke| !app_level.contains(keystroke));
+    browse
 }
 
 /// Recompute the claimed-set snapshot from disk, after a binding is set,
@@ -340,6 +467,11 @@ pub(crate) fn refresh_claimed_from_disk() {
 /// membership in the current claimed-set snapshot, compared structurally so
 /// modifier order never matters. Unparseable input claims nothing.
 ///
+/// `BaazBrowse`-only chords (see [`browse_only_shortcuts`]) claim only
+/// while Browse is live ([`BROWSE_LIVE`]): a page in Sessions keeps
+/// ⌘1–⌘9, ⌘⇧T and ⌥⌘↑/↓. Chords that also bind at the root (⌘W, ⌘T)
+/// claim in both modes, as their Sessions handlers require.
+///
 /// Only built where something reads it: the `cef` router and the unit tests.
 /// Without either it would be dead code, and `-D warnings` says so loudly.
 #[cfg(any(test, feature = "cef"))]
@@ -347,6 +479,11 @@ pub(crate) fn claims_keystroke(keystroke: &str) -> bool {
     let Ok(incoming) = gpui::Keystroke::parse(keystroke) else {
         return false;
     };
+    if !BROWSE_LIVE.with(|slot| slot.get())
+        && BROWSE_ONLY_KEYS.with(|slot| slot.borrow().contains(&incoming))
+    {
+        return false;
+    }
     CLAIMED_KEYS.with(|slot| slot.borrow().contains(&incoming))
 }
 
@@ -1244,7 +1381,7 @@ mod tests {
     fn invalid_context_warns_and_keeps_the_default() {
         let path = user_file(
             "invalid-context",
-            r#"[{ "context": "NoSuchContext", "bindings": { "cmd-t": "NewSession" } }]"#,
+            r#"[{ "context": "NoSuchContext", "bindings": { "cmd-alt-y": "NewSession" } }]"#,
         );
         let loaded = super::load_from_path(&path, false);
         assert!(
@@ -1258,19 +1395,21 @@ mod tests {
             "the skipped block installs nothing: the default stands alone"
         );
         assert!(
-            binding_rows(&loaded.bindings).iter().all(|(_, key, _)| key != "cmd-t"),
+            binding_rows(&loaded.bindings).iter().all(|(_, key, _)| key != "cmd-alt-y"),
             "the would-be keystroke is bound nowhere"
         );
     }
 
     /// A duplicate `(keystroke, context)` in the user file warns and the
-    /// first entry wins: exactly one `cmd-t` survives, for the first action.
+    /// first entry wins: exactly one `cmd-alt-y` survives, for the first
+    /// action. (The fixture used to be `cmd-t`; B2a-H3 binds that to
+    /// `NewBrowserTab`, so the free chord moved.)
     #[test]
     fn duplicate_keystroke_context_warns_and_keeps_the_first() {
         let path = user_file(
             "duplicate",
-            r#"[{ "context": "AuiRoot", "bindings": { "cmd-t": "NewSession" } },
-                { "context": "AuiRoot", "bindings": { "cmd-t": "OpenModelMenu" } }]"#,
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-alt-y": "NewSession" } },
+                { "context": "AuiRoot", "bindings": { "cmd-alt-y": "OpenModelMenu" } }]"#,
         );
         let loaded = super::load_from_path(&path, false);
         assert!(
@@ -1279,12 +1418,12 @@ mod tests {
             loaded.warnings
         );
         let rows = binding_rows(&loaded.bindings);
-        let cmd_t: Vec<_> = rows
+        let kept: Vec<_> = rows
             .iter()
-            .filter(|(_, key, context)| key == "cmd-t" && context.as_deref() == Some("AuiRoot"))
+            .filter(|(_, key, context)| (key == "cmd-alt-y" || key == "alt-cmd-y") && context.as_deref() == Some("AuiRoot"))
             .collect();
-        assert_eq!(cmd_t.len(), 1, "exactly one cmd-t survives: {cmd_t:?}");
-        assert_eq!(cmd_t[0].0, "NewSession", "the first entry wins");
+        assert_eq!(kept.len(), 1, "exactly one cmd-alt-y survives: {kept:?}");
+        assert_eq!(kept[0].0, "NewSession", "the first entry wins");
     }
 
     /// The guarantee the reserved list exists for: a hand-written
@@ -1507,6 +1646,80 @@ mod tests {
         assert!(claimed_has(&claimed, "cmd-alt-b"), "⌥⌘B must be claimed");
     }
 
+    /// B2a-H3: every Browse tab shortcut is a table row in the right
+    /// context — ⌘T at the root (so it fires from Sessions too, where
+    /// the handler switches to Browse first), the rest in `BaazBrowse`
+    /// (so Sessions keeps ⌘W closing the window and ⌘N untouched).
+    #[test]
+    fn browse_tab_shortcuts_are_bound_in_their_contexts() {
+        let browse = Some(crate::app::BROWSE_CONTEXT);
+        let root = Some(aui::keys::ROOT_CONTEXT);
+        for (action, keystroke, context) in [
+            ("NewBrowserTab", "cmd-t", root),
+            ("CloseBrowseTab", "cmd-w", browse),
+            ("ReopenBrowseTab", "cmd-shift-t", browse),
+            ("BrowseTab1", "cmd-1", browse),
+            ("BrowseTab2", "cmd-2", browse),
+            ("BrowseTab3", "cmd-3", browse),
+            ("BrowseTab4", "cmd-4", browse),
+            ("BrowseTab5", "cmd-5", browse),
+            ("BrowseTab6", "cmd-6", browse),
+            ("BrowseTab7", "cmd-7", browse),
+            ("BrowseTab8", "cmd-8", browse),
+            ("BrowseTabLast", "cmd-9", browse),
+            ("MoveBrowseTabUp", "cmd-alt-up", browse),
+            ("MoveBrowseTabDown", "cmd-alt-down", browse),
+        ] {
+            let row = super::KEYMAP
+                .iter()
+                .find(|row| row.action == action)
+                .unwrap_or_else(|| panic!("keymap has no {action} row"));
+            assert_eq!(row.keystroke, keystroke, "{action} rides the wrong chord");
+            assert_eq!(row.context, context, "{action} binds in the wrong context");
+            assert_eq!(row.category, "pane", "{action} lists outside the pane group");
+            assert!(!row.label.is_empty(), "{action} has no Settings label");
+        }
+        // Sessions' own chords stand exactly where they were.
+        let new = super::KEYMAP
+            .iter()
+            .find(|row| row.action == "NewSession")
+            .expect("a NewSession row");
+        assert_eq!((new.keystroke, new.context), ("cmd-n", root));
+        let close = super::KEYMAP
+            .iter()
+            .find(|row| row.action == "CloseWindow")
+            .expect("a CloseWindow row");
+        assert_eq!((close.keystroke, close.context), ("cmd-w", root));
+    }
+
+    /// B2a-H3: every Browse chord is claimed while a page holds the
+    /// keyboard — the `BaazBrowse` rows through the extended claimed
+    /// set — while the page keeps its editing keys.
+    #[test]
+    fn browse_tab_shortcuts_are_all_claimed() {
+        let claimed = super::claimed_shortcuts(&super::build_bindings());
+        for keystroke in [
+            "cmd-t",
+            "cmd-w",
+            "cmd-shift-t",
+            "cmd-1",
+            "cmd-8",
+            "cmd-9",
+            "cmd-alt-up",
+            "cmd-alt-down",
+        ] {
+            assert!(claimed_has(&claimed, keystroke), "{keystroke:?} must be claimed");
+        }
+        super::refresh_claimed_keys(&super::build_bindings());
+        // The thread-local starts in Sessions: Browse-only chords claim
+        // only once the live mode says Browse (see
+        // `claims_filter_browse_chords_by_live_mode` for both halves).
+        super::set_claim_live_browse(true);
+        assert!(super::claims_keystroke("cmd-alt-down"), "⌥⌘↓ is claimed");
+        assert!(!super::claims_keystroke("cmd-c"), "the page keeps ⌘C");
+        super::set_claim_live_browse(false);
+    }
+
     /// The claimed set never takes what belongs to the page or the typing:
     /// editing keys (`cmd-c`, `cmd-v`, `cmd-a`, `cmd-z`), ⌃C (terminals and
     /// editors in web pages), bare keys (`enter`, `a`) and shift-only keys
@@ -1548,6 +1761,40 @@ mod tests {
         let claimed = super::claimed_shortcuts(&loaded.bindings);
         assert!(!claimed_has(&claimed, "cmd-k"), "the unbound library ⌘K stays with the page");
         assert!(claimed_has(&claimed, "cmd-l"), "the rest of the set is untouched");
+    }
+
+    /// B2a-H3b: the `BaazBrowse`-only subset is exactly the chords that
+    /// bind in `BaazBrowse` and nowhere app-level — ⌘⇧T, ⌘1–⌘9, ⌥⌘↑/↓ —
+    /// while the dual-bound chords (⌘W, ⌘T) stay out of it.
+    #[test]
+    fn browse_only_subset_holds_exactly_the_browse_only_chords() {
+        let only = super::browse_only_shortcuts(&super::build_bindings());
+        for keystroke in ["cmd-shift-t", "cmd-1", "cmd-8", "cmd-9", "cmd-alt-up", "cmd-alt-down"] {
+            assert!(claimed_has(&only, keystroke), "{keystroke:?} is Browse-only");
+        }
+        for keystroke in ["cmd-w", "cmd-t", "cmd-k", "cmd-c"] {
+            assert!(!claimed_has(&only, keystroke), "{keystroke:?} is not Browse-only");
+        }
+    }
+
+    /// B2a-H3b: the claim check filters that subset by the live mode. In
+    /// Sessions a page keeps ⌘1–⌘9, ⌘⇧T and ⌥⌘↑/↓ while ⌘W and ⌘T still
+    /// claim (their Sessions handlers need them); in Browse everything
+    /// claims. The snapshot itself never changes on a switch.
+    #[test]
+    fn claims_filter_browse_chords_by_live_mode() {
+        super::refresh_claimed_keys(&super::build_bindings());
+        super::set_claim_live_browse(false);
+        for keystroke in ["cmd-1", "cmd-9", "cmd-shift-t", "cmd-alt-up", "cmd-alt-down"] {
+            assert!(!super::claims_keystroke(keystroke), "Sessions keeps {keystroke:?}");
+        }
+        assert!(super::claims_keystroke("cmd-w"), "Sessions still claims ⌘W for CloseWindow");
+        assert!(super::claims_keystroke("cmd-t"), "Sessions still claims ⌘T for NewBrowserTab");
+        super::set_claim_live_browse(true);
+        for keystroke in ["cmd-1", "cmd-9", "cmd-shift-t", "cmd-alt-up", "cmd-alt-down", "cmd-w", "cmd-t"] {
+            assert!(super::claims_keystroke(keystroke), "Browse claims {keystroke:?}");
+        }
+        super::set_claim_live_browse(false);
     }
 
     /// The thread-local snapshot the CEF router reads: refreshed from the
