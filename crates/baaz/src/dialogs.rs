@@ -742,10 +742,7 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::BackHistory) {
             return None;
         }
-        let shown = self.browse_centre_shown();
-        let Some(id) = shown else {
-            return None;
-        };
+        let id = self.browse_centre_shown()?;
         let mut past: Vec<String> = self
             .browser
             .histories
@@ -769,9 +766,7 @@ impl Harness {
                 }
             }
         });
-        let Some(trigger) = self.back_bounds else {
-            return None;
-        };
+        let trigger = self.back_bounds?;
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();

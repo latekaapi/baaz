@@ -189,19 +189,19 @@ fn address_shows_the_page_with_tab_fallback() {
     let app = source("app.rs");
     let toolbar = fn_body(&app, "render_browse_toolbar");
     assert!(toolbar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
-    assert!(toolbar.contains("stop_armed"), "the stop button reads the tracked load");
+    assert!(toolbar.contains("state.read(cx).loading()"), "the stop button reads the engine loading state");
+    assert!(!toolbar.contains("loading_tabs"), "no Baaz-tracked load set feeds the button");
 }
 
-/// The Browse centre hides the library's nav row: `webview_pane` offers no
-/// no-nav option, so the pane renders shifted up by exactly that row inside
-/// a clipping centre — only the page shows under Browse's own toolbar.
+/// The Browse centre draws no library nav row: the pane leaves it out
+/// with `without_nav`, so only the page shows under Browse's own toolbar
+/// — no shift, no clip.
 #[test]
 fn browse_centre_hides_the_library_nav_row() {
     let app = source("app.rs");
     let centre = fn_body(&app, "render_browse_centre");
-    assert!(centre.contains("offers no no-nav option"), "the workaround names its reason");
-    assert!(centre.contains("top(px(-38.0))"), "the pane shifts up by exactly the nav row");
-    assert!(centre.contains("overflow_hidden"), "the centre clips the shifted row away");
+    assert!(centre.contains(".without_nav()"), "the centre pane leaves the nav row out");
+    assert!(!centre.contains("top(px(-38.0))"), "no shift hack for the nav row");
 }
 
 /// The extensions button is a monochrome toolbar icon (the sprite has no
@@ -236,15 +236,16 @@ fn newtab_placeholder_and_dropdown_anchors() {
 }
 
 /// Ask drafts into the session that lands: `browse_ask` arms the question
-/// and starts the session without touching `active`; `activate` writes it
-/// into the landed view (appending over reused text) — never sent, never
-/// navigated. ⌘↵ rides the input's own binding, so the commit never also
-/// fires.
+/// and starts the session without touching `active`; `new_session_in`
+/// keys it by the created (or reused) session id and drops it on every
+/// early return; `activate` writes it into the keyed view only (appending
+/// over reused text) — never sent, never navigated. ⌘↵ rides the input's
+/// own binding, so the commit never also fires.
 #[test]
 fn ask_draft_lands_on_arrival_never_sent() {
     let browser = source("browser/mod.rs");
     let ask = fn_body(&browser, "browse_ask");
-    assert!(ask.contains("pending_ask_draft = Some(query)"), "Ask arms the question for its session");
+    assert!(ask.contains("PendingAsk { target: None, query }"), "Ask arms the unkeyed question");
     assert!(!ask.contains("self.active"), "Ask never touches whatever is active right now");
     assert!(!ask.contains("set_draft"), "Ask never writes a draft immediately");
     for banned in ["submit", ".send(", "navigate", "start_turn"] {
@@ -260,15 +261,25 @@ fn ask_draft_lands_on_arrival_never_sent() {
     let input = fn_body(&app, "browse_address_input");
     assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
     let lifecycle = source("app/lifecycle.rs");
+    let new = fn_body(&lifecycle, "new_session_in");
+    assert!(new.contains("self.drop_pending_ask()"), "an early return drops the draft");
+    assert!(
+        lifecycle.contains("self.key_pending_ask("),
+        "every open path keys the draft to its session"
+    );
     let activate = fn_body(&lifecycle, "activate");
-    assert!(activate.contains("pending_ask_draft.take()"), "the landed view takes the question");
+    assert!(
+        activate.contains("ask.target.as_deref() == Some(session_id.as_str())"),
+        "only the keyed session's landing takes the question"
+    );
     assert!(activate.contains("ask_draft_text"), "reused text appends on a new line");
     assert!(activate.contains("view.set_draft(next, window, cx)"), "the draft lands, never sent");
 }
 
 /// The back-history menu never opens while back is disabled; an empty
-/// render clears the menu instead of leaving the page covered; picking a
-/// row steps back through the history so the stacks stay right.
+/// stack draws nothing (the render never mutates state — the opener
+/// decides); picking a row steps back through the history so the stacks
+/// stay right.
 #[test]
 fn back_history_menu_guards_clears_and_steps() {
     let app = source("app.rs");
@@ -294,7 +305,7 @@ fn centre_override_clears_everywhere() {
             "{name} unparks the carry"
         );
     }
-    let row = fn_body(&browser, "activate_omnibox_row");
+    let row = fn_body(&browser, "activate_omnibox_target");
     assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and unparks)");
     assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
     let lifecycle = source("app/lifecycle.rs");
@@ -325,31 +336,30 @@ fn suggestions_pickup_and_row_presses() {
     assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
     assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
     assert!(
-        app.contains("on_mouse_down(gpui::MouseButton::Left, activate)"),
+        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
         "omnibox rows press on mouse-down"
     );
+    assert!(app.contains(".on_click(activate)"), "omnibox rows also answer clicks");
     assert!(
-        app.contains("on_mouse_down(gpui::MouseButton::Left, reset)"),
+        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
         "the zoom pill presses on mouse-down"
     );
+    assert!(app.contains(".on_click(reset)"), "the zoom pill also answers clicks");
     let leave = fn_body(&browser, "leave_browse_address");
     assert!(leave.contains("browse_address_page_focus"), "leaving prefers the page when it had focus");
     assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
 }
 
-/// Loads track until done or stopped: every navigation marks its tab, the
-/// sync clears finished ones, and the stop clears a stalled one — the
-/// button never sticks on Stop below 1.0.
+/// The stop/reload control follows the engine: `browse_reload_or_stop`
+/// stops exactly while `WebviewState::loading()` reports a load and
+/// reloads otherwise — no Baaz-tracked set anywhere, in the registry or
+/// the sync.
 #[test]
 fn loading_tracks_until_done_or_stop() {
     let browser = source("browser/mod.rs");
+    assert!(!browser.contains("loading_tabs"), "no Baaz-tracked load set survives");
     assert!(
-        fn_body(&browser, "navigate_browse_tab").contains("loading_tabs.insert(id)"),
-        "every navigation marks its tab"
+        fn_body(&browser, "browse_reload_or_stop").contains("state.read(cx).loading()"),
+        "the control reads the engine loading state"
     );
-    assert!(
-        fn_body(&browser, "browse_reload_or_stop").contains("loading_tabs.remove(&id)"),
-        "the stop untracks a stalled load"
-    );
-    assert!(browser.contains("progress() >= 1.0"), "the sync clears finished loads");
 }
