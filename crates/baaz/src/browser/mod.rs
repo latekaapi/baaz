@@ -3432,7 +3432,11 @@ impl Harness {
     /// The session label behind the ↩ chip: the collapsed head label the
     /// Sessions header wears, falling back to the id.
     pub(crate) fn browse_chip_session_name(&self, session: &str, cx: &gpui::App) -> String {
-        self.collapsed_head_label(session, cx).unwrap_or_else(|| session.to_owned())
+        // A session with no title yet (a draft) reads "New session" — never
+        // its raw id (found live: the chip read "local-draft-b0d3…").
+        self.collapsed_head_label(session, cx)
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| String::from("New session"))
     }
 
     /// Ask the agent about `query` (the omnibox's Ask row, ⌘↵): a new
