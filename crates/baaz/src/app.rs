@@ -184,6 +184,12 @@ actions!(
         MoveBrowseTabDown,
         /// Move the active Browse tab up one slot (⌥⌘↑).
         MoveBrowseTabUp,
+        /// Open the find strip on the shown Browse tab (⌘F in Browse).
+        FindInPage,
+        /// Copy the shown Browse tab's link (⇧⌘C in Browse).
+        CopyLink,
+        /// Open the shown Browse tab's developer tools (⌥⌘I in Browse).
+        DevTools,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -811,6 +817,19 @@ pub struct Harness {
     /// the page then, else to the root — never a destroyed handle. Never
     /// persists.
     pub(crate) browse_address_page_focus: bool,
+    /// The find strip's live input (B2a-H5): `Some` while the strip renders
+    /// on the shown tab, `None` when it closes. One input for every tab —
+    /// the render syncs its value to the shown tab's kept query, so
+    /// switching tabs never shows another tab's text. Never persists.
+    pub(crate) browse_find: Option<Entity<InputState>>,
+    /// The find input's event subscription (Enter steps, typing searches
+    /// debounced): held while [`Self::browse_find`] is `Some`, dropped
+    /// with it. Never persists.
+    pub(crate) browse_find_sub: Option<gpui::Subscription>,
+    /// The live-search generation (B2a-H5): typing bumps this and arms a
+    /// 100 ms timer, and only the latest generation searches — the strip
+    /// searches once per pause, not once per keystroke. Never persists.
+    pub(crate) browse_find_generation: u64,
     /// The Ask question waiting for its session (B2a-H4d): `browse_ask`
     /// arms this and starts the session; `activate` writes it into the
     /// landed view's draft (appending on a new line over reused text) —
@@ -1402,6 +1421,9 @@ impl Harness {
             back_bounds: None,
             browse_last_holds: false,
             browse_address_page_focus: false,
+            browse_find: None,
+            browse_find_sub: None,
+            browse_find_generation: 0,
             pending_ask_draft: None,
             browse_completed: None,
             browse_completed_text: None,
@@ -3746,10 +3768,13 @@ impl Harness {
             None => None,
         };
         let address = self.browse_address_field(url.clone(), blank, editing, security, zoom, tab, window, cx);
-        // Extensions and More are placeholders until B2a-H5 owns their
-        // menus (Annotate and Screenshot stay reachable through the ⋯
-        // menu from B2a-H5 on). The sprite has no puzzle or grid glyph, so
-        // the grid-like Layout stands in — monochrome like every other
+        // Downloads (B2a-H5): the button exists only while downloads list
+        // this session, between the address and ⋯ — and opens the popover.
+        let downloads = self.browse_downloads_button(cx);
+        // Extensions (B2a-H5): stock CEF exposes no extension list, so the
+        // popover is a fixed message (Manage opens chrome://extensions,
+        // the Store opens the Web Store). The sprite has no puzzle glyph,
+        // so the grid-like Layout stands in — monochrome like every other
         // toolbar button.
         let extensions = div()
             .id("hd-browse-extensions")
@@ -3761,8 +3786,12 @@ impl Harness {
                     .muted()
                     .size(ButtonSize::Sm)
                     .accessibility_label("Extensions")
-                    // B2a-H5: the extensions menu.
-                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
+                    .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.browser.extensions_open = !this.browser.extensions_open;
+                        this.browser.downloads_open = false;
+                        this.browser.more_open = false;
+                        cx.notify();
+                    })),
             );
         let more = div()
             .id("hd-browse-more")
@@ -3774,22 +3803,24 @@ impl Harness {
                     .muted()
                     .size(ButtonSize::Sm)
                     .accessibility_label("More")
-                    // B2a-H5: the ⋯ menu.
-                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
+                    .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.browser.more_open = !this.browser.more_open;
+                        this.browser.more_move_open = false;
+                        this.browser.downloads_open = false;
+                        this.browser.extensions_open = false;
+                        cx.notify();
+                    })),
             );
         let mut cell =
             header_cell("hd-browse").child(div().flex_none().child(self.project_crumb(window, cx)));
         if let Some(chip) = chip {
             cell = cell.child(chip);
         }
-        let cell = cell
-            .child(back)
-            .child(forward)
-            .child(reload)
-            .child(address)
-            .child(extensions)
-            .child(more)
-            .child(self.right_toggle(cx));
+        let mut cell = cell.child(back).child(forward).child(reload).child(address);
+        if let Some(downloads) = downloads {
+            cell = cell.child(downloads);
+        }
+        let cell = cell.child(extensions).child(more).child(self.right_toggle(cx));
         // The 2 px accent progress line along the bottom of the header,
         // driven by the page's progress: a proportional fill while loading.
         let progress_bar: Option<AnyElement> = if loading {
@@ -3847,6 +3878,700 @@ impl Harness {
                     .min_w(px(0.0)),
             )
             .into_any_element()
+    }
+
+    /// A small chrome button (B2a-H5): text on no surface, named for
+    /// assistive tech, with its click. Find-strip, permission-strip and
+    /// popover rows share it — the label and the click stay in one chain,
+    /// so the a11y ratchet sees the name beside the press.
+    fn browse_chrome_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        label: &str,
+        aria: &str,
+        click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let p = cx.aui().colors;
+        div()
+            .id(id)
+            .flex_none()
+            .h(px(24.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(px(scale::R_SM))
+            .ui(scale::FS_12)
+            .text_color(p.ink_2)
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(aria.to_owned())
+            .child(label.to_owned())
+            .on_click(click)
+    }
+
+    /// One ⋯/popover menu row (B2a-H5): label plus an optional shortcut
+    /// hint, a MenuItem named for assistive tech, with its click. Mirrors
+    /// the tab menu's rows; the label and the click stay in one chain, so
+    /// the a11y ratchet sees the name beside the press.
+    fn browse_menu_row(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        label: &str,
+        hint: Option<&str>,
+        click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mut row = h_flex()
+            .id(id)
+            .w_full()
+            .h(px(28.0))
+            .flex_none()
+            .items_center()
+            .px(px(8.0))
+            .gap(px(8.0))
+            .rounded(px(scale::R_XS))
+            .cursor_pointer()
+            .role(gpui::Role::MenuItem)
+            .aria_label(label.to_owned())
+            .child(div().flex_1().min_w(px(0.0)).truncate().ui(scale::FS_12).child(label.to_owned()));
+        if let Some(hint) = hint {
+            let p = cx.aui().colors;
+            row = row.child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(hint.to_owned()));
+        }
+        row.on_click(click)
+    }
+
+    /// A popover shell (B2a-H5): absolute under the toolbar, over the page
+    /// (which the covering rule obscures while it stands). Downloads,
+    /// extensions and ⋯ share it.
+    fn browse_popover(&self, id: impl Into<gpui::ElementId>, aria: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let p = cx.aui().colors;
+        v_flex()
+            .id(id)
+            .absolute()
+            .top(px(4.0))
+            .right(px(8.0))
+            .w(px(320.0))
+            .flex_none()
+            .gap(px(2.0))
+            .p(px(4.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_2)
+            .border_1()
+            .border_color(p.line)
+            .role(gpui::Role::Menu)
+            .aria_label(aria.to_owned())
+    }
+
+    /// The downloads toolbar button (B2a-H5): `None` with no downloads
+    /// this session. A % badge ringed in accent while any is active, the
+    /// plain tray mark otherwise; it opens the popover.
+    fn browse_downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::browser::chrome::{downloads_active_count, downloads_label};
+        let downloads = self.browse_downloads(cx);
+        if downloads.is_empty() {
+            return None;
+        }
+        let states: Vec<aui_webview::DownloadState> =
+            downloads.iter().map(|(_, _, download)| download.clone()).collect();
+        let spoken = downloads_label(&states);
+        let badge = if downloads_active_count(&states) == 0 {
+            "↓".to_owned()
+        } else {
+            let (mut received, mut total) = (0u64, 0u64);
+            for download in &states {
+                if download.state == aui_webview::DownloadStatus::Downloading {
+                    received += download.received;
+                    total += download.total.unwrap_or(0);
+                }
+            }
+            match received.checked_mul(100).and_then(|hundredths| hundredths.checked_div(total)) {
+                Some(pct) => format!("{pct}%"),
+                None => "↓".to_owned(),
+            }
+        };
+        let p = cx.aui().colors;
+        let active = downloads_active_count(&states) > 0;
+        Some(
+            div()
+                .id("hd-browse-downloads")
+                .flex_none()
+                .role(gpui::Role::Button)
+                .aria_label(spoken)
+                .cursor_pointer()
+                .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.browser.downloads_open = !this.browser.downloads_open;
+                    this.browser.extensions_open = false;
+                    this.browser.more_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(if active { p.accent } else { p.line })
+                        .ui(scale::FS_11)
+                        .text_color(if active { p.accent } else { p.ink_2 })
+                        .child(badge),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The find strip (B2a-H5): a row above the page — input, "3 / 12",
+    /// ↑/↓, Match case, Done. Only the shown tab's open strip renders;
+    /// the input syncs to its kept query, so a switch never shows another
+    /// tab's text. Esc closes (the wrapper owns it, like the address
+    /// field); Enter steps through the input's own PressEnter.
+    fn render_browse_find(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::browser::chrome::find_count_text;
+        let shown = self.browse_centre_shown();
+        let (query, match_case) = match self.browser.find_strips.visible(shown) {
+            Some((_, strip)) => (strip.query.clone(), strip.match_case),
+            None => return None,
+        };
+        let input = self.browse_find.clone()?;
+        if input.read(cx).value() != query {
+            let synced = query.clone();
+            input.update(cx, |input, cx| {
+                input.set_value(synced, window, cx);
+            });
+        }
+        let p = cx.aui().colors;
+        let count = self
+            .browse_centre_state()
+            .and_then(|state| state.read(cx).find_state())
+            .filter(|found| found.query == query)
+            .map(|found| (find_count_text(found.active, found.total), found.active, found.total));
+        let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key.as_str() == "escape" {
+                this.close_browse_find(window, cx);
+            }
+        });
+        let mut row = h_flex()
+            .id("browse-find")
+            .w_full()
+            .flex_none()
+            .items_center()
+            .h(px(32.0))
+            .px(px(8.0))
+            .gap(px(6.0))
+            .bg(p.surface_1)
+            .role(gpui::Role::Group)
+            .aria_label("Find in page")
+            .on_key_down(keys)
+            .child(
+                div().flex_1().min_w(px(0.0)).child(
+                    a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w(px(0.0)),
+                ),
+            );
+        match count {
+            Some((text, active, total)) => {
+                row = row.child(
+                    div()
+                        .id("browse-find-count")
+                        .flex_none()
+                        .ui(scale::FS_12)
+                        .text_color(p.ink_3)
+                        .role(gpui::Role::Label)
+                        .aria_label(format!("{active} of {total} matches"))
+                        .child(text),
+                );
+            }
+            None => {
+                row = row.child(
+                    div()
+                        .id("browse-find-count")
+                        .flex_none()
+                        .ui(scale::FS_12)
+                        .text_color(p.ink_3)
+                        .role(gpui::Role::Label)
+                        .aria_label("No matches yet")
+                        .child("…"),
+                );
+            }
+        }
+        let prev = self.browse_chrome_button(
+            "browse-find-prev",
+            "↑",
+            "Previous match",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.step_browse_find(false, cx);
+            }),
+            cx,
+        );
+        let next = self.browse_chrome_button(
+            "browse-find-next",
+            "↓",
+            "Next match",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.step_browse_find(true, cx);
+            }),
+            cx,
+        );
+        let case = self.browse_chrome_button(
+            "browse-find-case",
+            &format!("Match case: {}", if match_case { "On" } else { "Off" }),
+            "Match case",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.toggle_browse_find_case(cx);
+            }),
+            cx,
+        );
+        let done = self.browse_chrome_button(
+            "browse-find-done",
+            "Done",
+            "Done",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.close_browse_find(window, cx);
+            }),
+            cx,
+        );
+        row = row.child(prev).child(next).child(case).child(done);
+        Some(row.into_any_element())
+    }
+
+    /// The permission strip (B2a-H5): a row above the page while the shown
+    /// tab holds an unanswered ask — the sentence plus Block, Allow once
+    /// and Allow while visiting. Trusted origins never reach it (the sync
+    /// auto-answers), and a page dismissal drops it with no state here.
+    fn render_browse_permission(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::browser::chrome::permission_sentence;
+        let p = cx.aui().colors;
+        let state = self.browse_centre_state()?;
+        let request = state.read(cx).permissions().first()?.clone();
+        let sentence = permission_sentence(&request.origin, &request.kinds);
+        let id = request.id;
+        let mut row = h_flex()
+            .id("browse-permission")
+            .w_full()
+            .flex_none()
+            .items_center()
+            .h(px(32.0))
+            .px(px(8.0))
+            .gap(px(6.0))
+            .bg(p.surface_1)
+            .role(gpui::Role::Group)
+            .aria_label("Permission request")
+            .child(
+                div()
+                    .id("browse-permission-text")
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .ui(scale::FS_13)
+                    .text_color(p.ink)
+                    .role(gpui::Role::Label)
+                    .aria_label(sentence.clone())
+                    .child(sentence),
+            );
+        let block = self.browse_chrome_button(
+            "browse-permission-block",
+            "Block",
+            "Block",
+            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.answer_shown_permission(id, false, false, cx);
+            }),
+            cx,
+        );
+        let once = self.browse_chrome_button(
+            "browse-permission-once",
+            "Allow once",
+            "Allow once",
+            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.answer_shown_permission(id, true, false, cx);
+            }),
+            cx,
+        );
+        let visiting = self.browse_chrome_button(
+            "browse-permission-visiting",
+            "Allow while visiting",
+            "Allow while visiting",
+            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.answer_shown_permission(id, true, true, cx);
+            }),
+            cx,
+        );
+        row = row.child(block).child(once).child(visiting);
+        Some(row.into_any_element())
+    }
+
+    /// The Baaz crashed page (B2a-H5): gpui in the page rect while the
+    /// native view hides under it. The library reports no load-error
+    /// event — only `Crashed` — so every Baaz error page renders from
+    /// that state, with Reload navigating the tab again at its own URL.
+    fn render_browse_crashed(&self, reason: String, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let reload = self.browse_chrome_button(
+            "browse-crashed-reload",
+            "Reload",
+            "Reload page",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.reload_browse_shown(window, cx);
+            }),
+            cx,
+        );
+        v_flex()
+            .size_full()
+            .id("browse-crashed")
+            .items_center()
+            .justify_center()
+            .gap(px(8.0))
+            .role(gpui::Role::Group)
+            .aria_label("This page stopped")
+            .child(div().ui(scale::FS_14).text_color(p.ink).child("This page stopped"))
+            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(reason))
+            .child(reload)
+            .into_any_element()
+    }
+
+    /// The downloads popover (B2a-H5): every download's name, its
+    /// size-and-ETA line (or Done/Cancelled/Failed), the session credit on
+    /// agent-saved files — with Reveal in Finder on landed files, Cancel
+    /// download while active, Try again on failed ones — plus All
+    /// downloads for `~/Downloads`.
+    fn render_browse_downloads(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::browser::chrome::{download_line, download_owner_label};
+        if !self.browser.downloads_open {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let downloads = self.browse_downloads(cx);
+        if downloads.is_empty() {
+            return None;
+        }
+        let now = crate::browser::tabs::now_ms();
+        let mut menu = self.browse_popover("browse-downloads", "Downloads", cx);
+        for (tab, owner, download) in &downloads {
+            let tab = *tab;
+            let id = download.id;
+            let started = self.browser.download_started.get(&(tab, id)).copied().unwrap_or(now);
+            let elapsed = now.saturating_sub(started) / 1000;
+            let line = download_line(download, elapsed);
+            let credit = match owner {
+                crate::browser::Owner::Session(session) => {
+                    download_owner_label(owner, Some(&self.browse_chip_session_name(session, cx)))
+                }
+                crate::browser::Owner::Person => None,
+            };
+            let detail = match credit {
+                Some(credit) => format!("{line} · {credit}"),
+                None => line,
+            };
+            let mut item = v_flex()
+                .w_full()
+                .flex_none()
+                .gap(px(2.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .ui(scale::FS_13)
+                        .text_color(p.ink)
+                        .child(download.file_name.clone()),
+                )
+                .child(
+                    div()
+                        .id(("browse-download-line", id))
+                        .ui(scale::FS_11)
+                        .text_color(p.ink_3)
+                        .role(gpui::Role::Label)
+                        .aria_label(detail.clone())
+                        .child(detail),
+                );
+            let actions: Option<AnyElement> = match download.state {
+                aui_webview::DownloadStatus::Downloading => {
+                    let cancel = self.browse_chrome_button(
+                        ("browse-download-cancel", id),
+                        "Cancel download",
+                        "Cancel download",
+                        cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                            this.cancel_browse_download(tab, id, cx);
+                        }),
+                        cx,
+                    );
+                    Some(div().flex().flex_row().child(cancel).into_any_element())
+                }
+                aui_webview::DownloadStatus::Complete => {
+                    let path = download.path.clone();
+                    let reveal = self.browse_chrome_button(
+                        ("browse-download-reveal", id),
+                        "Reveal in Finder",
+                        "Reveal in Finder",
+                        move |_, _, _| {
+                            Self::reveal_browse_download(&path);
+                        },
+                        cx,
+                    );
+                    Some(div().flex().flex_row().child(reveal).into_any_element())
+                }
+                aui_webview::DownloadStatus::Failed => {
+                    let url = download.url.clone();
+                    let retry = self.browse_chrome_button(
+                        ("browse-download-retry", id),
+                        "Try again",
+                        "Try again",
+                        cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                            let url = url.clone();
+                            this.retry_browse_download(tab, &url, window, cx);
+                        }),
+                        cx,
+                    );
+                    Some(div().flex().flex_row().child(retry).into_any_element())
+                }
+                aui_webview::DownloadStatus::Cancelled => None,
+            };
+            if let Some(actions) = actions {
+                item = item.child(actions);
+            }
+            menu = menu.child(item);
+        }
+        let all = self.browse_menu_row(
+            "browse-downloads-all",
+            "All downloads",
+            None,
+            |_, _, _| {
+                Self::open_downloads_folder();
+            },
+            cx,
+        );
+        menu = menu.child(all);
+        Some(menu.into_any_element())
+    }
+
+    /// The extensions popover (B2a-H5): stock CEF exposes no extension
+    /// list, so a fixed message — Manage opens chrome://extensions, the
+    /// Store opens the Chrome Web Store, each in a new tab.
+    fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.browser.extensions_open {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let mut menu = self.browse_popover("browse-extensions", "Extensions", cx);
+        menu = menu.child(
+            div()
+                .w_full()
+                .px(px(8.0))
+                .py(px(4.0))
+                .ui(scale::FS_13)
+                .text_color(p.ink)
+                .child("Extensions run in this browser. Manage them in Chromium's extensions page."),
+        );
+        let manage = self.browse_menu_row(
+            "browse-extensions-manage",
+            "Manage",
+            None,
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.dismiss_browse_popovers(cx);
+                this.step_tab_new("chrome://extensions", window, cx);
+            }),
+            cx,
+        );
+        let store = self.browse_menu_row(
+            "browse-extensions-store",
+            "Chrome Web Store",
+            None,
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.dismiss_browse_popovers(cx);
+                this.step_tab_new("https://chromewebstore.google.com/", window, cx);
+            }),
+            cx,
+        );
+        menu = menu.child(manage).child(store);
+        let _ = window;
+        Some(menu.into_any_element())
+    }
+
+    /// The ⋯ page-actions menu (B2a-H5): New tab, Find in page, the Zoom
+    /// row, Move tab to project ▸ (an inline project list), Open in
+    /// Safari, Copy link, Developer tools (hidden when unsupported),
+    /// Browser settings — and Annotate and Screenshot, which Browse keeps
+    /// reachable here since it hides the library's nav row. No
+    /// Print/History/Bookmarks: none of those exist yet.
+    fn render_browse_more(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.browser.more_open {
+            return None;
+        }
+        let state = self.browse_centre_state()?;
+        let zoom = state.read(cx).zoom();
+        let devtools = state.read(cx).supports(aui_webview::BackendFeature::DevTools);
+        let annotate_on = state.read(cx).annotating();
+        let mut menu = self.browse_popover("browse-more", "More", cx);
+        let new_tab = self.browse_menu_row(
+            "browse-more-new-tab",
+            "New tab",
+            Some("⌘T"),
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.dismiss_browse_popovers(cx);
+                this.new_browser_tab(window, cx);
+            }),
+            cx,
+        );
+        menu = menu.child(new_tab);
+        let find = self.browse_menu_row(
+            "browse-more-find",
+            "Find in page",
+            Some("⌘F"),
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.dismiss_browse_popovers(cx);
+                this.open_browse_find(window, cx);
+            }),
+            cx,
+        );
+        menu = menu.child(find);
+        let zoom_out = self.browse_chrome_button(
+            "browse-more-zoom-out",
+            "–",
+            "Zoom out",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.browse_zoom_step(-10, cx);
+            }),
+            cx,
+        );
+        let zoom_reset = self.browse_chrome_button(
+            "browse-more-zoom-reset",
+            &format!("{zoom}%"),
+            "Reset zoom",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                if let Some(state) = this.browse_centre_state() {
+                    state.update(cx, |state, _| state.set_zoom(100));
+                }
+            }),
+            cx,
+        );
+        let zoom_in = self.browse_chrome_button(
+            "browse-more-zoom-in",
+            "+",
+            "Zoom in",
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.browse_zoom_step(10, cx);
+            }),
+            cx,
+        );
+        menu = menu.child(
+            h_flex()
+                .id("browse-more-zoom")
+                .w_full()
+                .h(px(28.0))
+                .flex_none()
+                .items_center()
+                .px(px(8.0))
+                .gap(px(4.0))
+                .role(gpui::Role::Group)
+                .aria_label("Zoom")
+                .child(zoom_out)
+                .child(zoom_reset)
+                .child(zoom_in),
+        );
+        let shown = self.browse_centre_shown();
+        let projects: Vec<(String, String)> =
+            self.projects.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect();
+        let space = self.current_project_id();
+        let movers: Vec<(String, String)> =
+            projects.into_iter().filter(|(pid, _)| Some(pid) != space.as_ref()).collect();
+        if shown.is_some() && !movers.is_empty() {
+            let move_row = self.browse_menu_row(
+                "browse-more-move",
+                "Move tab to project ▸",
+                None,
+                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.browser.more_move_open = !this.browser.more_move_open;
+                    cx.notify();
+                }),
+                cx,
+            );
+            menu = menu.child(move_row);
+            if self.browser.more_move_open {
+                if let Some(shown) = shown {
+                    for (ix, (pid, name)) in movers.into_iter().enumerate() {
+                        let target = Some(pid.clone());
+                        let label = format!("Move to {name}");
+                        let row = self.browse_menu_row(
+                            ("browse-more-move-to", ix),
+                            &label,
+                            None,
+                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                                this.move_browse_tab_to_project(shown, target.clone(), window, cx);
+                                this.dismiss_browse_popovers(cx);
+                            }),
+                            cx,
+                        );
+                        menu = menu.child(row);
+                    }
+                }
+            }
+        }
+        let safari = self.browse_menu_row(
+            "browse-more-safari",
+            "Open in Safari",
+            None,
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.open_browse_in_safari(cx);
+            }),
+            cx,
+        );
+        menu = menu.child(safari);
+        let copy = self.browse_menu_row(
+            "browse-more-copy",
+            "Copy link",
+            Some("⇧⌘C"),
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.copy_shown_browse_link(cx);
+            }),
+            cx,
+        );
+        menu = menu.child(copy);
+        if devtools {
+            let tools = self.browse_menu_row(
+                "browse-more-devtools",
+                "Developer tools",
+                Some("⌥⌘I"),
+                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.open_browse_devtools(cx);
+                }),
+                cx,
+            );
+            menu = menu.child(tools);
+        }
+        let settings = self.browse_menu_row(
+            "browse-more-settings",
+            "Browser settings",
+            None,
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.open_browse_settings(cx);
+            }),
+            cx,
+        );
+        menu = menu.child(settings);
+        let annotate = self.browse_menu_row(
+            "browse-more-annotate",
+            "Annotate",
+            Some(if annotate_on { "On" } else { "Off" }),
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.toggle_browse_annotate(cx);
+            }),
+            cx,
+        );
+        menu = menu.child(annotate);
+        let shot = self.browse_menu_row(
+            "browse-more-screenshot",
+            "Screenshot",
+            None,
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.capture_browse_screenshot(cx);
+            }),
+            cx,
+        );
+        menu = menu.child(shot);
+        let _ = window;
+        Some(menu.into_any_element())
     }
 
     /// The toolbar's address field (B2a-H4): the resting address view —
@@ -4351,11 +5076,19 @@ impl Harness {
                 if blank {
                     blank_page = true;
                     self.render_browse_newtab(window, cx)
+                } else if let Some(reason) =
+                    state.read(cx).crashed().map(|crashed| crashed.to_string())
+                {
+                    // A crashed tab renders the Baaz error page in the page
+                    // rect (B2a-H5) — gpui, while the covering rule hides
+                    // the native view under it. Reload navigates again at
+                    // the tab's own URL, which clears the crash.
+                    self.render_browse_crashed(reason, cx)
                 } else {
                     // Browse draws its own toolbar above, so the page fills
                     // the centre with no library nav row of its own.
-                    // (B2a-H5 note: Annotate and Screenshot stay reachable
-                    // through the header's ⋯ menu from H5 on.)
+                    // (Annotate and Screenshot stay reachable through the
+                    // header's ⋯ menu.)
                     aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
                         .on_intent(move |intent, window, cx| {
@@ -4370,6 +5103,19 @@ impl Harness {
             }
             None => self.render_browse_empty(cx),
         };
+        // The find and permission strips are rows in the chrome above the
+        // page (B2a-H5): in flow, so the page rect shrinks under them —
+        // never drawn over it. The omnibox dropdown and the chrome
+        // popovers drop down over the page instead — painted after it, so
+        // gpui draws them above the screenshot stand-in the covering rule
+        // shows while they stand open.
+        let find = (!blank_page).then(|| self.render_browse_find(window, cx)).flatten();
+        let permission = (!blank_page).then(|| self.render_browse_permission(cx)).flatten();
+        let body = if find.is_some() || permission.is_some() {
+            div().flex_1().min_h(px(0.0)).w_full().child(body).into_any_element()
+        } else {
+            body
+        };
         // The omnibox dropdown drops down over the page — painted after it,
         // so gpui draws it above the screenshot stand-in the covering rule
         // shows while it renders rows. The toolbar field's list anchors
@@ -4377,14 +5123,22 @@ impl Harness {
         // renders its own list in flow, under the centred field.
         let omnibox =
             (!blank_page).then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar)).flatten();
+        let downloads = self.render_browse_downloads(window, cx);
+        let extensions = self.render_browse_extensions(window, cx);
+        let more = self.render_browse_more(window, cx);
         v_flex()
             .size_full()
             .relative()
             .id("browse-centre")
             .role(gpui::Role::Group)
             .aria_label("Browse")
+            .children(find)
+            .children(permission)
             .child(body)
             .children(omnibox)
+            .children(downloads)
+            .children(extensions)
+            .children(more)
             .into_any_element()
     }
 
@@ -6010,6 +6764,26 @@ impl Render for Harness {
                 }))
                 .on_action(cx.listener(|this, _: &MoveBrowseTabUp, window, cx| {
                     this.move_browse_shortcut(-1, window, cx);
+                }))
+                // B2a-H5: find, copy-link and devtools. They bind in
+                // `BaazBrowse`, so with a page focused the claimed set
+                // carries them here; each is a no-op outside Browse or
+                // with no shown page (the context is what scopes them,
+                // the guards are the belt).
+                .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
+                    this.open_browse_find(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &CopyLink, window, cx| {
+                    if this.mode == layout::Mode::Browse {
+                        this.copy_shown_browse_link(cx);
+                    }
+                    let _ = window;
+                }))
+                .on_action(cx.listener(|this, _: &DevTools, window, cx| {
+                    if this.mode == layout::Mode::Browse {
+                        this.open_browse_devtools(cx);
+                    }
+                    let _ = window;
                 }))
                 // ⌘L at window level: the webview's own `cmd-l` binding
                 // only fires while gpui holds the keyboard, so this root

@@ -277,9 +277,9 @@ pub(crate) struct SidebarKey {
     mode: crate::layout::Mode,
     session_count: usize,
     tab_count: usize,
-    browse_tabs: Vec<(u64, bool, bool)>,
+    browse_tabs: Vec<(u64, bool, bool, bool)>,
     tabs_generation: u64,
-    browse_flags: Vec<(u64, bool, bool, bool, bool)>,
+    browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
     browse_groups: Vec<BrowseGroupPrint>,
     browse_expanded: Vec<String>,
     browse_session_tab: Option<u64>,
@@ -299,6 +299,7 @@ pub(crate) struct BrowseTabSnap {
     audible: bool,
     crashed: bool,
     discarded: bool,
+    attention: bool,
 }
 
 /// One session tab under From sessions, still owned by its session.
@@ -318,11 +319,12 @@ pub(crate) struct AgentNeed {
 
 impl SidebarKey {
     /// The Browse sidebar's fingerprint: the current project's person
-    /// tabs as `(id, active, pinned)` triples, beside the tabs-model
-    /// generation. A select, a retitle, a (un)pin or an open/close moves
-    /// the key — retitles through the generation, never through a label
-    /// string built per frame — so the cached pane repaints.
-    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, bool, bool)> {
+    /// tabs as `(id, active, pinned, attention)` quadruples, beside the
+    /// tabs-model generation. A select, a retitle, a (un)pin, an
+    /// open/close or a background permission ask moves the key — retitles
+    /// through the generation, never through a label string built per
+    /// frame — so the cached pane repaints.
+    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness) -> Vec<(u64, bool, bool, bool)> {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
@@ -333,20 +335,21 @@ impl SidebarKey {
             .tabs
             .person_tabs(space.as_deref())
             .iter()
-            .map(|tab| (tab.id.0, Some(tab.id) == active, tab.pinned))
+            .map(|tab| (tab.id.0, Some(tab.id) == active, tab.pinned, tab.needs_attention))
             .collect()
     }
 
     /// The live page facts behind each person tab's row state, as
-    /// `(id, loading, audible, crashed, discarded)` — read off the
-    /// registered webviews, so a load finishing or a crash landing
-    /// repaints the cached pane. A tab with no live page reads
-    /// discarded (asleep); a blank tab with no progress yet reads
-    /// neither loading nor discarded.
+    /// `(id, loading, audible, crashed, discarded, attention)` — read off
+    /// the registered webviews (attention off the tab), so a load
+    /// finishing, a crash landing or a background permission ask repaints
+    /// the cached pane. A tab with no live page reads discarded (asleep);
+    /// a blank tab with no progress yet reads neither loading nor
+    /// discarded.
     pub(crate) fn browse_flags_fingerprint(
         baaz: &Harness,
         cx: &gpui::App,
-    ) -> Vec<(u64, bool, bool, bool, bool)> {
+    ) -> Vec<(u64, bool, bool, bool, bool, bool)> {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
@@ -370,7 +373,7 @@ impl SidebarKey {
                     None => (false, false, false, false),
                 };
                 let discarded = !live && tab.url != crate::browser::tabs::BLANK && !tab.url.is_empty();
-                (tab.id.0, loading, audible, crashed, discarded)
+                (tab.id.0, loading, audible, crashed, discarded, tab.needs_attention)
             })
             .collect()
     }
@@ -1006,6 +1009,7 @@ impl Harness {
                     discarded: page.is_none()
                         && tab.url != crate::browser::tabs::BLANK
                         && !tab.url.is_empty(),
+                    attention: tab.needs_attention,
                 }
             })
             .collect()
@@ -1243,6 +1247,21 @@ impl Harness {
         // takes the click.
         if snap.audible {
             row = row.child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child("♪"));
+        }
+        // The "needs you" dot: a background tab holds a permission ask
+        // (B2a-H5). Display-only, like the speaker — showing the tab
+        // clears it.
+        if snap.attention {
+            row = row.child(
+                div()
+                    .id(("browse-attention", id))
+                    .flex_none()
+                    .size(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(p.accent)
+                    .role(gpui::Role::Label)
+                    .aria_label("Needs you"),
+            );
         }
         // The × on hover or while active: the hover report below owns
         // the hover bit and notifies the pane directly, so a settle
