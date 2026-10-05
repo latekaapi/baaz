@@ -3166,6 +3166,58 @@ mod tests {
     /// `update_in` shape, which held the lease across the dispatch — first
     /// with ⌘L, then with ⌘,. Neither panics ("already being updated"),
     /// the address edit lands and Settings opens.
+    /// ⌘W in Browse closes the shown tab — never the window — even with
+    /// focus resting on the root (B2a-H3b review: an ancestor `BaazBrowse`
+    /// lost to the deeper `AuiRoot` CloseWindow binding). A real keystroke
+    /// dispatch, not a call to the handler.
+    #[gpui::test]
+    fn cmd_w_in_browse_closes_a_tab_not_the_window(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            crate::app::BROWSE_ROOT_CONTEXT,
+            format!("{} {}", aui::keys::ROOT_CONTEXT, crate::app::BROWSE_CONTEXT)
+        );
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("cmdw");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_mode(crate::layout::Mode::Browse, window, cx);
+                harness.step_tab_new("https://www.wikipedia.org/", window, cx);
+                harness.step_tab_new("https://docs.rs/", window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let count = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                let space = harness.current_project_id();
+                harness.browser.tabs.person_tabs(space.as_deref()).len()
+            })
+        };
+        let before = count(vc);
+        assert!(before >= 2, "two person tabs to close one of: {before}");
+        vc.update(|window, cx| {
+            let root = baaz.read(cx).focus_root.clone();
+            window.focus(&root, cx);
+        });
+        vc.run_until_parked();
+        vc.simulate_keystrokes("cmd-w");
+        vc.run_until_parked();
+        assert_eq!(count(vc), before - 1, "⌘W closed exactly one tab");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).mode == crate::layout::Mode::Browse),
+            "still in Browse, window alive"
+        );
+    }
+
     #[gpui::test]
     fn routed_page_keystrokes_dispatch_after_the_harness_lease(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));

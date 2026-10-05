@@ -53,55 +53,6 @@ fn browse_tab_actions_are_declared_and_handled() {
     }
 }
 
-/// The `BaazBrowse` context exists and wraps the shell in Browse mode
-/// only — Sessions never wears it, so ⌘W keeps closing the window
-/// there and ⌘N is untouched in both modes.
-#[test]
-fn browse_context_wraps_the_shell_in_browse_only() {
-    let app = source("app.rs");
-    assert!(
-        app.contains("pub(crate) const BROWSE_CONTEXT: &str = \"BaazBrowse\";"),
-        "the context is declared"
-    );
-    assert!(
-        app.contains(".key_context(BROWSE_CONTEXT)"),
-        "a wrapper wears it"
-    );
-    assert!(
-        app.contains("if self.mode == layout::Mode::Browse {"),
-        "the wrapper mounts in Browse mode"
-    );
-    assert!(
-        app.contains("this.new_browser_tab(window, cx);"),
-        "⌘T still routes through the new-tab handler"
-    );
-    assert!(
-        app.contains("if self.mode != layout::Mode::Browse {"),
-        "⌘T switches to Browse first from Sessions"
-    );
-}
-
-/// B2a-H3b item 1: `BaazBrowse` sits on an ancestor of the focus-root
-/// div (which owns `track_focus` and `AuiRoot`), never on a child of it
-/// — focus resting on the root carries both contexts, so ⌘W closes a
-/// tab in Browse and the window in Sessions.
-#[test]
-fn browse_context_sits_above_the_focus_root() {
-    let app = source("app.rs");
-    assert!(
-        app.contains(".key_context(BROWSE_CONTEXT).child(root)"),
-        "the context wrapper is an ancestor of the focus-root div"
-    );
-    assert!(
-        !app.contains(".key_context(BROWSE_CONTEXT).child(body)"),
-        "no child wrapper sits below the focused node"
-    );
-    assert!(
-        app.contains(".track_focus(&self.focus_root)"),
-        "the root still owns the focus"
-    );
-}
-
 /// `tab-pin:`, `tab-menu:` and `from-sessions:` are window verbs and
 /// are documented — the doc test enforces the table, this pins the
 /// registration the captures rely on.
