@@ -215,16 +215,13 @@ mod mac {
         };
         let found: Option<Retained<AnyObject>> =
             unsafe { msg_send![&*view, accessibilityHitTest: on_screen] };
-        let found = match found {
-            Some(found) => found,
-            None => return None,
-        };
+        let found: Retained<AnyObject> = found?;
         let raw = (&*found) as *const AnyObject as *mut AnyObject;
-        let role = property(raw, Role::Role).unwrap_or_default();
-        let label = property(raw, Role::Title)
-            .or_else(|| property(raw, Role::Label))
-            .or_else(|| property(raw, Role::Help))
-            .or_else(|| property(raw, Role::Value))
+        let role = property(raw, Property::Role).unwrap_or_default();
+        let label = property(raw, Property::Title)
+            .or_else(|| property(raw, Property::Label))
+            .or_else(|| property(raw, Property::Help))
+            .or_else(|| property(raw, Property::Value))
             .unwrap_or_default();
         let frame: NSRect = unsafe { msg_send![&*raw, accessibilityFrame] };
         // A hit on an unlabelled point is the root group whose frame is the
@@ -246,7 +243,7 @@ mod mac {
     }
 
     /// Which `NSString` property to read.
-    enum Role {
+    enum Property {
         /// `accessibilityTitle` — where labels arrive in this app.
         Title,
         /// `accessibilityLabel` — empty in the spike, kept as a fallback.
@@ -261,21 +258,17 @@ mod mac {
 
     /// Read one `NSString` property as Rust text; nil, empty or
     /// undecodable is `None`.
-    fn property(obj: *mut AnyObject, which: Role) -> Option<String> {
+    fn property(obj: *mut AnyObject, which: Property) -> Option<String> {
         let kept: Option<Retained<AnyObject>> = unsafe {
             match which {
-                Role::Title => msg_send![&*obj, accessibilityTitle],
-                Role::Label => msg_send![&*obj, accessibilityLabel],
-                Role::Help => msg_send![&*obj, accessibilityHelp],
-                Role::Value => msg_send![&*obj, accessibilityValue],
-                Role::Role => msg_send![&*obj, accessibilityRole],
+                Property::Title => msg_send![&*obj, accessibilityTitle],
+                Property::Label => msg_send![&*obj, accessibilityLabel],
+                Property::Help => msg_send![&*obj, accessibilityHelp],
+                Property::Value => msg_send![&*obj, accessibilityValue],
+                Property::Role => msg_send![&*obj, accessibilityRole],
             }
         };
-        let kept = match kept {
-            Some(kept) => kept,
-            None => return None,
-        };
-        let text = cocoa_string(&kept)?;
+        let text = cocoa_string(kept.as_deref()?)?;
         if text.is_empty() {
             None
         } else {
@@ -303,14 +296,14 @@ mod mac {
                 None => break,
             };
             let raw = (&*parent) as *const AnyObject as *mut AnyObject;
-            let role = property(raw, Role::Role).unwrap_or_default();
+            let role = property(raw, Property::Role).unwrap_or_default();
             if role == "AXWindow" {
                 break;
             }
-            let label = property(raw, Role::Title)
-                .or_else(|| property(raw, Role::Label))
-                .or_else(|| property(raw, Role::Help))
-                .or_else(|| property(raw, Role::Value));
+            let label = property(raw, Property::Title)
+                .or_else(|| property(raw, Property::Label))
+                .or_else(|| property(raw, Property::Help))
+                .or_else(|| property(raw, Property::Value));
             if let Some(text) = label {
                 out.push((role, text));
             }
