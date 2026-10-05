@@ -439,6 +439,12 @@ pub struct Layout {
     /// live through [`crate::settings::apply_setting`].
     #[serde(rename = "foldFinishedTurns", default = "default_true")]
     pub fold_finished_turns: bool,
+    /// Whether ⌃⌥⌘F points at parts of Baaz to leave notes for Claude
+    /// (F2). OFF by default: an old file reads as disabled, and the
+    /// gesture toasts until the person opts in. The Settings page's
+    /// General section owns the switch.
+    #[serde(rename = "feedbackMode", default)]
+    pub feedback_mode: bool,
     /// Whether the terminal dock stands open in the centre column, under
     /// the composer (D42). Closed by default: the dock is asked for, never
     /// assumed.
@@ -550,6 +556,7 @@ impl Default for Layout {
             auto_summary: true,
             handoff_model_summary: true,
             fold_finished_turns: true,
+            feedback_mode: false,
             terminal_open: false,
             terminal_height: None,
             right_open: false,
@@ -725,6 +732,7 @@ mod tests {
             auto_summary: true,
             handoff_model_summary: true,
             fold_finished_turns: false,
+            feedback_mode: true,
             terminal_open: true,
             terminal_height: Some(300.0),
             right_open: true,
@@ -758,6 +766,7 @@ mod tests {
         assert!(text.contains("\"compactRows\":true"));
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"foldFinishedTurns\":false"));
+        assert!(text.contains("\"feedbackMode\":true"));
         assert!(text.contains("\"terminalOpen\":true"));
         assert!(text.contains("\"terminalHeight\":300.0"));
         assert!(text.contains("\"rightOpen\":true"));
@@ -779,6 +788,7 @@ mod tests {
         assert!(back.compact_rows);
         assert!(back.group_branch);
         assert!(!back.fold_finished_turns);
+        assert!(back.feedback_mode);
         assert!(back.terminal_open);
         assert_eq!(back.terminal_height, Some(300.0));
         assert!(back.right_open);
@@ -813,6 +823,10 @@ mod tests {
         assert!(Layout::default().auto_summary);
         assert!(Layout::default().handoff_model_summary);
         assert!(Layout::default().fold_finished_turns);
+        // Feedback mode defaults OFF, old files included: the gesture
+        // toasts until the person opts in.
+        assert!(!Layout::default().feedback_mode);
+        assert!(!old.feedback_mode);
         assert!(old.auto_title);
         assert!(old.auto_summary);
         assert!(old.handoff_model_summary);
