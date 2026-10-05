@@ -114,6 +114,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
+    KeymapEntry { action: "ToggleBrowseMode", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Switch between Sessions and Browse" },
     KeymapEntry { action: "FocusAddress", keystroke: "cmd-l", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Focus address bar" },
     KeymapEntry { action: "TerminalSigint", keystroke: "ctrl-c", context: Some(crate::app::TERMINAL_CONTEXT), category: "terminal", label: "Interrupt terminal program" },
     KeymapEntry { action: "NoAction", keystroke: "enter", context: Some("BaazTerminal && !menu"), category: "terminal", label: "Terminal takes the key" },
@@ -204,6 +205,11 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "ShowRightBrowser" => Some(gpui::KeyBinding::new(
             keystroke,
             crate::app::ShowRightBrowser,
+            context,
+        )),
+        "ToggleBrowseMode" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::ToggleBrowseMode,
             context,
         )),
         "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
@@ -1468,26 +1474,42 @@ mod tests {
     }
 
     /// The claimed set carries the app shortcuts a focused page must hand
-    /// back: Baaz rows at the root (`cmd-l`, `cmd-n`, `cmd-,`, `cmd-shift-b`)
-    /// and the library's own (`cmd-k`, `cmd-\`), in one set.
+    /// back: Baaz rows at the root (`cmd-l`, `cmd-n`, `cmd-,`,
+    /// `cmd-shift-b`, `cmd-alt-b`) and the library's own (`cmd-k`,
+    /// `cmd-\`), in one set.
     #[test]
     fn claimed_set_contains_app_shortcuts() {
         let claimed = super::claimed_shortcuts(&super::build_bindings());
-        for keystroke in ["cmd-k", "cmd-l", "cmd-n", "cmd-,", "cmd-shift-b", "cmd-\\"] {
+        for keystroke in ["cmd-k", "cmd-l", "cmd-n", "cmd-,", "cmd-shift-b", "cmd-\\", "cmd-alt-b"] {
             assert!(claimed_has(&claimed, keystroke), "{keystroke:?} must be claimed");
         }
     }
 
+    /// The mode switch's own row: ⌥⌘B binds `ToggleBrowseMode` at the
+    /// root, so a focused page hands it back — the AuiRoot context is
+    /// what puts it in the claimed set.
+    #[test]
+    fn browse_toggle_is_bound_and_claimed_at_the_root() {
+        let row = super::KEYMAP
+            .iter()
+            .find(|row| row.action == "ToggleBrowseMode")
+            .expect("a ToggleBrowseMode row");
+        assert_eq!(row.keystroke, "cmd-alt-b");
+        assert_eq!(row.context, Some(aui::keys::ROOT_CONTEXT));
+        assert_eq!(row.category, "pane");
+        assert_eq!(row.label, "Switch between Sessions and Browse");
+        let claimed = super::claimed_shortcuts(&super::build_bindings());
+        assert!(claimed_has(&claimed, "cmd-alt-b"), "⌥⌘B must be claimed");
+    }
+
     /// The claimed set never takes what belongs to the page or the typing:
     /// editing keys (`cmd-c`, `cmd-v`, `cmd-a`, `cmd-z`), ⌃C (terminals and
-    /// editors in web pages), bare keys (`enter`, `a`), shift-only keys
-    /// (`shift-a`) — and `cmd-alt-b`, which no row binds anymore.
+    /// editors in web pages), bare keys (`enter`, `a`) and shift-only keys
+    /// (`shift-a`).
     #[test]
     fn claimed_set_excludes_page_and_typing_keys() {
         let claimed = super::claimed_shortcuts(&super::build_bindings());
-        for keystroke in
-            ["cmd-c", "cmd-v", "cmd-a", "cmd-z", "ctrl-c", "enter", "a", "shift-a", "cmd-alt-b"]
-        {
+        for keystroke in ["cmd-c", "cmd-v", "cmd-a", "cmd-z", "ctrl-c", "enter", "a", "shift-a"] {
             assert!(!claimed_has(&claimed, keystroke), "{keystroke:?} must not be claimed");
         }
     }
@@ -1536,7 +1558,7 @@ mod tests {
         );
         assert!(!super::claims_keystroke("cmd-c"), "the page keeps ⌘C");
         assert!(!super::claims_keystroke("a"), "typing reaches the page");
-        assert!(!super::claims_keystroke("cmd-alt-b"), "⌥⌘B is free");
+        assert!(super::claims_keystroke("cmd-alt-b"), "⌥⌘B switches modes");
         assert!(!super::claims_keystroke("not-a-keystroke-["), "garbage claims nothing");
     }
 }
