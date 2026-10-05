@@ -2548,7 +2548,7 @@ impl Harness {
         let Some(id) = self.browse_centre_shown() else {
             return;
         };
-        match toolbar::classify_address_input(&typed) {
+        match toolbar::classify_address_input_with(&typed, self.layout.search_engine) {
             toolbar::NavTarget::Url(url) => self.navigate_browse_tab(id, &url, window, cx),
             toolbar::NavTarget::Search(url) => {
                 if !url.is_empty() {
@@ -2755,7 +2755,7 @@ impl Harness {
             .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
             .map(|entry| (entry.id.clone(), entry.label.clone(), recency_ms(&entry.updated)))
             .collect();
-        toolbar::rank_omnibox(&query, &tabs, &sessions, &[])
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &[], self.layout.search_engine)
     }
 
     /// Move the omnibox highlight by `delta`, wrapping over the rows the
