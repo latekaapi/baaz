@@ -3698,6 +3698,7 @@ impl Harness {
     /// badge, bright host, quiet path, zoom pill, agent chip — or the live
     /// input while editing (except on a blank tab, where the new-tab field
     /// owns the input and the toolbar stays at rest).
+    #[allow(clippy::too_many_arguments)] // one call site; the inputs are the toolbar's live state
     fn browse_address_field(
         &self,
         url: String,
