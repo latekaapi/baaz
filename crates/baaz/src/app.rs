@@ -766,6 +766,16 @@ pub struct Harness {
     /// the window is at hand. The fake backend navigates without a window
     /// and never arms this. Never persists.
     pub(crate) browser_pending_url: Option<String>,
+    /// Outside URLs waiting for the shell (B2a-H7): `ingest_external_urls`
+    /// parks them while the login stands open;
+    /// `flush_pending_external_urls` opens them once signed in. Never
+    /// persists.
+    pub(crate) pending_external_urls: Vec<String>,
+    /// Whether the window held focus on the last frame (B2a-H7): the
+    /// false→true edge re-reads the default-browser row, so the Settings
+    /// page shows a switch made in System Settings without a restart.
+    /// Never persists.
+    pub(crate) was_window_active: bool,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1307,6 +1317,8 @@ impl Harness {
             browser_idle_warmed: false,
             browser_url_focus_armed: false,
             browser_pending_url: None,
+            pending_external_urls: Vec::new(),
+            was_window_active: false,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -4391,6 +4403,23 @@ impl Harness {
         // edge-triggered inside, so steady active frames do no work of
         // their own and probes run at most every 15s per provider.
         crate::provider_status::note_window_active(window.is_window_active());
+        // Links from other apps (B2a-H7): drain the `on_open_urls` queue
+        // into person tabs (or park them until sign-in), off the frame
+        // through a task.
+        self.poll_external_urls(cx);
+        // A regained focus re-reads the default-browser row (B2a-H7): the
+        // page renders the live handler every frame, and this edge wakes
+        // one more render so a switch made in System Settings shows
+        // without a restart.
+        let window_active = window.is_window_active();
+        if window_active
+            && !self.was_window_active
+            && self.settings_page.open
+            && crate::settings::settings_parent(&self.settings_page.section) == "browser"
+        {
+            cx.notify();
+        }
+        self.was_window_active = window_active;
         // The window's title is the session's, so a person with three baaz
         // windows open can tell them apart in Mission Control. It is built
         // only when the list or the open session changed: the scan and the

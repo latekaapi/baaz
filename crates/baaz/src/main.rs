@@ -46,7 +46,9 @@ mod byline;
 mod clock;
 mod connect;
 mod conn;
+mod default_browser;
 mod dialogs;
+mod external_urls;
 mod files;
 mod full_output;
 mod handoff;
@@ -772,6 +774,12 @@ fn main() {
         } else {
             cx.activate(true);
         }
+    });
+    // Links from other apps (B2a-H7): the callback owns no window, so it
+    // only parks the URLs — the shell drains them on its next frame into
+    // person tabs (or waits for sign-in first). Never changes the default.
+    app.on_open_urls(|urls| {
+        crate::external_urls::enqueue_external_urls(urls);
     });
     app.run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
