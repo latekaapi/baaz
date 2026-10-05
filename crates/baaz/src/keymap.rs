@@ -1123,17 +1123,19 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every action named in the table builds a binding for that same
-    /// action, and every built binding comes from a table row: a new
-    /// action without a keystroke fails here (unknown name panics, or the
-    /// lengths disagree), and a dead keystroke cannot linger (it would
-    /// build a binding no row accounts for).
+    /// action, in table order — then the generated feedback-layer swallows
+    /// ride past the table: one `NoAction` in `BaazFeedback` per app-level
+    /// keystroke (plus `tab` / `shift-tab`), never a table row, so the
+    /// Shortcuts list stays clean. A new action without a keystroke fails
+    /// here (unknown name panics, or the table prefix disagrees), a dead
+    /// keystroke cannot linger, and an uncovered root shortcut fails the
+    /// tail assertion below.
     #[test]
     fn every_table_action_has_a_binding_and_vice_versa() {
         let bindings = build_bindings();
-        assert_eq!(
-            bindings.len(),
-            KEYMAP.len(),
-            "one binding per table row, no more and no fewer"
+        assert!(
+            bindings.len() > KEYMAP.len(),
+            "the generated layer swallows ride past the table rows"
         );
         for (row, binding) in KEYMAP.iter().zip(bindings.iter()) {
             let built = binding.action().name().rsplit("::").next().unwrap_or("");
@@ -1155,6 +1157,57 @@ mod tests {
                 "row ({}, {}) lost or gained its context",
                 row.action,
                 row.keystroke
+            );
+        }
+        // The tail is exactly the generated swallows: every app-level
+        // keystroke (a root-context or context-free row, except the
+        // toggle and Quit) plus the library's root keys, `tab` and
+        // `shift-tab` — each once, each `NoAction` in `BaazFeedback`.
+        let mut expected: Vec<&str> = Vec::new();
+        for row in KEYMAP {
+            let app_level = match row.context {
+                None => true,
+                Some(context) => context == aui::keys::ROOT_CONTEXT,
+            };
+            if !app_level || row.action == "ToggleFeedback" || row.action == "QuitApp" {
+                continue;
+            }
+            if !expected.contains(&row.keystroke) {
+                expected.push(row.keystroke);
+            }
+        }
+        for keystroke in super::AUI_ROOT_KEYS.iter().copied() {
+            if !expected.contains(&keystroke) {
+                expected.push(keystroke);
+            }
+        }
+        for keystroke in ["tab", "shift-tab"] {
+            if !expected.contains(&keystroke) {
+                expected.push(keystroke);
+            }
+        }
+        let tail = &bindings[KEYMAP.len()..];
+        assert_eq!(
+            tail.len(),
+            expected.len(),
+            "one swallow per app-level keystroke, no more and no fewer"
+        );
+        for (binding, keystroke) in tail.iter().zip(expected.iter()) {
+            let built = binding.action().name().rsplit("::").next().unwrap_or("");
+            assert_eq!(built, "NoAction", "{keystroke} swallows with more than NoAction");
+            let context = binding.predicate().map(|predicate| predicate.to_string());
+            assert_eq!(
+                context.as_deref(),
+                Some(crate::app::feedback_ui::FEEDBACK_CONTEXT),
+                "{keystroke} swallows outside the feedback layer"
+            );
+            let [stroke] = binding.keystrokes() else {
+                panic!("{keystroke} swallow is not a single keystroke");
+            };
+            assert_eq!(
+                stroke.inner(),
+                &gpui::Keystroke::parse(keystroke).expect("the table parses"),
+                "{keystroke} swallow moved keystrokes"
             );
         }
     }

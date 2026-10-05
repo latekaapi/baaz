@@ -1176,21 +1176,21 @@ mod tests {
     fn layer_and_chrome_follow_the_phase(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("layer-phase");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
+        let (baaz, vc) = window_harness(cx, &state.2);
         let layer = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_layer(cx).is_some()))
         };
         let chrome = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_chrome(cx).is_some()))
         };
-        assert!(!layer(&mut vc), "Off renders no layer");
-        assert!(!chrome(&mut vc), "Off renders no chrome");
-        enter_active(&baaz, &mut vc);
-        assert!(layer(&mut vc), "Active renders the layer");
-        assert!(chrome(&mut vc), "Active renders the bar");
+        assert!(!layer(vc), "Off renders no layer");
+        assert!(!chrome(vc), "Off renders no chrome");
+        enter_active(&baaz, vc);
+        assert!(layer(vc), "Active renders the layer");
+        assert!(chrome(vc), "Active renders the bar");
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
-        assert!(!layer(&mut vc), "Paused renders no layer");
-        assert!(chrome(&mut vc), "Paused renders the pill");
+        assert!(!layer(vc), "Paused renders no layer");
+        assert!(chrome(vc), "Paused renders the pill");
         restore_state(state);
     }
 
@@ -1200,8 +1200,8 @@ mod tests {
     fn active_layer_swallows_app_keys_but_keeps_the_toggle(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("keys-swallow");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
-        enter_active(&baaz, &mut vc);
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
         assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active));
         let sessions_before = vc.update(|_, cx| baaz.read(cx).sessions.len());
         vc.simulate_keystrokes("cmd-n");
@@ -1230,7 +1230,7 @@ mod tests {
     fn entering_active_closes_palette_and_dialog(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("enter-closes");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
+        let (baaz, vc) = window_harness(cx, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.open_palette(crate::overlays::PaletteKind::Commands, cx);
@@ -1239,7 +1239,7 @@ mod tests {
         });
         assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some()));
         assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_some()));
-        enter_active(&baaz, &mut vc);
+        enter_active(&baaz, vc);
         assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_none()));
         assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_none()));
         restore_state(state);
@@ -1251,8 +1251,8 @@ mod tests {
     fn double_done_writes_one_report_with_count_and_clipboard(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("double-done");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
-        enter_active(&baaz, &mut vc);
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.feedback.draft.add(
@@ -1307,17 +1307,18 @@ mod tests {
     }
 
     /// A failed write keeps the draft and the phase, lifts the guard, and
-    /// toasts the error. The state dir points at a FILE, so `create_dir_all`
-    /// cannot succeed.
+    /// toasts the error. The report root itself is a FILE (planted where
+    /// `feedback_root()` lands), so `create_dir_all` cannot succeed — while
+    /// the state dir stays a real directory, so parallel tests reading
+    /// their own roots never see this one's failure.
     #[gpui::test]
     fn failed_done_keeps_draft_and_phase(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("done-error");
-        let blocker = state.2.join("blocker");
+        let blocker = state.2.join("feedback");
         std::fs::write(&blocker, b"not a dir").expect("blocker file writes");
-        std::env::set_var("BAAZ_STATE_DIR", &blocker);
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
-        enter_active(&baaz, &mut vc);
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.feedback.draft.add(
@@ -1351,8 +1352,8 @@ mod tests {
     fn discard_click_keeps_escape_working(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("discard-focus");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
-        enter_active(&baaz, &mut vc);
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.feedback.draft.add(
@@ -1384,7 +1385,7 @@ mod tests {
     fn feedback_mode_steps_never_touch_the_layout_setting(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("mode-steps");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
+        let (baaz, vc) = window_harness(cx, &state.2);
         assert!(!vc.update(|_, cx| baaz.read(cx).layout.feedback_mode));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx)));
         vc.update(|_, cx| {
@@ -1416,8 +1417,8 @@ mod tests {
     fn rearming_discard_keeps_a_single_task(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("discard-task");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, mut vc) = window_harness(cx, &state.2);
-        enter_active(&baaz, &mut vc);
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.feedback.draft.add(
