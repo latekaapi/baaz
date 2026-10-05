@@ -9470,6 +9470,10 @@ mod tests {
                 h.browse_address_page_focus = true;
             })
         });
+        // A blur only ends the edit while the window is key (a blur from
+        // the keyboard leaving for one of Baaz's own page windows does not).
+        vc.update(|window, _| window.activate_window());
+        vc.run_until_parked();
         // The input's own blur — exactly what a click on something
         // focusable delivers — through the real subscription arm.
         let held = vc.update(|window, cx| {
