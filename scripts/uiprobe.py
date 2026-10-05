@@ -179,6 +179,20 @@ ENTRIES = {
     # backend, no baselines — capture and look.
     "browse-opened-link":    {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "open-url:https://www.wikipedia.org/"]},
+    # B2a-H5: the find strip (scripted "3 of 12" lands through the poll
+    # path, hence the wait), the permission strip, the downloads popover
+    # (open), the ⋯ page-actions menu, and the Baaz crashed page. Offline,
+    # fake backend, no baselines — capture and look.
+    "browse-find":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;find:price;wait:200"]},
+    "browse-permission":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;permission:camera,microphone;wait:200"]},
+    "browse-downloads":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;download:big.zip;wait:200"]},
+    "browse-more-menu":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;more-menu"]},
+    "browse-crashed":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;crashed:the page crashed (-1);wait:200"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
