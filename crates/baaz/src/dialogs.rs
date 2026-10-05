@@ -729,14 +729,28 @@ impl Harness {
 
     /// The Browse header back button's history menu (B2a-H4), anchored
     /// under the back button: the shown tab's back stack, newest first.
-    /// Picking a row navigates there. The menu covers the page like every
-    /// other menu, through the shared overlay inputs.
+    /// Picking a row steps back to it through the history (go back N), so
+    /// the stacks stay right. The menu covers the page like every other
+    /// menu, through the shared overlay inputs — and when there is nothing
+    /// to show, the menu clears itself instead of leaving the page covered.
+    /// The opener never opens it while back is disabled (see the header's
+    /// back menu listener); this close is the backstop for a stack that
+    /// emptied while open. Keyboard reach for the back control itself is
+    /// still open (B2a-H4c note): right-click (or its menu listener) is the
+    /// only route today.
     pub(crate) fn render_back_history_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::BackHistory) {
             return None;
         }
+        let clear = |this: &Self, cx: &mut Context<Self>| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        };
         let shown = self.browse_centre_shown();
-        let id = shown?;
+        let Some(id) = shown else {
+            clear(self, cx);
+            return None;
+        };
         let mut past: Vec<String> = self
             .browser
             .histories
@@ -745,6 +759,7 @@ impl Harness {
             .unwrap_or_default();
         past.reverse();
         if past.is_empty() {
+            clear(self, cx);
             return None;
         }
         let rows: Vec<MenuRow> =
@@ -752,14 +767,16 @@ impl Harness {
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             this.ensure_tabs_loaded(cx);
-            if let Some(url) = past.get(*index).cloned() {
-                if let Some(id) = this.browse_centre_shown() {
+            // Rows read newest-first, so row `i` steps back `i + 1`.
+            if let Some(id) = this.browse_centre_shown() {
+                let steps = index.saturating_add(1);
+                if let Some(url) = this.browser.histories.entry(id).or_default().go_back_steps(steps) {
                     this.navigate_browse_tab(id, &url, window, cx);
                 }
             }
         });
         let Some(trigger) = self.back_bounds else {
-            cx.notify();
+            clear(self, cx);
             return None;
         };
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {

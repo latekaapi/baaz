@@ -159,9 +159,197 @@ fn toolbar_roles_and_labels() {
 fn omnibox_covering_is_pinned_in_source() {
     let browser = source("browser/mod.rs");
     assert!(browser.contains("omnibox_open: bool"), "visibility carries the omnibox input");
-    assert!(browser.contains("omnibox_open: self.browse_omnibox_open()"), "the sync feeds the input");
+    assert!(browser.contains("omnibox_open: self.browse_omnibox_open(cx)"), "the sync feeds the input");
     assert!(
         browser.contains("fn open_omnibox_obscures_pane_and_centre()"),
         "a unit test pins the omnibox covering both halves"
     );
+}
+
+/// The page covers only while the dropdown renders rows — merely editing
+/// with no rows obscures nothing — and leaving Browse (or switching
+/// project) leaves the field and resets the page-holds edge.
+#[test]
+fn omnibox_covers_only_while_rows_render() {
+    let browser = source("browser/mod.rs");
+    let open = fn_body(&browser, "browse_omnibox_open");
+    assert!(open.contains("browse_suggestions"), "open means rows actually rank");
+    let app = source("app.rs");
+    let switch = fn_body(&app, "set_mode");
+    assert!(switch.contains("centre_override = None"), "a mode switch unparks the carry");
+    assert!(switch.contains("leave_browse_address(window, cx)"), "a mode switch leaves the field");
+    assert!(switch.contains("browse_last_holds = false"), "a mode switch resets the holds edge");
+}
+
+/// The address field shows the shown tab's URL, falling back to the tab
+/// model when the page has no live state (a discarded tab) — never empty
+/// on a loaded page.
+#[test]
+fn address_shows_the_page_with_tab_fallback() {
+    let app = source("app.rs");
+    let toolbar = fn_body(&app, "render_browse_toolbar");
+    assert!(toolbar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
+    assert!(toolbar.contains("stop_armed"), "the stop button reads the tracked load");
+}
+
+/// The Browse centre hides the library's nav row: `webview_pane` offers no
+/// no-nav option, so the pane renders shifted up by exactly that row inside
+/// a clipping centre — only the page shows under Browse's own toolbar.
+#[test]
+fn browse_centre_hides_the_library_nav_row() {
+    let app = source("app.rs");
+    let centre = fn_body(&app, "render_browse_centre");
+    assert!(centre.contains("offers no no-nav option"), "the workaround names its reason");
+    assert!(centre.contains("top(px(-38.0))"), "the pane shifts up by exactly the nav row");
+    assert!(centre.contains("overflow_hidden"), "the centre clips the shifted row away");
+}
+
+/// The extensions button is a monochrome toolbar icon (the sprite has no
+/// puzzle or grid glyph), and the address reads in the UI font — only the
+/// dev label stays mono.
+#[test]
+fn toolbar_icons_and_fonts() {
+    let app = source("app.rs");
+    assert!(!app.contains("🧩"), "no coloured emoji on the toolbar");
+    assert!(app.contains("IconName::Layout"), "the extensions button is a monochrome icon");
+    let field = fn_body(&app, "browse_address_field");
+    assert!(field.contains(".ui(scale::FS_12)"), "the address reads in the UI font");
+    assert!(field.contains("mono(scale::FS_12)"), "only the dev label stays mono");
+    assert!(field.contains("\"Site information\""), "the site button is labelled");
+    assert!(field.contains("\"hd-browse-site\""), "the site button names its own chain");
+}
+
+/// The new-tab field carries the placeholder, and each field's dropdown
+/// anchors under it: the toolbar's under the toolbar, the new-tab's under
+/// the centred field.
+#[test]
+fn newtab_placeholder_and_dropdown_anchors() {
+    let browser = source("browser/mod.rs");
+    let focus = fn_body(&browser, "focus_browse_address_with");
+    assert!(
+        focus.contains("set_placeholder(\"Search, open a page, or ask\""),
+        "the field carries the placeholder"
+    );
+    let app = source("app.rs");
+    assert!(app.contains("OmniAnchor::Toolbar"), "the toolbar list anchors under the toolbar");
+    assert!(app.contains("OmniAnchor::Newtab"), "the new-tab list anchors under the centred field");
+}
+
+/// Ask drafts into the session that lands: `browse_ask` arms the question
+/// and starts the session without touching `active`; `activate` writes it
+/// into the landed view (appending over reused text) — never sent, never
+/// navigated. ⌘↵ rides the input's own binding, so the commit never also
+/// fires.
+#[test]
+fn ask_draft_lands_on_arrival_never_sent() {
+    let browser = source("browser/mod.rs");
+    let ask = fn_body(&browser, "browse_ask");
+    assert!(ask.contains("pending_ask_draft = Some(query)"), "Ask arms the question for its session");
+    assert!(!ask.contains("self.active"), "Ask never touches whatever is active right now");
+    assert!(!ask.contains("set_draft"), "Ask never writes a draft immediately");
+    for banned in ["submit", ".send(", "navigate", "start_turn"] {
+        assert!(!ask.contains(banned), "Ask never sends and never navigates ({banned})");
+    }
+    let focus = fn_body(&browser, "focus_browse_address_with");
+    assert!(
+        focus.contains("PressEnter { secondary: true"),
+        "⌘↵ arrives through the input context"
+    );
+    assert!(focus.contains("ask_from_browse_address"), "⌘↵ asks instead of committing");
+    let app = source("app.rs");
+    let input = fn_body(&app, "browse_address_input");
+    assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
+    let lifecycle = source("app/lifecycle.rs");
+    let activate = fn_body(&lifecycle, "activate");
+    assert!(activate.contains("pending_ask_draft.take()"), "the landed view takes the question");
+    assert!(activate.contains("ask_draft_text"), "reused text appends on a new line");
+    assert!(activate.contains("view.set_draft(next, window, cx)"), "the draft lands, never sent");
+}
+
+/// The back-history menu never opens while back is disabled; an empty
+/// render clears the menu instead of leaving the page covered; picking a
+/// row steps back through the history so the stacks stay right.
+#[test]
+fn back_history_menu_guards_clears_and_steps() {
+    let app = source("app.rs");
+    let toolbar = fn_body(&app, "render_browse_toolbar");
+    assert!(toolbar.contains("history.can_back()"), "the opener checks back first");
+    assert!(toolbar.contains("open_menu(MenuKind::BackHistory, cx)"), "the opener opens the menu");
+    let dialogs = source("dialogs.rs");
+    let menu = fn_body(&dialogs, "render_back_history_menu");
+    assert!(menu.contains("overlays.menu = None"), "an empty render clears the menu");
+    assert!(menu.contains("go_back_steps(steps)"), "picking steps back through the history");
+}
+
+/// The carried tab unparks everywhere it must: sidebar and new-tab
+/// selection, pick-up and omnibox rows, project switch, and every mode
+/// switch. An omnibox session-tab row opens its session (updating the
+/// sidebar selection there) instead of carrying.
+#[test]
+fn centre_override_clears_everywhere() {
+    let browser = source("browser/mod.rs");
+    for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab"] {
+        assert!(
+            fn_body(&browser, name).contains("centre_override = None"),
+            "{name} unparks the carry"
+        );
+    }
+    let row = fn_body(&browser, "activate_omnibox_row");
+    assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and unparks)");
+    assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
+    let lifecycle = source("app/lifecycle.rs");
+    assert!(
+        fn_body(&lifecycle, "new_session_in").contains("centre_override = None"),
+        "a new session unparks even without a mode switch"
+    );
+    let projects = source("project_menu.rs");
+    assert!(
+        projects.contains("note_project_changed"),
+        "project adoptions unpark through the shared hook"
+    );
+}
+
+/// Suggestions stay in this project and out of the hidden list, and closed
+/// pick-up rows are this project's person tabs that reopen the tab they
+/// name. Rows press on mouse-down so the click lands before blur.
+#[test]
+fn suggestions_pickup_and_row_presses() {
+    let browser = source("browser/mod.rs");
+    let suggestions = fn_body(&browser, "browse_suggestions");
+    assert!(suggestions.contains("!entry.hidden"), "hidden sessions never suggest");
+    assert!(suggestions.contains("entry.project == current"), "suggestions stay in this project");
+    let pickup = fn_body(&browser, "browse_pickup_full");
+    assert!(pickup.contains("tab.owner == Owner::Person"), "closed rows are person tabs");
+    assert!(pickup.contains("PickupTarget::Closed(id)"), "each closed row reopens its own tab");
+    let app = source("app.rs");
+    assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
+    assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
+    assert!(
+        app.contains("on_mouse_down(gpui::MouseButton::Left, activate)"),
+        "omnibox rows press on mouse-down"
+    );
+    assert!(
+        app.contains("on_mouse_down(gpui::MouseButton::Left, reset)"),
+        "the zoom pill presses on mouse-down"
+    );
+    let leave = fn_body(&browser, "leave_browse_address");
+    assert!(leave.contains("browse_address_page_focus"), "leaving prefers the page when it had focus");
+    assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
+}
+
+/// Loads track until done or stopped: every navigation marks its tab, the
+/// sync clears finished ones, and the stop clears a stalled one — the
+/// button never sticks on Stop below 1.0.
+#[test]
+fn loading_tracks_until_done_or_stop() {
+    let browser = source("browser/mod.rs");
+    assert!(
+        fn_body(&browser, "navigate_browse_tab").contains("loading_tabs.insert(id)"),
+        "every navigation marks its tab"
+    );
+    assert!(
+        fn_body(&browser, "browse_reload_or_stop").contains("loading_tabs.remove(&id)"),
+        "the stop untracks a stalled load"
+    );
+    assert!(browser.contains("progress() >= 1.0"), "the sync clears finished loads");
 }

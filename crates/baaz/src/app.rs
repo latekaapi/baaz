@@ -764,6 +764,17 @@ pub struct Harness {
     /// since a click into a Chromium page moves no gpui focus and the input
     /// never blurs. Never persists.
     pub(crate) browse_last_holds: bool,
+    /// Whether the Browse centre's page held the keyboard when the address
+    /// field took focus (B2a-H4c): leaving the field hands focus back to
+    /// the page then, else to the root — never a destroyed handle. Never
+    /// persists.
+    pub(crate) browse_address_page_focus: bool,
+    /// The Ask question waiting for its session (B2a-H4c): `browse_ask`
+    /// arms this and starts the session; `activate` writes it into the
+    /// landed view's draft (appending on a new line over reused text) —
+    /// never sent, never on the wrong session. Taken on landing. Never
+    /// persists.
+    pub(crate) pending_ask_draft: Option<String>,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1284,6 +1295,8 @@ impl Harness {
             browse_omnibox_moved: false,
             back_bounds: None,
             browse_last_holds: false,
+            browse_address_page_focus: false,
+            pending_ask_draft: None,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -2288,6 +2301,13 @@ impl Harness {
         let leaving = self.mode_state(cx);
         let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
+        // A mode switch unparks any carried session tab, leaves the address
+        // field (its dropdown belongs to Browse's centre) and resets the
+        // page-holds edge, so Browse never reopens onto stale centre state.
+        // `leave_browse_address` skips its refocus off Browse.
+        self.browser.centre_override = None;
+        self.browse_last_holds = false;
+        self.leave_browse_address(window, cx);
         self.layout.mode = mode;
         self.layout.right_open = entering.right_open;
         self.layout.right_width = entering.right_width;
@@ -3473,7 +3493,11 @@ impl Harness {
         let shown = self.browse_centre_shown();
         let tab = shown.and_then(|id| self.browser.tabs.get(id).cloned());
         let state = self.browse_centre_state();
-        let url = state.as_ref().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+        // The live page's URL — falling back to the tab's when the page has
+        // no live state (a discarded tab), so the field never reads empty
+        // on a loaded page.
+        let live_url = state.as_ref().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+        let url = if live_url.is_empty() { tab.as_ref().map(|tab| tab.url.clone()).unwrap_or_default() } else { live_url };
         let security = state.as_ref().map(|state| state.read(cx).security()).unwrap_or(aui_webview::PageSecurity::Unknown);
         let progress = state.as_ref().map(|state| state.read(cx).progress()).unwrap_or(0.0);
         let zoom = state.as_ref().map(|state| state.read(cx).zoom()).unwrap_or(100);
@@ -3482,13 +3506,22 @@ impl Harness {
         let (can_back, can_forward) = shown
             .and_then(|id| self.browser.histories.get(&id).map(|history| (history.can_back(), history.can_forward())))
             .unwrap_or((false, false));
-        let loading = crate::browser::toolbar::is_loading(progress);
-        // Back ‹, with the tab's back history on right-click.
+        let loading = shown.is_some_and(|id| {
+            crate::browser::toolbar::stop_armed(self.browser.loading_tabs.contains(&id), progress)
+        });
+        // Back ‹, with the tab's back history on right-click — never opened
+        // while back is disabled.
         let go_back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.browse_go_back(window, cx);
         });
         let back_menu = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            this.open_menu(MenuKind::BackHistory, cx);
+            let open = this
+                .browse_centre_shown()
+                .and_then(|id| this.browser.histories.get(&id).map(|history| history.can_back()))
+                .unwrap_or(false);
+            if open {
+                this.open_menu(MenuKind::BackHistory, cx);
+            }
         });
         let back_report = cx.entity().downgrade();
         let back = div()
@@ -3587,24 +3620,23 @@ impl Harness {
             None => None,
         };
         let address = self.browse_address_field(url.clone(), blank, editing, security, zoom, tab, window, cx);
-        // Extensions and More are placeholders until B2a-H5 owns their menus.
+        // Extensions and More are placeholders until B2a-H5 owns their
+        // menus (Annotate and Screenshot stay reachable through the ⋯
+        // menu from B2a-H5 on). The sprite has no puzzle or grid glyph, so
+        // the grid-like Layout stands in — monochrome like every other
+        // toolbar button.
         let extensions = div()
             .id("hd-browse-extensions")
             .role(gpui::Role::Button)
             .aria_label("Extensions")
-            .cursor_pointer()
-            // B2a-H5: the extensions menu.
-            .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
             .child(
-                div()
-                    .flex_none()
-                    .size(px(26.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(p.ink_3)
-                    .ui(scale::FS_13)
-                    .child("🧩"),
+                icon_button("hd-browse-extensions-button", IconName::Layout)
+                    .ghost()
+                    .muted()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("Extensions")
+                    // B2a-H5: the extensions menu.
+                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
             );
         let more = div()
             .id("hd-browse-more")
@@ -3662,8 +3694,9 @@ impl Harness {
     /// The address field's live input with its omnibox keys (B2a-H4):
     /// the one element the toolbar and the new-tab field share — only one
     /// ever renders it per frame. ↑/↓ move the highlight, Tab completes,
-    /// ⌘↵ asks, Escape restores; plain Enter commits through the input's
-    /// own PressEnter.
+    /// Escape restores; plain Enter commits and ⌘↵ asks, both through the
+    /// input's own PressEnter (⌘↵ rides the input context's
+    /// `secondary-enter` binding, so it never also fires the commit).
     fn browse_address_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(input) = self.browse_address.clone() else {
             return div().into_any_element();
@@ -3673,11 +3706,7 @@ impl Harness {
                 "up" => this.move_omnibox(-1, cx),
                 "down" => this.move_omnibox(1, cx),
                 "tab" => this.complete_omnibox(window, cx),
-                "escape" => this.leave_browse_address(cx),
-                "enter" if event.keystroke.modifiers.platform => {
-                    let query = this.browse_address_text(cx);
-                    this.browse_ask(&query, window, cx);
-                }
+                "escape" => this.leave_browse_address(window, cx),
                 _ => {}
             }
         });
@@ -3722,7 +3751,7 @@ impl Harness {
             .gap(px(6.0))
             .rounded(px(scale::R_SM))
             .bg(p.surface_2)
-            .mono(scale::FS_12)
+            .ui(scale::FS_12)
             .overflow_hidden();
         if editing && !blank {
             return slot.child(self.browse_address_input(window, cx)).into_any_element();
@@ -3738,12 +3767,16 @@ impl Harness {
             .aria_label("Address and search")
             .on_click(focus);
         let view = address_view(&url, security, false);
-        // The site button: the tune glyph on secure, words otherwise.
+        // The site button (B2a-H4c): a real button labelled "Site
+        // information" around the badge — the tune glyph on secure, words
+        // otherwise. No popover yet. Only the dev label stays mono.
         let badge: AnyElement = match view.badge {
             Some(AddressBadge::Tune) => {
                 icon(IconName::Sliders).size(px(13.0)).color(p.ink_2).into_any_element()
             }
-            Some(AddressBadge::Dev) => div().flex_none().text_color(p.accent).child(view.label).into_any_element(),
+            Some(AddressBadge::Dev) => {
+                div().flex_none().mono(scale::FS_12).text_color(p.accent).child(view.label).into_any_element()
+            }
             Some(AddressBadge::Warn) => {
                 div().flex_none().text_color(p.warning).child(view.label).into_any_element()
             }
@@ -3755,16 +3788,32 @@ impl Harness {
             }
             None => div().into_any_element(),
         };
-        slot = slot.child(badge);
+        let site = div()
+            .id("hd-browse-site")
+            .flex_none()
+            .role(gpui::Role::Button)
+            .aria_label("Site information")
+            .cursor_pointer()
+            .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
+            .child(badge);
+        slot = slot.child(site);
+        // Userinfo (when any) reads quiet, never bright.
+        if !view.userinfo.is_empty() {
+            slot = slot.child(
+                div().flex_none().text_color(p.ink_3).child(format!("{}@", view.userinfo)),
+            );
+        }
         if !view.host.is_empty() {
             slot = slot.child(div().flex_none().text_color(p.ink).child(view.host));
         }
         if !view.path.is_empty() {
             slot = slot.child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink_3).child(view.path));
         }
-        // A non-default zoom wears its pill; clicking resets to 100.
+        // A non-default zoom wears its pill; pressing it resets to 100.
+        // Mouse-down (not click): the press must land before the address
+        // input's blur drops the field.
         if let Some(pill) = zoom_pill(zoom) {
-            let reset = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            let reset = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
                 this.browse_reset_zoom(window, cx);
             });
             slot = slot.child(
@@ -3774,7 +3823,7 @@ impl Harness {
                     .role(gpui::Role::Button)
                     .aria_label(format!("Zoom {pill}, reset"))
                     .cursor_pointer()
-                    .on_click(reset)
+                    .on_mouse_down(gpui::MouseButton::Left, reset)
                     .child(
                         div()
                             .px(px(6.0))
@@ -4145,13 +4194,12 @@ impl Harness {
     }
 
     /// The Browse centre (B2a-H2): the current project's active person
-    /// tab's page — the existing `webview_pane` with its own nav row for
-    /// now; B2a-H4 replaces the header/toolbar. The page is built here,
-    /// where it shows, never as a render side effect elsewhere. With no
-    /// person tab open the centre names itself and offers a New tab —
-    /// render never opens one (B2a-H2b).
+    /// tab's page. The page is built here, where it shows, never as a
+    /// render side effect elsewhere. With no person tab open the centre
+    /// names itself and offers a New tab — render never opens one (B2a-H2b).
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let harness = cx.weak_entity();
+        let mut blank_page = false;
         let body = match self.browse_centre_page(window, cx) {
             Some(state) => {
                 let blank =
@@ -4160,9 +4208,16 @@ impl Harness {
                 // a white page — gpui, since about:blank is hidden by the
                 // library.
                 if blank {
+                    blank_page = true;
                     self.render_browse_newtab(window, cx)
                 } else {
-                    aui_webview::webview_pane("browse-centre-page", &state)
+                    // The library's `webview_pane` offers no no-nav option —
+                    // it always draws its own nav row — so the pane renders
+                    // shifted up by exactly that row and the centre clips it
+                    // away: only the page shows under Browse's own toolbar.
+                    // (B2a-H5 note: Annotate and Screenshot stay reachable
+                    // through the header's ⋯ menu from H5 on.)
+                    let pane = aui_webview::webview_pane("browse-centre-page", &state)
                         .on_intent(move |intent, window, cx| {
                             if let Some(harness) = harness.upgrade() {
                                 harness.update(cx, |harness, cx| {
@@ -4170,6 +4225,12 @@ impl Harness {
                                 });
                             }
                         })
+                        .into_any_element();
+                    div()
+                        .relative()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(div().absolute().top(px(-38.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(pane))
                         .into_any_element()
                 }
             }
@@ -4177,8 +4238,11 @@ impl Harness {
         };
         // The omnibox dropdown drops down over the page — painted after it,
         // so gpui draws it above the screenshot stand-in the covering rule
-        // shows while it is open.
-        let omnibox = self.render_omnibox_dropdown(window, cx);
+        // shows while it renders rows. The toolbar field's list anchors
+        // under the toolbar (the top of the centre); the new-tab field
+        // renders its own list in flow, under the centred field.
+        let omnibox =
+            (!blank_page).then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar)).flatten();
         v_flex()
             .size_full()
             .relative()
@@ -4205,7 +4269,7 @@ impl Harness {
                 .items_center()
                 .rounded(px(scale::R_MD))
                 .bg(p.surface_2)
-                .mono(scale::FS_14)
+                .ui(scale::FS_14)
                 .child(self.browse_address_input(window, cx))
                 .into_any_element()
         } else {
@@ -4240,6 +4304,11 @@ impl Harness {
             .aria_label("New tab")
             .child(field)
             .child(div().ui(scale::FS_12).text_color(p.ink_3).child("⌘↵ ask"));
+        // The new-tab field's own dropdown, anchored under the centred
+        // field (the toolbar's anchors under the toolbar instead).
+        if let Some(list) = self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Newtab) {
+            column = column.child(list);
+        }
         let pickup = self.browse_pickup_full();
         if !pickup.is_empty() {
             let mut rows = v_flex()
@@ -4257,9 +4326,11 @@ impl Harness {
                     .ui(scale::FS_13)
                     .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).child(row.title.clone()))
                     .child(div().flex_none().text_color(p.ink_3).child(row.detail.clone()));
+                // Pick-up rows press on mouse-down (not click): the press
+                // must land before the address input's blur drops the field.
                 match target {
                     crate::browser::PickupTarget::Tab(id) => {
-                        let select = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                        let select = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
                             this.select_browse_sidebar_tab(id, window, cx);
                         });
                         rows = rows.child(
@@ -4268,12 +4339,12 @@ impl Harness {
                                 .role(gpui::Role::Button)
                                 .aria_label(format!("Open {}", row.title))
                                 .cursor_pointer()
-                                .on_click(select)
+                                .on_mouse_down(gpui::MouseButton::Left, select)
                                 .child(content),
                         );
                     }
                     crate::browser::PickupTarget::Session(session) => {
-                        let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                        let open = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
                             this.set_mode(layout::Mode::Sessions, window, cx);
                             this.resume(session.clone(), window, cx);
                         });
@@ -4283,12 +4354,23 @@ impl Harness {
                                 .role(gpui::Role::Button)
                                 .aria_label(format!("Open {}", row.title))
                                 .cursor_pointer()
-                                .on_click(open)
+                                .on_mouse_down(gpui::MouseButton::Left, open)
                                 .child(content),
                         );
                     }
-                    crate::browser::PickupTarget::Closed => {
-                        rows = rows.child(content);
+                    crate::browser::PickupTarget::Closed(id) => {
+                        let reopen = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
+                            this.reopen_browse_closed_tab(id, window, cx);
+                        });
+                        rows = rows.child(
+                            div()
+                                .id(("browse-pickup-closed", index))
+                                .role(gpui::Role::Button)
+                                .aria_label(format!("Reopen {}", row.title))
+                                .cursor_pointer()
+                                .on_mouse_down(gpui::MouseButton::Left, reopen)
+                                .child(content),
+                        );
                     }
                 }
             }
@@ -4301,23 +4383,48 @@ impl Harness {
     /// agent, Tabs and sessions, History and pages you read (omitted until
     /// B2b fills it), then the engine row — dropping down over the page.
     /// Rows are list-box options; ↑/↓/Tab/⌘↵/Enter ride the field's own
-    /// keys, a click activates.
-    fn render_omnibox_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.browse_omnibox_open() {
+    /// keys. Rows activate on mouse-down (not click): the press must land
+    /// before the address input's blur drops the field.
+    fn render_omnibox_dropdown(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        anchor: crate::browser::OmniAnchor,
+    ) -> Option<AnyElement> {
+        if !self.browse_omnibox_open(cx) {
             return None;
         }
         let rows = self.browse_suggestions(cx);
         if rows.is_empty() {
             return None;
         }
+        let list = self.omnibox_list(&rows, window, cx);
+        Some(match anchor {
+            crate::browser::OmniAnchor::Toolbar => list
+                .absolute()
+                .top(px(6.0))
+                .left(px(12.0))
+                .right(px(12.0))
+                .into_any_element(),
+            crate::browser::OmniAnchor::Newtab => {
+                list.w(px(480.0)).into_any_element()
+            }
+        })
+    }
+
+    /// The omnibox list box itself, unpositioned: section headers and rows
+    /// for the already-ranked `rows`, with `anchor` deciding the placement
+    /// in [`Self::render_omnibox_dropdown`].
+    fn omnibox_list(
+        &self,
+        rows: &[crate::browser::OmniRow],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
-        let selected = self.browse_omnibox_selected;
+        let selected = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
         let mut list = v_flex()
             .id("browse-omni-list")
-            .absolute()
-            .top(px(6.0))
-            .left(px(12.0))
-            .right(px(12.0))
             .py(px(4.0))
             .rounded(px(scale::R_MD))
             .bg(p.surface_1)
@@ -4347,7 +4454,7 @@ impl Harness {
                 );
             }
             last_kind = Some(row.suggestion.kind);
-            let activate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            let activate = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
                 this.activate_omnibox_row(index, window, cx);
             });
             let mut item = h_flex()
@@ -4377,12 +4484,12 @@ impl Harness {
                     .role(gpui::Role::ListBoxOption)
                     .aria_label(row.suggestion.title.clone())
                     .cursor_pointer()
-                    .on_click(activate)
+                    .on_mouse_down(gpui::MouseButton::Left, activate)
                     .child(item),
             );
         }
         let _ = window;
-        Some(list.into_any_element())
+        list
     }
 
     /// The Browse centre with no person tab (B2a-H2b): the empty state
