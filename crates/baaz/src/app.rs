@@ -7342,16 +7342,19 @@ impl Render for Harness {
         let dialog = self.render_dialog(window, cx);
         // F2: the feedback capture layer (Active only) under its chrome
         // (bar while Active, pill while Paused); both paint above the
-        // palette, dialog, settings and menus, with only toasts above them.
-        // F3 adds the note popover as a sibling of the layer, never inside
-        // its key context, so typing and Escape reach the note.
+        // palette, dialog, settings and menus, with only toasts above them
+        // (and toasts hide while a capture reads the window). F3 adds the
+        // note popover as a sibling of the layer, never inside its key
+        // context, so typing and Escape reach the note.
         let feedback_layer = self.render_feedback_layer(window, cx);
         let feedback_chrome = self.render_feedback_chrome(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = self.render_palette(cx);
-        let toasts = self.render_toasts(cx);
+        // While capturing the window must read clean: toasts render after
+        // the feedback layers, so they would leak into the capture.
+        let toasts = if self.feedback.capturing { None } else { self.render_toasts(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
         // One overlay, not two: the two drags never run together, so it

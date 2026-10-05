@@ -15,6 +15,7 @@
 //! built by [`FeedbackUi::layer_base`] — add handlers there, next to the
 //! swallowing ones, so every pointer trap stays in one place.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use aui::data::button;
@@ -57,6 +58,20 @@ pub(crate) const FEEDBACK_CAPTURE_TIMEOUT: Duration = Duration::from_millis(120)
 /// A cold accessibility tree gets this long to warm before hover and click
 /// fall back.
 pub(crate) const FEEDBACK_PROBE_WARM: Duration = Duration::from_secs(1);
+/// Hover hit-tests run at most this often: every ≥ 2 px move past this
+/// interval re-tests, anything sooner keeps the last outline.
+pub(crate) const FEEDBACK_HOVER_THROTTLE: Duration = Duration::from_millis(30);
+/// A queued `note:`/`click:`/`drag:` step waits this long for the popover
+/// (or the idle shell) before it fails loudly instead of racing the
+/// async capture.
+pub(crate) const FEEDBACK_STEP_WAIT: Duration = Duration::from_secs(2);
+/// The step pump's tick: how often queued steps retry across frames.
+pub(crate) const FEEDBACK_STEP_TICK: Duration = Duration::from_millis(50);
+/// The top strip the Active bar floats in: the hover chip never parks its
+/// top edge inside it.
+pub(crate) const FEEDBACK_BAR_ZONE_H: f32 = 64.0;
+/// The note popover's fixed width, matching its render.
+pub(crate) const FEEDBACK_POPOVER_W: f32 = 300.0;
 
 /// How long a first Discard click stays armed waiting for its confirm.
 const DISCARD_ARM: Duration = Duration::from_secs(4);
@@ -121,6 +136,48 @@ pub(crate) struct PendingClick {
     pub since: Instant,
 }
 
+/// A step-driven pointing action waiting behind an in-flight capture: a
+/// `click:`/`drag:` issued while a capture is pending queues here instead
+/// of cancelling it, and a `note:` waits here for its popover. Each item
+/// carries its full step name so the pump can fail it loudly on expiry.
+#[derive(Clone, Debug)]
+pub(crate) enum QueuedStep {
+    /// A queued `click:x,y`.
+    Click {
+        /// The full `feedback-mode:click:…` step name, for the failure log.
+        step: String,
+        /// Where the owner clicked, in window-logical pixels.
+        point: Point<Pixels>,
+    },
+    /// A queued `drag:x1,y1,x2,y2`.
+    Drag {
+        /// The full `feedback-mode:drag:…` step name, for the failure log.
+        step: String,
+        /// The drag's start corner, in window-logical pixels.
+        start: Point<Pixels>,
+        /// The drag's end corner, in window-logical pixels.
+        end: Point<Pixels>,
+    },
+    /// A queued `note:<text>`.
+    Note {
+        /// The full `feedback-mode:note:…` step name, for the failure log.
+        step: String,
+        /// The owner's words, filled into the popover once it opens.
+        text: String,
+    },
+}
+
+impl QueuedStep {
+    /// The full step name, for the failure log on expiry.
+    fn step(&self) -> &str {
+        match self {
+            QueuedStep::Click { step, .. }
+            | QueuedStep::Drag { step, .. }
+            | QueuedStep::Note { step, .. } => step,
+        }
+    }
+}
+
 /// The feedback shell's state: one per window, on `Harness`.
 pub struct FeedbackUi {
     /// What the shell shows.
@@ -138,6 +195,10 @@ pub struct FeedbackUi {
     /// When the current hover wait started, bounding the warm retry while
     /// the accessibility tree is still cold.
     pub hover_since: Option<Instant>,
+    /// When the last hover hit-test ran: moves inside
+    /// [`FEEDBACK_HOVER_THROTTLE`] of it skip the next one, so hover costs
+    /// at most one hit-test per ~30 ms.
+    pub hover_tested_at: Option<Instant>,
     /// Where the left button went down, while it is down.
     pub press: Option<Point<Pixels>>,
     /// Where the pointer is now, while a drag is live.
@@ -151,6 +212,17 @@ pub struct FeedbackUi {
     /// The target waiting for its capture to land, with the field already
     /// built so opening the popover is synchronous when it does.
     pub capture_pending: Option<(Target, Entity<TextareaState>)>,
+    /// The capture's 120 ms timer bound. One slot, never a queue:
+    /// starting a capture replaces the previous timer (dropping cancels
+    /// it), so timers can never stack on `wire_tasks`.
+    pub capture_task: Option<gpui::Task<()>>,
+    /// Step-driven pointing actions waiting behind an in-flight capture,
+    /// oldest first, each with the moment it queued (bounding the
+    /// [`FEEDBACK_STEP_WAIT`] wait).
+    pub step_queue: VecDeque<(QueuedStep, Instant)>,
+    /// The step pump task, while queued steps are waiting. One slot: the
+    /// pump exits (clearing this) once the queue drains.
+    pub step_task: Option<gpui::Task<()>>,
     /// The open note popover, if the owner is writing one.
     pub popover: Option<PendingNote>,
     /// A click that hit-tested nothing, waiting for the tree to warm.
@@ -185,11 +257,15 @@ impl FeedbackUi {
             hover: None,
             hover_point: None,
             hover_since: None,
+            hover_tested_at: None,
             press: None,
             drag: None,
             capturing: false,
             capture_seq: 0,
             capture_pending: None,
+            capture_task: None,
+            step_queue: VecDeque::new(),
+            step_task: None,
             popover: None,
             pending_click: None,
             discard_armed: false,
@@ -214,9 +290,28 @@ impl FeedbackUi {
     pub fn cancel_note(&mut self) {
         self.popover = None;
         self.capture_pending = None;
+        self.capture_task = None;
         self.capture_seq = self.capture_seq.wrapping_add(1);
         self.capturing = false;
         self.pending_click = None;
+    }
+
+    /// Drop everything transient except the open popover: hover, press,
+    /// drag, the parked click and any in-flight capture (its frame
+    /// callbacks go stale). Pausing and toggling park through here so a
+    /// note-in-progress survives them; cancelling goes through
+    /// [`Self::cancel_note`] instead.
+    pub(crate) fn clear_transient(&mut self) {
+        self.hover = None;
+        self.hover_point = None;
+        self.hover_since = None;
+        self.press = None;
+        self.drag = None;
+        self.pending_click = None;
+        self.capture_pending = None;
+        self.capture_task = None;
+        self.capture_seq = self.capture_seq.wrapping_add(1);
+        self.capturing = false;
     }
 
     /// Clear the hover outline, for the bar's mouse-move catcher.
@@ -301,7 +396,9 @@ impl FeedbackUi {
     /// outcome names (toasts, probe activation, focus). The run-only
     /// [`Self::forced_on`] counts as the setting being on. While
     /// [`Self::saving`] the Harness guards the toggle outright (there is
-    /// no stay-put outcome to return here).
+    /// no stay-put outcome to return here). Moving between Active and
+    /// Paused keeps the open popover (a note-in-progress survives the
+    /// round-trip); only the transient pointer and capture state parks.
     pub fn toggle(&mut self, setting_on: bool) -> ToggleOutcome {
         if !(setting_on || self.forced_on) {
             return ToggleOutcome::NeedsSetting;
@@ -311,19 +408,19 @@ impl FeedbackUi {
                 if self.draft.is_empty() {
                     self.draft = Draft::new();
                 }
-                self.cancel_note();
+                self.clear_transient();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Active;
                 ToggleOutcome::EnteredActive
             }
             FeedbackPhase::Active => {
-                self.cancel_note();
+                self.clear_transient();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Paused;
                 ToggleOutcome::Paused
             }
             FeedbackPhase::Paused => {
-                self.cancel_note();
+                self.clear_transient();
                 self.disarm_discard();
                 self.phase = FeedbackPhase::Active;
                 ToggleOutcome::Resumed
@@ -332,10 +429,11 @@ impl FeedbackUi {
     }
 
     /// Escape, the Pause button: Active → Paused, anywhere else a no-op —
-    /// and always a no-op while [`Self::saving`].
+    /// and always a no-op while [`Self::saving`]. The open popover (with
+    /// its typed text) survives: Resume brings it back.
     pub fn pause(&mut self) {
         if self.phase == FeedbackPhase::Active && !self.saving {
-            self.cancel_note();
+            self.clear_transient();
             self.disarm_discard();
             self.phase = FeedbackPhase::Paused;
         }
@@ -458,6 +556,66 @@ impl FeedbackUi {
         }
     }
 
+    /// Where the hover name chip sits: centred on the target, above it by
+    /// default, below it near the top — and never with its top edge inside
+    /// the bar zone (then below the element too). Clamped horizontally and
+    /// vertically into the window. When the element is taller than the
+    /// window, the chip pins inside its top-left instead. Pure, so tests
+    /// drive the edges directly.
+    pub(crate) fn feedback_chip_pos(
+        rect: Rect,
+        est_w: f32,
+        chip_h: f32,
+        win_w: f32,
+        win_h: f32,
+    ) -> (f32, f32) {
+        if rect.h >= win_h {
+            let x = (rect.x + 4.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
+            return (x, rect.y + 4.0);
+        }
+        let centre = rect.x + rect.w / 2.0;
+        let x = (centre - est_w / 2.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
+        let mut y = if rect.y <= 30.0 { rect.y + rect.h + 4.0 } else { rect.y - 28.0 };
+        if y < FEEDBACK_BAR_ZONE_H {
+            y = rect.y + rect.h + 4.0;
+        }
+        (x, y.clamp(4.0, (win_h - chip_h - 4.0).max(4.0)))
+    }
+
+    /// The note popover's estimated full height: padding plus the header,
+    /// the textarea at its current row count (the field grows 3–8 rows),
+    /// the buttons and the hint. An estimate — the render cannot measure
+    /// before layout — but conservative enough that Save stays on screen.
+    pub(crate) fn feedback_popover_height(rows: usize) -> f32 {
+        let rows = rows.clamp(3, 8) as f32;
+        12.0 + 20.0 + 2.0 + 16.0 + 9.0 + rows * 20.0 + 9.0 + 28.0 + 9.0 + 16.0 + 12.0
+    }
+
+    /// Where the note popover sits: right of the target (left when there
+    /// is no room), top-aligned with it — flipped above the target when
+    /// there is no room below, so the whole popover including Save stays
+    /// on screen and below the bar. Pure, so tests drive the edges
+    /// directly.
+    pub(crate) fn feedback_popover_pos(
+        rect: Rect,
+        pop_h: f32,
+        win_w: f32,
+        win_h: f32,
+    ) -> (f32, f32) {
+        let x = if rect.x + rect.w + 12.0 + FEEDBACK_POPOVER_W <= win_w - 8.0 {
+            rect.x + rect.w + 12.0
+        } else {
+            rect.x - FEEDBACK_POPOVER_W - 12.0
+        }
+        .clamp(8.0, (win_w - FEEDBACK_POPOVER_W - 8.0).max(8.0));
+        let mut y = rect.y;
+        if y + pop_h > win_h - 8.0 {
+            y = rect.y - pop_h - 8.0;
+        }
+        let hi = (win_h - 8.0 - pop_h).max(FEEDBACK_BAR_ZONE_H);
+        (x, y.clamp(FEEDBACK_BAR_ZONE_H, hi))
+    }
+
     /// One `(rect, 1-based index)` per draft note, in order: what the
     /// layer draws one pin per.
     pub(crate) fn pin_rects(&self) -> Vec<(Rect, usize)> {
@@ -564,7 +722,14 @@ impl crate::app::Harness {
         });
         self.close_dialog(cx);
         self.feedback.probe.activate(window);
-        window.focus(&self.feedback.focus, cx);
+        // A note-in-progress survived the pause: hand the keyboard back to
+        // its field, otherwise to the layer.
+        if let Some(note) = self.feedback.popover.as_ref() {
+            let focus = note.field.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        } else {
+            window.focus(&self.feedback.focus, cx);
+        }
         window.refresh();
         cx.notify();
     }
@@ -644,6 +809,15 @@ impl crate::app::Harness {
     /// error. Afterwards the layer keeps the keyboard when still Active,
     /// so Escape keeps working after the click.
     pub(crate) fn finish_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Done first files the open note when it holds text: a
+        // note-in-progress is a note, not chrome. An in-flight capture has
+        // no popover to file yet, so it is dropped instead.
+        if self.feedback.popover.is_some() {
+            self.save_feedback_note(window, cx);
+        }
+        if self.feedback.capture_pending.is_some() {
+            self.feedback.cancel_note();
+        }
         if !self.feedback.done_enabled() {
             return;
         }
@@ -710,11 +884,13 @@ impl crate::app::Harness {
     /// The F3 note-taking subs run through the same handlers as the
     /// mouse: `hover:x,y` hovers, `click:x,y` presses and releases at one
     /// point, `drag:x1,y1,x2,y2` drags corner to corner, `note:<text>`
-    /// fills the open popover and saves (completing an in-flight capture
-    /// first), `cancel` closes the popover unsaved. Coordinates are
-    /// window-logical pixels. A note sub with no popover and no pending
-    /// capture, an empty text, an unparseable coordinate, or a pointing
-    /// sub while not Active records a step failure.
+    /// fills the open popover and saves (waiting behind an in-flight
+    /// capture across frames, bounded ~2 s), `cancel` closes the popover
+    /// unsaved. Coordinates are window-logical pixels. A `click:`/`drag:`
+    /// issued while a capture is pending queues behind it instead of
+    /// cancelling it. A note sub with no popover and nothing pending, an
+    /// empty text, an unparseable coordinate, or a pointing sub while not
+    /// Active records a step failure.
     pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.saving {
             return;
@@ -733,8 +909,8 @@ impl crate::app::Harness {
         if let Some(payload) = rest.strip_prefix("click:") {
             match parse_feedback_point(payload) {
                 Some(point) if self.feedback.phase == FeedbackPhase::Active => {
-                    self.feedback_press_at(point, window, cx);
-                    self.feedback_release_at(point, window, cx);
+                    let step = QueuedStep::Click { step: format!("feedback-mode:{rest}"), point };
+                    self.run_or_queue_step(step, window, cx);
                 }
                 _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
             }
@@ -744,9 +920,9 @@ impl crate::app::Harness {
         if let Some(payload) = rest.strip_prefix("drag:") {
             match parse_feedback_drag(payload) {
                 Some((start, end)) if self.feedback.phase == FeedbackPhase::Active => {
-                    self.feedback_press_at(start, window, cx);
-                    self.feedback_drag_at(end, cx);
-                    self.feedback_release_at(end, window, cx);
+                    let step =
+                        QueuedStep::Drag { step: format!("feedback-mode:{rest}"), start, end };
+                    self.run_or_queue_step(step, window, cx);
                 }
                 _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
             }
@@ -756,22 +932,20 @@ impl crate::app::Harness {
         if let Some(text) = rest.strip_prefix("note:") {
             if self.feedback.phase != FeedbackPhase::Active || text.trim().is_empty() {
                 crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
-            } else if self.feedback.popover.is_some() {
+            } else if self.feedback.popover.is_some() && self.feedback.step_queue.is_empty() {
                 self.fill_feedback_note(text, window, cx);
                 self.save_feedback_note(window, cx);
-            } else if self.feedback.capture_pending.is_some() {
-                // The capture task (two painted frames) has not landed
-                // yet: steps run back-to-back with no frame between them,
-                // so finish it synchronously here instead of scripting a
-                // `wait:` around capture internals.
-                let seq = self.feedback.capture_seq;
-                self.finish_note_capture(window, cx, seq);
-                if self.feedback.popover.is_some() {
-                    self.fill_feedback_note(text, window, cx);
-                    self.save_feedback_note(window, cx);
-                } else {
-                    crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
-                }
+            } else if self.feedback.popover.is_some()
+                || self.feedback.capture_pending.is_some()
+                || self.feedback.pending_click.is_some()
+                || self.feedback.step_task.is_some()
+            {
+                // The popover is not open yet (or an earlier step is still
+                // queued): wait behind the capture across frames instead of
+                // racing it — the pump fills and saves once it opens, and
+                // only then reports failure.
+                let step = QueuedStep::Note { step: format!("feedback-mode:{rest}"), text: text.to_owned() };
+                self.queue_step(step, cx);
             } else {
                 crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
             }
@@ -779,6 +953,9 @@ impl crate::app::Harness {
             return;
         }
         if rest == "cancel" {
+            // A cancel supersedes queued steps: their popovers will never
+            // open, so drop them rather than failing each on expiry.
+            self.feedback.step_queue.clear();
             self.cancel_feedback_note(window, cx);
             cx.notify();
             return;
@@ -820,6 +997,135 @@ impl crate::app::Harness {
                 cx.notify();
             }
         }
+    }
+
+    /// Run a step `click:`/`drag:` now when the shell is idle, or queue it
+    /// behind the in-flight capture (or the already-queued steps) instead
+    /// of cancelling them the way an interactive press would.
+    pub(crate) fn run_or_queue_step(
+        &mut self,
+        step: QueuedStep,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        debug_assert!(matches!(step, QueuedStep::Click { .. } | QueuedStep::Drag { .. }));
+        if self.feedback.capture_pending.is_some()
+            || self.feedback.pending_click.is_some()
+            || !self.feedback.step_queue.is_empty()
+            || self.feedback.step_task.is_some()
+        {
+            self.queue_step(step, cx);
+            return;
+        }
+        match step {
+            QueuedStep::Click { point, .. } => {
+                self.feedback_press_at(point, window, cx);
+                self.feedback_release_at(point, window, cx);
+            }
+            QueuedStep::Drag { start, end, .. } => {
+                self.feedback_press_at(start, window, cx);
+                self.feedback_drag_at(end, cx);
+                self.feedback_release_at(end, window, cx);
+            }
+            QueuedStep::Note { .. } => {}
+        }
+    }
+
+    /// Push a step onto the queue and make sure the pump is draining it.
+    pub(crate) fn queue_step(&mut self, step: QueuedStep, cx: &mut Context<Self>) {
+        self.feedback.step_queue.push_back((step, Instant::now()));
+        self.ensure_step_pump(cx);
+    }
+
+    /// Start the step pump unless one is already draining the queue: a
+    /// single task that ticks the queue across frames until it drains,
+    /// then clears its own slot.
+    pub(crate) fn ensure_step_pump(&mut self, cx: &mut Context<Self>) {
+        if self.feedback.step_task.is_some() {
+            return;
+        }
+        let pump = cx.spawn(async move |this, cx| {
+            loop {
+                let finished = this
+                    .update_in(cx, |this, window, cx| this.step_pump_tick(window, cx))
+                    .unwrap_or(true);
+                if finished {
+                    break;
+                }
+                cx.background_executor().timer(FEEDBACK_STEP_TICK).await;
+            }
+            let _ = this.update(cx, |this, _| {
+                this.feedback.step_task = None;
+            });
+        });
+        self.feedback.step_task = Some(pump);
+    }
+
+    /// One pump tick. Returns true when the pump should exit: the queue is
+    /// empty (a parked click or capture without queued steps belongs to
+    /// the frame loop, not the pump), the shell left Active (queued steps
+    /// only run there — each is failed loudly), or there is nothing left
+    /// to wait on.
+    pub(crate) fn step_pump_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.feedback.phase != FeedbackPhase::Active {
+            while let Some((queued, _)) = self.feedback.step_queue.pop_front() {
+                crate::steps::record_step_failure(queued.step());
+            }
+            cx.notify();
+            return true;
+        }
+        let Some((_, since)) = self.feedback.step_queue.front() else {
+            return true;
+        };
+        if since.elapsed() >= FEEDBACK_STEP_WAIT {
+            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            crate::steps::record_step_failure(queued.step());
+            cx.notify();
+            return self.feedback.step_queue.is_empty();
+        }
+        if self.feedback.popover.is_some() {
+            // A click or drag behind an open popover waits for the popover
+            // to close: cancelling it here would eat the note the script is
+            // about to file. It stays at the front with its timestamp, so
+            // the expiry above still bounds the wait.
+            let front_is_note =
+                matches!(self.feedback.step_queue.front(), Some((QueuedStep::Note { .. }, _)));
+            if !front_is_note {
+                cx.notify();
+                return false;
+            }
+            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            let QueuedStep::Note { text, .. } = queued else { unreachable!("front checked") };
+            self.fill_feedback_note(&text, window, cx);
+            self.save_feedback_note(window, cx);
+            cx.notify();
+            return false;
+        }
+        if self.feedback.capture_pending.is_some() || self.feedback.pending_click.is_some() {
+            // Still resolving: keep the cold retry moving even when no
+            // frames arrive (headless `--steps` runs), and wait.
+            self.feedback_poll(window, cx);
+            return false;
+        }
+        // Idle with no popover: a note has nothing to fill — fail it — and
+        // a click or drag runs through the real handlers now.
+        let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+        match queued {
+            QueuedStep::Note { step, .. } => {
+                crate::steps::record_step_failure(&step);
+            }
+            QueuedStep::Click { point, .. } => {
+                self.feedback_press_at(point, window, cx);
+                self.feedback_release_at(point, window, cx);
+            }
+            QueuedStep::Drag { start, end, .. } => {
+                self.feedback_press_at(start, window, cx);
+                self.feedback_drag_at(end, cx);
+                self.feedback_release_at(end, window, cx);
+            }
+        }
+        cx.notify();
+        false
     }
 
     /// Where the app was, for a note's [`ScreenContext`]: the mode, the
@@ -865,10 +1171,13 @@ impl crate::app::Harness {
         }
     }
 
-    /// The pointer moved while Active with nothing pressed: refresh the
+    /// The pointer moved while Active with the left button up: refresh the
     /// hover outline. The mouse-move handler and the `hover:` step verb
-    /// both land here. Moves under 2 px skip the hit-test; while a popover
-    /// is open, while capturing, or with the button down, hovers stay off.
+    /// both land here. Moves under 2 px skip the hit-test, and so do moves
+    /// inside ~30 ms of the last one; while a popover is open, while
+    /// capturing, or with the button down, hovers stay off. The hit-test
+    /// never enriches (that serialises the whole debug tree) — enrichment
+    /// waits for [`Self::begin_note_capture`].
     pub(crate) fn feedback_hover_at(
         &mut self,
         point: Point<Pixels>,
@@ -888,8 +1197,14 @@ impl crate::app::Harness {
                 return;
             }
         }
+        if let Some(tested) = self.feedback.hover_tested_at {
+            if tested.elapsed() < FEEDBACK_HOVER_THROTTLE {
+                return;
+            }
+        }
         let hit = self.feedback.probe.hit(window, point);
         self.feedback.hover_point = Some(point);
+        self.feedback.hover_tested_at = Some(Instant::now());
         if hit.is_some() {
             self.feedback.hover_since = None;
             self.feedback.hover = hit;
@@ -948,6 +1263,36 @@ impl crate::app::Harness {
             self.feedback.hover = None;
             cx.notify();
         }
+    }
+
+    /// The pointer moved while Active: with the left button down it is a
+    /// drag, otherwise a hover. When a press is armed but the button is no
+    /// longer down, the mouse-up landed on the bar, the popover or outside
+    /// the window and never reached the layer: clear the stale press and
+    /// drag without filing a note, then hover on so the outline revives.
+    /// The layer's mouse-move handler lands here.
+    pub(crate) fn feedback_move_at(
+        &mut self,
+        point: Point<Pixels>,
+        pressed_button: Option<gpui::MouseButton>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.feedback.phase != FeedbackPhase::Active {
+            return;
+        }
+        if pressed_button == Some(gpui::MouseButton::Left) {
+            self.feedback_drag_at(point, cx);
+            return;
+        }
+        if self.feedback.press.is_some() {
+            self.feedback.press = None;
+            self.feedback.drag = None;
+            self.feedback_hover_at(point, window, cx);
+            cx.notify();
+            return;
+        }
+        self.feedback_hover_at(point, window, cx);
     }
 
     /// The left button came up while Active: a ≥ 6×6 box becomes an area
@@ -1050,19 +1395,28 @@ impl crate::app::Harness {
     /// then read the window after two painted frames (a 120 ms timer bounds
     /// the wait). The note field is built now, so opening the popover is
     /// synchronous when the capture lands — or when it fails, in which
-    /// case the popover still opens, with no images.
+    /// case the popover still opens, with no images. A no-op while a Done
+    /// write is in flight. An element target is enriched once here (its
+    /// gpui provenance), never on the hover path.
     pub(crate) fn begin_note_capture(
         &mut self,
         target: Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.feedback.saving {
+            return;
+        }
         self.feedback.hover = None;
         self.feedback.hover_point = None;
         self.feedback.hover_since = None;
         self.feedback.press = None;
         self.feedback.drag = None;
         self.feedback.pending_click = None;
+        let mut target = target;
+        if let Target::Element(hit) = &mut target {
+            self.feedback.probe.enrich(window, hit);
+        }
         let field = cx.new(|cx| {
             aui::composer::composer_state_rows("What should change?", 3, 8, window, cx)
         });
@@ -1083,7 +1437,7 @@ impl crate::app::Harness {
             cx.background_executor().timer(FEEDBACK_CAPTURE_TIMEOUT).await;
             let _ = this.update_in(cx, |this, window, cx| this.finish_note_capture(window, cx, seq));
         });
-        self.wire_tasks().push(timer);
+        self.feedback.capture_task = Some(timer);
     }
 
     /// Finish the capture `seq` started: read the window, cut the outlined
@@ -1100,6 +1454,7 @@ impl crate::app::Harness {
             return;
         }
         self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
+        self.feedback.capture_task = None;
         let (target, field) = self.feedback.capture_pending.take().expect("pending checked");
         self.feedback.capturing = false;
         let rect = FeedbackUi::target_rect(&target);
@@ -1169,18 +1524,27 @@ impl crate::app::Harness {
         }
     }
 
+    /// Where the note was taken, as a person reads it: `<pane> pane`
+    /// while the right pane is open (`Browser pane`, `Files pane`, …),
+    /// else the capitalised mode (`Sessions` / `Browse`). Display only —
+    /// [`ScreenContext`] keeps the stored lowercase values and the report
+    /// is untouched.
+    pub(crate) fn feedback_pane_label(&self) -> String {
+        if self.layout.right_open {
+            format!("{} pane", crate::layout::right_kind(&self.layout).label())
+        } else {
+            match self.mode {
+                crate::layout::Mode::Sessions => "Sessions".to_owned(),
+                crate::layout::Mode::Browse => "Browse".to_owned(),
+            }
+        }
+    }
+
     /// The popover's muted subtitle: `<human role> · in <nearest
     /// ancestor> · <right pane or mode>` for an element, the region or the
     /// pane for an area.
     pub(crate) fn feedback_note_subtitle(&self, target: &Target) -> String {
-        let pane = if self.layout.right_open {
-            crate::layout::right_kind(&self.layout).label().to_owned()
-        } else {
-            match self.mode {
-                crate::layout::Mode::Sessions => "sessions".to_owned(),
-                crate::layout::Mode::Browse => "browse".to_owned(),
-            }
-        };
+        let pane = self.feedback_pane_label();
         match target {
             Target::Element(hit) => {
                 let role = human_role(&hit.role);
@@ -1210,6 +1574,15 @@ impl crate::app::Harness {
         }
         self.feedback.expire_discard();
         self.feedback_poll(window, cx);
+        // Keep frames coming while anything is waiting on one: a parked
+        // cold-tree click, a cold hover retry, or an in-flight capture all
+        // stall forever in an idle window otherwise.
+        if self.feedback.pending_click.is_some()
+            || self.feedback.hover_since.is_some()
+            || self.feedback.capture_pending.is_some()
+        {
+            window.request_animation_frame();
+        }
         let accent = feedback_accent(cx);
         let win = window.viewport_size();
         let win_w = f32::from(win.width);
@@ -1243,16 +1616,12 @@ impl crate::app::Harness {
             .on_mouse_up(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                    if event.pressed_button == Some(gpui::MouseButton::Left) {
-                        this.feedback_drag_at(event.position, cx);
-                    } else {
-                        this.feedback_hover_at(event.position, window, cx);
-                    }
+                    this.feedback_move_at(event.position, event.pressed_button, window, cx);
                     cx.stop_propagation();
                 }),
             )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .children(self.render_feedback_hover(cx, win_w))
+            .children(self.render_feedback_hover(cx, win_w, win_h))
             .children(self.render_feedback_dragbox(cx))
             .children(self.render_feedback_pins(cx, win_w, win_h));
         Some(layer.into_any_element())
@@ -1261,8 +1630,14 @@ impl crate::app::Harness {
     /// The hover outline (3 px outside the hit rect, accent border plus a
     /// 14 % accent fill) and its name chip (`<human role> · <label>`,
     /// accent background, on-accent mono text), above the rect or below it
-    /// near the top. Decorative: no role, pointer-transparent.
-    fn render_feedback_hover(&self, cx: &mut Context<Self>, win_w: f32) -> Option<AnyElement> {
+    /// near the top — clamped into the window and out from under the bar.
+    /// Decorative: no role, pointer-transparent.
+    fn render_feedback_hover(
+        &self,
+        cx: &mut Context<Self>,
+        win_w: f32,
+        win_h: f32,
+    ) -> Option<AnyElement> {
         if self.feedback.capturing {
             return None;
         }
@@ -1282,15 +1657,9 @@ impl crate::app::Harness {
             format!("{} · {}", human_role(&hit.role), hit.label)
         };
         // Roughly 6.9 px per mono glyph at 11.5 px plus the 7 px side
-        // padding each side; clamped into the window.
+        // padding each side; the position clamps into the window.
         let est_w = chip.chars().count() as f32 * 6.9 + 14.0;
-        let centre = hit.rect.x + hit.rect.w / 2.0;
-        let chip_x = (centre - est_w / 2.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
-        let chip_y = if hit.rect.y <= 30.0 {
-            hit.rect.y + hit.rect.h + 4.0
-        } else {
-            hit.rect.y - 28.0
-        };
+        let (chip_x, chip_y) = FeedbackUi::feedback_chip_pos(hit.rect, est_w, 24.0, win_w, win_h);
         Some(
             div()
                 .child(
@@ -1429,10 +1798,12 @@ impl crate::app::Harness {
     }
 
     /// The accent Done button both the bar and the pill share: feedback
-    /// accent fill with on-accent text (never Baaz's purple primary), at
-    /// ~40 % opacity while disabled. A styled div with the aui md metrics
-    /// (28 px height, 11 px side padding, small radius), a Button role and
-    /// label, hover and disabled states.
+    /// accent fill with on-accent text (never Baaz's purple primary) while
+    /// enabled; while disabled a transparent background with a 1 px accent
+    /// border at ~45 % and accent text at ~55 % (both lines in the bar).
+    /// A styled div with the aui md metrics (28 px height, 11 px side
+    /// padding, small radius), a Button role and label, hover and disabled
+    /// states.
     fn render_feedback_done(
         &self,
         id: &'static str,
@@ -1446,6 +1817,8 @@ impl crate::app::Harness {
         let on_accent = feedback_on_accent(cx);
         let hover = gpui::Hsla { l: (accent.l - 0.06).max(0.0), ..accent };
         let sub = gpui::Hsla { a: 0.75, ..on_accent };
+        let faint_border = gpui::Hsla { a: 0.45, ..accent };
+        let faint_text = gpui::Hsla { a: 0.55, ..accent };
         let enabled = self.feedback.done_enabled();
         div()
             .id(id)
@@ -1459,13 +1832,12 @@ impl crate::app::Harness {
             .h(if two_line { px(44.0) } else { px(28.0) })
             .rounded(px(scale::R_SM))
             .border_1()
-            .border_color(gpui::transparent_black())
-            .bg(accent)
-            .when(!enabled, |this| this.opacity(0.4))
+            .border_color(if enabled { gpui::transparent_black() } else { faint_border })
+            .bg(if enabled { accent } else { gpui::transparent_black() })
             .when(enabled, |this| {
                 this.hover(|this| this.bg(hover)).cursor_pointer()
             })
-            .text_color(on_accent)
+            .text_color(if enabled { on_accent } else { faint_text })
             .role(gpui::Role::Button)
             .aria_label("Done — save feedback report")
             .on_click(move |_, window, cx| {
@@ -1486,7 +1858,7 @@ impl crate::app::Harness {
                     div()
                         .ui(scale::FS_11)
                         .line_height(gpui::relative(1.0))
-                        .text_color(sub)
+                        .text_color(if enabled { sub } else { faint_text })
                         .whitespace_nowrap()
                         .child("Saves the report and copies its path"),
                 )
@@ -1497,8 +1869,11 @@ impl crate::app::Harness {
 
     /// The note popover: a sibling of the capture layer (never inside its
     /// key context), floating above it and consuming its own mouse events.
-    /// 300 px wide, 12 px right of the target (left when there is no room,
-    /// clamped below the bar): header, field, Cancel/Save, hints.
+    /// 300 px wide, 12 px right of the target (left when there is no room),
+    /// top-aligned and flipped above the target when there is no room
+    /// below, so the whole popover including Save stays on screen below
+    /// the bar: header, field, Cancel/Save, hints. Save reads disabled
+    /// while the text is empty.
     pub(crate) fn render_feedback_popover(
         &mut self,
         window: &mut Window,
@@ -1516,15 +1891,19 @@ impl crate::app::Harness {
         let win = window.viewport_size();
         let (win_w, win_h) = (f32::from(win.width), f32::from(win.height));
         let rect = FeedbackUi::target_rect(&target);
-        let x = if rect.x + rect.w + 12.0 + 300.0 <= win_w - 8.0 {
-            rect.x + rect.w + 12.0
-        } else {
-            rect.x - 300.0 - 12.0
-        }
-        .clamp(8.0, (win_w - 308.0).max(8.0));
-        let y = rect.y.clamp(64.0, (win_h - 280.0).max(64.0));
+        // The popover's full height at the field's current row count, so
+        // the position keeps all of it — including Save — on screen,
+        // flipping above the target when there is no room below.
+        let rows = note.field.read(cx).value().lines().count();
+        let pop_h = FeedbackUi::feedback_popover_height(rows);
+        let (x, y) = FeedbackUi::feedback_popover_pos(rect, pop_h, win_w, win_h);
         let title = Self::feedback_note_title(&target);
         let subtitle = self.feedback_note_subtitle(&target);
+        // Empty text saves nothing (the save keeps focus as a no-op), so
+        // the button reads disabled until there is something to file.
+        let save_enabled = !note.field.read(cx).value().trim().is_empty();
+        let save_border = gpui::Hsla { a: 0.45, ..accent };
+        let save_faint = gpui::Hsla { a: 0.55, ..accent };
         let save = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.save_feedback_note(window, cx);
         });
@@ -1593,13 +1972,18 @@ impl crate::app::Harness {
                             .justify_center()
                             .rounded(px(scale::R_SM))
                             .border_1()
-                            .border_color(gpui::transparent_black())
-                            .bg(accent)
-                            .hover(|this| this.bg(hover))
-                            .cursor_pointer()
+                            .border_color(if save_enabled {
+                                gpui::transparent_black()
+                            } else {
+                                save_border
+                            })
+                            .bg(if save_enabled { accent } else { gpui::transparent_black() })
+                            .when(save_enabled, |this| {
+                                this.hover(|this| this.bg(hover)).cursor_pointer()
+                            })
                             .ui(scale::FS_13)
                             .medium()
-                            .text_color(on_accent)
+                            .text_color(if save_enabled { on_accent } else { save_faint })
                             .whitespace_nowrap()
                             .role(gpui::Role::Button)
                             .aria_label("Save note")
@@ -1786,7 +2170,10 @@ mod tests {
     /// A live shell on the test app: the transition tests need a real
     /// focus handle, which needs the app.
     fn live_shell(cx: &mut gpui::App) -> FeedbackUi {
-        FeedbackUi::new(Box::new(FakeProbe { hits: Vec::new() }), cx)
+        FeedbackUi::new(
+            Box::new(FakeProbe { hits: Vec::new(), enrich_calls: std::cell::Cell::new(0) }),
+            cx,
+        )
     }
 
     fn note_on(shell: &mut FeedbackUi, text: &str) {
@@ -2456,7 +2843,8 @@ mod tests {
     ) {
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                h.feedback.probe = Box::new(FakeProbe { hits });
+                h.feedback.probe =
+                    Box::new(FakeProbe { hits, enrich_calls: std::cell::Cell::new(0) });
             })
         });
     }
