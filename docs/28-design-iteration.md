@@ -69,16 +69,40 @@ shortcuts, archived), **Skills page**, **the sidebar with sessions and projects*
 git, files, changes). A design round that touches those must either add gallery screens for them first (so there is
 something to iterate on) or iterate in Baaz.
 
+## The recommended path (decided 2026-10-09): move every page into the library, by redesigning it
+
+Do not refactor first and design second. Each Baaz-drawn page moves into `aui::screens` **at the moment it is
+redesigned**, one relay lane per page, so every lane ends with something the owner can look at.
+
+A library screen has the shape Browse already has: a plain **view model in** (the data to show), **intents out** (what
+the person did). Baaz keeps all state, stores, sessions and providers; it becomes the thin host that fills the view
+model and handles the intents. The gallery shows the screen with mock data and a steps harness for every state.
+
+Order (most visible first, and where the browser integration will land):
+1. Sidebar with sessions and projects (the Sessions ↔ Browse toggle changes it anyway)
+2. Session header + transcript chrome
+3. Settings ×4
+4. Right pane ×5
+5. Skills page, dialogs
+6. App chrome last (glue; may stay in Baaz)
+
+Each lane: capture the Baaz page with the Tier V probe as the honest reference → build the library screen (view model,
+gallery card, steps harness, screenshots) → iterate the design in the gallery on the owner's notes → Baaz adopts
+(delete the local drawing, map state → view model, intents → handlers) → tag, repin, probe, compare images.
+
+Cost guess: the Browse run built one screen plus its library in ≈4 h of relay time with reviews; nine pages on existing
+components ≈ 2–3 days of runs across however many rounds of owner notes. End state: Baaz draws nothing of its own, the
+gallery IS the app's design, every later design round is a tag bump, and the browser's R1 step is already half done.
+
 ## Prompt for the session that runs the design round
 
-> Read docs/28-design-iteration.md. We are iterating the design of the agentic-ui library before the browser
-> integration. Work in `~/Projects/agentic-ui` on a new branch cut from the merge of `relay/browse-proto`. Rules:
-> tokens before components before screens; every change lands with its gallery card and a screenshot; no hard-coded
-> colour or size; a page whose composition changes becomes an `aui::screens` entry with a steps harness. Before
-> changing anything, add gallery screens that mirror the Baaz pages not yet mirrored (Settings ×4, Skills, Sidebar,
-> Right pane ×5), captured from Baaz via the Tier V probe so the mirror is honest. Then take my design notes one at a
-> time. Tag when a round is green and looked at. Finish by repinning Baaz to the tag, running the 18-entry visual
-> probe, and showing me the before/after images per screen.
+> Read docs/28-design-iteration.md, "The recommended path". We are moving Baaz's pages into agentic-ui as screens,
+> redesigning each as it moves. Library work in `~/Projects/agentic-ui` on a branch cut from the merge of
+> `relay/browse-proto`; Baaz work in `~/Projects/harness`. Rules: view model in, intents out, Baaz keeps state; tokens
+> before components before screens; every change lands with its gallery card, steps harness and screenshot; no
+> hard-coded colour or size. Start with the sidebar: capture Baaz's sidebar with the Tier V probe as the reference,
+> build `screens/sidebar` in the gallery, then take my design notes on it, then have Baaz adopt it, tag, repin, run
+> the 18-entry probe and show me before/after. Then the next page in the doc's order. Use relay for the lanes.
 
 ## Related
 
