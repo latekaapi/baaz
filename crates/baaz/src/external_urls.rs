@@ -428,7 +428,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.mode, crate::layout::Mode::Browse, "an outside link switches to Browse");
-            let space = h.current_project_id();
+            let space = h.browse_space();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             // Entering Browse arms its own blank tab first; the outside
             // URLs open behind it, one tab per URL in arrival order.
@@ -476,7 +476,7 @@ mod tests {
                 vec!["https://queued-one.example/".to_owned(), "https://queued-two.example/".to_owned()],
                 "pre-shell URLs wait"
             );
-            let space = h.current_project_id();
+            let space = h.browse_space();
             assert!(
                 h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref()).is_empty(),
                 "nothing opens before the shell is up"
@@ -496,7 +496,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert!(h.pending_external_urls.is_empty(), "the frame hook drains the queue");
-            let space = h.current_project_id();
+            let space = h.browse_space();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             let got: Vec<&str> =
                 tabs.iter().map(|tab| tab.url.as_str()).filter(|url| *url != "about:blank").collect();

@@ -28,10 +28,12 @@ use aui::nav::{
 };
 use aui::screens::UsageRowState;
 use aui::screens::sidebar::{
-    collapsed_strip_width, screen_item_count, sidebar_screen, traffic_light_gap, Account, AccountAction,
-    BrowseFolder, BrowseIntent, BrowseModel, BrowsePin, BrowseTab, Bylines, EditingState, Mode, NavItem,
-    ProviderUsage, SidebarIntent, SidebarModel, UsageLine, ViewOption, ViewOptions,
+    screen_item_count, sidebar_screen, Account, AccountAction,
+    BrowseEditing, BrowseFolder, BrowseIntent, BrowseModel, BrowseNaming, BrowsePin, BrowseSpace, BrowseTab, Bylines,
+    EditingState, FolderKind, GroupKey, Mode, NavItem, ProviderUsage, SidebarIntent, SidebarModel, SortKey,
+    TaskFolderAction, UsageLine, ViewOption, ViewOptions,
 };
+use aui_tokens::AgentState;
 use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled, Palette};
 use gpui::{
@@ -254,7 +256,7 @@ pub(crate) type BrowseGroupPrint = (String, Vec<(u64, bool)>);
 /// scroll state) notify through the view tree on their own and need no key.
 /// The tier is deliberately not an input: the footer shows the person,
 /// never the plan or the meter, so a usage tick must not dirty the column.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq)]
 pub(crate) struct SidebarKey {
     visible: usize,
     grouping: usize,
@@ -284,7 +286,10 @@ pub(crate) struct SidebarKey {
     pinned_open: bool,
     view_menu_open: bool,
     account_menu_open: bool,
-    view_options: (bool, bool, bool, crate::layout::GroupBy),
+    view_options: (bool, bool, bool, crate::layout::GroupBy, crate::layout::SortBy, bool, usize),
+    browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
+    browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
+    current_space: String,
     loading: bool,
     sidebar_open: bool,
     skills_on: usize,
@@ -326,7 +331,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.current_project_id();
+        let space = baaz.browse_space();
         let active =
             baaz.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
         baaz.browser
@@ -351,7 +356,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.current_project_id();
+        let space = baaz.browse_space();
         baaz.browser
             .tabs
             .person_tabs(space.as_deref())
@@ -385,7 +390,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.current_project_id();
+        let space = baaz.browse_space();
         baaz.browser
             .tabs
             .session_tabs(space.as_deref())
@@ -488,7 +493,18 @@ impl SidebarKey {
             pinned_open: baaz.pinned_open,
             view_menu_open: baaz.overlays.read(cx).is_open(MenuKind::ViewOptions),
             account_menu_open,
-            view_options: (baaz.show_empty, baaz.show_pr_status, baaz.show_archived, baaz.effective_group_by()),
+            view_options: (
+                baaz.show_empty,
+                baaz.show_hidden,
+                baaz.show_archived,
+                baaz.effective_group_by(),
+                baaz.layout.sort_by,
+                baaz.layout.search_all_projects,
+                baaz.hidden_count(),
+            ),
+            browse_menu: baaz.browse_menu.clone(),
+            browse_naming: baaz.browse_naming.clone(),
+            current_space: baaz.browser.tabs.current_space.clone(),
             loading: !(baaz.sessions_loaded && baaz.index_loaded),
             sidebar_open: baaz.sidebar_open,
             skills_on: baaz.skills.catalog.on_count(),
@@ -506,6 +522,7 @@ impl SidebarKey {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct SidebarRegroupKey {
     group_by: crate::layout::GroupBy,
+    sort_by: crate::layout::SortBy,
     show_hidden: bool,
     show_empty: bool,
     show_archived: bool,
@@ -612,7 +629,7 @@ impl Harness {
         if !self.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let active =
             self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
         self.browser
@@ -653,11 +670,10 @@ impl Harness {
         if !self.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = self.current_project_id();
         let visible = self.visible_sessions(cx);
         self.browser
             .tabs
-            .session_tabs(space.as_deref())
+            .session_tabs(None)
             .iter()
             .map(|(session, tabs)| {
                 let owner = crate::browser::Owner::Session(session.clone());
@@ -736,6 +752,9 @@ impl Harness {
         let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.sidebar_list.clone(), self.sidebar_fluid.clone())
             .width(px(self.resize.width))
             .rename_textarea(&self.rename)
+            // Browse's right-click menus draw in the overlay window, over the
+            // native page (`overlay.rs`).
+            .external_menus(true)
             .on_intent(move |intent, window, cx| {
                 let _ = baaz.update(cx, |this, cx| this.sidebar_intent(intent, window, cx));
             });
@@ -773,8 +792,9 @@ impl Harness {
     pub(crate) fn render_collapsed_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
         div()
+            .id("hd-minimal-sidebar")
+            .debug_selector(|| "hd-minimal-sidebar".into())
             .flex_none()
-            .pl(traffic_light_gap() - collapsed_strip_width())
             .child(
                 icon_button("sidebar-show", IconName::Sidebar)
                     .ghost()
@@ -811,8 +831,13 @@ impl Harness {
             NavItem { id: NAV_AUTOMATIONS.into(), label: "Automations".into(), icon: IconName::Zap, count: None, soon: true },
         ];
         let group_by = match self.effective_group_by() {
-            crate::layout::GroupBy::Project => "Project",
-            crate::layout::GroupBy::Date => "Date",
+            crate::layout::GroupBy::Project => GroupKey::Project,
+            crate::layout::GroupBy::Date => GroupKey::Date,
+        };
+        let sort_by = match self.layout.sort_by {
+            crate::layout::SortBy::Recent => SortKey::Recent,
+            crate::layout::SortBy::Created => SortKey::Created,
+            crate::layout::SortBy::Name => SortKey::Name,
         };
         let mode = match self.mode {
             crate::layout::Mode::Sessions => Mode::Sessions,
@@ -836,11 +861,17 @@ impl Harness {
             collapsed,
             view_menu_open,
             view_options: ViewOptions {
-                group_by: group_by.into(),
-                sort_by: "Last activity".into(),
+                group_by,
+                sort_by,
                 show_empty: self.show_empty,
-                show_pr_status: self.show_pr_status,
+                show_hidden: self.show_hidden,
+                hidden_count: self.hidden_count(),
                 show_archived: self.show_archived,
+                // Baaz reads no PR data yet: the row stays, disabled, "Soon"
+                // (owner 2026-10-11).
+                show_pr_status: false,
+                pr_status_available: false,
+                search_all_projects: self.layout.search_all_projects,
             },
             bylines: Bylines::All,
             account: self.sidebar_account(account_menu_open),
@@ -900,31 +931,70 @@ impl Harness {
             .collect()
     }
 
-    /// Browse mode's rows: the current project's person tabs (pinned ones
-    /// as tiles), each session that owns tabs as a folder, the shown
-    /// page's address and history, and the current project as the one
-    /// space.
+    /// Browse mode's rows: the current space's person tabs (pinned ones as
+    /// tiles, the rest in Today or in your folders), every session that owns
+    /// tabs as a task folder, the shown page's address and history, the
+    /// spaces, and the open menu / name field.
     fn browse_model(&self, cx: &mut Context<Self>) -> BrowseModel {
-        let (pinned, tabs): (Vec<BrowseTabSnap>, Vec<BrowseTabSnap>) =
-            self.browse_person_snaps(cx).into_iter().partition(|snap| snap.pinned);
+        let space = self.browse_space().unwrap_or_default();
+        let snaps = self.browse_person_snaps(cx);
+        let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
+            self.browser.tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
         let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
             initial: initial.into(),
             active,
         };
-        let pins = pinned
-            .into_iter()
-            .map(|snap| BrowsePin { id: browse_tab_key(snap.id).into(), initial: snap.initial.into(), label: snap.title.into() })
-            .collect();
-        let tabs = tabs.into_iter().map(|snap| tab(snap.id, snap.title, snap.initial, snap.active)).collect();
+        let mut pins = Vec::new();
+        let mut today = Vec::new();
+        let mut in_folders: std::collections::HashMap<String, Vec<BrowseTab>> = std::collections::HashMap::new();
+        for snap in snaps {
+            if snap.pinned {
+                pins.push(BrowsePin { id: browse_tab_key(snap.id).into(), initial: snap.initial.into(), label: snap.title.into() });
+                continue;
+            }
+            let folder = folder_of.get(&snap.id).cloned().flatten();
+            let row = tab(snap.id, snap.title, snap.initial, snap.active);
+            match folder.filter(|id| self.browser.tabs.folders.iter().any(|f| &f.id == id)) {
+                Some(folder) => in_folders.entry(folder).or_default().push(row),
+                None => today.push(row),
+            }
+        }
         let folders = self
+            .browser
+            .tabs
+            .folders_in(&space)
+            .into_iter()
+            .map(|folder| BrowseFolder {
+                id: folder.id.clone().into(),
+                name: folder.name.clone().into(),
+                kind: FolderKind::Yours,
+                open: folder.open,
+                tabs: in_folders.remove(&folder.id).unwrap_or_default(),
+            })
+            .collect();
+        let task_folders = self
             .browse_session_groups(cx)
             .into_iter()
-            .map(|(session, label, rows)| BrowseFolder {
-                name: label.into(),
-                open: self.browse_from_expanded.contains(&session),
-                tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active)).collect(),
+            .map(|(session, label, rows)| {
+                let entry = self.sessions.iter().find(|entry| entry.id == session);
+                let running = entry.is_some_and(|entry| entry.running);
+                let waiting = entry.is_some_and(|entry| !entry.attention.is_empty() || entry.approval_command.is_some() || entry.pending_question.is_some());
+                let (state, status) = if waiting {
+                    (AgentState::Waiting, "needs you")
+                } else if running {
+                    (AgentState::Running, "working")
+                } else {
+                    (AgentState::Idle, "")
+                };
+                BrowseFolder {
+                    id: session.into(),
+                    name: label.into(),
+                    kind: FolderKind::Task { state, status: status.into(), needs_you: waiting },
+                    open: true,
+                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active)).collect(),
+                }
             })
             .collect();
         let shown = self.browse_centre_shown();
@@ -938,21 +1008,29 @@ impl Harness {
         };
         let address = split_address(&url);
         let history = shown.and_then(|id| self.browser.histories.get(&id));
-        let space = self
-            .current_project_id()
-            .and_then(|id| self.projects.find_available(&id).map(|p| p.name.clone()))
-            .unwrap_or_else(|| "Everywhere".to_owned());
+        let spaces: Vec<BrowseSpace> = self
+            .browser
+            .tabs
+            .spaces
+            .iter()
+            .map(|space| BrowseSpace { id: space.id.clone().into(), name: space.name.clone().into() })
+            .collect();
+        let current = self.browser.tabs.spaces.iter().position(|s| s.id == space).unwrap_or(0);
+        let editing = self.browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
         BrowseModel {
             host: address.host,
             path: address.path,
             can_go_back: history.is_some_and(|h| h.can_back()),
             can_go_forward: history.is_some_and(|h| h.can_forward()),
             pins,
-            tabs,
+            tabs: today,
             folders,
-            spaces: vec![space.into()],
-            space: 0,
+            task_folders,
+            spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into() }] } else { spaces },
+            space: current,
             hovered_today_header: self.hovered_today_header,
+            editing,
+            menu: self.browse_menu.clone(),
         }
     }
 
@@ -968,6 +1046,7 @@ impl Harness {
                 | SidebarIntent::Account
                 | SidebarIntent::AccountAction(_)
                 | SidebarIntent::MenuBackdrop
+                | SidebarIntent::DismissMenus
                 | SidebarIntent::Hover(..)
                 | SidebarIntent::HoverGroup(_)
                 | SidebarIntent::HoverProjectsHeader(_)
@@ -1010,9 +1089,20 @@ impl Harness {
             }
             SidebarIntent::Toggle(id) => self.toggle_group(id.to_string(), cx),
             SidebarIntent::TogglePinned => self.pinned_open = !self.pinned_open,
-            SidebarIntent::ViewOptions => self.open_menu(MenuKind::ViewOptions, cx),
+            SidebarIntent::ViewOptions => {
+                if !self.just_dismissed(MenuKind::ViewOptions) {
+                    self.open_menu(MenuKind::ViewOptions, cx);
+                }
+            }
             SidebarIntent::ViewOption(option) => self.apply_view_option(option, cx),
             SidebarIntent::MenuBackdrop => {}
+            SidebarIntent::DismissMenus => {
+                // Remember what the press closed: when the press was on the
+                // menu's own trigger, the click that follows must not reopen it.
+                let closed = self.overlays.read(cx).menu.as_ref().map(|menu| menu.kind);
+                self.menu_dismissed = closed.map(|kind| (kind, std::time::Instant::now()));
+                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+            }
             SidebarIntent::AddProject => self.open_projects(false, window, cx),
             // A group row's actions: `+` starts a session in that project
             // (and makes it current), `…` opens its project menu. On "Other
@@ -1067,7 +1157,11 @@ impl Harness {
                 self.renaming = None;
                 self.focus_composer = true;
             }
-            SidebarIntent::Account => self.open_menu(MenuKind::Account, cx),
+            SidebarIntent::Account => {
+                if !self.just_dismissed(MenuKind::Account) {
+                    self.open_menu(MenuKind::Account, cx);
+                }
+            }
             SidebarIntent::AccountAction(action) => {
                 self.overlays.update(cx, |overlays, _| overlays.menu = None);
                 match action {
@@ -1119,26 +1213,60 @@ impl Harness {
         cx.notify();
     }
 
-    /// One row of the view-options menu. Group by and Sort by have no
-    /// submenu yet: Group by flips between Project and Date (the two
-    /// groupings Baaz has), Sort by says so. Toggles keep the menu open,
-    /// so the check is seen to change.
+    /// Whether `kind` was dismissed by the press of the click now arriving:
+    /// a trigger's own click after an outside-press close toggles it shut,
+    /// never back open.
+    fn just_dismissed(&mut self, kind: MenuKind) -> bool {
+        match self.menu_dismissed.take() {
+            Some((closed, at)) => closed == kind && at.elapsed() < std::time::Duration::from_millis(400),
+            None => false,
+        }
+    }
+
+    /// One row of the view-options menu (or its Group by / Sort by
+    /// submenus). Toggles keep the menu open, so the check is seen to
+    /// change; a submenu choice and Clear empty close it.
     fn apply_view_option(&mut self, option: ViewOption, cx: &mut Context<Self>) {
         match option {
-            ViewOption::GroupBy => self.toggle_group_by(cx),
-            ViewOption::SortBy => {
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast("Sort by", "Sessions sort by last activity; other orders are not wired up yet.");
-                });
+            ViewOption::GroupBy(key) => {
+                self.set_group_by(
+                    match key {
+                        GroupKey::Project => crate::layout::GroupBy::Project,
+                        GroupKey::Date => crate::layout::GroupBy::Date,
+                    },
+                    cx,
+                );
+                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+            }
+            ViewOption::SortBy(key) => {
+                self.set_sort_by(
+                    match key {
+                        SortKey::Recent => crate::layout::SortBy::Recent,
+                        SortKey::Created => crate::layout::SortBy::Created,
+                        SortKey::Name => crate::layout::SortBy::Name,
+                    },
+                    cx,
+                );
+                self.overlays.update(cx, |overlays, _| overlays.menu = None);
             }
             ViewOption::ToggleEmpty => {
                 self.show_empty = !self.show_empty;
                 self.invalidate_list();
             }
-            ViewOption::TogglePrStatus => self.show_pr_status = !self.show_pr_status,
+            ViewOption::ToggleHidden => {
+                self.show_hidden = !self.show_hidden;
+                self.invalidate_list();
+            }
             ViewOption::ToggleArchived => {
                 self.show_archived = !self.show_archived;
                 self.invalidate_list();
+            }
+            // Disabled while Baaz reads no PR data: never reported.
+            ViewOption::TogglePrStatus => {}
+            ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
+            ViewOption::ClearEmpty => {
+                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.clear_empty(cx);
             }
         }
     }
@@ -1169,35 +1297,35 @@ impl Harness {
                     self.browse_sidebar_tab(id, true, window, cx);
                 }
             }
-            // Folders are the sessions that own tabs, named by their
-            // sidebar label; the first session wearing that label folds.
-            BrowseIntent::ToggleFolder(name) => {
-                let session = self
-                    .browse_session_groups(cx)
-                    .into_iter()
-                    .find(|(_, label, _)| label.as_str() == name.as_ref())
-                    .map(|(session, _, _)| session);
-                if let Some(session) = session {
-                    if !self.browse_from_expanded.remove(&session) {
-                        self.browse_from_expanded.insert(session);
-                    }
+            BrowseIntent::ToggleFolder(id) => {
+                if self.browser.tabs.toggle_folder(&id) {
+                    self.schedule_tabs_write(cx);
                 }
             }
+            BrowseIntent::OpenTaskChat(session) => self.browse_task_folder_action(&session, TaskFolderAction::OpenChat, window, cx),
             BrowseIntent::HoverTodayHeader(on) => {
                 if self.hovered_today_header != on {
                     self.hovered_today_header = on;
                     self.sidebar_pane.update(cx, |_, cx| cx.notify());
                 }
             }
-            BrowseIntent::Ask
-            | BrowseIntent::SwitchSpace(_)
-            | BrowseIntent::NewSpace
-            | BrowseIntent::NewFolder
-            | BrowseIntent::CloseAll => {
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast("Browse", "Spaces, folders and Ask are not wired up yet.");
-                });
+            BrowseIntent::Ask => self.browse_ask_page(window, cx),
+            BrowseIntent::SwitchSpace(index) => self.browse_switch_space(index, window, cx),
+            BrowseIntent::NewSpace => self.start_browse_naming(BrowseNaming::Space(None), "", window, cx),
+            BrowseIntent::NewFolder => self.browse_new_folder(None, window, cx),
+            BrowseIntent::CloseAll => self.browse_close_all(window, cx),
+            BrowseIntent::OpenMenu(menu) => self.open_browse_menu(menu, cx),
+            BrowseIntent::CloseMenu => self.close_browse_menu(cx),
+            BrowseIntent::Tab(id, action) => {
+                if let Some(id) = browse_tab_id(&id) {
+                    self.browse_tab_action(id, action, window, cx);
+                }
             }
+            BrowseIntent::Folder(id, action) => self.browse_folder_action(&id, action, window, cx),
+            BrowseIntent::TaskFolder(session, action) => self.browse_task_folder_action(&session, action, window, cx),
+            BrowseIntent::Space(id, action) => self.browse_space_action(&id, action, window, cx),
+            BrowseIntent::Name(target, text) => self.commit_browse_name(target, &text, cx),
+            BrowseIntent::NameCancel => self.cancel_browse_name(cx),
         }
     }
     pub(crate) fn render_row_detail(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1349,6 +1477,7 @@ impl Harness {
     pub(crate) fn regroup_key(&self) -> SidebarRegroupKey {
         SidebarRegroupKey {
             group_by: self.effective_group_by(),
+            sort_by: self.layout.sort_by,
             show_hidden: self.show_hidden,
             show_empty: self.show_empty,
             show_archived: self.show_archived,
@@ -1873,6 +2002,7 @@ mod tests {
                     id: format!("p{p}-s{s}"),
                     label: "x".into(),
                     updated: now,
+                    created: now,
                     running: false,
                     turns: 0,
                     hidden: false,
@@ -2015,6 +2145,7 @@ mod tests {
             id: id.to_owned(),
             label: "x".into(),
             updated: crate::clock::now_local(),
+            created: crate::clock::now_local(),
             running: false,
             turns: 1,
             hidden: false,
@@ -2273,7 +2404,7 @@ mod tests {
                 // enters Browse the way the switch does.
                 h.mode = crate::layout::Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2287,7 +2418,7 @@ mod tests {
         // A select moves the key.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
                 h.browser.tabs.activate(id);
             })
@@ -2297,7 +2428,7 @@ mod tests {
         // A pin moves the key (the pinned tile appears).
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
                 h.browser.tabs.set_pinned(id, true);
             })
@@ -2350,7 +2481,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = crate::layout::Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2370,7 +2501,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
             assert_eq!(tabs.len(), 1, "⌘W in Browse closes a tab, not the window");
         });
         // Sessions: the same handler must not touch the tabs — the belt
@@ -2385,7 +2516,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
             assert_eq!(tabs.len(), 1, "⌘W in Sessions closes no tab");
         });
         b3c_teardown(&dir, guard, old);
@@ -2404,7 +2535,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = crate::layout::Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2440,7 +2571,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert!(h.browse_session_tab.is_none(), "⌘W stops showing the session tab");
-            let tabs = h.browser.tabs.person_tabs(h.current_project_id().as_deref());
+            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
             assert_eq!(tabs.len(), 2, "⌘W closes nothing while a session tab shows");
         });
         b3c_teardown(&dir, guard, old);
@@ -2819,6 +2950,7 @@ mod tests {
                 id: id.into(),
                 label: crate::sidebar::UNNAMED.into(),
                 updated: chrono::Local::now(),
+                created: chrono::Local::now(),
                 running: false,
                 turns: 0,
                 hidden: false,

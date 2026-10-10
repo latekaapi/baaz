@@ -948,9 +948,6 @@ pub struct Harness {
     pub(crate) hovered_today_header: bool,
     /// Whether the Pinned section is open.
     pub(crate) pinned_open: bool,
-    /// The view-options "Show PR status" toggle. Nothing draws PR status
-    /// yet; the menu row keeps its state so the check is honest.
-    pub(crate) show_pr_status: bool,
     /// The flattened rows the list state was last synced to, and the
     /// regroup key it was last reset for. `render_sidebar` re-flattens per
     /// frame (an index walk, no summaries cloned) and splices the
@@ -1095,6 +1092,19 @@ pub struct Harness {
     /// The tab whose right-click menu stands open in the Browse sidebar
     /// (`None` while none does). Part of the sidebar key.
     pub(crate) tab_menu: Option<crate::browser::TabId>,
+    /// The Browse sidebar's open right-click menu (tab, folder, task
+    /// folder or space) at the pointer; drawn in the overlay window.
+    pub(crate) browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
+    /// The Browse name field in flight (a folder or a space), edited in
+    /// the shared `rename` textarea.
+    pub(crate) browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
+    /// The sidebar menu an outside press just closed, and when: its
+    /// trigger's click right after must not reopen it.
+    pub(crate) menu_dismissed: Option<(crate::overlays::MenuKind, std::time::Instant)>,
+    /// The overlay window over the native page (Browse menus), when open.
+    pub(crate) overlay: Option<crate::overlay::Overlay>,
+    /// This window's handle: overlay intents run against it.
+    pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
     /// the row's own prepaint. The popup seats at this rect; cleared with
     /// the menu, refilled on the next pane repaint.
@@ -1492,7 +1502,6 @@ impl Harness {
             hovered_projects_header: false,
             hovered_today_header: false,
             pinned_open: true,
-            show_pr_status: true,
             prev_sidebar_rows: Vec::new(),
             prev_sidebar_grouping: None,
             prev_sidebar_regroup: None,
@@ -1601,6 +1610,11 @@ impl Harness {
             browse_drop_target: None,
             browse_drop_at_end: false,
             tab_menu: None,
+            browse_menu: None,
+            browse_naming: None,
+            menu_dismissed: None,
+            overlay: None,
+            main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
         };
@@ -2590,7 +2604,7 @@ impl Harness {
             // chain head clones the whole chain index — the restore path
             // resolves the head instead.
             .or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let selected_tab = self
             .browser
             .tabs_loaded
@@ -2654,7 +2668,7 @@ impl Harness {
         };
         let id = crate::browser::TabId(tab);
         let ours = self.browser.tabs.get(id).is_some_and(|tab| {
-            tab.owner == crate::browser::Owner::Person && tab.space == self.current_project_id()
+            tab.owner == crate::browser::Owner::Person && tab.space == self.browse_space()
         });
         if ours && self.browser.tabs.activate(id) {
             self.schedule_tabs_write(cx);
@@ -4542,7 +4556,7 @@ impl Harness {
             .and_then(|tab| tab.space.clone());
         let projects: Vec<(String, String)> =
             self.projects.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect();
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let movers: Vec<(String, String)> =
             projects.into_iter().filter(|(pid, _)| Some(pid) != space.as_ref()).collect();
         if shown_is_person && shown.is_some() && (!movers.is_empty() || shown_space.is_some()) {
@@ -4867,7 +4881,6 @@ impl Harness {
         } else {
             tab.as_ref().map(|tab| tab.title.clone()).unwrap_or_default()
         };
-        let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.new_browse_sidebar_tab(window, cx);
         });
@@ -4927,26 +4940,9 @@ impl Harness {
                     // B2a-H5: the ⋯ menu.
                     .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
             );
-        let mut row = header_cell("hd-minimal")
-            // The rail column is gone in this mode, so the row clears the
-            // native traffic lights itself (found live: the sidebar toggle
-            // and Back sat under them).
-            .child(div().flex_none().w(px(aui::shell::NATIVE_LIGHTS_WIDTH - 12.0)))
-            .child(
-                div()
-                    .id("hd-minimal-sidebar")
-                    .debug_selector(|| "hd-minimal-sidebar".into())
-                    .flex_none()
-                    .role(gpui::Role::Button)
-                    .aria_label("Show sidebar")
-                    .child(
-                        icon_button("hd-minimal-sidebar-button", IconName::Sidebar)
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .accessibility_label("Show sidebar")
-                            .on_click(show),
-                    ),
-            );
+        // The shell pins the Show-sidebar toggle at x 84 and pads this row
+        // clear of it and the lights (`edge_control` / `centre_clear`).
+        let mut row = header_cell("hd-minimal");
         if let Some(chip) = chip {
             row = row.child(chip);
         }
@@ -6777,6 +6773,9 @@ impl Harness {
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_find_resync(window, cx);
+        // The overlay window (Browse menus over the native page) follows
+        // what is open and where.
+        self.sync_overlay(window, cx);
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once
@@ -7210,6 +7209,13 @@ impl Render for Harness {
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
+                // The collapsed toggle stands at x 84 in the title strip while
+                // the sidebar slides in and out under it, and the centre
+                // header clears it on the sidebar's animated width — nothing
+                // in the header swaps at the start or end of a collapse
+                // (docs/31 §7).
+                .edge_control(traffic_light_gap(), cx.aui().metrics.control_sm, self.render_collapsed_toggle(cx))
+                .centre_clear(traffic_light_gap() + cx.aui().metrics.control_sm + cx.aui().metrics.gap)
                 // The header row stands still while the pane collapses: the
                 // sidebar cell keeps its width — and the native-lights
                 // reservation — so the toggle and search stay where they are.
@@ -7225,20 +7231,7 @@ impl Render for Harness {
                 .header_centre(if settings_open {
                     self.render_settings_centre_header(cx)
                 } else if browse_minimal {
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .pl(traffic_light_gap() - collapsed_strip_width())
-                        .child(self.render_browse_minimal_toolbar(window, cx))
-                        .into_any_element()
-                } else if !self.sidebar_open {
-                    h_flex()
-                        .size_full()
-                        .items_center()
-                        .child(self.render_collapsed_toggle(cx))
-                        .child(div().flex_1().min_w(px(0.0)).h_full().child(self.render_centre_header(window, cx)))
-                        .into_any_element()
+                    div().size_full().flex().items_center().child(self.render_browse_minimal_toolbar(window, cx)).into_any_element()
                 } else {
                     self.render_centre_header(window, cx)
                 })
@@ -7435,10 +7428,11 @@ impl Render for Harness {
         let overflow = self.render_overflow_menu(cx);
         let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
-        // The view-options and account menus draw inside the sidebar
-        // screen now (D3); the browser sync only needs to know they are up.
-        let view_options_open = self.overlays.read(cx).is_open(MenuKind::ViewOptions);
-        let account_open = self.overlays.read(cx).is_open(MenuKind::Account);
+        // The view-options and account menus draw inside the sidebar column
+        // (and the Sort / Group submenu beside it, over the centre), never
+        // over the right pane or the Browse page: they leave the page live.
+        let view_options_open = false;
+        let account_open = false;
         let project_menu = self.render_project_menu(cx);
         // The Browse tab menu went with the old tab rows (D3); the v2 rows
         // carry no context menu yet.
@@ -8862,7 +8856,7 @@ mod tests {
         let fake = vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let id = h.browser.tabs.open(
                     space,
                     crate::browser::Owner::Person,
@@ -8966,7 +8960,7 @@ mod tests {
         let (alpha, beta) = vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let alpha = h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -9208,7 +9202,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let id = h.browser.tabs.open(
                     space,
                     crate::browser::Owner::Session("s-9".to_owned()),
@@ -9220,6 +9214,7 @@ mod tests {
                     id: "s-9".to_owned(),
                     label: "x".into(),
                     updated: Local::now(),
+                    created: Local::now(),
                     running: true,
                     turns: 1,
                     hidden: false,
@@ -9394,7 +9389,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 // Pin the middle tab: the strip leads with pinned tabs, in
                 // `nth_tab` order.
                 let middle = h.browse_person_snaps(cx)[1].id;
@@ -9540,7 +9535,7 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_chromium_settings(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let space = harness.current_project_id();
+            let space = harness.browse_space();
             let settings_tabs: Vec<crate::browser::TabId> = harness
                 .browser
                 .tabs
@@ -9624,7 +9619,7 @@ mod tests {
         let (first, second) = vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let first = h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -9681,7 +9676,7 @@ mod tests {
         let (first, second) = vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.ensure_tabs_loaded(cx);
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 let first = h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -10790,6 +10785,7 @@ mod tests {
                 id: id.to_owned(),
                 label: "x".into(),
                 updated: Local::now(),
+                created: Local::now(),
                 running: false,
                 turns: 1,
                 hidden: false,
@@ -10882,6 +10878,7 @@ mod tests {
                 id: id.to_owned(),
                 label: "x".into(),
                 updated: Local::now(),
+                created: Local::now(),
                 running: false,
                 turns: 1,
                 hidden: false,

@@ -26,6 +26,20 @@ pub enum GroupBy {
     Project,
 }
 
+/// How sessions are ordered inside their group (the view menu's Sort by).
+/// Pinned rows stay first whatever the order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortBy {
+    /// The latest activity first.
+    #[default]
+    Recent,
+    /// The newest session first.
+    Created,
+    /// Alphabetical by title.
+    Name,
+}
+
 /// Which right-pane kind was last shown, so reopening restores it. Task
 /// T3's ⌘K rows reuse [`RightKind::label`]; task T4's `right:<kind>` step
 /// verb parses [`RightKind::slug`].
@@ -380,6 +394,9 @@ pub struct Layout {
     /// the start so the toggle has somewhere to land.
     #[serde(rename = "searchAllProjects", default = "default_search_all")]
     pub search_all_projects: bool,
+    /// The session order inside each group (Sort by).
+    #[serde(rename = "sortBy", default)]
+    pub sort_by: SortBy,
     /// Whether project group rows draw the collapse chevron in the leading
     /// box. Off by default: the row is a plain label.
     /// The Settings dialog's Sidebar section (⌘,) owns the switch; `--steps
@@ -539,6 +556,7 @@ impl Default for Layout {
             closed_groups: Vec::new(),
             expanded_groups: Vec::new(),
             search_all_projects: true,
+            sort_by: SortBy::Recent,
             group_chevron: false,
             group_bar: false,
             compact_rows: false,
@@ -715,6 +733,7 @@ mod tests {
             closed_groups: vec!["other".into()],
             expanded_groups: vec!["p-baaz".into()],
             search_all_projects: false,
+            sort_by: SortBy::Recent,
             group_chevron: true,
             group_bar: true,
             compact_rows: true,

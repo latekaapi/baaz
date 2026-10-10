@@ -1443,7 +1443,7 @@ impl Harness {
         }
         let owner = self.shown_tab_owner(cx);
         let space = match &owner {
-            Owner::Person => self.current_project_id(),
+            Owner::Person => self.browse_space(),
             Owner::Session(_) => None,
         };
         self.browser
@@ -1885,6 +1885,7 @@ mod tests {
                         id: id.to_string(),
                         label: format!("Arrow session {n}"),
                         updated: chrono::Local::now(),
+                        created: chrono::Local::now(),
                         running: false,
                         turns: 3,
                         hidden: false,
@@ -2289,7 +2290,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.browser.fake = true;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
                 h.layout.right_open = true;
                 h.layout.right_kind = Some(RightKind::Browser);
@@ -2314,7 +2315,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
             })
         });
@@ -2337,7 +2338,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(space, Owner::Person, "about:blank", None);
             })
         });
@@ -2347,7 +2348,7 @@ mod tests {
         );
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(space, Owner::Person, "", None);
             })
         });
@@ -2370,7 +2371,7 @@ mod tests {
             baaz.update(cx, |h, _| {
                 h.mode = Mode::Browse;
                 h.browser.tabs_loaded = true;
-                let space = h.current_project_id();
+                let space = h.browse_space();
                 h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
                 h.settings_page.open = true;
             })

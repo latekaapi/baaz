@@ -2762,6 +2762,7 @@ impl Harness {
                         id: id.clone(),
                         label: sidebar::one_line(&title),
                         updated: now,
+                        created: now,
                         running: false,
                         turns: 0,
                         hidden: meta.is_some_and(|m| m.hidden),
@@ -4495,7 +4496,7 @@ impl Harness {
 /// are opened, and acks advance the run to activation.
 impl Harness {
     /// The view for `session_id`: the active one, else a parked one.
-    pub(super) fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
+    pub(crate) fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
         if let Some(view) = self.active.clone() {
             if view.read(cx).session_id == session_id {
                 return Some(view);
@@ -8748,6 +8749,7 @@ mod tests {
             id: id.to_owned(),
             label: label.to_owned(),
             updated: crate::clock::now_local(),
+            created: crate::clock::now_local(),
             running: false,
             turns,
             hidden: false,
