@@ -46,6 +46,41 @@ pub(crate) enum OverlayKind {
 /// The Field panel's width (canvas board "Field", 2026-10-11): 600.
 const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
 
+/// The clear margin around the Field panel inside its window: room for FF's
+/// shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which the
+/// window's edge would otherwise clip — the panel's only edge, since the
+/// window draws none of its own ([`drop_native_chrome`]).
+const FIELD_SHADOW_PAD: f32 = scale::SP_1;
+
+/// Take macOS's own rim and shadow off an overlay window. gpui opens a
+/// `PopUp` as a titled panel, so the window server outlines the WHOLE window
+/// rect: around the Field's fixed transparent rect that drew an empty box
+/// below the rows and a second edge on top of the panel's FF ring (owner
+/// screenshot 2026-10-11). The panel's own FF shadow is its only edge.
+#[cfg(target_os = "macos")]
+fn drop_native_chrome(window: &Window) {
+    use objc2::{msg_send, runtime::AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let view = appkit.ns_view.as_ptr() as *mut AnyObject;
+    // SAFETY: `view` is the live NSView gpui just made for this window, on
+    // the main thread; `window` and `setHasShadow:` are plain AppKit calls.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, setHasShadow: false];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn drop_native_chrome(_: &Window) {}
+
 /// The open overlay: its window, what it shows, and where (screen space).
 pub(crate) struct Overlay {
     handle: AnyWindowHandle,
@@ -98,9 +133,12 @@ impl Harness {
             // resizes the window; a click on the clear part is outside.
             let metrics = cx.aui().metrics;
             let top = metrics.header + metrics.item_px / 2.0;
-            let origin = window.bounds().origin + gpui::point(metrics.item_px, top);
-            let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0));
-            return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(gpui::px(FIELD_WIDTH), height))));
+            // The panel sits at (item_px, top); the window reaches the
+            // shadow margin past it on every side.
+            let pad = gpui::px(FIELD_SHADOW_PAD);
+            let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
+            let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
+            return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(gpui::px(FIELD_WIDTH) + pad * 2.0, height))));
         }
         let menu = self.browse_menu.as_ref()?;
         let space = self.browse_space().unwrap_or_default();
@@ -159,6 +197,9 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
+                    if kind == OverlayKind::Field {
+                        drop_native_chrome(window);
+                    }
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
@@ -268,23 +309,36 @@ impl Harness {
         let input = self.browse_address.clone().map(|input| {
             aui::a11y_text::a11y_text_input("field-input", "Search or type a URL", &input, cx).flex_1().min_w(gpui::px(0.0)).into_any_element()
         });
-        let field = Shape::Item.rounded(
-            h_flex()
-                .id("field-row")
-                .h(metrics.control)
-                .w_full()
-                .items_center()
-                .gap(metrics.gap)
-                .pr(metrics.item_px)
-                .border_1()
-                .border_color(p.line)
-                .text_color(p.fg)
-                .text_role_in(TextRole::Body, Density::Standard)
-                .on_key_down(keys)
-                .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(IconName::Search).size(metrics.icon).color(p.fg_muted)))
-                .children(input)
-                .child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("esc")),
-        );
+        // FF `DropdownSearch` (dropdown-search.tsx): the field is a row of
+        // the popup, not a box inside it — full bleed through the 4 px
+        // padding (`-mx-1 -mt-1`), 36 tall, no ring, a `border/60` divider
+        // under it and 2 px (`mb-0.5`) before the first row; its icon is lit
+        // (foreground, stroke 2) while it holds focus, which is always here.
+        // Adaptation: the leading slot keeps the rows' 24 px icon axis, so
+        // the icon and text line up with the rows below.
+        let inset = metrics.item_px / 2.0;
+        let field = h_flex()
+            .id("field-row")
+            .h(metrics.control)
+            .mx(-inset)
+            .mt(-inset)
+            .mb(gpui::px(2.0))
+            .pl(inset)
+            .pr(metrics.item_px + inset)
+            .items_center()
+            .gap(metrics.gap)
+            .border_b_1()
+            .border_color({
+                let mut line = p.line;
+                line.a *= 0.6;
+                line
+            })
+            .text_color(p.fg)
+            .text_role_in(TextRole::Body, Density::Standard)
+            .on_key_down(keys)
+            .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(IconName::Search).size(metrics.icon).color(p.fg).lit(true)))
+            .children(input)
+            .child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("esc"));
         let mut list = v_flex().w_full().gap(gpui::px(0.0)).child(field);
         let mut last: Option<&'static str> = None;
         for (index, row) in rows.iter().enumerate() {
@@ -352,6 +406,7 @@ impl Harness {
             .size_full()
             .flex()
             .flex_col()
+            .p(gpui::px(FIELD_SHADOW_PAD))
             .on_mouse_down(gpui::MouseButton::Left, leave)
             .child(
                 div()
