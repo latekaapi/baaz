@@ -4287,4 +4287,89 @@ mod tests {
         assert_eq!(preview.language, "rust", "a .rs file previews as rust");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// The probe/mark/land trio against a real directory.
+    fn landed(root: &std::path::Path, id: &str) -> (RightCache, bool) {
+        let mut cache = RightCache::default();
+        mark_file_preview_loading(&mut cache, root, id, None);
+        let probe = probe_file_preview(&root.join(id));
+        let changed = land_file_preview(&mut cache, root, id, probe);
+        (cache, changed)
+    }
+
+    #[test]
+    fn landing_a_missing_path_shows_the_gone_card() {
+        let root = temp_root("land-gone");
+        let (cache, changed) = landed(&root, "nope.txt");
+        assert!(changed);
+        let preview = cache.preview_for(&root).expect("preview stays open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Card { meta } if meta.starts_with("The file is gone")),
+            "{:?}",
+            preview.content
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn landing_a_directory_closes_the_preview_and_expands_it() {
+        let root = temp_root("land-dir");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let (cache, changed) = landed(&root, "sub");
+        assert!(changed);
+        assert!(cache.preview_for(&root).is_none());
+        assert!(cache.expanded_for(&root).contains("sub"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn landing_an_oversized_file_shows_the_too_large_card_with_its_size() {
+        let root = temp_root("land-big");
+        std::fs::write(root.join("big.bin"), vec![b'x'; (PREVIEW_MAX_BYTES + 1) as usize]).unwrap();
+        let (cache, changed) = landed(&root, "big.bin");
+        assert!(changed);
+        let preview = cache.preview_for(&root).expect("preview");
+        assert_eq!(preview.size, PREVIEW_MAX_BYTES + 1);
+        assert!(preview.mtime.is_some());
+        assert!(
+            matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("too large")),
+            "{:?}",
+            preview.content
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn landing_a_small_text_file_shows_its_text_with_size_and_mtime() {
+        let root = temp_root("land-text");
+        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        let (cache, changed) = landed(&root, "a.txt");
+        assert!(changed);
+        let preview = cache.preview_for(&root).expect("preview");
+        assert_eq!(preview.size, 6);
+        assert!(preview.mtime.is_some());
+        assert!(
+            matches!(&preview.content, PreviewContent::Text { code, .. } if code == "hello\n"),
+            "{:?}",
+            preview.content
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_landing_after_the_selection_moved_changes_nothing() {
+        let root = temp_root("land-stale");
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        let mut cache = RightCache::default();
+        mark_file_preview_loading(&mut cache, &root, "a.txt", None);
+        mark_file_preview_loading(&mut cache, &root, "b.txt", None);
+        let probe = probe_file_preview(&root.join("a.txt"));
+        assert!(!land_file_preview(&mut cache, &root, "a.txt", probe));
+        let preview = cache.preview_for(&root).expect("preview");
+        assert_eq!(preview.path, "b.txt");
+        assert_eq!(preview.content, PreviewContent::Loading);
+        assert_eq!(preview.size, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

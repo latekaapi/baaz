@@ -4202,4 +4202,33 @@ mod tests {
         assert!(groups.iter().all(|g| !g.sessions.is_empty()), "no empty bucket survives the lift");
         assert!(groups.iter().flat_map(|g| &g.sessions).all(|s| !s.pinned));
     }
+
+    fn sorted_ids(rows: &mut [SessionEntry], order: crate::layout::SortBy) -> Vec<String> {
+        sort_rows(rows, order);
+        rows.iter().map(|e| e.id.clone()).collect()
+    }
+
+    #[test]
+    fn sort_rows_orders_by_the_chosen_key_with_pinned_first() {
+        use crate::layout::SortBy;
+        let base = Local::now();
+        let mk = |id: &str, label: &str, updated: i64, created: i64, pinned: bool| {
+            let mut e = entry(id);
+            e.label = label.into();
+            e.updated = base - chrono::Duration::minutes(updated);
+            e.created = base - chrono::Duration::minutes(created);
+            e.pinned = pinned;
+            e
+        };
+        let mut rows = vec![
+            mk("old-pinned", "zeta", 500, 500, true),
+            mk("a", "banana", 10, 400, false),
+            mk("b", "Apple", 30, 100, false),
+            mk("c", "apple", 20, 300, false),
+        ];
+        assert_eq!(sorted_ids(&mut rows, SortBy::Recent), ["old-pinned", "a", "c", "b"]);
+        assert_eq!(sorted_ids(&mut rows, SortBy::Created), ["old-pinned", "b", "c", "a"]);
+        // Case-insensitive name; the "apple" tie breaks by recency (c is newer than b).
+        assert_eq!(sorted_ids(&mut rows, SortBy::Name), ["old-pinned", "c", "b", "a"]);
+    }
 }

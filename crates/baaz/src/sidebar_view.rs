@@ -3092,5 +3092,170 @@ mod tests {
         );
         b3c_teardown(&dir, guard, old);
     }
-}
 
+    /// A session row for the real-path tests below.
+    fn list_entry(id: &str, pinned: bool) -> SessionEntry {
+        let now = chrono::Local::now();
+        SessionEntry {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            updated: now,
+            created: now,
+            running: false,
+            turns: 1,
+            hidden: false,
+            pinned,
+            archived: false,
+            description: String::new(),
+            replayed: false,
+            provider: None,
+            named: true,
+            needs_title: false,
+            side_marker: false,
+            title_pending: false,
+            last_ask: None,
+            local: false,
+            provisional: false,
+            workspace: None,
+            project: None,
+            project_name: None,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
+            branch: None,
+            terminals_running: 0,
+        }
+    }
+
+    /// Fill the harness with `n` date-grouped sessions (the last pinned) and
+    /// mark the lists loaded.
+    fn load_sessions(h: &mut Harness, n: usize) {
+        h.layout.group_by = Some(crate::layout::GroupBy::Date);
+        h.sessions = (0..n).map(|i| list_entry(&format!("s{i}"), i == n - 1)).collect();
+        h.sessions_loaded = true;
+        h.index_loaded = true;
+        h.invalidate_list();
+    }
+
+    fn render_once(vc: &mut gpui::VisualTestContext, baaz: &Entity<Harness>) {
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let _ = h.render_sidebar(window, cx);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn browse_mode_render_leaves_the_session_list_untouched(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-keeps-list");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| baaz.update(cx, |h, _| load_sessions(h, 40)));
+        render_once(vc, &baaz);
+        let (count, top) = vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 9, offset_in_item: px(0.0) });
+                (h.sidebar_list.item_count(), h.sidebar_list.logical_scroll_top())
+            })
+        });
+        assert!(count > 20, "the sessions area has rows: {count}");
+        assert_eq!(top.item_ix, 9);
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Browse));
+        render_once(vc, &baaz);
+        let (browse_count, browse_top) =
+            vc.update(|_, cx| baaz.update(cx, |h, _| (h.sidebar_list.item_count(), h.sidebar_list.logical_scroll_top())));
+        assert_eq!(browse_count, count, "Browse must not resize the Sessions list state");
+        assert_eq!(browse_top.item_ix, top.item_ix);
+        assert_eq!(browse_top.offset_in_item, top.offset_in_item);
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Sessions));
+        render_once(vc, &baaz);
+        let back = vc.update(|_, cx| baaz.update(cx, |h, _| h.sidebar_list.logical_scroll_top()));
+        assert_eq!(back.item_ix, top.item_ix, "switching back lands where the person was");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    #[gpui::test]
+    fn a_sidebar_wheel_disarms_the_reveal_and_marks_user_scrolled(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("wheel-disarm");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.reveal = Some("s1".to_owned());
+                h.reveal_unknown = Some(("s1".to_owned(), 2));
+                h.sidebar_user_scrolled = false;
+                h.note_sidebar_wheel(cx);
+                assert!(h.reveal.is_none());
+                assert!(h.reveal_unknown.is_none());
+                assert!(h.sidebar_user_scrolled);
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    #[gpui::test]
+    fn a_pinned_sessions_reveal_clears_without_scrolling(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("pinned-reveal");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| baaz.update(cx, |h, _| load_sessions(h, 40)));
+        render_once(vc, &baaz);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 6, offset_in_item: px(0.0) });
+                let before = h.sidebar_list.logical_scroll_top();
+                assert!(h.sidebar_pinned(cx).iter().any(|row| row.id.as_ref() == "s39"), "s39 is pinned");
+                let grouping = h.sidebar_grouping(cx);
+                let rows = flatten_sidebar(&grouping, false);
+                h.reveal = Some("s39".to_owned());
+                h.reveal_sidebar_row(&rows, &grouping, "s39", cx);
+                assert!(h.reveal.is_none(), "a pinned row is always in view");
+                let after = h.sidebar_list.logical_scroll_top();
+                assert_eq!((after.item_ix, after.offset_in_item), (before.item_ix, before.offset_in_item));
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    #[gpui::test]
+    fn the_browse_model_files_tabs_into_folders_pins_and_task_folders(cx: &mut TestAppContext) {
+        use crate::browser::Owner;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-model");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let (filed, pinned, session) = vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                h.browser.tabs.ensure_spaces(|_| None);
+                let space = h.browse_space();
+                let folder = h.browser.tabs.add_folder(crate::browser::tabs::PERSONAL, "Reading");
+                let filed = h.browser.tabs.open(space.clone(), Owner::Person, "https://filed.example/", None);
+                let pinned = h.browser.tabs.open(space, Owner::Person, "https://pinned.example/", None);
+                let session = h.browser.tabs.open(None, Owner::Session("sess-1".into()), "https://task.example/", None);
+                assert!(h.browser.tabs.set_folder(filed, Some(&folder)));
+                assert!(h.browser.tabs.set_pinned(pinned, true));
+                (filed, pinned, session)
+            })
+        });
+        let browse = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_model(false, cx).browse));
+        let browse = browse.expect("Browse mode carries a browse model");
+        assert_eq!(browse.folders.len(), 1);
+        assert_eq!(browse.folders[0].name.as_ref(), "Reading");
+        let ids: Vec<String> = browse.folders[0].tabs.iter().map(|t| t.id.to_string()).collect();
+        assert_eq!(ids, vec![browse_tab_key(filed)]);
+        assert_eq!(browse.pins.len(), 1);
+        assert_eq!(browse.pins[0].id.as_ref(), browse_tab_key(pinned));
+        assert!(browse.tabs.is_empty(), "nothing is left loose in Today");
+        assert_eq!(browse.task_folders.len(), 1);
+        assert_eq!(browse.task_folders[0].id.as_ref(), "sess-1");
+        assert_eq!(browse.task_folders[0].tabs[0].id.as_ref(), browse_tab_key(session));
+        b3c_teardown(&dir, guard, old);
+    }
+}
