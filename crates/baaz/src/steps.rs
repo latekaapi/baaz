@@ -153,6 +153,8 @@
 //! | `page-focus` | give the active browser page the keyboard, free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
+//! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
+//! | `space-new:<name>` | add a browser space named `<name>` and make it current, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -315,6 +317,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "tab-close", run: |this, rest, window, cx| this.step_tab_close(rest, window, cx) },
     WindowVerb { verb: "tab-pin", run: |this, rest, _, cx| this.step_tab_pin(rest, cx) },
     WindowVerb { verb: "tab-menu", run: |this, rest, _, cx| this.step_tab_menu(rest, cx) },
+    WindowVerb { verb: "folder-new", run: |this, rest, _, cx| this.step_folder_new(rest, cx) },
+    WindowVerb { verb: "space-new", run: |this, rest, _, cx| this.step_space_new(rest, cx) },
     WindowVerb { verb: "from-sessions", run: |this, rest, _, cx| this.step_from_sessions(rest, cx) },
     WindowVerb {
         verb: "tab-discard-now",
