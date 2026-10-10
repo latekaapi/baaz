@@ -387,7 +387,7 @@ impl Harness {
                 crate::log::boot_mark("index-loaded");
                 // Same reason as the list reply below: re-arm the cached
                 // pane in this update, not on some later frame's `on_frame`.
-                this.sync_sidebar_pane(cx);
+                let _ = this.sync_sidebar_pane(cx);
                 cx.notify();
             },
         );
@@ -549,7 +549,7 @@ impl Harness {
             // a cached view, and waiting for the next root render's `on_frame`
             // to notice the new key adds a whole frame hop — one a quiescent
             // window may not take for a long while — before the first rows paint.
-            this.sync_sidebar_pane(cx);
+            let _ = this.sync_sidebar_pane(cx);
             cx.notify();
             if this.sessions_list_stale {
                 // A refresh asked while this fetch was running: one

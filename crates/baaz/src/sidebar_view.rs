@@ -549,13 +549,16 @@ impl Harness {
     /// wheel notifies leave the pane clean and gpui reuses its cached
     /// element instead of rebuilding the column. The comparison itself is a
     /// few pointer reads and small clones — no list rebuild.
-    pub(crate) fn sync_sidebar_pane(&mut self, cx: &mut Context<Self>) {
+    /// Answers whether the key moved (the pane was re-armed).
+    pub(crate) fn sync_sidebar_pane(&mut self, cx: &mut Context<Self>) -> bool {
         let key = SidebarKey::current(self, cx);
         if self.sidebar_key.as_ref() != Some(&key) {
             self.sidebar_key = Some(key);
             crate::log::boot_mark("pane-notify");
             self.sidebar_pane.update(cx, |_, cx| cx.notify());
+            return true;
         }
+        false
     }
 
     /// The sessions list's current scroll position: what
@@ -973,11 +976,12 @@ impl Harness {
         let snaps = self.browse_person_snaps(cx);
         let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
             self.browser.tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
-        let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool| BrowseTab {
+        let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool, loading: bool| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
             initial: initial.into(),
             active,
+            loading,
         };
         let mut pins = Vec::new();
         let mut today = Vec::new();
@@ -988,7 +992,7 @@ impl Harness {
                 continue;
             }
             let folder = folder_of.get(&snap.id).cloned().flatten();
-            let row = tab(snap.id, snap.title, snap.initial, snap.active);
+            let row = tab(snap.id, snap.title, snap.initial, snap.active, snap.loading);
             match folder.filter(|id| self.browser.tabs.folders.iter().any(|f| &f.id == id)) {
                 Some(folder) => in_folders.entry(folder).or_default().push(row),
                 None => today.push(row),
@@ -1026,7 +1030,9 @@ impl Harness {
                     name: label.into(),
                     kind: FolderKind::Task { state, status: status.into(), needs_you: waiting },
                     open: true,
-                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active)).collect(),
+                    // A session's tabs load in its own pane; their rows keep
+                    // the favicon (the groups key carries no page facts).
+                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active, false)).collect(),
                 }
             })
             .collect();
