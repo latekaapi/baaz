@@ -1071,4 +1071,19 @@ mod tests {
             Layout { download_dir: Some(PathBuf::from("/tmp/baaz-picked")), ..Layout::default() };
         assert_eq!(browser_download_dir(&chosen), PathBuf::from("/tmp/baaz-picked"));
     }
+
+    #[test]
+    fn sort_by_defaults_to_recent_and_round_trips() {
+        assert_eq!(SortBy::default(), SortBy::Recent);
+        assert_eq!(Layout::default().sort_by, SortBy::Recent);
+        let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
+        assert_eq!(old.sort_by, SortBy::Recent);
+        for sort in [SortBy::Created, SortBy::Name] {
+            let layout = Layout { sort_by: sort, ..Layout::default() };
+            let text = serde_json::to_string(&layout).unwrap();
+            assert!(text.contains("\"sortBy\""), "{text}");
+            let back: Layout = serde_json::from_str(&text).unwrap();
+            assert_eq!(back.sort_by, sort);
+        }
+    }
 }

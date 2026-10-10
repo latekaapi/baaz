@@ -1706,4 +1706,155 @@ mod tests {
         assert!(!model.migrate_from_overrides(&overrides));
         assert!(model.tabs_of(&session("s-1")).is_empty());
     }
+    fn names(model: &Tabs, space: &str) -> Vec<String> {
+        model.folders_in(space).iter().map(|f| f.name.clone()).collect()
+    }
+
+    #[test]
+    fn ensure_spaces_migrates_person_tabs_into_personal_and_is_idempotent() {
+        let mut model = tabs();
+        let a = model.open(Some("p1".into()), Owner::Person, "https://a.example/", None);
+        let b = model.open(Some("p1".into()), Owner::Person, "https://b.example/", None);
+        let c = model.open(Some("p2".into()), Owner::Person, "https://c.example/", None);
+        let d = model.open(None, Owner::Person, "https://d.example/", None);
+        let s = model.open(Some("p1".into()), session("s"), "https://s.example/", None);
+        assert!(model.activate(a));
+        let session_before = model.get(s).cloned().unwrap();
+        assert!(model.ensure_spaces(|id| Some(format!("Name {id}"))));
+        assert_eq!(model.spaces.len(), 1);
+        assert_eq!(model.spaces[0].id, PERSONAL);
+        assert_eq!(model.spaces[0].name, "Personal");
+        assert_eq!(model.current_space, PERSONAL);
+        assert_eq!(names(&model, PERSONAL), vec!["Name p1", "Name p2"]);
+        let f1 = model.folders.iter().find(|f| f.name == "Name p1").unwrap().id.clone();
+        let f2 = model.folders.iter().find(|f| f.name == "Name p2").unwrap().id.clone();
+        assert_eq!(model.get(a).unwrap().folder.as_deref(), Some(f1.as_str()));
+        assert_eq!(model.get(b).unwrap().folder.as_deref(), Some(f1.as_str()));
+        assert_eq!(model.get(c).unwrap().folder.as_deref(), Some(f2.as_str()));
+        assert_eq!(model.get(d).unwrap().folder, None);
+        for id in [a, b, c, d] {
+            assert_eq!(model.get(id).unwrap().space.as_deref(), Some("personal"));
+        }
+        assert_eq!(model.get(s).unwrap(), &session_before);
+        assert_eq!(model.active_of(&Owner::Person, Some(PERSONAL)), Some(a));
+        let snapshot = model.clone();
+        assert!(!model.ensure_spaces(|id| Some(format!("Other {id}"))));
+        assert_eq!(model, snapshot);
+    }
+
+    fn with_space() -> Tabs {
+        let mut model = tabs();
+        model.ensure_spaces(|_| None);
+        model
+    }
+
+    #[test]
+    fn folders_are_added_first_renamed_toggled_and_deleted() {
+        let mut model = with_space();
+        let a = model.add_folder(PERSONAL, "A");
+        let b = model.add_folder(PERSONAL, "B");
+        assert_ne!(a, b);
+        assert_eq!(names(&model, PERSONAL), vec!["B", "A"]);
+        assert!(model.rename_folder(&a, "  Alpha  "));
+        assert!(!model.rename_folder(&a, "   "));
+        assert!(!model.rename_folder("nope", "X"));
+        assert_eq!(names(&model, PERSONAL), vec!["B", "Alpha"]);
+        assert!(model.folders_in(PERSONAL)[0].open);
+        assert!(model.toggle_folder(&b));
+        assert!(!model.folders_in(PERSONAL)[0].open);
+        assert!(!model.toggle_folder("nope"));
+    }
+
+    #[test]
+    fn set_folder_and_delete_folder_move_tabs() {
+        let mut model = with_space();
+        let f = model.add_folder(PERSONAL, "F");
+        let t1 = model.open(Some(PERSONAL.into()), Owner::Person, "https://a.example/", None);
+        let t2 = model.open(Some(PERSONAL.into()), Owner::Person, "https://b.example/", None);
+        assert!(!model.set_folder(t1, Some("nope")));
+        assert!(!model.set_folder(TabId(999), Some(&f)));
+        assert!(model.set_folder(t1, Some(&f)));
+        assert_eq!(model.person_ids_in(PERSONAL, Some(&f)), vec![t1]);
+        assert_eq!(model.person_ids_in(PERSONAL, None), vec![t1, t2]);
+        assert!(model.set_folder(t1, None));
+        assert_eq!(model.get(t1).unwrap().folder, None);
+        assert!(model.set_folder(t1, Some(&f)));
+        assert!(model.set_folder(t2, Some(&f)));
+        assert!(model.delete_folder(&f));
+        assert!(!model.delete_folder(&f));
+        assert_eq!(model.get(t1).unwrap().folder, None);
+        assert_eq!(model.get(t2).unwrap().folder, None);
+        assert!(model.folders_in(PERSONAL).is_empty());
+    }
+
+    #[test]
+    fn spaces_add_rename_switch_and_delete() {
+        let mut model = with_space();
+        let s2 = model.add_space("");
+        assert_eq!(model.spaces[1].name, "Space 2");
+        assert_eq!(model.current_space, s2);
+        let s3 = model.add_space("  Trip ");
+        assert_eq!(model.spaces[2].name, "Trip");
+        assert_eq!(model.current_space, s3);
+        assert!(model.rename_space(&s2, "Work"));
+        assert!(!model.rename_space(&s2, " "));
+        assert!(!model.rename_space("nope", "X"));
+        assert_eq!(model.spaces[1].name, "Work");
+        assert!(!model.switch_space(&s3), "already current");
+        assert!(!model.switch_space("nope"));
+        assert!(model.switch_space(PERSONAL));
+        assert_eq!(model.current_space, PERSONAL);
+
+        // Delete the current space: it moves to the first remaining.
+        assert!(model.switch_space(&s2));
+        let folder = model.add_folder(&s2, "Held");
+        let kept = model.add_folder(&s3, "Kept");
+        let t = model.open(Some(s2.clone()), Owner::Person, "https://a.example/", None);
+        let held = model.delete_space(&s2).expect("deleted");
+        assert_eq!(held, vec![t]);
+        assert!(model.folders.iter().all(|f| f.id != folder));
+        assert!(model.folders.iter().any(|f| f.id == kept));
+        assert_eq!(model.current_space, PERSONAL);
+        assert_eq!(model.delete_space("nope"), None);
+        assert!(model.delete_space(&s3).is_some());
+        assert_eq!(model.delete_space(PERSONAL), None, "the last space stays");
+        assert_eq!(model.spaces.len(), 1);
+    }
+
+    #[test]
+    fn session_tabs_without_a_space_span_every_space() {
+        let mut model = tabs();
+        let a = model.open(Some("x".into()), session("s1"), "https://a.example/", None);
+        let b = model.open(Some("y".into()), session("s2"), "https://b.example/", None);
+        model.open(Some("x".into()), Owner::Person, "https://p.example/", None);
+        let all = model.session_tabs(None);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, "s1");
+        assert_eq!(all[0].1[0].id, a);
+        assert_eq!(all[1].0, "s2");
+        assert_eq!(all[1].1[0].id, b);
+        let only_x = model.session_tabs(Some("x"));
+        assert_eq!(only_x.len(), 1);
+        assert_eq!(only_x[0].0, "s1");
+    }
+
+    #[test]
+    fn spaces_and_folders_round_trip_and_old_json_loads_empty() {
+        let mut model = with_space();
+        let f = model.add_folder(PERSONAL, "F");
+        let t = model.open(Some(PERSONAL.into()), Owner::Person, "https://a.example/", None);
+        model.set_folder(t, Some(&f));
+        let json = serde_json::to_string(&model).unwrap();
+        let back: Tabs = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, model);
+        assert_eq!(back.get(t).unwrap().folder.as_deref(), Some(f.as_str()));
+
+        let old = r#"{"tabs":[{"id":1,"space":"p1","owner":"Person","url":"https://a.example/","title":"A"}],"active":{},"next_id":2}"#;
+        let old: Tabs = serde_json::from_str(old).unwrap();
+        assert!(old.spaces.is_empty());
+        assert!(old.folders.is_empty());
+        assert_eq!(old.current_space, "");
+        assert_eq!(old.tabs[0].folder, None);
+    }
+
 }
