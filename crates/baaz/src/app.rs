@@ -3881,8 +3881,9 @@ impl Harness {
             cell = cell.child(slot);
         }
         let cell = cell.child(extensions).child(more).child(self.right_toggle(cx));
-        // The 2 px accent progress line along the bottom of the header,
-        // driven by the page's progress: a proportional fill while loading.
+        // The 2 px progress line along the bottom of the header, driven by
+        // the page's progress: a proportional foreground fill while loading
+        // (FF has no accent; the card's own line is `render_page_progress`).
         let progress_bar: Option<AnyElement> = if loading {
             let fill = progress.clamp(0.0, 1.0);
             Some(
@@ -3894,7 +3895,7 @@ impl Harness {
                     .h(px(2.0))
                     .flex()
                     .flex_row()
-                    .child(div().h_full().bg(p.accent).flex_grow(fill))
+                    .child(div().h_full().bg(p.fg).flex_grow(fill))
                     .child(div().h_full().flex_grow(1.0 - fill))
                     .into_any_element(),
             )
@@ -5976,7 +5977,48 @@ impl Harness {
             .pr(inset)
             .pb(inset)
             .child(aui::interact::surface(2, centre).shape(aui::interact::Shape::Container).fill())
+            .children(self.render_page_progress(cx))
             .into_any_element()
+    }
+
+    /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
+    /// the foreground filling a border-12 % track in proportion to the
+    /// engine's progress, along the card's top edge between its corner radii.
+    /// Adaptation: the native page covers anything gpui draws over the card,
+    /// so the line rides the 8 px gap, flush on the card's top edge.
+    fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.browse_centre_state()?;
+        let (loading, progress) = {
+            let page = state.read(cx);
+            (page.loading(), page.progress())
+        };
+        if !loading {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let line = px(2.0);
+        let radius = px(scale::SHAPE_CONTAINER);
+        let inset = px(crate::browser::PAGE_CARD_INSET);
+        let fill = progress.clamp(0.0, 1.0);
+        Some(
+            div()
+                .id("page-progress")
+                .role(gpui::Role::ProgressIndicator)
+                .aria_label("Loading page")
+                .absolute()
+                .top(inset - line)
+                .left(radius)
+                .right(inset + radius)
+                .h(line)
+                .rounded(line / 2.0)
+                .overflow_hidden()
+                .bg(p.line)
+                .flex()
+                .flex_row()
+                .child(div().h_full().bg(p.fg).flex_grow(fill))
+                .child(div().h_full().flex_grow(1.0 - fill))
+                .into_any_element(),
+        )
     }
 
     /// The Baaz new-tab page (B2a-H4): a large centred field with the
@@ -6952,8 +6994,13 @@ impl Harness {
         // The sidebar pane's inputs may have changed without a notify of its
         // own (a session event, a probe answer, the minute rollover): re-arm
         // it here, before anything draws, so a transcript notify alone never
-        // rebuilds the column.
-        self.sync_sidebar_pane(cx);
+        // rebuilds the column. A notify raised inside this draw lands after
+        // it, and a quiet window may take no frame for seconds (a page load's
+        // `loading` key painted only after the load had ended): ask for the
+        // next one so the re-armed pane draws now.
+        if self.sync_sidebar_pane(cx) {
+            window.request_animation_frame();
+        }
         // A mode switch slides the sidebar body to rest, but the pane is
         // cached: after the key change above re-arms it once, nothing
         // would re-render it mid-flight. Keep re-arming on animation
