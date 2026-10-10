@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collapsed sidebar with the hover peek</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap">
+<style>
+body{margin:0}
+a{color:#8489E0}a:hover{color:#9297EA}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #121317; position: relative; font-family: 'Geist', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #E8EAEF; overflow: hidden; display: flex;">
+  <!-- traffic lights stay in the window chrome; the pane's header now carries the sidebar toggle -->
+  <div style="position: absolute; left: 20px; top: 20px; display: flex; gap: 8px; z-index: 2;">
+    <span style="width: 12px; height: 12px; border-radius: 999px; background: #FF5F57;"></span>
+    <span style="width: 12px; height: 12px; border-radius: 999px; background: #FEBC2E;"></span>
+    <span style="width: 12px; height: 12px; border-radius: 999px; background: #28C840;"></span>
+  </div>
+  <button aria-label="Show sidebar" style="position: absolute; left: 84px; top: 15px; width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: #737985; display: flex; align-items: center; justify-content: center; padding: 0; cursor: pointer; z-index: 2;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/></svg></button>
+
+  <!-- the 12 px edge strip: nothing drawn; it is the hover region that peeks the sidebar. Shown here as a guide. -->
+  <div style="position: absolute; left: 0; top: 52px; bottom: 8px; width: 12px; background: rgba(132,137,224,.10); border-right: 1px dashed rgba(132,137,224,.35); z-index: 1;"></div>
+
+  <!-- the pane fills the window when the sidebar is gone -->
+  <div style="flex: 1 1 auto; min-width: 0; margin: 52px 8px 8px 8px; border-radius: 8px; background: #17181D; border: 1px solid #262930; box-shadow: 0 1px 2px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden;">
+    <div style="height: 44px; flex: none; display: flex; align-items: center; padding: 0 12px 0 16px; gap: 8px; border-bottom: 1px solid #262930; font-size: 13px;">
+      <span style="color: #E8EAEF;">Design v2 tokens</span>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#737985" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg>
+      <span style="margin-left: 4px; font-size: 12px; color: #737985; background: #1C1E24; border-radius: 4px; padding: 1px 6px;">harness</span>
+    </div>
+    <div style="flex: 1 1 auto;"></div>
+    <div style="flex: none; margin: 0 16px 16px; border-radius: 8px; border: 1px solid #262930; background: #1C1E24; min-height: 64px; display: flex; align-items: center; padding: 0 12px; color: #737985; font-size: 13px;">Type / for commands</div>
+  </div>
+
+  <!-- the peek: the whole sidebar floats in as an elevated surface, inset 8 px, over the pane -->
+  <div style="position: absolute; left: 8px; top: 52px; bottom: 8px; width: 260px; border-radius: 8px; background: #1C1E24; border: 1px solid #353945; box-shadow: 0 24px 60px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.5); overflow: hidden; z-index: 3; display: flex; flex-direction: column;">
+    <dc-import name="Sidebar" variant="populated" h="{{h}}" hint-size="260px,840px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 290px; top: 64px; font-size: 12px; line-height: 16px; color: #737985; max-width: 260px; z-index: 3;">Collapsed means gone. The sidebar toggle moves to the window's title strip, right after the traffic lights, the same spot in Sessions and Browse mode (which has no pane header). Resting the pointer on the 12 px edge strip, clicking that toggle, or ⌘\ brings the sidebar back; the hover peek floats it in as an elevated surface and it leaves when the pointer does.</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { h: 840 };
+  }
+}
+</script>
+</body>
+</html>

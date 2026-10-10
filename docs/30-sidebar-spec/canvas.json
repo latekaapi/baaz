@@ -1,0 +1,105 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-09T16:20:00Z"
+  },
+  "title": "Baaz sidebar v2",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Populated · window"
+    },
+    "Collapsed.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Collapsed · peek on hover"
+    },
+    "States.dc.html": {
+      "x": 0,
+      "y": 1020,
+      "w": 1432,
+      "h": 720,
+      "title": "States · loading, empty, hover, rename + keyboard, menus"
+    },
+    "Browse.dc.html": {
+      "x": 1520,
+      "y": 1020,
+      "w": 260,
+      "h": 720,
+      "title": "Browse mode"
+    },
+    "Compact.dc.html": {
+      "x": 1860,
+      "y": 1020,
+      "w": 260,
+      "h": 720,
+      "title": "Compact density"
+    },
+    "Spec.dc.html": {
+      "x": 0,
+      "y": 1860,
+      "w": 1240,
+      "h": 900,
+      "title": "Spec · every measurement"
+    },
+    "Sidebar.dc.html": {
+      "x": 1520,
+      "y": 1860,
+      "w": 260,
+      "h": 900,
+      "title": "Sidebar component (imported by the boards)"
+    },
+    "BrowseWindow.dc.html": {
+      "x": 0,
+      "y": 2900,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse · window (page spans full height)"
+    },
+    "NewTab.dc.html": {
+      "x": 1520,
+      "y": 2900,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse · new tab"
+    }
+  },
+  "order": [
+    "Sidebar.dc.html",
+    "Spec.dc.html",
+    "Compact.dc.html",
+    "Browse.dc.html",
+    "States.dc.html",
+    "NewTab.dc.html",
+    "BrowseWindow.dc.html",
+    "Collapsed.dc.html",
+    "Main.dc.html"
+  ],
+  "notes": {
+    "t1": {
+      "x": 0,
+      "y": -240,
+      "text": "Baaz sidebar on tokens v2 — dark, 260 px, Geist. Values from the v2 tokens.json and the Fluid Functionalism sidebar measured live.",
+      "kind": "title1",
+      "maxW": 2960
+    },
+    "n1": {
+      "x": 3040,
+      "y": 0,
+      "w": 360,
+      "text": "Tweaks on the Sidebar board: bylines all ↔ status only, row height 32 ↔ 36, row text 13 ↔ 14, selected weight regular ↔ medium.\n\nBrowse mode follows Yet Another Browser: the page spans the full height with no header; address, page controls, New tab, pinned, tabs, folders and spaces all live in the sidebar.",
+      "fill": "blue"
+    }
+  },
+  "designSystems": []
+}

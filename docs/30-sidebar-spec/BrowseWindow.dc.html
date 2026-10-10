@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browse mode in the window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap">
+<style>
+body{margin:0}
+a{color:#8489E0}a:hover{color:#9297EA}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #121317; position: relative; font-family: 'Geist', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #E8EAEF; overflow: hidden; display: flex;">
+
+  <dc-import name="Sidebar" variant="browse" h="{{h}}" hint-size="260px,900px"></dc-import>
+
+  <!-- the page: full height, no header of its own. The site's colours live inside the card. -->
+  <div style="flex: 1 1 auto; min-width: 0; margin: 8px 8px 8px 0; border-radius: 8px; background: #FFFFFF; border: 1px solid #353945; box-shadow: 0 1px 2px rgba(0,0,0,.35); overflow: hidden; display: flex; flex-direction: column; color: #191B21;">
+    <div style="height: 56px; flex: none; display: flex; align-items: center; padding: 0 32px; gap: 24px; border-bottom: 1px solid #E2E5EB; font-size: 13px;">
+      <span style="font-weight: 600; font-size: 15px;">UDISE+ · PGI</span>
+      <span style="color: #4D5262;">Home</span><span style="color: #4D5262;">State scores</span><span style="color: #4D5262;">Report cards</span><span style="color: #4D5262;">Open data</span>
+      <span style="margin-left: auto; height: 32px; width: 220px; border-radius: 6px; border: 1px solid #C9CED8; display: flex; align-items: center; padding: 0 10px; color: #7B818F;">Search a state or district</span>
+    </div>
+    <div style="padding: 40px 48px; display: flex; flex-direction: column; gap: 24px; max-width: 1040px;">
+      <div style="font-size: 12px; color: #7B818F;">Performance Grading Index · 2023-24</div>
+      <div style="font-size: 32px; line-height: 40px; font-weight: 600;">State scores 2023-24</div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px;">
+        <div style="border: 1px solid #E2E5EB; border-radius: 8px; padding: 16px;"><div style="font-size: 12px; color: #7B818F;">States graded</div><div style="font-size: 24px; font-weight: 600; margin-top: 4px;">36</div></div>
+        <div style="border: 1px solid #E2E5EB; border-radius: 8px; padding: 16px;"><div style="font-size: 12px; color: #7B818F;">Highest band</div><div style="font-size: 24px; font-weight: 600; margin-top: 4px;">Prachesta-2</div></div>
+        <div style="border: 1px solid #E2E5EB; border-radius: 8px; padding: 16px;"><div style="font-size: 12px; color: #7B818F;">Updated</div><div style="font-size: 24px; font-weight: 600; margin-top: 4px;">29 Sept 2026</div></div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 8px;">
+        <span style="height: 8px; width: 92%; border-radius: 4px; background: #EFF1F5;"></span>
+        <span style="height: 8px; width: 84%; border-radius: 4px; background: #EFF1F5;"></span>
+        <span style="height: 8px; width: 88%; border-radius: 4px; background: #EFF1F5;"></span>
+        <span style="height: 8px; width: 60%; border-radius: 4px; background: #EFF1F5;"></span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 8px;">
+        <div style="border: 1px solid #E2E5EB; border-radius: 8px; height: 220px; display: flex; align-items: flex-end; gap: 10px; padding: 16px;">
+          <span style="flex: 1; height: 40%; background: #E6E9EF; border-radius: 4px 4px 0 0;"></span><span style="flex: 1; height: 65%; background: #E6E9EF; border-radius: 4px 4px 0 0;"></span><span style="flex: 1; height: 55%; background: #E6E9EF; border-radius: 4px 4px 0 0;"></span><span style="flex: 1; height: 80%; background: #565CC4; border-radius: 4px 4px 0 0;"></span><span style="flex: 1; height: 48%; background: #E6E9EF; border-radius: 4px 4px 0 0;"></span><span style="flex: 1; height: 70%; background: #E6E9EF; border-radius: 4px 4px 0 0;"></span>
+        </div>
+        <div style="border: 1px solid #E2E5EB; border-radius: 8px; height: 220px; padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+          <span style="height: 8px; width: 70%; border-radius: 4px; background: #EFF1F5;"></span><span style="height: 8px; width: 90%; border-radius: 4px; background: #EFF1F5;"></span><span style="height: 8px; width: 64%; border-radius: 4px; background: #EFF1F5;"></span><span style="height: 8px; width: 82%; border-radius: 4px; background: #EFF1F5;"></span><span style="height: 8px; width: 50%; border-radius: 4px; background: #EFF1F5;"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { h: 900 };
+  }
+}
+</script>
+</body>
+</html>
