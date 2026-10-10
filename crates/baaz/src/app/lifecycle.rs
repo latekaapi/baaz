@@ -802,6 +802,21 @@ impl Harness {
     /// `sidebar-wheel:0,0` to read a burst's renders after its frames paint
     /// (renders land on frames, not inside the dispatch). Free: no turn, no
     /// wire.
+    /// `pointer:<x>,<y>`: dispatch one mouse move to window point (x, y) —
+    /// the pointer resting on a row, for captures of hover under a scroll
+    /// (`sidebar-scroll-sweep:`). Free: no turn, no wire.
+    pub(crate) fn step_pointer(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((x, y)) = rest.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))) else {
+            crate::steps::record_step_failure(&format!("pointer:{rest}"));
+            return;
+        };
+        // Dispatched after this update: the list's hover handler reports to
+        // Harness, which is mid-update here.
+        window.defer(cx, move |window, cx| {
+            window.dispatch_event(PlatformInput::MouseMove(gpui::MouseMoveEvent { position: point(px(x), px(y)), ..Default::default() }), cx);
+        });
+    }
+
     pub(crate) fn step_sidebar_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (dy_text, n_text) = rest.split_once(',').unwrap_or((rest, "1"));
         let dy: f32 = dy_text.trim().parse().unwrap_or(0.0);
