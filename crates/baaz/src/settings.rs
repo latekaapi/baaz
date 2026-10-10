@@ -1032,7 +1032,7 @@ impl Harness {
             .child(
                 Switch::new(format!("settings-switch-{row_id}"))
                     .checked(on)
-                    .color(p.accent)
+                    .color(p.accent_ring)
                     .accessibility_label(SharedString::from(label.to_string()))
                     .on_click(move |next, window, cx| flip(next, window, cx)),
             )
@@ -1506,7 +1506,7 @@ impl Harness {
                     .child(
                         Switch::new(format!("settings-enable-{wire}"))
                             .checked(status.enabled)
-                            .color(p.accent)
+                            .color(p.accent_ring)
                             .accessibility_label(SharedString::from(format!(
                                 "Enable {}",
                                 status.provider.label()

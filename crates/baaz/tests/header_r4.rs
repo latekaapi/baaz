@@ -78,11 +78,11 @@ fn project_menu_openers_survive_without_the_crumb() {
     assert!(!menu.contains("crumb_bounds"), "no crumb seat remains");
     let sidebar = source("sidebar_view.rs");
     assert!(
-        sidebar.contains("this.open_project_menu(None, false, cx)"),
+        sidebar.contains("self.open_project_menu(None, false, cx)"),
         "the unfiled tray still opens the menu"
     );
     assert!(
-        sidebar.contains("this.open_project_menu(Some(id.to_string()), false, cx)"),
+        sidebar.contains("self.open_project_menu(Some(id.to_string()), false, cx)"),
         "a group tray still opens its menu"
     );
     let skills = source("skills_page.rs");

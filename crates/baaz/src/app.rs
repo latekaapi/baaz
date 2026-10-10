@@ -59,6 +59,7 @@ use aui::data::{button, icon_button, spinner, ButtonSize};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
+use aui::screens::sidebar::{collapsed_strip_width, traffic_light_gap};
 use aui::shell::{
     RESIZE_HANDLE_W, TabItem, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header, tab_strip,
@@ -932,6 +933,24 @@ pub struct Harness {
     /// `remeasure_items` after a text-only height change — `item_count`
     /// always equals the flattened length.
     pub(crate) sidebar_list: ListState,
+    /// The v2 sidebar's one gliding highlight: created once, kept across
+    /// frames, never shared with another list (D3).
+    pub(crate) sidebar_fluid: aui::interact::FluidHandle,
+    /// What the pointer is over in the sidebar, as the screen reports it:
+    /// a session id, a Browse tab key, or a reserved chrome key. The row's
+    /// trailing slot swaps to its actions on it.
+    pub(crate) sidebar_hovered: Option<String>,
+    /// The project head the pointer is over: it shows its actions.
+    pub(crate) hovered_group: Option<String>,
+    /// Whether the Projects header shows its actions (hovered).
+    pub(crate) hovered_projects_header: bool,
+    /// Whether Browse's Today header shows its actions (hovered).
+    pub(crate) hovered_today_header: bool,
+    /// Whether the Pinned section is open.
+    pub(crate) pinned_open: bool,
+    /// The view-options "Show PR status" toggle. Nothing draws PR status
+    /// yet; the menu row keeps its state so the check is honest.
+    pub(crate) show_pr_status: bool,
     /// The flattened rows the list state was last synced to, and the
     /// regroup key it was last reset for. `render_sidebar` re-flattens per
     /// frame (an index walk, no summaries cloned) and splices the
@@ -1084,10 +1103,6 @@ pub struct Harness {
     /// stays owned by its session. Cleared by any person-tab select.
     /// Part of the sidebar key (and read by the centre every frame).
     pub(crate) browse_session_tab: Option<crate::browser::TabId>,
-    /// The Browse tab row the pointer rests on: its × shows on hover as
-    /// well as when active. Transient (cleared on leave), never keyed —
-    /// the hover report notifies the pane directly.
-    pub(crate) browse_hovered_tab: Option<crate::browser::TabId>,
     /// The Settings Shortcuts section's live rows, re-read when the dialog
     /// opens and after every shortcut edit. The dialog builds from state
     /// every frame, and a file read per frame is not state.
@@ -1168,12 +1183,6 @@ pub struct Harness {
     /// "Ask Muse to write one" (A5) arms this: the next activated session
     /// opens with the `/create-skill ` draft, never sent.
     pub(crate) pending_create_skill: bool,
-    /// The pulse rings' timebase: sampled phases count cycles since here, so
-    /// every dot in a frame agrees and restarts never jump.
-    pub(crate) pulse_epoch: std::time::Instant,
-    /// The 20 Hz pulse loop while a sampled dot is on screen; self-clearing
-    /// when no dot is visible and running.
-    pub(crate) pulse_task: Option<Task<()>>,
     /// A `new:` step's session is still opening: its `session/start`
     /// round-trip lands after the following steps would run. Session verbs
     /// wait for the switch (bounded) instead of acting on the session that
@@ -1260,10 +1269,6 @@ pub struct Harness {
     /// Each wrapper notifies only on its first bounds (nothing → something),
     /// so a menu opened before the first prepaint appears on the next frame
     /// instead of flashing at a wrong seat, and nothing repaints afterwards.
-    /// The sidebar footer row: the account menu's trigger.
-    pub(crate) footer_bounds: Option<Bounds<Pixels>>,
-    /// The fixed Sessions caption row: the Sessions view menu's trigger.
-    pub(crate) sessions_caption: Option<Bounds<Pixels>>,
     /// The header overflow `…` button: the overflow menu's trigger.
     pub(crate) overflow_bounds: Option<Bounds<Pixels>>,
     /// The open project menu's own rect: the Colour submenu's anchor is
@@ -1481,6 +1486,13 @@ impl Harness {
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
+            sidebar_fluid: aui::interact::FluidHandle::new(),
+            sidebar_hovered: None,
+            hovered_group: None,
+            hovered_projects_header: false,
+            hovered_today_header: false,
+            pinned_open: true,
+            show_pr_status: true,
             prev_sidebar_rows: Vec::new(),
             prev_sidebar_grouping: None,
             prev_sidebar_regroup: None,
@@ -1545,8 +1557,6 @@ impl Harness {
             skills_new_name: skills_new_name.clone(),
             skills_new_desc: skills_new_desc.clone(),
             pending_create_skill: false,
-            pulse_epoch: std::time::Instant::now(),
-            pulse_task: None,
             session_switch_pending: false,
             provider_open_error: None,
             provider_open_epoch: 0,
@@ -1564,8 +1574,6 @@ impl Harness {
             boot_session_attempted: false,
             renaming_project: None,
             project_colour_open: false,
-            footer_bounds: None,
-            sessions_caption: None,
             overflow_bounds: None,
             project_menu_bounds: None,
             group_menu_bounds: HashMap::new(),
@@ -1595,7 +1603,6 @@ impl Harness {
             tab_menu: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
-            browse_hovered_tab: None,
         };
         // Booting into Browse restores what Browse remembered for the
         // right pane (closed on a fresh file) — the live width and the
@@ -6770,11 +6777,6 @@ impl Harness {
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_find_resync(window, cx);
-        // A running dot advances on the pulse loop's ticks, not on animation
-        // frames: make sure the loop is up exactly while a sampled dot is on
-        // screen. Cheap when it is already running (one `is_some`) and when
-        // nobody runs (one scan).
-        self.ensure_pulse_task(cx);
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once
@@ -7187,7 +7189,22 @@ impl Render for Harness {
             // exactly as it did.
             let browse_minimal =
                 self.mode == layout::Mode::Browse && !self.sidebar_open && !settings_open;
+            // D3: the v2 sidebar draws its own title bar (the traffic-light
+            // gap, the toggle, the mode switch), so its column spans the
+            // window's height and the centre header starts beside it.
+            // Collapsed, the column is the library's edge strip and the
+            // centre header carries the toggle at the same x. Browse with
+            // the sidebar open shows the page full height, no pane header.
+            let collapsed_strip: AnyElement = if self.sidebar_open || settings_open {
+                div().into_any_element()
+            } else {
+                self.render_collapsed_strip(cx)
+            };
+            let browse_full = self.mode == layout::Mode::Browse && self.sidebar_open && !settings_open;
             let shell = app_shell("shell")
+                .full_height_sidebar(!settings_open)
+                .rail_width(collapsed_strip_width())
+                .centre_header(!browse_full)
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
@@ -7208,7 +7225,20 @@ impl Render for Harness {
                 .header_centre(if settings_open {
                     self.render_settings_centre_header(cx)
                 } else if browse_minimal {
-                    self.render_browse_minimal_toolbar(window, cx)
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .pl(traffic_light_gap() - collapsed_strip_width())
+                        .child(self.render_browse_minimal_toolbar(window, cx))
+                        .into_any_element()
+                } else if !self.sidebar_open {
+                    h_flex()
+                        .size_full()
+                        .items_center()
+                        .child(self.render_collapsed_toggle(cx))
+                        .child(div().flex_1().min_w(px(0.0)).h_full().child(self.render_centre_header(window, cx)))
+                        .into_any_element()
                 } else {
                     self.render_centre_header(window, cx)
                 })
@@ -7280,16 +7310,7 @@ impl Render for Harness {
                 // while Sessions keeps its rail. The collapsed sidebar
                 // header cell above keeps the native-lights reservation, so
                 // the toolbar's first control still clears the lights.
-                .hide_rail(browse_minimal)
-                .rail(if browse_minimal {
-                    div()
-                        .id("browse-rail-hidden")
-                        .debug_selector(|| "browse-rail-hidden".into())
-                        .size_full()
-                        .into_any_element()
-                } else {
-                    self.render_rail(cx)
-                })
+                .rail(collapsed_strip)
                 .right(right)
                 .centre(centre)
                 .into_any_element();
@@ -7414,18 +7435,22 @@ impl Render for Harness {
         let overflow = self.render_overflow_menu(cx);
         let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
-        let view_options = self.render_view_menu(cx);
-        let account = self.render_account_menu(cx);
+        // The view-options and account menus draw inside the sidebar
+        // screen now (D3); the browser sync only needs to know they are up.
+        let view_options_open = self.overlays.read(cx).is_open(MenuKind::ViewOptions);
+        let account_open = self.overlays.read(cx).is_open(MenuKind::Account);
         let project_menu = self.render_project_menu(cx);
-        let tab_menu = self.render_tab_menu_popup(cx);
+        // The Browse tab menu went with the old tab rows (D3); the v2 rows
+        // carry no context menu yet.
+        let tab_menu: Option<AnyElement> = None;
         // Z7a, the native-overlay rule: persist real navigations, resolve
         // pending screenshot attaches, and hide every native webview this
         // frame covers (the page is composited above gpui, so gpui cannot
         // draw over it — the host takes the view out instead).
         self.sync_browser(
             overflow.is_some(),
-            view_options.is_some(),
-            account.is_some(),
+            view_options_open,
+            account_open,
             project_menu.is_some(),
             tab_menu.is_some(),
             window,
@@ -7728,8 +7753,6 @@ impl Render for Harness {
                 .children(row_detail)
                 .children(overflow)
                 .children(back_history)
-                .children(view_options)
-                .children(account)
                 .children(project_menu)
                 .children(tab_menu)
                 // F2: the feedback capture layer paints above the palette,
@@ -9231,42 +9254,6 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6b: Browse-with-sidebar-hidden mounts no rail — Sessions with
-    /// its sidebar hidden keeps it.
-    #[gpui::test]
-    fn browse_hidden_hides_the_rail_but_sessions_keeps_it(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("browse-rail-hidden");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
-        draw_shell(&mut *vc, &baaz);
-        assert!(
-            vc.debug_bounds("browse-rail-hidden").is_some(),
-            "Browse-with-sidebar-hidden mounts no rail"
-        );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Sessions, window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
-        draw_shell(&mut *vc, &baaz);
-        assert!(
-            vc.debug_bounds("browse-rail-hidden").is_none(),
-            "Sessions keeps its rail"
-        );
-        restore_state(state);
-    }
-
     /// B2a-H6: vertical tabs list down the sidebar — no strip above the
     /// page. Each drawn test boots its own window because a test draw
     /// renders the cached sidebar pane at most once: the pane paints its
@@ -9291,8 +9278,8 @@ mod tests {
         }
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-strip").is_none(), "vertical keeps the tabs down the sidebar");
-        assert!(vc.debug_bounds("browse-tabs-caption").is_some(), "vertical lists the tabs in the sidebar");
-        assert!(vc.debug_bounds("browse-new-tab-button").is_some(), "vertical keeps New tab");
+        let listed = vc.update(|_, cx| baaz.read(cx).browse_person_snaps(cx).len());
+        assert!(listed >= 2, "vertical lists the opened tabs in the sidebar's model, got {listed}");
         restore_state(state);
     }
 
@@ -9321,8 +9308,6 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-strip").is_some(), "horizontal strips the tabs above the page");
         assert!(vc.debug_bounds("browse-strip-new-tab").is_some(), "the strip ends in `+`");
-        assert!(vc.debug_bounds("browse-tabs-caption").is_none(), "horizontal drops the sidebar Tabs list");
-        assert!(vc.debug_bounds("browse-new-tab-button").is_some(), "the sidebar keeps New tab");
         // B2a-H6b: the chips scroll inside their own area while the `+`
         // rides outside it, so a long strip never scrolls it away.
         assert!(

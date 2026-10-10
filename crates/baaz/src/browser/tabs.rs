@@ -506,59 +506,6 @@ impl Tabs {
         order.get(n - 1).map(|tab| tab.id)
     }
 
-    /// Duplicate `id`: a copy of its URL and title, unpinned, inserted
-    /// directly after it and selected. `None` for an unknown tab.
-    pub(crate) fn duplicate(&mut self, id: TabId) -> Option<TabId> {
-        let tab = self.tabs.iter().find(|tab| tab.id == id)?.clone();
-        let fresh = TabId(self.next_id);
-        self.next_id += 1;
-        let at = self.tabs.iter().position(|tab| tab.id == id).map(|index| index + 1).unwrap_or(self.tabs.len());
-        self.tabs.insert(
-            at.min(self.tabs.len()),
-            Tab {
-                id: fresh,
-                space: tab.space.clone(),
-                owner: tab.owner.clone(),
-                url: tab.url.clone(),
-                title: tab.title.clone(),
-                pinned: false,
-                last_shown: None,
-                needs_attention: false,
-            },
-        );
-        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), fresh);
-        self.bump();
-        Some(fresh)
-    }
-
-    /// Close every unpinned tab of `id`'s owner in `id`'s space except
-    /// `id` itself: the tab menu's "Close other tabs". Pinned tabs are
-    /// spared, the browser convention — a pinned tile never dies from
-    /// another tab's menu. Answers how many closed, and selects `id`.
-    pub(crate) fn close_others(&mut self, id: TabId) -> usize {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id).cloned() else {
-            return 0;
-        };
-        let others: Vec<TabId> = self
-            .tabs
-            .iter()
-            .filter(|other| {
-                other.id != id
-                    && other.owner == tab.owner
-                    && other.space == tab.space
-                    && !other.pinned
-            })
-            .map(|other| other.id)
-            .collect();
-        let count = others.len();
-        for other in others {
-            self.close(other);
-        }
-        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
-        self.bump();
-        count
-    }
-
     /// Record a live page's URL and title on `id`. Answers whether either
     /// changed (the caller persists only on change). A fresh page's blank
     /// report never clobbers a real URL: when the tab already holds one,
@@ -1382,51 +1329,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_copies_and_selects_behind_the_source() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        assert!(model.set_url_title(first, "https://a.example/", "A"));
-        let copy = model.duplicate(first).expect("a copy");
-        assert_ne!(copy, first);
-        let tab = model.get(copy).expect("the copy");
-        assert_eq!(tab.url, "https://a.example/");
-        assert_eq!(tab.title, "A");
-        assert!(!tab.pinned);
-        assert_eq!(model.active_of(&session("s"), None), Some(copy));
-        assert!(model.duplicate(TabId(77)).is_none());
-    }
-
-    #[test]
-    fn close_others_keeps_only_the_kept_tab_selected() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let third = model.open(None, session("s"), "https://c.example/", None);
-        let other = model.open(None, session("t"), "https://d.example/", None);
-        assert_eq!(model.close_others(second), 2);
-        assert_eq!(model.active_of(&session("s"), None), Some(second));
-        assert_eq!(model.active_of(&session("t"), None), Some(other));
-        // Reopen still knows the closed ones, newest first.
-        assert_eq!(model.reopen_last(), Some(third));
-        assert_eq!(model.close_others(TabId(77)), 0);
-        let _ = first;
-    }
-
-    #[test]
-    fn close_others_spares_pinned_tabs() {
-        let mut model = tabs();
-        let pinned = model.open(None, session("s"), "https://a.example/", None);
-        let kept = model.open(None, session("s"), "https://b.example/", None);
-        let doomed = model.open(None, session("s"), "https://c.example/", None);
-        assert!(model.set_pinned(pinned, true));
-        assert_eq!(model.close_others(kept), 1, "only the unpinned other closes");
-        assert!(model.get(pinned).is_some(), "the pinned tab survives");
-        assert!(model.get(doomed).is_none(), "the unpinned other closes");
-        assert!(model.get(kept).is_some(), "the kept tab survives");
-        assert_eq!(model.active_of(&session("s"), None), Some(kept));
-    }
-
-    #[test]
     fn mutations_bump_the_model_generation() {
         let mut model = tabs();
         assert_eq!(model.generation, 0, "a fresh model starts at zero");
@@ -1449,7 +1351,6 @@ mod tests {
             "closing a background tab answers nothing — and still bumps"
         );
         assert!(model.generation > retitled, "closing bumps the generation");
-        assert!(model.duplicate(first).is_some());
         assert!(model.move_before(first, None));
         assert!(model.reorder(first, 0));
         let before = model.generation;

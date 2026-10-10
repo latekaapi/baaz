@@ -451,13 +451,12 @@ impl Harness {
             // so the refresh rechecks every adoption without touching the
             // disk on the UI thread.
             let mut branches = HashMap::new();
-            let mut availability = HashMap::new();
             for project in &projects.projects {
                 if let Some(branch) = crate::projects::branch_of(&project.root) {
                     branches.insert(project.id.clone(), branch);
                 }
-                availability.insert(project.id.clone(), project.root.is_dir());
             }
+            let availability = projects.measure_availability();
             Ok::<_, MuseError>((sessions, branches, availability))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
