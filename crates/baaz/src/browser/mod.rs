@@ -165,19 +165,18 @@ const BROWSER_NAV_PX: f32 = 38.0;
 pub(crate) const BROWSE_TAB_STRIP_PX: f32 = 34.0;
 
 /// The Browse page card's inset from the centre's top, right and bottom
-/// edges (the sidebar side has none), in pixels: the 1 px hairline sits in
-/// it, the native page inside the hairline.
+/// edges (the sidebar side has none), in pixels: FF's inset card `m-2`.
 pub(crate) const PAGE_CARD_INSET: f32 = 8.0;
 
-/// The native page's rect inside the card for the centre `page` rect:
-/// inset on top, right and bottom, plus the hairline on every side.
+/// The native page's rect inside the card for the centre `page` rect: the
+/// whole card, inset on top, right and bottom. The card has no hairline
+/// (FF `variant=inset`), so the page meets its edge.
 pub(crate) fn page_card_rect(page: Bounds<Pixels>) -> Bounds<Pixels> {
     let inset = gpui::px(PAGE_CARD_INSET);
-    let hair = gpui::px(1.0);
     Bounds {
-        origin: Point { x: page.origin.x + hair, y: page.origin.y + inset },
+        origin: Point { x: page.origin.x, y: page.origin.y + inset },
         size: gpui::size(
-            (page.size.width - inset - hair).max(gpui::px(0.0)),
+            (page.size.width - inset).max(gpui::px(0.0)),
             (page.size.height - inset * 2.0).max(gpui::px(0.0)),
         ),
     }
@@ -4217,6 +4216,18 @@ mod tests {
     use super::{Owner, TabId};
     use aui_webview::WebBackend as _;
     use std::collections::HashMap;
+
+    /// FF `variant=inset` (owner 2026-10-11): the native page fills the card
+    /// — 8 off the top, right and bottom, flush on the sidebar side — with
+    /// no hairline offset, since the card draws none.
+    #[test]
+    fn page_card_rect_is_the_inset_card_with_no_hairline() {
+        use gpui::{point, px, size, Bounds};
+        let page = Bounds { origin: point(px(256.0), px(0.0)), size: size(px(1000.0), px(800.0)) };
+        let card = super::page_card_rect(page);
+        assert_eq!(card.origin, point(px(256.0), px(super::PAGE_CARD_INSET)));
+        assert_eq!(card.size, size(px(1000.0 - super::PAGE_CARD_INSET), px(800.0 - 2.0 * super::PAGE_CARD_INSET)));
+    }
 
     fn all_clear() -> BrowserVisibility {
         BrowserVisibility {

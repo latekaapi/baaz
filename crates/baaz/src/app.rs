@@ -5962,27 +5962,20 @@ impl Harness {
         if !self.browse_page_card() {
             return centre.into_any_element();
         }
-        // Browse with the sidebar: the page is a card inset 8 on top, right
-        // and bottom (none against the sidebar), with the container radius
-        // and a hairline — the native page's rect and radius match
+        // Browse with the sidebar: FF's sidebar `variant=inset` content card
+        // (sidebar-core.tsx:1141-1151) — `m-2` with no margin beside the
+        // sidebar, surface-2 + shadow-2, the container radius, and no hairline
+        // (the window rim and the sidebar's border beside one read as double
+        // lines; owner 2026-10-11). The native page's rect and radius match
         // (`browse_centre_page_rect`, `set_corner_radius`).
-        let p = cx.aui().colors;
-        let inset = px(crate::browser::PAGE_CARD_INSET - 1.0);
+        let inset = px(crate::browser::PAGE_CARD_INSET);
         div()
             .size_full()
+            .relative()
             .pt(inset)
             .pr(inset)
             .pb(inset)
-            .child(
-                div()
-                    .size_full()
-                    .rounded(px(scale::SHAPE_CONTAINER + 1.0))
-                    .border_1()
-                    .border_color(p.line)
-                    .overflow_hidden()
-                    .bg(p.surface(2))
-                    .child(centre),
-            )
+            .child(aui::interact::surface(2, centre).shape(aui::interact::Shape::Container).fill())
             .into_any_element()
     }
 
@@ -7242,6 +7235,9 @@ impl Render for Harness {
                 .full_height_sidebar(!settings_open)
                 .rail_width(collapsed_strip_width())
                 .centre_header(!browse_full)
+                // FF `variant=inset` with the page card: no sidebar border
+                // beside the card's own edge (owner 2026-10-11).
+                .inset(self.browse_page_card())
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
