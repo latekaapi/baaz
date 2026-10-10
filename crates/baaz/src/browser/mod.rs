@@ -1549,9 +1549,40 @@ impl Harness {
     /// failure. Free.
     pub(crate) fn step_tab_menu(&mut self, rest: &str, cx: &mut Context<Self>) {
         match self.browse_tab_at(rest, cx) {
-            Some(id) => self.open_tab_menu(id, cx),
+            Some(id) => {
+                let (pinned, in_folder) = self.browser.tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
+                // A right-click lands mid-sidebar at a fixed height: the menu
+                // seats at the pointer, so the capture shows it over the page.
+                let menu = aui::screens::sidebar::BrowseMenu {
+                    target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned, in_folder },
+                    at: gpui::point(gpui::px(150.0), gpui::px(300.0)),
+                };
+                self.open_browse_menu(menu, cx);
+            }
             None => crate::steps::record_step_failure(&format!("tab-menu:{rest}")),
         }
+    }
+
+    /// `folder-new:<name>`: a new folder in the current space holding the
+    /// active person tab, named `<name>` (the new-folder flow, committed).
+    pub(crate) fn step_folder_new(&mut self, rest: &str, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let space = self.browse_space().unwrap_or_default();
+        let active = self.browser.tabs.active_of(&Owner::Person, Some(&space));
+        let id = self.browser.tabs.add_folder(&space, rest.trim());
+        if let Some(tab) = active {
+            self.browser.tabs.set_folder(tab, Some(&id));
+        }
+        self.schedule_tabs_write(cx);
+        cx.notify();
+    }
+
+    /// `space-new:<name>`: add a space named `<name>` (it becomes current).
+    pub(crate) fn step_space_new(&mut self, rest: &str, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        self.browser.tabs.add_space(rest.trim());
+        self.schedule_tabs_write(cx);
+        cx.notify();
     }
 
     /// `from-sessions:<n>`: expand the n-th From-sessions group of the

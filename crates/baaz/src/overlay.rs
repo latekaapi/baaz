@@ -26,6 +26,13 @@ use gpui::{
 
 use crate::app::Harness;
 
+/// `BAAZ_OVERLAY_TRACE=1`: one stderr line per overlay open / close (live checks).
+fn trace(what: impl std::fmt::Display) {
+    if std::env::var("BAAZ_OVERLAY_TRACE").as_deref() == Ok("1") {
+        eprintln!("overlay: {what}");
+    }
+}
+
 /// What an overlay window shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
@@ -44,6 +51,8 @@ pub(crate) struct Overlay {
     handle: AnyWindowHandle,
     kind: OverlayKind,
     bounds: Bounds<Pixels>,
+    /// What the content showed at its last refresh ([`Harness::overlay_print`]).
+    print: u64,
 }
 
 /// The overlay's root view: draws the Harness-built content for its kind.
@@ -51,12 +60,17 @@ pub(crate) struct OverlayView {
     baaz: WeakEntity<Harness>,
     kind: OverlayKind,
     focus: FocusHandle,
+    /// Whether the panel has held the keyboard yet: only a resign after that
+    /// closes it (a panel that never became key — the app was in the
+    /// background — must not close on its own birth).
+    seen_active: bool,
 }
 
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
         let content = self.baaz.update(cx, |baaz, cx| baaz.overlay_content(kind, window, cx)).ok().flatten();
+        trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
         let baaz = self.baaz.clone();
         div()
             .size_full()
@@ -103,8 +117,13 @@ impl Harness {
         let wanted = self.wanted_overlay(window, cx);
         let current = self.overlay.as_ref().map(|o| (o.kind, o.bounds)).or(self.overlay_pending);
         if wanted == current {
-            if let Some(overlay) = self.overlay.as_ref() {
-                // The content reads Harness state: repaint it with the window.
+            // The content reads Harness state: repaint the panel only when what
+            // it shows changed (a blind refresh per main frame looped — the
+            // panel's render dirtied the main window again). Its own hover and
+            // typing repaint it through the entities it reads.
+            let print = self.overlay_print(cx);
+            if let Some(overlay) = self.overlay.as_mut().filter(|o| o.print != print) {
+                overlay.print = print;
                 let handle = overlay.handle;
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -119,6 +138,7 @@ impl Harness {
             });
         }
         self.overlay_pending = wanted;
+        trace(format_args!("want {wanted:?} (had {current:?})"));
         let Some((kind, bounds)) = wanted else {
             return;
         };
@@ -148,22 +168,29 @@ impl Harness {
                         }
                         // Resigning key (a click outside, a switch away) closes it.
                         cx.observe_window_activation(window, move |this: &mut OverlayView, window, cx| {
-                            if !window.is_window_active() {
+                            if window.is_window_active() {
+                                this.seen_active = true;
+                            } else if this.seen_active && std::env::var("BAAZ_OVERLAY_STICKY").as_deref() != Ok("1") {
+                                // `BAAZ_OVERLAY_STICKY=1` (captures of a background
+                                // launch, where the app never holds the keyboard)
+                                // keeps the panel up past a resign.
                                 let kind = this.kind;
                                 let _ = this.baaz.update(cx, |baaz, cx| baaz.close_overlay_content(kind, cx));
                             }
                         })
                         .detach();
-                        OverlayView { baaz, kind, focus }
+                        OverlayView { baaz, kind, focus, seen_active: window.is_window_active() }
                     })
                 })
             });
+            trace(format_args!("opened {kind:?}: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
                 // Still wanted? Keep it; otherwise it goes straight away.
                 match opened {
                     Ok(handle) if this.overlay_pending == Some((kind, bounds)) => {
                         this.overlay_pending = None;
-                        this.overlay = Some(Overlay { handle: handle.into(), kind, bounds });
+                        let print = this.overlay_print(cx);
+                        this.overlay = Some(Overlay { handle: handle.into(), kind, bounds, print });
                     }
                     Ok(handle) => {
                         let handle: AnyWindowHandle = handle.into();
@@ -179,12 +206,28 @@ impl Harness {
         .detach();
     }
 
+    /// A fingerprint of what the overlay content shows: the open menu and the
+    /// folders it lists, or the Field's rows and highlight.
+    fn overlay_print(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", self.browse_menu).hash(&mut hasher);
+        self.browser.tabs.generation.hash(&mut hasher);
+        if self.browse_address.is_some() {
+            self.browse_address_text(cx).hash(&mut hasher);
+            self.browse_omnibox_selected.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Whether the Field shows as an overlay: the address is being edited in
-    /// Browse with the sidebar open and the page is not the new-tab page
+    /// Browse with the sidebar (vertical tabs) open and the page is not the new-tab page
     /// (which carries the Field inline).
     pub(crate) fn field_overlay_wanted(&self, cx: &App) -> bool {
         self.mode == crate::layout::Mode::Browse
             && self.sidebar_open
+            // Horizontal tabs keep the centre's own toolbar field and list.
+            && self.layout.browser_tabs == crate::layout::BrowserTabs::Vertical
             && !self.settings_open()
             && self.browse_address.is_some()
             && !self.browse_centre_state().is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
@@ -237,6 +280,8 @@ impl Harness {
                 .pr(metrics.item_px)
                 .border_1()
                 .border_color(p.line)
+                .text_color(p.fg)
+                .text_role_in(TextRole::Body, Density::Standard)
                 .on_key_down(keys)
                 .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(IconName::Search).size(metrics.icon).color(p.fg_muted)))
                 .children(input)
@@ -246,9 +291,12 @@ impl Harness {
         let mut last: Option<&'static str> = None;
         for (index, row) in rows.iter().enumerate() {
             let group = match row.suggestion.kind {
+                // The ranking puts Ask first and Search last (the omnibox
+                // rule), so each kind keeps its own label.
+                crate::browser::SuggestKind::Ask => "Ask",
                 crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session => "Switch to",
                 crate::browser::SuggestKind::History => "History",
-                crate::browser::SuggestKind::Ask | crate::browser::SuggestKind::Search => "Search and ask",
+                crate::browser::SuggestKind::Search => "Search",
             };
             if last != Some(group) {
                 list = list.child(
@@ -333,6 +381,7 @@ impl Harness {
 
     /// Close what the overlay shows (Escape inside it, or it lost the key).
     pub(crate) fn close_overlay_content(&mut self, kind: OverlayKind, cx: &mut Context<Self>) {
+        trace(format_args!("close {kind:?}"));
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
             // Leaving the Field also hands focus back: on the main window.

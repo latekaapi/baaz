@@ -876,7 +876,16 @@ impl Harness {
             pinned_open: self.pinned_open,
             grouping: self.sidebar_grouping(cx),
             selected: selected.map(SharedString::from),
-            hovered: self.sidebar_hovered.clone().map(SharedString::from),
+            // The row a right-click menu belongs to stays lit while it is open
+            // (canvas Menus board).
+            hovered: match self.browse_menu.as_ref().map(|menu| &menu.target) {
+                Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if self.mode == crate::layout::Mode::Browse => Some(id.clone()),
+                Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if self.mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
+                Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if self.mode == crate::layout::Mode::Browse => {
+                    Some(format!("folder-{session}").into())
+                }
+                _ => self.sidebar_hovered.clone().map(SharedString::from),
+            },
             hovered_group: self.hovered_group.clone().map(SharedString::from),
             hovered_projects_header: self.hovered_projects_header,
             highlighted: None,

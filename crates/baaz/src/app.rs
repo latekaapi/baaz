@@ -5909,8 +5909,11 @@ impl Harness {
         // shows while it renders rows. The toolbar field's list anchors
         // under the toolbar (the top of the centre); the new-tab field
         // renders its own list in flow, under the centred field.
-        let omnibox =
-            (!blank_page).then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar)).flatten();
+        // The Field overlay carries its own rows over the page: no second
+        // list in the window under it.
+        let omnibox = (!blank_page && !self.field_overlay_wanted(cx))
+            .then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar))
+            .flatten();
         let downloads = self.render_browse_downloads(window, cx);
         let extensions = self.render_browse_extensions(window, cx);
         let more = self.render_browse_more(window, cx);
@@ -9436,7 +9439,7 @@ mod tests {
     /// strip in horizontal mode — never over it — and under the toolbar
     /// otherwise.
     #[gpui::test]
-    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal(cx: &mut gpui::TestAppContext) {
+    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal_and_vertical_uses_the_field(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-omni-anchor");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -9471,8 +9474,12 @@ mod tests {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
         });
         draw_shell(&mut *vc, &baaz);
-        let rest = vc.debug_bounds("browse-omni-list").expect("the dropdown draws");
-        assert!(rest.origin.y < strip_bottom, "vertical anchors under the toolbar");
+        // Vertical tabs (the sidebar layout): the Field overlay carries the
+        // rows over the page (canvas board "Field", 2026-10-11), so no list
+        // draws in the window.
+        assert!(vc.debug_bounds("browse-omni-list").is_none(), "vertical shows the Field overlay, not an in-window list");
+        assert!(vc.update(|_, cx| baaz.read(cx).field_overlay_wanted(cx)), "the Field overlay is wanted");
+        let _ = strip_bottom;
         restore_state(state);
     }
 
