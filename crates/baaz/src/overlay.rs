@@ -226,8 +226,6 @@ impl Harness {
     pub(crate) fn field_overlay_wanted(&self, cx: &App) -> bool {
         self.mode == crate::layout::Mode::Browse
             && self.sidebar_open
-            // Horizontal tabs keep the centre's own toolbar field and list.
-            && self.layout.browser_tabs == crate::layout::BrowserTabs::Vertical
             && !self.settings_open()
             && self.browse_address.is_some()
             && !self.browse_centre_state().is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))

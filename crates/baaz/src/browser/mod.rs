@@ -164,6 +164,25 @@ const BROWSER_NAV_PX: f32 = 38.0;
 /// hangs exactly under the row with no gap.
 pub(crate) const BROWSE_TAB_STRIP_PX: f32 = 34.0;
 
+/// The Browse page card's inset from the centre's top, right and bottom
+/// edges (the sidebar side has none), in pixels: the 1 px hairline sits in
+/// it, the native page inside the hairline.
+pub(crate) const PAGE_CARD_INSET: f32 = 8.0;
+
+/// The native page's rect inside the card for the centre `page` rect:
+/// inset on top, right and bottom, plus the hairline on every side.
+pub(crate) fn page_card_rect(page: Bounds<Pixels>) -> Bounds<Pixels> {
+    let inset = gpui::px(PAGE_CARD_INSET);
+    let hair = gpui::px(1.0);
+    Bounds {
+        origin: Point { x: page.origin.x + hair, y: page.origin.y + inset },
+        size: gpui::size(
+            (page.size.width - inset - hair).max(gpui::px(0.0)),
+            (page.size.height - inset * 2.0).max(gpui::px(0.0)),
+        ),
+    }
+}
+
 /// A person tab mid-drag between tab rows: the sidebar's rows and the
 /// horizontal strip's chips share this one payload, so a drag reorders
 /// from either side.
@@ -173,10 +192,11 @@ pub(crate) struct BrowseTabDrag(pub TabId);
 /// How far the native page hangs below the centre column's top: the
 /// strip's height when horizontal, zero when the tabs live down the
 /// sidebar. Pure, so tests pin the rect without a window.
-pub(crate) fn browse_strip_offset(tabs: crate::layout::BrowserTabs) -> Pixels {
-    match tabs {
-        crate::layout::BrowserTabs::Horizontal => gpui::px(BROWSE_TAB_STRIP_PX),
-        crate::layout::BrowserTabs::Vertical => gpui::px(0.0),
+pub(crate) fn browse_strip_offset(strip: bool) -> Pixels {
+    if strip {
+        gpui::px(BROWSE_TAB_STRIP_PX)
+    } else {
+        gpui::px(0.0)
     }
 }
 
@@ -184,8 +204,8 @@ pub(crate) fn browse_strip_offset(tabs: crate::layout::BrowserTabs) -> Pixels {
 /// centre: under the toolbar's address field in vertical mode, under the
 /// tab strip in horizontal mode — never over the strip. Pure, so tests
 /// pin the anchor without a window.
-pub(crate) fn omnibox_dropdown_top(tabs: crate::layout::BrowserTabs) -> Pixels {
-    gpui::px(6.0) + browse_strip_offset(tabs)
+pub(crate) fn omnibox_dropdown_top(strip: bool) -> Pixels {
+    gpui::px(6.0) + browse_strip_offset(strip)
 }
 
 /// The window's content box in window coordinates. `Window::content_mask`
@@ -501,6 +521,14 @@ impl Harness {
         }
     }
 
+    /// Whether Browse hangs the horizontal tab strip over the page: only with
+    /// the sidebar hidden (the setting's one remaining place). With the
+    /// sidebar open its rows ARE the tabs and the page spans the full
+    /// height (docs/27 v2 cut horizontal tabs; owner note 2026-10-11).
+    pub(crate) fn browse_strip_shown(&self) -> bool {
+        self.layout.browser_tabs == crate::layout::BrowserTabs::Horizontal && !self.sidebar_open
+    }
+
     /// The browser space Browse shows: person tabs are keyed by it, never by
     /// the project (docs/27 §4.2). Before the tab file loads (or in a test
     /// that skips the migration) it reads as Personal.
@@ -813,11 +841,23 @@ impl Harness {
         // B2a-H6: the horizontal strip hangs its gpui row above the page,
         // so the native page hangs below it by the same const — one source
         // for placement and release, never a gap.
-        let strip = browse_strip_offset(self.layout.browser_tabs);
-        Bounds {
+        let strip = browse_strip_offset(self.browse_strip_shown());
+        let page = Bounds {
             origin: Point { x: content.origin.x, y: content.origin.y + strip },
             size: gpui::size(content.size.width, (content.size.height - strip).max(gpui::px(0.))),
+        };
+        if self.browse_page_card() {
+            page_card_rect(page)
+        } else {
+            page
         }
+    }
+
+    /// Whether the Browse page sits in the inset rounded card: Browse with
+    /// the sidebar open (canvas BrowseWindow; owner note 2026-10-11 — a
+    /// square page's corner poked past the window's rounded corner).
+    pub(crate) fn browse_page_card(&self) -> bool {
+        self.mode == crate::layout::Mode::Browse && self.sidebar_open && !self.settings_open() && !self.browse_strip_shown()
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -4282,12 +4322,12 @@ mod tests {
         // row: the centre's top in vertical mode, the strip's bottom in
         // horizontal mode — never over the strip.
         assert_eq!(
-            omnibox_dropdown_top(crate::layout::BrowserTabs::Vertical),
+            omnibox_dropdown_top(false),
             gpui::px(6.0),
             "vertical anchors under the toolbar"
         );
         assert_eq!(
-            omnibox_dropdown_top(crate::layout::BrowserTabs::Horizontal),
+            omnibox_dropdown_top(true),
             gpui::px(6.0 + BROWSE_TAB_STRIP_PX),
             "horizontal anchors under the strip"
         );
