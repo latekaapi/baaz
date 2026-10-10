@@ -270,7 +270,7 @@ a{color:#F5F5F5}a:hover{color:#DEDEDE}
             <span class="ttl"><span style="background: rgba(107,151,255,.32);">New folder</span><span class="caret"></span></span>
           </div>
         </sc-if>
-        <div class="{{tabSel}}"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></span><span class="ttl">State scores 2023-24</span><button class="ib" aria-label="Close tab State scores 2023-24" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+        <div class="{{tabSel}}"><span class="lead"><sc-if value="{{tabLoading}}" hint-placeholder-val="{{false}}"><svg role="img" aria-label="Loading" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#F5F5F5" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6" stroke="rgba(245,245,245,.12)"/><path d="M8 2a6 6 0 0 1 6 6"/></svg></sc-if><sc-if value="{{tabIdle}}" hint-placeholder-val="{{true}}"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></sc-if></span><span class="ttl">State scores 2023-24</span><button class="ib" aria-label="Close tab State scores 2023-24" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
         <div class="{{tabHov}}"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">D</span></span><span class="ttl">Dashboard 2024-25</span><sc-if value="{{hover}}" hint-placeholder-val="{{false}}"><button class="ib" aria-label="Close tab Dashboard 2024-25" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></sc-if></div>
         <div class="row"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></span><span class="ttl">State report cards</span></div>
         <!-- your folder: the project-head row (chevron on the icon axis, name, count), tabs nested one inset -->
@@ -294,7 +294,9 @@ a{color:#F5F5F5}a:hover{color:#DEDEDE}
         <div class="ph"><span class="lead"><span class="dot on"></span></span><span class="name">Browser integration audit</span><span class="br" style="font-family: inherit; font-size: 12px;">reading</span></div>
         <div class="row nest"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">G</span></span><span class="ttl">Pull request #412 · baaz</span></div>
       </sc-if>
-      <!-- spaces: the browser's own, as quiet chips above the footer; ⌃1–9 switch; + names a new one in place -->
+      <!-- spaces: the browser's own, as quiet chips above the footer; ⌃1–9 switch; + names a new one in place.
+           Always under a divider spanning the sidebar edge to edge, like the task pane's (owner 2026-10-11) -->
+      <div style="height: 1px; background: rgba(245,245,245,.12); margin: 0 -8px;"></div>
       <div style="display: flex; gap: 4px; padding: 8px 0 8px; align-items: center;" role="tablist" aria-label="Spaces">
         <span class="space on" role="tab">Personal</span>
         <span class="space" role="tab">Work</span>
@@ -349,7 +351,7 @@ a{color:#F5F5F5}a:hover{color:#DEDEDE}
   </div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["populated","hover","loading","empty","rename","browse","browse-hover","browse-empty","browse-naming","menus"],"default":"populated","section":"State"},"bylines":{"editor":"enum","options":["all","status"],"default":"all","section":"State"},"h":{"editor":"int","default":900,"min":400,"max":1200,"unit":"px","section":"Size"},"rowH":{"editor":"enum","options":[32,36],"default":32,"section":"Ladder"},"fs":{"editor":"enum","options":[13,14],"default":13,"section":"Ladder"},"selW":{"editor":"enum","options":[400,500],"default":400,"section":"Ladder"},"$preview":{"width":256,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["populated","hover","loading","empty","rename","browse","browse-hover","browse-empty","browse-naming","browse-loading","menus"],"default":"populated","section":"State"},"bylines":{"editor":"enum","options":["all","status"],"default":"all","section":"State"},"h":{"editor":"int","default":900,"min":400,"max":1200,"unit":"px","section":"Size"},"rowH":{"editor":"enum","options":[32,36],"default":32,"section":"Ladder"},"fs":{"editor":"enum","options":[13,14],"default":13,"section":"Ladder"},"selW":{"editor":"enum","options":[400,500],"default":400,"section":"Ladder"},"$preview":{"width":256,"height":900}}'>
 class Component extends DCLogic {
   renderVals() {
     const v = this.props.variant ?? 'populated';
@@ -411,6 +413,8 @@ class Component extends DCLogic {
       naming,
       notNaming: !naming,
       tabSel: 'row sel',
+      tabLoading: v === 'browse-loading',
+      tabIdle: v !== 'browse-loading',
       tabHov: bHover ? 'row hov' : 'row',
       showViewMenu: v === 'menus',
       showAccountMenu: v === 'menus',

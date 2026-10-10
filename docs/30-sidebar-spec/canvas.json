@@ -93,9 +93,25 @@
       "w": 1440,
       "h": 900,
       "title": "Browse \u00b7 the Field on the address (\u2318L)"
+    },
+    "NewTab2.dc.html": {
+      "x": 0,
+      "y": 5300,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse \u00b7 new tab v2 \u2014 the Field + pick up (proposal)"
+    },
+    "BrowseFixes.dc.html": {
+      "x": 1520,
+      "y": 5300,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse \u00b7 FF inset card, loading (line + tab spinner), the Field as FF DropdownSearch"
     }
   },
   "order": [
+    "NewTab2.dc.html",
+    "BrowseFixes.dc.html",
     "BrowseStates.dc.html",
     "Menus.dc.html",
     "Field.dc.html",
@@ -130,6 +146,13 @@
       "text": "Browse round \u2014 approved 2026-10-11 and built: folders, task folders, spaces, empty, menus, the Field",
       "kind": "title1",
       "maxW": 4176
+    },
+    "t3": {
+      "x": 0,
+      "y": 5060,
+      "text": "Owner round 2026-10-11 (late) \u2014 new tab redesign for approval; inset card, loader and Field fixes as decided",
+      "kind": "title1",
+      "maxW": 2960
     }
   },
   "designSystems": []

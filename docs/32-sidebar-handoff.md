@@ -1,11 +1,11 @@
 # 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `da7c8a9`. **harness** `feedback-mode` @ `778bba0`. Both trees clean.
+- **agentic-ui** `design-v2` @ `48ba59e`. **harness** `feedback-mode` @ `bd0fa2d` (+ this doc). Both trees clean.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
-- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v25** = the build; repo copy in `docs/30-sidebar-spec/`.
+- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v26** (v25 = the sidebar build; v26 adds NewTab2 for approval + BrowseFixes as built); repo copy in `docs/30-sidebar-spec/`.
 - Gates last run green: `cargo test -p baaz` 1486 · `cargo test -p aui -p aui-webview` 628 · `aui-cef` (own target dir,
   `cd crates/aui-cef && cargo test`) 44 · clippy `-D warnings` on all of them. Gallery clippy has one pre-existing failure
   (`aui-gallery/src/browse/screen.rs:2235`, not ours).
@@ -48,6 +48,31 @@ overlay windows over the page; task folders = status dot + word; horizontal stri
 - A script that opens a page then focuses the address loses the field when the page loads (page-took-keyboard rule) —
   add `wait:` before `omnibox:`.
 - Step verbs added: `folder-new:<name>`, `space-new:<name>`; `tab-menu:<n>` opens the new Browse menu.
+
+## Owner bug round (2026-10-11 late) — four fixed, one waiting on approval
+Screenshots: a double frame round the page card, no divider above Personal, the Field's double top edge
+and empty box, no loader, an undesigned new tab. Owner decisions asked up front: page frame = **FF inset
+card** (8 px, no hairlines); loader = **line + tab spinner**; new tab = **Field + pick-up, redesigned**.
+
+| Fix | Root cause | Commits |
+|---|---|---|
+| Divider above the spaces strip, always | the strip had none; only the task pane drew one | aui c8d1624 |
+| Page card = FF `variant=inset` | card hairline beside the window rim and the sidebar border | aui 33322b4 (`AppShell::inset`), harness f866822 |
+| Field: no empty box, single edge | gpui opens a `PopUp` as a **titled** NSPanel → the window server rims + shadows the whole fixed transparent rect; plus the input's own ring | harness 237bfd7 (`setHasShadow:NO`, 4 px shadow margin, FF `DropdownSearch` row) |
+| Loader | old line lived in the centre header Browse never draws; and the cached sidebar pane re-armed inside the draw, so a quiet window never repainted it until the load ended | aui 48ba59e (`Spinner::fluid`, `BrowseTab.loading`), harness bd0fa2d (card-edge line, `request_animation_frame` on a key change) |
+
+Adaptations written down: the progress line rides the 8 px gap above the card (the native page covers anything
+drawn over it); `Spinner::fluid` turns in 2 s like FF but does not breathe its dash; task-folder tabs keep their
+favicon while loading (the groups key carries no page facts). Seen live in the bundle (scripted runs +
+`screencapture`): no sidebar border, card 8 off the rim, line at 10 % then gone, tab arc spinning then the
+favicon, Field with one edge and nothing below its rows.
+
+**Waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
+left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
+Not reproduced: the "border appears on hover" over the spaces strip (no pointer hover in scripted runs) — the
+always-on divider should make it moot; owner to confirm. Browse right-click menus still carry the native rim
+(their window is exactly menu-sized, so it reads as one edge); same `drop_native_chrome` + margin if wanted.
+The 18-entry probe reports findings on every entry against pre-design-v2 baselines; none of them draws Browse.
 
 ## Still open (known, not yet done)
 - Collapse animation not reviewed frame by frame since the fix — ask for a recording, review with ffmpeg contact sheets.
