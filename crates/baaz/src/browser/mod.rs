@@ -42,6 +42,7 @@ use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
 pub(crate) mod chrome;
+mod sidebar_actions;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
 
@@ -490,9 +491,22 @@ impl Harness {
         }
         self.browser.tabs_loaded = true;
         self.browser.tabs = tabs::load();
-        if self.browser.tabs.migrate_from_overrides(&self.overrides) {
+        let mut changed = self.browser.tabs.migrate_from_overrides(&self.overrides);
+        // Spaces are the browser's own (docs/27 v2): an older file's
+        // per-project person tabs become Personal's folders, once.
+        let projects = &self.projects;
+        changed |= self.browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()));
+        if changed {
             self.schedule_tabs_write(cx);
         }
+    }
+
+    /// The browser space Browse shows: person tabs are keyed by it, never by
+    /// the project (docs/27 §4.2). Before the tab file loads (or in a test
+    /// that skips the migration) it reads as Personal.
+    pub(crate) fn browse_space(&self) -> Option<String> {
+        let current = &self.browser.tabs.current_space;
+        Some(if current.is_empty() { tabs::PERSONAL.to_owned() } else { current.clone() })
     }
 
     /// The space an owner's active tab lives in: the current project for
@@ -500,7 +514,7 @@ impl Harness {
     /// already belongs to one project).
     fn owner_space(&self, owner: &Owner) -> Option<String> {
         match owner {
-            Owner::Person => self.current_project_id(),
+            Owner::Person => self.browse_space(),
             Owner::Session(_) => None,
         }
     }
@@ -521,7 +535,7 @@ impl Harness {
                 .and_then(|right| right.browser_url),
             Owner::Person => None,
         };
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let id = self
             .browser
             .tabs
@@ -739,7 +753,7 @@ impl Harness {
                 return Some(id);
             }
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         self.browser.tabs.active_of(&Owner::Person, space.as_deref())
     }
 
@@ -829,7 +843,7 @@ impl Harness {
     /// particular never steals focus.
     pub(crate) fn ensure_browse_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
-        let space = self.current_project_id();
+        let space = self.browse_space();
         if self.browser.tabs.active_of(&Owner::Person, space.as_deref()).is_none() {
             self.new_browse_sidebar_tab(window, cx);
         }
@@ -842,7 +856,7 @@ impl Harness {
     pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.browser.centre_override = None;
         self.ensure_tabs_loaded(cx);
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
         let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
         self.browse_session_tab = None;
@@ -904,7 +918,7 @@ impl Harness {
             return None;
         }
         self.ensure_tabs_loaded(cx);
-        Some(self.current_project_id())
+        Some(self.browse_space())
     }
 
     /// ⌘W in Browse: while a From-sessions tab shows, stop showing it —
@@ -1403,7 +1417,7 @@ impl Harness {
         } else {
             self.shown_tab_owner(cx)
         };
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let after = self.browser.tabs.active_of(&owner, space.as_deref());
         let id = self.browser.tabs.open(space, owner.clone(), url, after);
         self.schedule_tabs_write(cx);
@@ -1552,7 +1566,7 @@ impl Harness {
             cx.notify();
             return;
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let groups = self.browser.tabs.session_tabs(space.as_deref());
         let n: usize = rest.trim().parse().unwrap_or(0);
         let Some((session, _)) = groups.get(n.saturating_sub(1)).filter(|_| n > 0) else {
@@ -1573,7 +1587,7 @@ impl Harness {
         if n == 0 {
             return None;
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         self.browser.tabs.person_tabs(space.as_deref()).get(n - 1).map(|tab| tab.id)
     }
 
@@ -1702,7 +1716,7 @@ impl Harness {
         // there is honest, and the centre is not showing.
         if self.mode == crate::layout::Mode::Browse
             && tab.owner == Owner::Person
-            && tab.space == self.current_project_id()
+            && tab.space == self.browse_space()
             && self.browser.tabs.person_tabs(tab.space.as_deref()).is_empty()
         {
             self.new_browse_sidebar_tab(window, cx);
@@ -1758,7 +1772,7 @@ impl Harness {
     pub(crate) fn new_blank_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let after = self.browser.tabs.active_of(&owner, space.as_deref());
         let id = self.browser.tabs.open(space, owner, BLANK, after);
         self.schedule_tabs_write(cx);
@@ -3429,7 +3443,7 @@ impl Harness {
         if query.trim().is_empty() || !self.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let mut tabs: Vec<(TabId, String, String, u64)> = self
             .browser
             .tabs
@@ -3582,7 +3596,7 @@ impl Harness {
     /// not somewhere to pick up), then its recent sessions, then recently
     /// closed tabs — capped at 5.
     pub(crate) fn browse_pickup_full(&self) -> Vec<(toolbar::PickupRow, PickupTarget)> {
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let project_name = self.current_project().map(|project| project.name.clone()).unwrap_or_default();
         let tab_items: Vec<(TabId, String, String)> = if self.browser.tabs_loaded {
             self.browser
@@ -3806,13 +3820,13 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         if !self.sessions.iter().any(|entry| entry.id == id) {
             let now = chrono::Local::now();
-            let space = self.current_project_id();
+            let space = self.browse_space();
             let workspace =
                 self.current_project().map(|project| project.root.to_string_lossy().into_owned());
             self.sessions.push(crate::sidebar::local_started_row(&id, name.to_owned(), space.clone(), workspace, now));
             self.invalidate_list();
         }
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let tab_id = self.browser.tabs.open(space, Owner::Session(id), "https://example.com", None);
         self.schedule_tabs_write(cx);
         self.ensure_tab_page(HOME_KEY, tab_id, window, cx);
@@ -4927,7 +4941,7 @@ mod tests {
         let count = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| {
                 let harness = baaz.read(cx);
-                let space = harness.current_project_id();
+                let space = harness.browse_space();
                 harness.browser.tabs.person_tabs(space.as_deref()).len()
             })
         };

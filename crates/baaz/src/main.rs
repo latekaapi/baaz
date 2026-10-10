@@ -62,6 +62,7 @@ mod layout;
 mod log;
 mod login;
 mod mascot;
+mod overlay;
 mod overlays;
 mod plan;
 mod project_menu;

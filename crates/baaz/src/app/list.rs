@@ -534,6 +534,66 @@ impl Harness {
         cx.notify();
     }
 
+    /// The view menu's Group by submenu: persist `group` and regroup (a
+    /// no-op when it already is the grouping).
+    pub(crate) fn set_group_by(&mut self, group: crate::layout::GroupBy, cx: &mut Context<Self>) {
+        if self.effective_group_by() != group {
+            self.toggle_group_by(cx);
+        }
+    }
+
+    /// The view menu's Sort by submenu: persist the order and regroup.
+    pub(crate) fn set_sort_by(&mut self, order: crate::layout::SortBy, cx: &mut Context<Self>) {
+        if self.layout.sort_by == order {
+            return;
+        }
+        self.layout.sort_by = order;
+        layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// The view menu's "Clear empty sessions": hide every session with no
+    /// turns as one undoable batch, so Undo restores exactly what this hid.
+    ///
+    /// The open session is excluded here, not by [`SessionEntry::is_empty`]:
+    /// `hidden` is a sticky, explicit flag with no auto-clear on activity, so
+    /// sweeping a person's live draft would hide it permanently, past its
+    /// first send. Provisional rows (turn count unknown) and provider-lane
+    /// rows (turns live in the local record) are never swept either.
+    pub(crate) fn clear_empty(&mut self, cx: &mut Context<Self>) {
+        let active = self.active_id(cx);
+        let cleared: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| {
+                !entry.hidden
+                    && !entry.archived
+                    && !entry.provisional
+                    && entry.provider.is_none()
+                    && entry.is_empty()
+                    && !active.as_deref().is_some_and(|id| id == entry.id)
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        if cleared.is_empty() {
+            self.overlays.update(cx, |overlays, _| overlays.toast("No empty sessions", "Every listed session has at least one turn."));
+            return;
+        }
+        let n = cleared.len();
+        self.hide_batch(
+            cleared,
+            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
+            "They are still on disk; Muse keeps its own list.",
+            cx,
+        );
+    }
+
+    /// How many listed sessions are hidden: the view menu's Show hidden count.
+    pub(crate) fn hidden_count(&self) -> usize {
+        self.sessions.iter().filter(|entry| entry.hidden && !entry.archived).count()
+    }
+
     /// Flip a group's disclosure: its id moves in or out of
     /// `closed_groups` and the layout is written. Every group, the unfiled
     /// one included, reads that set the same way.

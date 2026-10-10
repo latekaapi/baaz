@@ -55,6 +55,8 @@ pub struct SessionEntry {
     pub label: String,
     /// Last activity, as a local time.
     pub updated: DateTime<Local>,
+    /// When the session was created: the Sort by "Created" key.
+    pub created: DateTime<Local>,
     /// Whether this host reports the session as running.
     pub running: bool,
     /// Completed turns, shown on the meta line.
@@ -273,6 +275,7 @@ impl SessionEntry {
             id: session.session_id.clone(),
             label: one_line(text),
             updated: activity_time(session),
+            created: parse_time(&session.created_at),
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             // A destination's wire count includes its hidden pack
             // exchange; the row matches the transcript (§8.4).
@@ -388,6 +391,7 @@ impl SessionEntry {
             id: session_id.to_owned(),
             label: one_line(text),
             updated,
+            created: updated,
             running: false,
             turns: 0,
             hidden: meta.is_some_and(|m| m.hidden) || side_marker,
@@ -471,6 +475,7 @@ impl SessionEntry {
             id: record.session_id.clone(),
             label: one_line(text),
             updated,
+            created: updated,
             running: false,
             // A destination's record counts its hidden pack
             // acknowledgement; the row matches the transcript (§8.4). A
@@ -539,6 +544,7 @@ impl SessionEntry {
             id: session_id.to_owned(),
             label,
             updated: crate::clock::now_local(),
+            created: crate::clock::now_local(),
             running: false,
             turns: 0,
             hidden: side_marker,
@@ -905,6 +911,7 @@ pub fn local_started_row(
         id: session_id.to_owned(),
         label,
         updated,
+        created: updated,
         running: true,
         turns: 0,
         hidden: false,
@@ -1538,6 +1545,17 @@ pub struct GroupView<'a> {
 /// `entries` arrive already filtered: the empty/hidden/archived filters hide
 /// rows, never groups.
 ///
+/// Orders a group's rows: pinned first, then by `order` — latest activity,
+/// newest created, or title (case-insensitive, ties by activity).
+pub fn sort_rows<E: std::borrow::Borrow<SessionEntry>>(rows: &mut [E], order: crate::layout::SortBy) {
+    use crate::layout::SortBy;
+    match order {
+        SortBy::Recent => rows.sort_by_key(|e| (!e.borrow().pinned, std::cmp::Reverse(e.borrow().updated))),
+        SortBy::Created => rows.sort_by_key(|e| (!e.borrow().pinned, std::cmp::Reverse(e.borrow().created))),
+        SortBy::Name => rows.sort_by_cached_key(|e| (!e.borrow().pinned, e.borrow().label.to_lowercase(), std::cmp::Reverse(e.borrow().updated))),
+    }
+}
+
 /// A project group shows its pinned rows, then the [`VISIBLE_RECENT`] most
 /// recent others; the rest are held back and the group is
 /// [folded](aui::nav::ProjectGroup::folded) until its id lands in `expanded`.
@@ -1587,7 +1605,7 @@ pub fn grouping_by_project(
     // back when the path does.
     for project in projects.sorted_available() {
         let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
-        rows.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
+        sort_rows(&mut rows, layout.sort_by);
         // Pinned rows always show and never count toward the five; the open
         // session appends past the cut when it would otherwise be held back.
         // The walk is in group order, so the rescued row keeps its place.
@@ -1656,7 +1674,7 @@ pub fn grouping_by_project(
         groups.push(group);
     }
     if !other.is_empty() {
-        other.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
+        sort_rows(&mut other, layout.sort_by);
         let sessions: Vec<SessionSummary> = other
             .iter()
             .map(|e| {
@@ -2780,6 +2798,7 @@ mod tests {
             id: id.to_owned(),
             label: "x".into(),
             updated: Local::now(),
+            created: Local::now(),
             running: false,
             turns: 0,
             hidden: false,

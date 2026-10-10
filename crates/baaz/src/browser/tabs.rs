@@ -78,12 +78,48 @@ pub(crate) struct Tab {
     /// ([`now_ms`]); `None` for a tab never shown yet. Drives discard.
     #[serde(default)]
     pub last_shown: Option<u64>,
+    /// The folder this tab sits in (one of the person's own folders in its
+    /// space), or none (Today).
+    #[serde(default)]
+    pub folder: Option<String>,
     /// A background tab holds a permission ask: the sidebar draws its
     /// "needs you" dot until the tab is shown (B2a-H5). Live state, never
     /// persisted: a relaunch starts with no dots.
     #[serde(skip)]
     pub needs_attention: bool,
 }
+
+/// One browser space (docs/27 §4.2): the browser's own set of tabs with
+/// its own pins and folders — Personal, Work, a trip. Projects are not
+/// spaces; a session's tabs show in every space as a task folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Space {
+    /// Stable id (`space-<n>`; the first one is [`PERSONAL`]).
+    pub id: String,
+    /// The chip's label.
+    pub name: String,
+}
+
+/// One of the person's own folders, inside one space.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Folder {
+    /// Stable id (`folder-<n>`), never the name: two folders may share one.
+    pub id: String,
+    /// The space it lives in.
+    pub space: String,
+    /// The visible name.
+    pub name: String,
+    /// Whether its tabs show.
+    #[serde(default = "folder_open_default")]
+    pub open: bool,
+}
+
+fn folder_open_default() -> bool {
+    true
+}
+
+/// The first space's id: every person tab lands here on migration.
+pub(crate) const PERSONAL: &str = "personal";
 
 /// How many closed tabs [`Tabs::closed`] keeps for reopen.
 pub(crate) const CLOSED_CAP: usize = 20;
@@ -123,6 +159,19 @@ pub(crate) struct Tabs {
     /// resurrects from a stale `browser_url`.
     #[serde(default)]
     pub migrated: Vec<String>,
+    /// The browser's spaces, in chip order. Empty until
+    /// [`Tabs::ensure_spaces`] migrates an older file.
+    #[serde(default)]
+    pub spaces: Vec<Space>,
+    /// The space Browse shows.
+    #[serde(default)]
+    pub current_space: String,
+    /// The person's folders, in every space, in list order.
+    #[serde(default)]
+    pub folders: Vec<Folder>,
+    /// The next folder / space number to hand out.
+    #[serde(default)]
+    pub next_group: u64,
     /// The model generation: bumped on every mutation (open, close,
     /// activate, pin, reorder, retitle), so the cached sidebar keys the
     /// Browse fingerprints on this counter plus row state instead of
@@ -142,6 +191,10 @@ impl PartialEq for Tabs {
             && self.next_id == other.next_id
             && self.closed == other.closed
             && self.migrated == other.migrated
+            && self.spaces == other.spaces
+            && self.current_space == other.current_space
+            && self.folders == other.folders
+            && self.next_group == other.next_group
     }
 }
 
@@ -173,6 +226,7 @@ impl Tabs {
             title: url.to_owned(),
             pinned: false,
             last_shown: None,
+            folder: None,
             needs_attention: false,
         };
         let at = after
@@ -339,7 +393,9 @@ impl Tabs {
             let Owner::Session(session) = &tab.owner else {
                 continue;
             };
-            if tab.space.as_deref() != space {
+            // Task folders show in every space (docs/27 §4.3); `space`
+            // narrows only when a caller still asks per project.
+            if space.is_some_and(|space| tab.space.as_deref() != Some(space)) {
                 continue;
             }
             match groups.iter_mut().find(|(id, _)| id == session) {
@@ -552,6 +608,185 @@ impl Tabs {
 
     /// Give every session with a stored `browser_url` and no tabs yet one
     /// session tab with that URL (space from the session's project).
+    /// Give an older file its spaces (owner decision 2026-10-11): one space,
+    /// "Personal", becomes current; every person tab moves into it, and the
+    /// tabs that belonged to a project go into a folder named after that
+    /// project (`project_name` resolves the id; unknown ids keep the id).
+    /// Each project's remembered active tab carries over as Personal's when
+    /// Personal has none yet. Answers whether anything changed; idempotent.
+    pub(crate) fn ensure_spaces(&mut self, project_name: impl Fn(&str) -> Option<String>) -> bool {
+        if !self.spaces.is_empty() {
+            if !self.spaces.iter().any(|space| space.id == self.current_space) {
+                self.current_space = self.spaces[0].id.clone();
+                return true;
+            }
+            return false;
+        }
+        self.spaces.push(Space { id: PERSONAL.to_owned(), name: "Personal".to_owned() });
+        self.current_space = PERSONAL.to_owned();
+        let mut folder_of: HashMap<String, String> = HashMap::new();
+        let mut moved_active: Option<TabId> = None;
+        let projects: Vec<Option<String>> =
+            self.tabs.iter().filter(|tab| tab.owner == Owner::Person).map(|tab| tab.space.clone()).collect();
+        for project in projects.iter().flatten() {
+            if folder_of.contains_key(project) {
+                continue;
+            }
+            let id = self.next_group_id("folder");
+            let name = project_name(project).unwrap_or_else(|| project.clone());
+            self.folders.push(Folder { id: id.clone(), space: PERSONAL.to_owned(), name, open: true });
+            folder_of.insert(project.clone(), id);
+        }
+        for tab in self.tabs.iter_mut().filter(|tab| tab.owner == Owner::Person) {
+            let old_key = active_key(&Owner::Person, tab.space.as_deref());
+            if moved_active.is_none() && self.active.get(&old_key) == Some(&tab.id) {
+                moved_active = Some(tab.id);
+            }
+            tab.folder = tab.space.as_ref().and_then(|project| folder_of.get(project).cloned());
+            tab.space = Some(PERSONAL.to_owned());
+        }
+        self.active.retain(|key, _| !key.starts_with("person:"));
+        if let Some(id) = moved_active {
+            self.active.insert(active_key(&Owner::Person, Some(PERSONAL)), id);
+        }
+        self.bump();
+        true
+    }
+
+    fn next_group_id(&mut self, kind: &str) -> String {
+        self.next_group += 1;
+        format!("{kind}-{}", self.next_group)
+    }
+
+    /// The person's folders in `space`, in list order.
+    pub(crate) fn folders_in(&self, space: &str) -> Vec<&Folder> {
+        self.folders.iter().filter(|folder| folder.space == space).collect()
+    }
+
+    /// A new folder in `space`, first in its list; answers its id.
+    pub(crate) fn add_folder(&mut self, space: &str, name: &str) -> String {
+        let id = self.next_group_id("folder");
+        let at = self.folders.iter().position(|folder| folder.space == space).unwrap_or(self.folders.len());
+        self.folders.insert(at, Folder { id: id.clone(), space: space.to_owned(), name: name.to_owned(), open: true });
+        self.bump();
+        id
+    }
+
+    /// Rename a folder; a blank name keeps the old one. False when unknown.
+    pub(crate) fn rename_folder(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        match self.folders.iter_mut().find(|folder| folder.id == id) {
+            Some(folder) if !name.is_empty() => {
+                folder.name = name.to_owned();
+                self.bump();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Delete a folder: its tabs move up into Today. False when unknown.
+    pub(crate) fn delete_folder(&mut self, id: &str) -> bool {
+        let Some(index) = self.folders.iter().position(|folder| folder.id == id) else {
+            return false;
+        };
+        self.folders.remove(index);
+        for tab in self.tabs.iter_mut().filter(|tab| tab.folder.as_deref() == Some(id)) {
+            tab.folder = None;
+        }
+        self.bump();
+        true
+    }
+
+    /// Open or close a folder. False when unknown.
+    pub(crate) fn toggle_folder(&mut self, id: &str) -> bool {
+        match self.folders.iter_mut().find(|folder| folder.id == id) {
+            Some(folder) => {
+                folder.open = !folder.open;
+                self.bump();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put a tab into a folder (or back into Today with `None`). False when
+    /// the tab or the folder is unknown.
+    pub(crate) fn set_folder(&mut self, tab: TabId, folder: Option<&str>) -> bool {
+        if folder.is_some_and(|id| !self.folders.iter().any(|f| f.id == id)) {
+            return false;
+        }
+        match self.tabs.iter_mut().find(|t| t.id == tab) {
+            Some(t) => {
+                t.folder = folder.map(str::to_owned);
+                self.bump();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The person's tab ids in `space` inside `folder` (`None` = every one).
+    pub(crate) fn person_ids_in(&self, space: &str, folder: Option<&str>) -> Vec<TabId> {
+        self.ordered_tabs(&Owner::Person, Some(space))
+            .iter()
+            .filter(|tab| folder.is_none_or(|folder| tab.folder.as_deref() == Some(folder)))
+            .map(|tab| tab.id)
+            .collect()
+    }
+
+    /// A new space after the others, made current; answers its id. A blank
+    /// name reads "Space N".
+    pub(crate) fn add_space(&mut self, name: &str) -> String {
+        let id = self.next_group_id("space");
+        let name = if name.trim().is_empty() { format!("Space {}", self.spaces.len() + 1) } else { name.trim().to_owned() };
+        self.spaces.push(Space { id: id.clone(), name });
+        self.current_space = id.clone();
+        self.bump();
+        id
+    }
+
+    /// Rename a space; a blank name keeps the old one.
+    pub(crate) fn rename_space(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        match self.spaces.iter_mut().find(|space| space.id == id) {
+            Some(space) if !name.is_empty() => {
+                space.name = name.to_owned();
+                self.bump();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Make `id` the current space. False when unknown or already current.
+    pub(crate) fn switch_space(&mut self, id: &str) -> bool {
+        if self.current_space == id || !self.spaces.iter().any(|space| space.id == id) {
+            return false;
+        }
+        self.current_space = id.to_owned();
+        self.bump();
+        true
+    }
+
+    /// Delete a space with its folders, answering the person tabs it held
+    /// (the caller closes their pages). The last space is never deleted;
+    /// deleting the current one moves to the first remaining.
+    pub(crate) fn delete_space(&mut self, id: &str) -> Option<Vec<TabId>> {
+        if self.spaces.len() < 2 {
+            return None;
+        }
+        let index = self.spaces.iter().position(|space| space.id == id)?;
+        self.spaces.remove(index);
+        self.folders.retain(|folder| folder.space != id);
+        let held = self.person_ids_in(id, None);
+        if self.current_space == id {
+            self.current_space = self.spaces[0].id.clone();
+        }
+        self.bump();
+        Some(held)
+    }
+
     /// Answers whether any tab was created; the caller persists on true.
     /// Each session migrates only once ([`Tabs::migrated`]): a session
     /// whose last tab closed stays closed instead of resurrecting from a

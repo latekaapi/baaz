@@ -682,7 +682,7 @@ impl Harness {
         self.close_settings(cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.ensure_tabs_loaded(cx);
-        let space = self.current_project_id();
+        let space = self.browse_space();
         let existing = self
             .browser
             .tabs

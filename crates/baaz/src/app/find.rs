@@ -27,6 +27,15 @@ impl Harness {
         cx.notify();
     }
 
+    /// The view menu's "Search all projects": flip the scope the next query
+    /// reads, persist it, and re-run an open palette.
+    pub(crate) fn toggle_search_scope(&mut self, cx: &mut Context<Self>) {
+        self.layout.search_all_projects = !self.layout.search_all_projects;
+        layout::write(&self.layout);
+        self.refresh_search(cx);
+        cx.notify();
+    }
+
     /// Re-query `search.db` off the UI thread, latest keystroke wins.
     ///
     /// A no-op unless the search palette is open: typing anywhere else must
