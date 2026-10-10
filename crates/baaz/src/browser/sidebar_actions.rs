@@ -244,16 +244,39 @@ impl Harness {
                 self.start_browse_naming(BrowseNaming::Space(Some(space.to_owned().into())), &name, window, cx);
             }
             SpaceAction::Delete => {
-                let was_current = self.browser.tabs.current_space == space;
-                if let Some(held) = self.browser.tabs.delete_space(space) {
-                    for id in held {
-                        self.close_tab(HOME_KEY, id, window, cx);
-                    }
-                    self.schedule_tabs_write(cx);
-                    if was_current {
-                        self.ensure_browse_tab(window, cx);
-                    }
+                let space_tabs = self.browser.tabs.person_ids_in(space, None).len();
+                if space_tabs == 0 {
+                    self.delete_space_now(space, window, cx);
+                } else {
+                    let name = self.browser.tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
+                    self.set_dialog(
+                        cx,
+                        crate::overlays::Dialog {
+                            title: format!("Delete \"{name}\"?"),
+                            detail: format!("Its {space_tabs} tab{} close and its folders go with it.", if space_tabs == 1 { "" } else { "s" }),
+                            kind: aui::overlay::DialogKind::Warning,
+                            primary: "Delete space",
+                            action: crate::overlays::DialogAction::DeleteSpace,
+                            archive_target: Some(space.to_owned()),
+                        },
+                    );
                 }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Delete a space now (confirmed, or empty): close the pages it held and
+    /// show the space that becomes current. The last space never goes.
+    pub(crate) fn delete_space_now(&mut self, space: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_current = self.browser.tabs.current_space == space;
+        if let Some(held) = self.browser.tabs.delete_space(space) {
+            for id in held {
+                self.close_tab(HOME_KEY, id, window, cx);
+            }
+            self.schedule_tabs_write(cx);
+            if was_current {
+                self.ensure_browse_tab(window, cx);
             }
         }
         cx.notify();

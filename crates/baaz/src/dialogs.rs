@@ -1087,7 +1087,8 @@ impl Harness {
                 || modal.action == DialogAction::RemoveProject
                 || modal.action == DialogAction::QuitWithRunningTerminal
                 || modal.action == DialogAction::CloseTerminalTab
-                || modal.action == DialogAction::ProviderSignOut;
+                || modal.action == DialogAction::ProviderSignOut
+                || modal.action == DialogAction::DeleteSpace;
             (
                 modal.title.clone(),
                 modal.detail.clone(),
@@ -1130,6 +1131,15 @@ impl Harness {
             }
             if action == DialogAction::RemoveProject {
                 this.confirm_remove_project(cx);
+                return;
+            }
+            // The space id rode the dialog: confirming deletes it and closes
+            // its tabs; closing any other way keeps everything.
+            if action == DialogAction::DeleteSpace {
+                this.close_dialog(cx);
+                if let Some(space) = target.as_deref() {
+                    this.delete_space_now(space, window, cx);
+                }
                 return;
             }
             // Confirmed through its own path, like Archive: the tab id rode
@@ -1176,6 +1186,8 @@ impl Harness {
                 DialogAction::ProviderSignOut => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::MigrateSessions => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::DeleteSpace => {}
             }
             cx.notify();
         });

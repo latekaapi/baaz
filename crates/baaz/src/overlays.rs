@@ -66,6 +66,9 @@ pub enum DialogAction {
     /// real CLI logout, confirmed first. Dismissing any other way signs
     /// out nothing.
     ProviderSignOut,
+    /// Delete the browser space in `archive_target` and close the tabs it
+    /// holds (the space-chip menu asks first when it has any).
+    DeleteSpace,
     /// Move Baaz's own provider sessions into Baaz's homes (B4M): the
     /// one-time prompt's Move. The plan runs through the journaling
     /// executor; dismissing any other way moves nothing.

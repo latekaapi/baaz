@@ -68,7 +68,7 @@ use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, 
 use aui_icons::{icon, IconName, Provider};
 use aui_motion::{SpringKind, spring_phase, spring_px};
 use aui_terminal::{terminal_grid, TerminalGridIntent};
-use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
+use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme, Density, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -260,6 +260,9 @@ pub(crate) const SETTINGS_CONTEXT: &str = "HarnessSettings";
 /// The key context the sidebar's inline rename field wears, so Enter commits
 /// the name instead of reaching the composer's send.
 pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
+
+/// The new-tab page's Field width (canvas NewTab board): 560.
+const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
 
 /// The context the composer holder wears, so Enter reaches [`SendTurn`] instead
 /// of the textarea. Shift+Enter matches no binding and falls through to the
@@ -1103,6 +1106,8 @@ pub struct Harness {
     pub(crate) menu_dismissed: Option<(crate::overlays::MenuKind, std::time::Instant)>,
     /// The overlay window over the native page (Browse menus), when open.
     pub(crate) overlay: Option<crate::overlay::Overlay>,
+    /// An overlay being opened (its task is in flight), as (kind, bounds).
+    pub(crate) overlay_pending: Option<(crate::overlay::OverlayKind, gpui::Bounds<gpui::Pixels>)>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
@@ -1614,6 +1619,7 @@ impl Harness {
             browse_naming: None,
             menu_dismissed: None,
             overlay: None,
+            overlay_pending: None,
             main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
@@ -5954,39 +5960,39 @@ impl Harness {
     /// from this project's open tabs, recent sessions and closed tabs.
     fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
+        let metrics = cx.aui().metrics;
         let editing = self.browse_address.is_some();
+        // The canvas NewTab board: the Field inline on FF's composer chrome
+        // (`input-message.tsx`: surface + shadow, container radius, 8 px
+        // around, subtitle text; the focus edge is the foreground at 20 %).
+        let field_w = px(NEWTAB_FIELD_W);
+        let shell = |editing: bool| {
+            aui::interact::Shape::Container.rounded(
+                h_flex()
+                    .w(field_w)
+                    .p(metrics.item_px)
+                    .gap(metrics.gap)
+                    .items_center()
+                    .bg(p.surface(3))
+                    .border_1()
+                    .border_color(if editing { p.fg.alpha(0.2) } else { p.line })
+                    .text_role_in(TextRole::Subtitle, Density::Standard)
+                    .child(div().flex_none().pl(px(scale::SP_1)).child(icon(IconName::Search).size(metrics.icon).color(p.fg_muted))),
+            )
+        };
         let field: AnyElement = if editing {
-            div()
-                .w(px(480.0))
-                .h(px(40.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .rounded(px(scale::R_MD))
-                .bg(p.surface_2)
-                .ui(scale::FS_14)
-                .child(self.browse_address_input(window, cx))
-                .into_any_element()
+            shell(true).child(self.browse_address_input(window, cx)).into_any_element()
         } else {
             let focus = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.focus_browse_address_with("", window, cx);
             });
             div()
                 .id("browse-newtab-field")
-                .w(px(480.0))
-                .h(px(40.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .rounded(px(scale::R_MD))
-                .bg(p.surface_2)
-                .text_color(p.ink_3)
-                .ui(scale::FS_14)
                 .cursor_pointer()
                 .role(gpui::Role::Button)
-                .aria_label("New tab. Search, open a page, or ask")
+                .aria_label("New tab. Search or type a URL")
                 .on_click(focus)
-                .child("Search, open a page, or ask")
+                .child(shell(false).text_color(p.fg_muted).child("Search or type a URL"))
                 .into_any_element()
         };
         let mut column = v_flex()
@@ -5998,7 +6004,7 @@ impl Harness {
             .role(gpui::Role::Group)
             .aria_label("New tab")
             .child(field)
-            .child(div().ui(scale::FS_12).text_color(p.ink_3).child("⌘↵ ask"));
+            .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("Type to switch tabs, search, or ask Claude · ⌘↵ asks"));
         // The new-tab field's own dropdown, anchored under the centred
         // field (the toolbar's anchors under the toolbar instead).
         if let Some(list) = self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Newtab) {
@@ -6127,9 +6133,7 @@ impl Harness {
                 .left(px(12.0))
                 .right(px(12.0))
                 .into_any_element(),
-            crate::browser::OmniAnchor::Newtab => {
-                list.w(px(480.0)).into_any_element()
-            }
+            crate::browser::OmniAnchor::Newtab => list.w(px(NEWTAB_FIELD_W)).into_any_element(),
         })
     }
 
@@ -6143,15 +6147,18 @@ impl Harness {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
+        let metrics = cx.aui().metrics;
         let selected = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
+        // FF's dropdown chrome (`dropdown.tsx`): the popup surface, a 4 px
+        // inset, 36 px rows on the item radius lit by the hover overlay,
+        // Caption group labels — the same rows the Field overlay draws.
         let mut list = v_flex()
             .id("browse-omni-list")
             .debug_selector(|| "browse-omni-list".into())
-            .py(px(4.0))
-            .rounded(px(scale::R_MD))
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
+            .p(metrics.item_px / 2.0)
+            .rounded(px(scale::SHAPE_CONTAINER))
+            .bg(p.surface(3))
+            .shadow(p.floating_shadow())
             .role(gpui::Role::ListBox)
             .aria_label("Address suggestions");
         let mut last_kind: Option<crate::browser::SuggestKind> = None;
@@ -6172,7 +6179,7 @@ impl Harness {
             };
             if let Some(header) = header {
                 list = list.child(
-                    div().px(px(10.0)).pt(px(4.0)).ui(scale::FS_11).text_color(p.ink_3).child(header),
+                    div().h(metrics.control_md).px(metrics.item_px).flex().items_center().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(header),
                 );
             }
             last_kind = Some(row.suggestion.kind);
@@ -6187,26 +6194,26 @@ impl Harness {
             let activate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.activate_omnibox_row(index, window, cx);
             });
+            let lit = index == selected;
             let mut item = h_flex()
                 .w_full()
                 .items_center()
-                .gap(px(8.0))
-                .px(px(10.0))
-                .h(px(28.0))
-                .ui(scale::FS_13)
+                .gap(metrics.gap)
+                .px(metrics.item_px)
+                .h(metrics.control)
+                .rounded(px(scale::SHAPE_ITEM))
+                .when(lit, |d| d.bg(p.hover_overlay()))
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_color(p.ink)
+                        .text_role_in(TextRole::Body, Density::Standard)
+                        .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(row.suggestion.title.clone()),
                 );
             if !row.suggestion.hint.is_empty() {
-                item = item.child(div().flex_none().text_color(p.ink_3).child(row.suggestion.hint.clone()));
-            }
-            if index == selected {
-                item = item.bg(p.surface_3);
+                item = item.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(row.suggestion.hint.clone()));
             }
             list = list.child(
                 div()

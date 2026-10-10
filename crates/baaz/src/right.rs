@@ -715,9 +715,10 @@ impl Harness {
     }
 
     /// Start previewing `id` for `root` from a click or a step verb: the
-    /// selection and the loading (or card) state land at once, and a text
-    /// file's bytes follow on a background task. Never blocks the UI
-    /// thread on file content — only on one metadata call.
+    /// selection and the loading state land at once; the file's metadata
+    /// and bytes follow on one background task (gone, folder, too large or
+    /// the text). Never touches the filesystem on the UI thread — a session
+    /// open that restores a preview used to stat here.
     pub(crate) fn begin_file_preview_for(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
         self.begin_file_preview_for_line(root, id, None, cx);
     }
@@ -731,23 +732,18 @@ impl Harness {
         highlight: Option<std::ops::Range<u32>>,
         cx: &mut Context<Self>,
     ) {
-        if !begin_file_preview_highlight(&mut self.right_cache, root, id, highlight) {
-            self.save_right_for_active(cx);
-            cx.notify();
-            return;
-        }
+        mark_file_preview_loading(&mut self.right_cache, root, id, highlight);
         self.save_right_for_active(cx);
         cx.notify();
         let root = root.to_path_buf();
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let path = root.join(&id);
-            let bytes = cx
-                .background_executor()
-                .spawn(async move { std::fs::read(path).ok() })
-                .await;
+            let probe = cx.background_executor().spawn(async move { probe_file_preview(&path) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                complete_file_preview(&mut this.right_cache, &root, &id, bytes);
+                if land_file_preview(&mut this.right_cache, &root, &id, probe) {
+                    this.save_right_for_active(cx);
+                }
                 cx.notify();
             });
         })
@@ -1981,6 +1977,84 @@ pub(crate) fn begin_file_preview_highlight(
         },
     );
     true
+}
+
+/// What a background probe of a preview path found (see
+/// [`probe_file_preview`]).
+#[derive(Debug)]
+pub(crate) enum PreviewProbe {
+    /// Nothing there.
+    Gone,
+    /// A folder.
+    Dir,
+    /// A file past [`PREVIEW_MAX_BYTES`].
+    TooLarge(u64, Option<std::time::SystemTime>),
+    /// A file, its size, mtime and bytes (`None` = the read failed).
+    File(u64, Option<std::time::SystemTime>, Option<Vec<u8>>),
+}
+
+/// The filesystem half of a preview, run off the UI thread: metadata, then
+/// the bytes when the file is small enough.
+pub(crate) fn probe_file_preview(path: &Path) -> PreviewProbe {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return PreviewProbe::Gone;
+    };
+    if meta.is_dir() {
+        return PreviewProbe::Dir;
+    }
+    let size = meta.len();
+    let mtime = meta.modified().ok();
+    if size > PREVIEW_MAX_BYTES {
+        return PreviewProbe::TooLarge(size, mtime);
+    }
+    PreviewProbe::File(size, mtime, std::fs::read(path).ok())
+}
+
+/// Select `id` and show it loading, touching no file: the UI-thread half of
+/// a preview open.
+pub(crate) fn mark_file_preview_loading(cache: &mut RightCache, root: &Path, id: &str, highlight: Option<std::ops::Range<u32>>) {
+    cache.text_doc = None;
+    let name = id.rsplit('/').next().unwrap_or(id).to_string();
+    cache.selected.insert(root.to_path_buf(), id.to_string());
+    cache.previews.insert(
+        root.to_path_buf(),
+        FilePreview { path: id.to_string(), name, language: preview_language(id), highlight, size: 0, mtime: None, content: PreviewContent::Loading },
+    );
+}
+
+/// Land a [`probe_file_preview`] for the preview [`mark_file_preview_loading`]
+/// started: the gone or too-large card, a folder's expand (the preview
+/// closes), or the bytes. A stale landing (the selection moved on) changes
+/// nothing. Returns whether the pane changed.
+pub(crate) fn land_file_preview(cache: &mut RightCache, root: &Path, id: &str, probe: PreviewProbe) -> bool {
+    let Some(current) = cache.previews.get_mut(root) else {
+        return false;
+    };
+    if current.path != id || current.content != PreviewContent::Loading {
+        return false;
+    }
+    match probe {
+        PreviewProbe::Gone => {
+            current.content = PreviewContent::Card { meta: "The file is gone — it may have been moved or deleted.".into() };
+            true
+        }
+        PreviewProbe::Dir => {
+            cache.previews.remove(root);
+            toggle_expanded(cache, root, id);
+            true
+        }
+        PreviewProbe::TooLarge(size, mtime) => {
+            current.size = size;
+            current.mtime = mtime;
+            current.content = PreviewContent::Card { meta: format!("{} — too large to preview", friendly_size(size)) };
+            true
+        }
+        PreviewProbe::File(size, mtime, bytes) => {
+            current.size = size;
+            current.mtime = mtime;
+            complete_file_preview(cache, root, id, bytes)
+        }
+    }
 }
 
 /// Land a background read started by [`begin_file_preview`]: `None` is a
