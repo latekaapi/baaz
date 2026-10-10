@@ -31,7 +31,7 @@ pub(crate) struct ListCache {
     /// The sorted visible rows for that key.
     visible: Rc<Vec<SessionEntry>>,
     /// The grouping of those rows, and the minute its elapsed tags read.
-    grouping: Option<(i64, Rc<sidebar::Grouping>)>,
+    grouping: Option<(i64, Rc<sidebar::Grouping>, Rc<Vec<aui::nav::SessionSummary>>)>,
 }
 
 impl Harness {
@@ -98,7 +98,7 @@ impl Harness {
     }
 
     /// `/name`, and the row's inline field: rename the active session.
-    pub(super) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
         let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
         self.set_override(&session_id, |meta| meta.name = name, cx);
         self.renaming = None;
@@ -193,51 +193,6 @@ impl Harness {
             UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
             UndoBatch::Archived(ids) => self.set_overrides(&ids, |meta| meta.archived = false, cx),
         }
-    }
-
-    /// "Clear empty": hide every session with no turns, with a way back for
-    /// eight seconds. Rows already hidden, archived rows, and the open
-    /// session — none of which Clear must ever sweep — stay out of the
-    /// batch, so Undo restores exactly what this hid and nothing it did not.
-    ///
-    /// The open session is excluded here, not by [`SessionEntry::is_empty`]
-    /// (which no longer exempts it — v0.1 prep task 3): `hidden` is a sticky,
-    /// explicit flag with no auto-clear on activity, so sweeping a person's
-    /// live draft would hide it **permanently**, past its first send, until
-    /// they noticed and unhid it by hand — worse than the no-row-yet state
-    /// Clear Empty is trying to tidy away.
-    pub(crate) fn clear_empty(&mut self, cx: &mut Context<Self>) {
-        let active = self.active_id(cx);
-        let cleared: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|entry| {
-                !entry.hidden
-                    && !entry.archived
-                    // Never sweep a provisional row: its turn count is
-                    // unknown, and hiding it would hide it permanently past
-                    // the wire answering — the same reason the open session
-                    // is excluded below.
-                    && !entry.provisional
-                    // Never sweep a provider-lane row for being quiet: its
-                    // turns live in the local record, and a hidden flag
-                    // here would strand the session past its next send.
-                    && entry.provider.is_none()
-                    && entry.is_empty()
-                    && !active.as_deref().is_some_and(|id| id == entry.id)
-            })
-            .map(|entry| entry.id.clone())
-            .collect();
-        if cleared.is_empty() {
-            return;
-        }
-        let n = cleared.len();
-        self.hide_batch(
-            cleared,
-            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
-            "They are still on disk; Muse keeps its own list.",
-            cx,
-        );
     }
 
     /// Pin or unpin a session. Purely local: the list regroups around it
@@ -708,14 +663,14 @@ impl Harness {
         let now = sidebar::grouping_now(&visible);
         let minute = now.timestamp().div_euclid(60);
         let mut cache = self.list_cache.borrow_mut();
-        if let Some((cached, grouping)) = cache.grouping.as_ref() {
+        if let Some((cached, grouping, _)) = cache.grouping.as_ref() {
             if *cached == minute {
                 return Rc::clone(grouping);
             }
         }
         let at = std::time::Instant::now();
         let was_boot = !self.sessions_loaded || !self.index_loaded;
-        let grouping = Rc::new(match self.effective_group_by() {
+        let grouping = match self.effective_group_by() {
             crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
             crate::layout::GroupBy::Project if self.index_loaded => {
                 let closed: std::collections::HashSet<String> =
@@ -750,15 +705,25 @@ impl Harness {
             // box it never re-measures, and the grouping already has its
             // final shape when the wire rows replace them.
             crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
-        });
+        };
+        // The v2 sidebar lists pinned rows in their own section (D3).
+        let (grouping, pinned) = sidebar::lift_pinned(grouping);
+        let grouping = Rc::new(grouping);
         crate::log::boot_mark(&format!(
             "grouping-built rows={} boot={} in={}ms",
             visible.len(),
             was_boot as u8,
             at.elapsed().as_millis()
         ));
-        cache.grouping = Some((minute, Rc::clone(&grouping)));
+        cache.grouping = Some((minute, Rc::clone(&grouping), Rc::new(pinned)));
         grouping
+    }
+
+    /// The pinned sessions lifted out of [`Self::sidebar_grouping`], from
+    /// the same cache entry: the v2 sidebar's Pinned section.
+    pub(crate) fn sidebar_pinned(&self, cx: &gpui::App) -> Rc<Vec<aui::nav::SessionSummary>> {
+        let _ = self.sidebar_grouping(cx);
+        self.list_cache.borrow().grouping.as_ref().map(|(_, _, pinned)| Rc::clone(pinned)).unwrap_or_default()
     }
 
     /// Drop the cached visible list and grouping: something they are derived

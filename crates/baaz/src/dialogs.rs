@@ -1232,10 +1232,10 @@ impl Harness {
                 .flex_none()
                 .w(px(420.0 * style.scale))
                 .rounded(px(scale::R_LG))
-                .border_1()
-                .border_color(p.line_strong)
-                .bg(p.overlay)
-                .shadow(p.shadow(3))
+                // FF dialog: surface 5 with its paired shadow-5 (the recipe
+                // carries the hairline, so no separate border).
+                .bg(p.surface(5))
+                .shadow(p.shadow(5))
                 .text_color(p.ink)
                 .gap(px(scale::SP_4))
                 .p(px(scale::SP_5))

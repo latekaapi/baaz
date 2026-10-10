@@ -173,13 +173,7 @@ fn default_colour() -> u8 {
     1
 }
 
-/// How long a root-exists answer is trusted before the disk is asked again:
-/// short enough that a deleted worktree leaves the sidebar promptly, long
-/// enough that rendering never stats the disk per frame. The list refresh
-/// rechecks every adoption off the UI thread regardless of this.
-const EXISTS_TTL_SECS: u64 = 30;
-
-/// Now as whole seconds since the epoch, for [`EXISTS_TTL_SECS`].
+/// Now as whole seconds since the epoch: when an existence answer was taken.
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_secs()).unwrap_or(0)
 }
@@ -467,20 +461,26 @@ impl Projects {
     /// unmounted volume and a detached worktree all read false, and the
     /// adoption itself is untouched — it comes back when the path does.
     ///
-    /// The answer is cached per project for [`EXISTS_TTL_SECS`], so frames
-    /// never touch the disk; the list refresh rechecks every adoption off
-    /// the UI thread (see [`Projects::refresh_availability`]) regardless.
-    /// Purely a read: it never writes `projects.json`.
+    /// Never touches the disk: this is called on the UI thread (render,
+    /// clicks), and a stat of a root under ~/Desktop, ~/Documents,
+    /// ~/Downloads or an external volume can block there on a macOS privacy
+    /// prompt or a sleeping disk — seen live 2026-10-10 as a one-second
+    /// freeze on a sidebar click. The answer is whatever the list refresh
+    /// last measured off the UI thread ([`Projects::refresh_availability`]);
+    /// a project it has not measured yet reads as available. Purely a read:
+    /// it never writes `projects.json`.
     pub fn is_available(&self, id: &str) -> bool {
-        let now = now_secs();
-        if let Some(&(exists, at)) = self.existence.borrow().get(id) {
-            if now.saturating_sub(at) < EXISTS_TTL_SECS {
-                return exists;
-            }
+        if self.find(id).is_none() {
+            return false;
         }
-        let exists = self.find(id).is_some_and(|project| project.root.is_dir());
-        self.existence.borrow_mut().insert(id.to_owned(), (exists, now));
-        exists
+        self.existence.borrow().get(id).is_none_or(|&(exists, _)| exists)
+    }
+
+    /// Stat every adoption's root: the root-exists answers
+    /// [`Projects::refresh_availability`] records. Touches the disk, so call
+    /// it OFF the UI thread only (the list refresh worker does).
+    pub fn measure_availability(&self) -> std::collections::HashMap<String, bool> {
+        self.projects.iter().map(|project| (project.id.clone(), project.root.is_dir())).collect()
     }
 
     /// Record root-exists answers computed off the UI thread (the list
@@ -1202,7 +1202,10 @@ mod tests {
 
     #[test]
     fn a_missing_root_is_skipped_but_stays_adopted() {
-        let (base, projects) = availability_store("availability-skipped");
+        let (base, mut projects) = availability_store("availability-skipped");
+        // The list refresh measures the roots off the UI thread.
+        let answers = projects.measure_availability();
+        projects.refresh_availability(&answers);
         // The store still holds both: hiding is a listing rule, and a folder
         // on an unmounted volume comes back when the path does.
         assert_eq!(projects.projects.len(), 2);
@@ -1250,13 +1253,17 @@ mod tests {
     #[test]
     fn a_missing_current_falls_back_to_the_most_recent_present_root() {
         let (base, mut projects) = availability_store("availability-current");
+        let answers = projects.measure_availability();
+        projects.refresh_availability(&answers);
         projects.current = Some("gone".into());
         assert_eq!(projects.effective_current().map(|p| p.id.as_str()), Some("present"));
         // Nothing on disk: no current at all, but the adoptions survive.
         std::fs::remove_dir_all(base.join("here")).expect("remove root");
-        // A fresh store: the removed root reads missing even though nothing
-        // rechecked it in between (no stale positive from the earlier read).
-        let cold = Projects { projects: projects.projects.clone(), ..Projects::default() };
+        // A fresh store reads the removed root missing once the refresh has
+        // measured it (no stale positive carried from the earlier store).
+        let mut cold = Projects { projects: projects.projects.clone(), ..Projects::default() };
+        let answers = cold.measure_availability();
+        cold.refresh_availability(&answers);
         assert!(cold.effective_current().is_none());
         assert_eq!(cold.projects.len(), 2);
         let _ = std::fs::remove_dir_all(&base);
@@ -1270,11 +1277,16 @@ mod tests {
         let mut project = project_with(root.to_str().expect("utf8"), 1, false);
         project.id = "ws".into();
         projects.projects.push(project);
-        // Missing, and the negative answer sticks inside the TTL.
+        // Never measured: reads available — the UI thread never stats.
+        assert!(projects.is_available("ws"));
+        // Measured missing; the answer holds until the next refresh, even
+        // after the folder appears.
+        let answers = projects.measure_availability();
+        projects.refresh_availability(&answers);
         assert!(!projects.is_available("ws"));
         std::fs::create_dir_all(&root).expect("temp dir");
-        assert!(!projects.is_available("ws"), "the TTL holds the stale answer");
-        // The list refresh rechecks off-thread: its answers reset the TTL.
+        assert!(!projects.is_available("ws"), "no stat on the UI thread");
+        // The next list refresh rechecks off-thread and records the answers.
         let mut answers = std::collections::HashMap::new();
         answers.insert("ws".to_owned(), true);
         answers.insert("forgotten".to_owned(), true);
@@ -1286,6 +1298,11 @@ mod tests {
         project.id = "ws".into();
         projects.projects.push(project);
         std::fs::remove_dir_all(&root).expect("remove root");
+        // Cold again: unmeasured, so it reads available until the refresh
+        // measures it — and then the old positive does not linger.
+        assert!(projects.is_available("ws"));
+        let answers = projects.measure_availability();
+        projects.refresh_availability(&answers);
         assert!(!projects.is_available("ws"), "no stale positive survives forgetting");
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -512,7 +512,7 @@ impl Harness {
             .child(
                 Switch::new(format!("providers-use-own-mcp-{}", id.as_str()))
                     .checked(on)
-                    .color(p.accent)
+                    .color(p.accent_ring)
                     .accessibility_label(SharedString::from(format!(
                         "{} · {}",
                         use_own_mcp_label(),

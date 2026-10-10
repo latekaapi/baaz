@@ -106,53 +106,6 @@ fn probe_entries_cover_both_modes() {
     );
 }
 
-/// The switch row sits at the top of the sidebar with counts, roles and
-/// labels; the rail carries the labelled toggle; the body slides on the
-/// Layout spring inside a clip; the Browse list is the real B2a-H3 body
-/// (the placeholder is gone).
-#[test]
-fn sidebar_carries_the_switch_and_the_slide() {
-    let sidebar = source("sidebar_view.rs");
-    assert!(sidebar.contains(".child(self.render_mode_switch(cx))"), "the switch tops the column");
-    assert!(sidebar.contains("\"mode-switch\""), "the switch has an id");
-    assert!(sidebar.contains("gpui::Role::TabList"), "the switch is a tab list");
-    assert!(sidebar.contains("gpui::Role::Tab"), "each segment is a tab");
-    assert!(sidebar.contains("mode.label(), count"), "each segment names its count");
-    assert!(sidebar.contains("aria_selected(selected)"), "segments carry selected state");
-    assert!(
-        sidebar.contains("RailItem::nav(\"mode\", IconName::Globe)"),
-        "the rail toggle is one lowercase mode cell"
-    );
-    assert!(
-        sidebar.contains("\"Switch to Browse\"") && sidebar.contains("\"Switch to Sessions\""),
-        "the toggle names both directions"
-    );
-    assert!(
-        sidebar.contains("SpringKind::Layout, window, cx"),
-        "the slide rides the Layout spring"
-    );
-    assert!(
-        sidebar.contains("overflow_hidden()"),
-        "the slide is clipped to the column"
-    );
-    assert!(
-        sidebar.contains("the Tabs list, From sessions, and the open tab's right-click"),
-        "the real Browse sidebar replaced the placeholder"
-    );
-    assert!(
-        sidebar.contains("\"browse-pinned\""),
-        "the pinned tiles render"
-    );
-    assert!(
-        sidebar.contains("\"tab-menu\""),
-        "the tab menu renders"
-    );
-    assert!(
-        sidebar.contains("\"browse-agent\""),
-        "the Agents strip renders"
-    );
-}
-
 /// The centre page is visible under the same covering rules in Browse,
 /// with its own bounds; Sessions-mode visibility is unchanged.
 #[test]

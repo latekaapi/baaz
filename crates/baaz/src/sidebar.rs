@@ -1850,6 +1850,43 @@ pub fn rowless_session_project(
         .filter(|p| !p.is_empty())
 }
 
+
+/// Lift the pinned sessions out of a project or date grouping: the v2
+/// sidebar draws them in its own Pinned section above the list, so the
+/// grouping must not list them a second time (a date grouping left with
+/// pinned rows would flatten a second Pinned header). A date bucket left
+/// empty by the lift is dropped. Status groupings are untouched. The
+/// project's count keeps counting them: the head says how many sessions
+/// the project has, not how many rows sit under it.
+pub(crate) fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::SessionSummary>) {
+    match grouping {
+        Grouping::Project(mut groups) => {
+            let mut pinned = Vec::new();
+            for group in &mut groups {
+                let (lifted, kept): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut group.sessions).into_iter().partition(|s| s.pinned);
+                group.sessions = kept;
+                pinned.extend(lifted);
+            }
+            (Grouping::Project(groups), pinned)
+        }
+        Grouping::Date(buckets) => {
+            let mut pinned = Vec::new();
+            let mut kept_buckets = Vec::with_capacity(buckets.len());
+            for mut bucket in buckets {
+                let (lifted, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut bucket.sessions).into_iter().partition(|s| s.pinned);
+                pinned.extend(lifted);
+                if !kept.is_empty() {
+                    bucket.sessions = kept;
+                    kept_buckets.push(bucket);
+                }
+            }
+            (Grouping::Date(kept_buckets), pinned)
+        }
+        other => (other, Vec::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2997,6 +3034,8 @@ mod tests {
         };
         assert!(!gone.root.is_dir(), "the test root must stay missing");
         projects.projects.push(gone);
+        let answers = projects.measure_availability();
+        projects.refresh_availability(&answers);
         let entries = vec![
             grouped_entry("s1", Some("p-baaz"), Some("ws"), 0),
             grouped_entry("s2", Some("p-gone"), Some("ws"), 0),
@@ -4095,5 +4134,53 @@ mod tests {
         ];
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 2, "a cycle is two singletons, never a hang");
+    }
+
+    /// [`lift_pinned`]: pinned rows leave their project groups, in group
+    /// then row order, and land in the returned vec; the groups' counts
+    /// keep counting them.
+    #[test]
+    fn lift_pinned_moves_pinned_rows_out_of_project_groups_in_order() {
+        let projects = grouped_projects();
+        let mut entries = vec![
+            grouped_entry("a1", Some("p-agentic"), Some("/w/a"), 0),
+            grouped_entry("a2", Some("p-agentic"), Some("/w/a"), 1),
+            grouped_entry("b1", Some("p-baaz"), Some("/w/b"), 0),
+            grouped_entry("b2", Some("p-baaz"), Some("/w/b"), 1),
+        ];
+        entries[1].pinned = true; // a2
+        entries[2].pinned = true; // b1
+        let (grouping, pinned) = lift_pinned(by_project(&entries, &projects));
+        let ids: Vec<&str> = pinned.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, ["a2", "b1"], "group order, then row order");
+        let Grouping::Project(groups) = grouping else { panic!("still a project grouping") };
+        let left = |id: &str| -> Vec<String> {
+            folded_group(&groups, id).sessions.iter().map(|s| s.id.to_string()).collect()
+        };
+        assert_eq!(left("p-agentic"), ["a1"]);
+        assert_eq!(left("p-baaz"), ["b2"]);
+        assert_eq!(folded_group(&groups, "p-baaz").count.as_ref(), "2", "the head still counts the lifted row");
+    }
+
+    /// [`lift_pinned`] lifts pinned rows out of a Date grouping too: the
+    /// v2 screen draws its own Pinned section, and the flattener would
+    /// otherwise add a second one.
+    #[test]
+    fn lift_pinned_lifts_pinned_rows_out_of_a_date_grouping() {
+        let mut pinned_entry = entry("p1");
+        pinned_entry.pinned = true;
+        pinned_entry.turns = 1;
+        let entries = vec![pinned_entry, entry("p2")];
+        let before = grouping_at(&entries, Local::now());
+        let before_count = match &before {
+            Grouping::Date(groups) => groups.iter().map(|g| g.sessions.len()).sum::<usize>(),
+            _ => panic!("date grouping"),
+        };
+        let (after, pinned) = lift_pinned(before);
+        assert_eq!(pinned.iter().map(|s| s.id.to_string()).collect::<Vec<_>>(), vec!["p1".to_string()]);
+        let Grouping::Date(groups) = after else { panic!("still a date grouping") };
+        assert_eq!(groups.iter().map(|g| g.sessions.len()).sum::<usize>(), before_count - 1);
+        assert!(groups.iter().all(|g| !g.sessions.is_empty()), "no empty bucket survives the lift");
+        assert!(groups.iter().flat_map(|g| &g.sessions).all(|s| !s.pinned));
     }
 }

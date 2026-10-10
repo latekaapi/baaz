@@ -166,15 +166,6 @@ impl Mode {
             Mode::Browse => Mode::Sessions,
         }
     }
-
-    /// The user-visible name: the sidebar switch's segment and the rail's
-    /// toggle label name the mode they show, not the one they leave.
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Sessions => "Sessions",
-            Mode::Browse => "Browse",
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for Mode {
@@ -890,8 +881,6 @@ mod tests {
         assert_eq!(Mode::parse("Sessions"), None);
         assert_eq!(Mode::Sessions.other(), Mode::Browse);
         assert_eq!(Mode::Browse.other(), Mode::Sessions);
-        assert_eq!(Mode::Sessions.label(), "Sessions");
-        assert_eq!(Mode::Browse.label(), "Browse");
         // Unknown stored modes read as sessions, never an error.
         let old: Layout = serde_json::from_str("{\"mode\":\"tabs\"}").unwrap();
         assert_eq!(old.mode, Mode::Sessions);

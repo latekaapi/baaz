@@ -1016,29 +1016,6 @@ impl Harness {
         Some(pinned)
     }
 
-    /// Duplicate the person tab `id` behind itself and show the copy:
-    /// the tab menu's Duplicate row. A closed or session-owned `id` is
-    /// a no-op.
-    pub(crate) fn duplicate_browse_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_tabs_loaded(cx);
-        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
-            return;
-        }
-        if let Some(copy) = self.browser.tabs.duplicate(id) {
-            self.schedule_tabs_write(cx);
-            self.browse_session_tab = None;
-            self.tab_menu = None;
-        self.tab_menu_bounds = None;
-            self.ensure_tab_page(HOME_KEY, copy, window, cx);
-        }
-        cx.notify();
-    }
-
     /// Reload the person tab `id` at its own URL and show it: the tab
     /// menu's Reload row, and what a crashed row's click does (the `!`
     /// tile's promise is reload *and* select). Activating clears a
@@ -1065,20 +1042,6 @@ impl Harness {
         self.tab_menu = None;
         self.tab_menu_bounds = None;
         self.browse_drop_target = None;
-        cx.notify();
-    }
-
-    /// Copy the person tab `id`'s link: the tab menu's Copy link row.
-    /// A closed `id` or an empty URL copies nothing.
-    pub(crate) fn copy_browse_link(&mut self, id: TabId, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        if let Some(url) = self.browser.tabs.get(id).map(|tab| tab.url.clone()) {
-            if !url.is_empty() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
-            }
-        }
-        self.tab_menu = None;
-        self.tab_menu_bounds = None;
         cx.notify();
     }
 
@@ -1141,45 +1104,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Close every other person tab in `id`'s project: the tab menu's
-    /// Close other tabs row. A closed or session-owned `id` only closes
-    /// the menu.
-    pub(crate) fn close_other_browse_tabs(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_tabs_loaded(cx);
-        self.tab_menu = None;
-        self.tab_menu_bounds = None;
-        let Some(tab) = self.browser.tabs.get(id).cloned() else {
-            cx.notify();
-            return;
-        };
-        if tab.owner != Owner::Person {
-            cx.notify();
-            return;
-        }
-        // Only the tabs the model actually closes lose their pages:
-        // pinned tabs survive (the model spares them), so their live
-        // pages stay registered.
-        let before: std::collections::HashSet<TabId> =
-            self.browser.tabs.tabs.iter().map(|live| live.id).collect();
-        self.browser.tabs.close_others(id);
-        let closed: Vec<TabId> = before
-            .into_iter()
-            .filter(|gone| self.browser.tabs.get(*gone).is_none())
-            .collect();
-        for gone in closed {
-            self.browser.states.remove(&gone);
-        }
-        self.schedule_tabs_write(cx);
-        self.browse_session_tab = None;
-        self.ensure_tab_page(HOME_KEY, id, window, cx);
-        cx.notify();
-    }
-
     /// Drop the dragged person tab before the target row: the sidebar's
     /// drag-reorder. `None` appends at the end. Either unknown id only
     /// closes the drop slot.
@@ -1225,16 +1149,6 @@ impl Harness {
         }
     }
 
-    /// Flip a From-sessions group open or shut (collapsed by default).
-    /// Unknown session ids still flip: the group may arrive a frame
-    /// later than the click.
-    pub(crate) fn toggle_from_sessions(&mut self, session: String, cx: &mut Context<Self>) {
-        if !self.browse_from_expanded.remove(&session) {
-            self.browse_from_expanded.insert(session);
-        }
-        cx.notify();
-    }
-
     /// Show a session-owned tab in the Browse centre (From sessions):
     /// the model activates it for its session and the centre builds its
     /// page — ownership never moves. A closed or person-owned `id` is a
@@ -1259,14 +1173,27 @@ impl Harness {
         cx.notify();
     }
 
-    /// The Agents strip's Review path: back to Sessions with that
-    /// session open — the quiet open a sidebar click does, with no
-    /// reveal and no list steering.
-    pub(crate) fn review_session(&mut self, session: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Sessions {
-            self.set_mode(crate::layout::Mode::Sessions, window, cx);
+    /// A Browse sidebar row's select or close, routed by the tab's owner:
+    /// person tabs through the person paths, From-sessions tabs through
+    /// [`Self::select_session_tab`] / [`Self::close_tab`] under their
+    /// session's key. An unknown `id` is a no-op.
+    pub(crate) fn browse_sidebar_tab(&mut self, id: TabId, close: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let Some(owner) = self.browser.tabs.get(id).map(|tab| tab.owner.clone()) else {
+            return;
+        };
+        match (owner, close) {
+            (Owner::Person, false) => self.select_browse_sidebar_tab(id, window, cx),
+            (Owner::Person, true) => self.close_person_tab(id, window, cx),
+            (Owner::Session(_), false) => self.select_session_tab(id, window, cx),
+            (Owner::Session(session), true) => {
+                if self.browse_session_tab == Some(id) {
+                    self.browse_session_tab = None;
+                }
+                self.close_tab(&session, id, window, cx);
+                cx.notify();
+            }
         }
-        self.resume_quiet(session, window, cx);
     }
 
     /// Prepare the shown tab's webview ahead of the pane animating
@@ -5091,6 +5018,36 @@ mod tests {
     /// tab's page is unobscured; the agent registration follows the active
     /// tab across a switch; and forcing discard drops the hidden page but
     /// keeps its tab for a rebuild.
+    /// D3: a Browse sidebar row routes by owner — a From-sessions tab
+    /// selects into the centre and closes under its session's key (the
+    /// person paths refuse it), a person tab still takes the person path.
+    #[gpui::test]
+    fn browse_sidebar_tab_routes_session_tabs_by_owner(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("sidebar-owner");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.ensure_tabs_loaded(cx);
+                let owner = super::Owner::Session("owner-probe".to_owned());
+                let tab = harness.browser.tabs.open(None, owner, "https://a.example/", None);
+                harness.browse_sidebar_tab(tab, false, window, cx);
+                assert_eq!(harness.browse_session_tab, Some(tab), "a session tab selects into the centre");
+                harness.browse_sidebar_tab(tab, true, window, cx);
+                assert!(harness.browser.tabs.get(tab).is_none(), "a session tab closes");
+                assert_eq!(harness.browse_session_tab, None, "closing the shown session tab clears the centre");
+            });
+        });
+    }
+
     #[gpui::test]
     fn two_session_tabs_hold_two_pages_with_one_live(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
