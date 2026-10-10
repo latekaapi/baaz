@@ -2243,7 +2243,9 @@ impl Harness {
             // The omnibox drops down over the page, so while it renders
             // rows the page must be obscured (its screenshot stand-in, as
             // with the palette) — gpui never paints over it.
-            omnibox_open: self.browse_omnibox_open(cx),
+            // The Field draws its rows in the overlay window, over the live
+            // page: only the in-window dropdowns still cover it.
+            omnibox_open: self.browse_omnibox_open(cx) && !self.field_overlay_wanted(cx),
             chrome_popover_open,
             page_error_open,
             // A Chromium page is its own child window: clicking it makes

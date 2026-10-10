@@ -591,6 +591,17 @@ impl Harness {
         self.sidebar_pane.update(cx, |_, cx| cx.notify());
     }
 
+    /// A real wheel event over the sidebar: the person scrolled. Disarms any
+    /// armed reveal and marks the list user-scrolled until the next
+    /// activation, and dismisses the group menu and the hover card.
+    pub(crate) fn note_sidebar_wheel(&mut self, cx: &mut Context<Self>) {
+        self.reveal = None;
+        self.reveal_unknown = None;
+        self.sidebar_user_scrolled = true;
+        self.dismiss_group_menu(cx);
+        self.close_row_detail();
+    }
+
     /// Apply the capture handler's input:
     /// take the accumulated travel into exactly one `ListState::scroll_by`
     /// per frame, disarm any armed reveal (the user's scroll wins), and mark
@@ -733,17 +744,22 @@ impl Harness {
         // length — `reset` after a regroup, `splice` after a local insert.
         let grouping = self.sidebar_grouping(cx);
         let rows = flatten_sidebar(&grouping, false);
-        self.sync_sidebar_list(&rows, &grouping);
         let model = self.sidebar_model(false, cx);
-        // While loading the screen draws skeleton rows the grouping does
-        // not have; the state follows the screen's count.
-        let count = screen_item_count(&model);
-        if self.sidebar_list.item_count() != count {
-            self.sidebar_list.reset(count);
+        // Browse draws no session list: leave its state (and its scroll
+        // offset) exactly as Sessions left it, so switching back lands where
+        // the person was. Sessions syncs it to the rows; while loading the
+        // screen draws skeleton rows the grouping does not have, and the
+        // state follows the screen's count.
+        if model.mode == Mode::Sessions {
+            self.sync_sidebar_list(&rows, &grouping);
+            let count = screen_item_count(&model);
+            if self.sidebar_list.item_count() != count {
+                self.sidebar_list.reset(count);
+            }
         }
         // The one-shot reveal, exactly as before: outside activations only,
         // never during a gesture, a user scroll or a resize drag.
-        if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
+        if model.mode == Mode::Sessions && !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
             if let Some(reveal_id) = self.reveal.clone() {
                 self.reveal_sidebar_row(&rows, &grouping, &reveal_id, cx);
             }
@@ -761,8 +777,16 @@ impl Harness {
         // The pane's own rect, once per frame: the hover card's side seat
         // hangs off its right edge.
         let pane_report = cx.entity().downgrade();
+        let wheel = cx.entity().downgrade();
         div()
             .size_full()
+            // A real wheel over the sidebar is the person's scroll: it
+            // disarms a pending reveal (theirs wins) and dismisses the group
+            // menu and the hover card, like the scripted sweep does. The
+            // library list scrolls itself; this only listens.
+            .on_scroll_wheel(move |_, _, cx| {
+                let _ = wheel.update(cx, |this, cx| this.note_sidebar_wheel(cx));
+            })
             .on_children_prepainted(move |bounds, _, cx| {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
@@ -1691,6 +1715,14 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let wanted = SharedString::from(reveal_id);
+        // A pinned session sits in the Pinned section above the list, always
+        // in view: its reveal is done, and its project head is never the
+        // target (it used to land there, the row being lifted out).
+        if self.sidebar_pinned(cx).iter().any(|row| row.id == wanted) {
+            self.reveal = None;
+            self.reveal_unknown = None;
+            return;
+        }
         let target = row_index_for_session(rows, grouping, &wanted)
             .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
         let Some(ix) = target else {
