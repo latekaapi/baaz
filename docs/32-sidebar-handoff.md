@@ -1,7 +1,7 @@
 # 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `48ba59e`. **harness** `feedback-mode` @ `bd0fa2d` (+ this doc). Both trees clean.
+- **agentic-ui** `design-v2` @ `4915fc3`. **harness** `feedback-mode` @ `8ba5fec` (+ this doc). Both trees clean.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
@@ -66,6 +66,17 @@ drawn over it); `Spinner::fluid` turns in 2 s like FF but does not breathe its d
 favicon while loading (the groups key carries no page facts). Seen live in the bundle (scripted runs +
 `screencapture`): no sidebar border, card 8 off the rim, line at 10 % then gone, tab arc spinning then the
 favicon, Field with one edge and nothing below its rows.
+
+**Same night, recording 2026-10-11 2.45 AM (sidebar scroll):** the hover pill chased the pointer's row through
+a wheel scroll and trailed its row — FluidList re-picked under a still pointer every frame and sprang both
+blocks to each new rect. FF re-picks only on a real mouse move; its blocks live in content coordinates. Fix
+(aui b03f56a): hold the highlight on its row until rows rest 100 ms (Chromium's synthetic move), and re-key a
+block's springs when its own row moves (rides, never trails). Scrollbar moved into the right gutter (aui
+4915fc3, `viewport_from_layout`). New step `pointer:<x>,<y>` (harness 8ba5fec). Live check method: a copy of
+the real state dir (sessions list loads; an empty isolated dir stays on skeletons), debug binary,
+`pointer:120,560;sidebar-scroll-sweep:-5,90,40`, `screencapture -V 7 -R <sidebar rect>`, ffmpeg frames.
+The 18-entry probe now reads right-git 28 / right-files 30 (+1 each since the morning) with or without this
+round's changes — time-dependent, not ours.
 
 **Waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
