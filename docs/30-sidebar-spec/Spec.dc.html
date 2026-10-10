@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sidebar spec</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap">
+<style>
+body{margin:0}
+a{color:#8489E0}a:hover{color:#9297EA}
+.spec table{border-collapse:collapse;width:100%;font-size:12px;line-height:16px}
+.spec th{text-align:left;color:#737985;font-weight:500;padding:6px 8px;border-bottom:1px solid #262930}
+.spec td{padding:5px 8px;border-bottom:1px solid #1C1E24;vertical-align:top;color:#E8EAEF}
+.spec td.k{color:#ABB0BB;white-space:nowrap}
+.spec td.v{font-variant-numeric:tabular-nums;white-space:nowrap}
+.spec code{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:11px;color:#ABB0BB}
+</style>
+</helmet>
+<div class="spec" style="width: 1240px; height: 900px; background: #121317; position: relative; font-family: 'Geist', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #E8EAEF; overflow: hidden; display: flex;">
+  <div style="width: 260px; height: 900px; position: relative; flex: none;">
+    <dc-import name="Sidebar" variant="hover" h="{{h}}" hint-size="260px,900px"></dc-import>
+    <!-- axes: gutter 8, icon axis 20, text axis 40, trailing edge 244 -->
+    <div style="position: absolute; top: 52px; bottom: 0; left: 8px; width: 1px; background: rgba(222,111,104,.6);"></div>
+    <div style="position: absolute; top: 52px; bottom: 0; left: 20px; width: 1px; background: rgba(222,111,104,.6);"></div>
+    <div style="position: absolute; top: 52px; bottom: 0; left: 40px; width: 1px; background: rgba(222,111,104,.6);"></div>
+    <div style="position: absolute; top: 52px; bottom: 0; left: 244px; width: 1px; background: rgba(222,111,104,.6);"></div>
+    <div style="position: absolute; top: 56px; left: 10px; font-size: 10px; color: #DE6F68;">8</div>
+    <div style="position: absolute; top: 56px; left: 22px; font-size: 10px; color: #DE6F68;">20</div>
+    <div style="position: absolute; top: 56px; left: 42px; font-size: 10px; color: #DE6F68;">40</div>
+    <div style="position: absolute; top: 56px; left: 222px; font-size: 10px; color: #DE6F68;">244</div>
+  </div>
+  <div style="flex: 1 1 auto; min-width: 0; padding: 16px 16px 16px 24px; overflow: hidden; border-left: 1px solid #262930;">
+    <div style="font-size: 15px; line-height: 20px; font-weight: 500; margin-bottom: 4px;">Sidebar · measured spec (default density, dark)</div>
+    <div style="font-size: 12px; line-height: 16px; color: #737985; margin-bottom: 12px;">Red lines on the left: gutter 8 · icon axis 20 · text axis 40 · trailing edge 244. Every row below shares them. Values are v2 tokens; names in <code>mono</code> are the token or metric to use in code.</div>
+    <table>
+      <tr><th>Part</th><th>Size</th><th>Type</th><th>Colour</th><th>Notes</th></tr>
+      <tr><td class="k">Sidebar</td><td class="v">260 wide · padding 0 8</td><td></td><td>bg <code>bg</code> #121317</td><td>no border; the pane lifts instead (surface-1, hairline, radius 8, shadow-1, inset 8)</td></tr>
+      <tr><td class="k">Title bar</td><td class="v">52 tall</td><td></td><td></td><td>traffic lights at 20,20; sidebar toggle 22×22 at the right on the icon axis</td></tr>
+      <tr><td class="k">Row</td><td class="v">32 tall · x 8–252 · radius 6</td><td>13/18 400 <code>fs</code></td><td>fg #E8EAEF</td><td><code>row</code> (new metric: 32 / 28 compact); hover <code>hover_overlay</code> white 6%; selected <code>selected_overlay</code> white 10%; weight unchanged on select (tweak)</td></tr>
+      <tr><td class="k">Two-line row</td><td class="v">48 tall</td><td>title 13/18 · byline 12/16</td><td>byline fg-muted #737985</td><td>row + 16; byline never coloured, the dot carries state</td></tr>
+      <tr><td class="k">Leading slot</td><td class="v">24 × 24 at x 8</td><td></td><td>fg-muted</td><td>glyph 16 or dot 8, centred → icon axis 20</td></tr>
+      <tr><td class="k">Status dot</td><td class="v">8 · pill</td><td></td><td>idle: 1 px <code>ink-4</code> hollow · running: <code>info</code> + 3 px <code>info-soft</code> ring · waiting: <code>warning</code> · failed: <code>danger</code></td><td>done = hollow <code>success</code></td></tr>
+      <tr><td class="k">Trailing</td><td class="v">right edge 244</td><td>12/16 tabular</td><td>fg-muted</td><td>age or count; kbd chips 11/14; hover swaps in 3 × 22 ghost icon buttons (pin, rename, archive)</td></tr>
+      <tr><td class="k">Workspace row</td><td class="v">mark 20 radius 6 at x 14</td><td>name 13 · initial 11/600</td><td>mark <code>label-n</code>, initial on bg</td><td>chevron 16 at the trailing edge; click opens the project menu below</td></tr>
+      <tr><td class="k">Search</td><td class="v">row 32 · margin-top 4</td><td>13 placeholder</td><td>fg-muted</td><td>no field chrome at rest; focus = <code>surface-2</code> + 1 px <code>accent-ring</code>; ⌘K only on hover/focus</td></tr>
+      <tr><td class="k">Mode control</td><td class="v">track 32 · pad 2 · items 28 · radius 6/4</td><td>13 · count 12</td><td>track <code>surface-2</code> · on <code>surface-4</code> + shadow-1</td><td>off label fg-muted; counts tabular; margin 8 above 4 below</td></tr>
+      <tr><td class="k">Section header</td><td class="v">28 tall · margin-top 12 · label x 16</td><td>12/16</td><td>fg-muted · count <code>ink-4</code></td><td>+ and ⋯ as 22 px ghost buttons, only while the header is hovered</td></tr>
+      <tr><td class="k">Project head</td><td class="v">row 32 · chevron on the icon axis · name at 40</td><td>13 500 · count 12 · branch 11 mono</td><td>fg · count fg-muted · branch fg-muted</td><td>no mark on the row (the colour lives in the project menu); + and ⋯ on hover</td></tr>
+      <tr><td class="k">Nested row</td><td class="v">+16 indent</td><td></td><td></td><td>one <code>inset</code>: dot centre 36, text at 56, one step in from the project name at 40</td></tr>
+      <tr><td class="k">Rename</td><td class="v">row 32</td><td>13</td><td><code>surface-2</code> + 1 px <code>accent-ring</code></td><td>in place, same axes; Enter commits, Esc restores, blur commits</td></tr>
+      <tr><td class="k">Keyboard focus</td><td class="v">row</td><td></td><td>same as hover</td><td>no ring on rows; the list highlight is the focus</td></tr>
+      <tr><td class="k">Loading</td><td class="v">3 rows</td><td></td><td><code>surface-3</code> bars 12 tall radius 4</td><td>under the first section title; shimmer slow tier</td></tr>
+      <tr><td class="k">Empty</td><td class="v">1 row</td><td>13</td><td>fg-muted</td><td>"No sessions yet" on the text axis, under the section title</td></tr>
+      <tr><td class="k">Menus</td><td class="v">inset 8 · radius 6 · pad 4 · rows 28</td><td>13 · kbd 11</td><td><code>surface-3</code> · 1 px <code>line-strong</code> · shadow-2</td><td>project menu drops from the workspace row; account menu rises from the footer</td></tr>
+      <tr><td class="k">Footer</td><td class="v">hairline + padding 8 + row 32</td><td>13</td><td>avatar 20 pill <code>label-n</code> with 1 px inset white 12%</td><td>name · plan (muted) · chevron up; usage meter lives in the account menu</td></tr>
+      <tr><td class="k">Browse · address</td><td class="v">row 32 · field</td><td>13 host fg · path fg-muted</td><td><code>surface-2</code>, ring only on focus</td><td>lock glyph on the icon axis; ⌘L on hover; replaces the pane's header entirely (Yab)</td></tr>
+      <tr><td class="k">Browse · controls</td><td class="v">5 × 28 ghost · row 36</td><td></td><td>fg-muted · disabled <code>ink-4</code></td><td>address + controls sit ABOVE Search; back, forward, reload, + (new tab) left; Ask Claude, page menu right</td></tr>
+      <tr><td class="k">Browse · New tab</td><td class="v">row 32 · filled</td><td>13 fg</td><td><code>surface-2</code> + 1 px <code>line</code></td><td>the one filled row in Browse, below the tabs list; ⌘T always shown; the + beside reload does the same</td></tr>
+      <tr><td class="k">Browse · pins / tabs</td><td class="v">pins 36 tiles · tab rows 32</td><td>13</td><td>favicon mark 16 radius 4 <code>surface-3</code></td><td>active tab = selected overlay; close ✕ 20 on hover; folders = project-head row without mark</td></tr>
+      <tr><td class="k">Browse · spaces</td><td class="v">chips 24 · pill</td><td>12</td><td>on <code>surface-3</code> fg · off fg-muted</td><td>above the footer; + adds a space</td></tr>
+      <tr><td class="k">Browse · page</td><td class="v">margin 8 8 8 0 · radius 8</td><td></td><td>the site's own colours; 1 px <code>line-strong</code> + shadow-1</td><td>spans the full window height, no header; new tab = <code>surface-1</code> with a centred omnibox and the pins</td></tr>
+      <tr><td class="k">Collapsed</td><td class="v">12 px edge strip</td><td></td><td></td><td>nothing drawn; hover peeks the sidebar as <code>surface-2</code> + <code>line-strong</code> + shadow-3, inset 8</td></tr>
+      <tr><td class="k">Motion</td><td class="v"></td><td></td><td></td><td>one highlight per list glides on <code>moderate</code>; fresh entry fades on <code>fast</code>; selection glides; chips and actions fade on <code>fast</code></td></tr>
+      <tr><td class="k">Compact</td><td class="v">row 28 · two-line 44 · 13/18</td><td></td><td></td><td>same axes; section header 24, margin-top 8</td></tr>
+    </table>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1240,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { h: 900 };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Populated sidebar in the window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap">
+<style>
+body{margin:0}
+a{color:#8489E0}a:hover{color:#9297EA}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #121317; position: relative; font-family: 'Geist', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #E8EAEF; overflow: hidden; display: flex;">
+
+  <dc-import name="Sidebar" variant="{{variant}}" h="{{h}}" row-h="{{rowH}}" fs="{{fs}}" sel-w="{{selW}}" hint-size="260px,900px"></dc-import>
+
+  <!-- the pane lifts off the window ground: surface-1, hairline, container radius, shadow-1 -->
+  <div style="flex: 1 1 auto; min-width: 0; margin: 8px 8px 8px 0; border-radius: 8px; background: #17181D; border: 1px solid #262930; box-shadow: 0 1px 2px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden;">
+    <div style="height: 44px; flex: none; display: flex; align-items: center; padding: 0 16px; gap: 8px; border-bottom: 1px solid #262930; font-size: 13px;">
+      <span style="color: #E8EAEF;">Design v2 tokens</span>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#737985" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg>
+      <span style="margin-left: 4px; font-size: 12px; color: #737985; background: #1C1E24; border-radius: 4px; padding: 1px 6px;">harness</span>
+      <span style="margin-left: auto; display: flex; gap: 4px;">
+        <span style="width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #737985;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4l4 4-4 4M8 12h5"/></svg></span>
+        <span style="width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #737985;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg></span>
+        <span style="width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #737985;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M10 3v10"/></svg></span>
+      </span>
+    </div>
+    <div style="flex: 1 1 auto;"></div>
+    <div style="flex: none; margin: 0 16px 16px; border-radius: 8px; border: 1px solid #262930; background: #1C1E24; min-height: 64px; display: flex; align-items: center; padding: 0 12px; color: #737985; font-size: 13px;">Type / for commands</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["populated","hover","loading","empty","rename","browse","menus"],"default":"populated","section":"State"},"rowH":{"editor":"enum","options":[32,36],"default":32,"section":"Ladder"},"fs":{"editor":"enum","options":[13,14],"default":13,"section":"Ladder"},"selW":{"editor":"enum","options":[400,500],"default":400,"section":"Ladder"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      variant: this.props.variant ?? 'populated',
+      h: 900,
+      rowH: Number(this.props.rowH ?? 32),
+      fs: Number(this.props.fs ?? 13),
+      selW: Number(this.props.selW ?? 400),
+    };
+  }
+}
+</script>
+</body>
+</html>
