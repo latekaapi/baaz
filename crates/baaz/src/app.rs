@@ -5877,6 +5877,11 @@ impl Harness {
                     // the centre with no library nav row of its own.
                     // (Annotate and Screenshot stay reachable through the
                     // header's ⋯ menu.)
+                    // The page sits in the rounded card (canvas BrowseWindow):
+                    // its native corners take the card's radius, square when
+                    // there is no card.
+                    let radius = if self.browse_page_card() { scale::SHAPE_CONTAINER } else { 0.0 };
+                    state.update(cx, |state, _| state.set_corner_radius(radius));
                     aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
                         .on_intent(move |intent, window, cx| {
@@ -5938,9 +5943,8 @@ impl Harness {
         // B2a-H6: horizontal hangs the tab strip row above the page; the
         // native page hangs below it by the same const (see
         // `browse_centre_page_rect`), so gpui and native agree exactly.
-        let strip = (self.layout.browser_tabs == layout::BrowserTabs::Horizontal)
-            .then(|| self.render_browse_tab_strip(cx));
-        v_flex()
+        let strip = self.browse_strip_shown().then(|| self.render_browse_tab_strip(cx));
+        let centre = v_flex()
             .size_full()
             .relative()
             .id("browse-centre")
@@ -5954,7 +5958,31 @@ impl Harness {
             .children(scrim)
             .children(downloads)
             .children(extensions)
-            .children(more)
+            .children(more);
+        if !self.browse_page_card() {
+            return centre.into_any_element();
+        }
+        // Browse with the sidebar: the page is a card inset 8 on top, right
+        // and bottom (none against the sidebar), with the container radius
+        // and a hairline — the native page's rect and radius match
+        // (`browse_centre_page_rect`, `set_corner_radius`).
+        let p = cx.aui().colors;
+        let inset = px(crate::browser::PAGE_CARD_INSET - 1.0);
+        div()
+            .size_full()
+            .pt(inset)
+            .pr(inset)
+            .pb(inset)
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(scale::SHAPE_CONTAINER + 1.0))
+                    .border_1()
+                    .border_color(p.line)
+                    .overflow_hidden()
+                    .bg(p.surface(2))
+                    .child(centre),
+            )
             .into_any_element()
     }
 
@@ -6132,7 +6160,7 @@ impl Harness {
             // horizontal mode, never over it.
             crate::browser::OmniAnchor::Toolbar => list
                 .absolute()
-                .top(crate::browser::omnibox_dropdown_top(self.layout.browser_tabs))
+                .top(crate::browser::omnibox_dropdown_top(self.browse_strip_shown()))
                 .left(px(12.0))
                 .right(px(12.0))
                 .into_any_element(),
@@ -9311,6 +9339,10 @@ mod tests {
         }
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
         draw_shell(&mut *vc, &baaz);
+        assert!(vc.debug_bounds("browse-strip").is_none(), "with the sidebar open its rows are the tabs: no strip");
+        // The strip's one remaining place: the sidebar hidden.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-strip").is_some(), "horizontal strips the tabs above the page");
         assert!(vc.debug_bounds("browse-strip-new-tab").is_some(), "the strip ends in `+`");
         // B2a-H6b: the chips scroll inside their own area while the `+`
@@ -9350,6 +9382,7 @@ mod tests {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         let strip_page =
             vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
@@ -9359,7 +9392,6 @@ mod tests {
             "horizontal hangs the page under the strip"
         );
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         let minimal_page =
             vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
@@ -9458,6 +9490,7 @@ mod tests {
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://docs.rs/", window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
         });
@@ -9469,6 +9502,7 @@ mod tests {
             list.origin.y >= strip_bottom,
             "the dropdown anchors under the strip, never over it"
         );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
