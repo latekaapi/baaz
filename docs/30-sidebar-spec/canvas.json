@@ -15,33 +15,33 @@
       "y": 0,
       "w": 1440,
       "h": 900,
-      "title": "Populated · window"
+      "title": "Populated \u00b7 window"
     },
     "Collapsed.dc.html": {
       "x": 1520,
       "y": 0,
       "w": 1440,
       "h": 900,
-      "title": "Collapsed · peek on hover"
+      "title": "Collapsed \u00b7 peek on hover"
     },
     "States.dc.html": {
       "x": 0,
       "y": 1020,
       "w": 1432,
       "h": 720,
-      "title": "States · loading, empty, hover, rename + keyboard, menus"
+      "title": "States \u00b7 loading, empty, hover, rename + keyboard, menus"
     },
     "Browse.dc.html": {
       "x": 1520,
       "y": 1020,
-      "w": 260,
+      "w": 256,
       "h": 720,
       "title": "Browse mode"
     },
     "Compact.dc.html": {
       "x": 1860,
       "y": 1020,
-      "w": 260,
+      "w": 256,
       "h": 720,
       "title": "Compact density"
     },
@@ -50,12 +50,12 @@
       "y": 1860,
       "w": 1240,
       "h": 900,
-      "title": "Spec · every measurement"
+      "title": "Spec \u00b7 every measurement"
     },
     "Sidebar.dc.html": {
       "x": 1520,
       "y": 1860,
-      "w": 260,
+      "w": 256,
       "h": 900,
       "title": "Sidebar component (imported by the boards)"
     },
@@ -64,17 +64,41 @@
       "y": 2900,
       "w": 1440,
       "h": 900,
-      "title": "Browse · window (page spans full height)"
+      "title": "Browse \u00b7 window (page spans full height)"
     },
     "NewTab.dc.html": {
       "x": 1520,
       "y": 2900,
       "w": 1440,
       "h": 900,
-      "title": "Browse · new tab"
+      "title": "Browse \u00b7 new tab"
+    },
+    "BrowseStates.dc.html": {
+      "x": 0,
+      "y": 4040,
+      "w": 1136,
+      "h": 900,
+      "title": "Browse \u00b7 states: populated, hover, empty, naming a folder + a space"
+    },
+    "Menus.dc.html": {
+      "x": 1216,
+      "y": 4040,
+      "w": 1440,
+      "h": 900,
+      "title": "Menus \u00b7 view options + Sort by, tab, folder, task folder, space"
+    },
+    "Field.dc.html": {
+      "x": 2736,
+      "y": 4040,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse \u00b7 the Field on the address (\u2318L)"
     }
   },
   "order": [
+    "BrowseStates.dc.html",
+    "Menus.dc.html",
+    "Field.dc.html",
     "Sidebar.dc.html",
     "Spec.dc.html",
     "Compact.dc.html",
@@ -89,7 +113,7 @@
     "t1": {
       "x": 0,
       "y": -240,
-      "text": "Baaz sidebar on tokens v2 — dark, 260 px, Geist. Values from the v2 tokens.json and the Fluid Functionalism sidebar measured live.",
+      "text": "Baaz sidebar on the fluid-design tokens \u2014 Fluid Functionalism's neutral ladder, shadows and motion, Inter, radii one step tighter (rows 6, menus 10). Dark, 256 px (FF 16rem).",
       "kind": "title1",
       "maxW": 2960
     },
@@ -97,8 +121,15 @@
       "x": 3040,
       "y": 0,
       "w": 360,
-      "text": "Tweaks on the Sidebar board: bylines all ↔ status only, row height 32 ↔ 36, row text 13 ↔ 14, selected weight regular ↔ medium.\n\nBrowse mode follows Yet Another Browser: the page spans the full height with no header; address, page controls, New tab, pinned, tabs, folders and spaces all live in the sidebar.",
+      "text": "Tweaks on the Sidebar board: bylines all \u2194 status only, row height 32 \u2194 36, row text 13 \u2194 14. Rows rest muted and light to foreground on hover or selection; selected titles are semibold.\n\nBrowse mode follows Yet Another Browser: the page spans the full height with no header; address, page controls, New tab, pinned, tabs, folders and spaces all live in the sidebar.",
       "fill": "blue"
+    },
+    "t2": {
+      "x": 0,
+      "y": 3810,
+      "text": "Browse round \u2014 approved 2026-10-11 and built: folders, task folders, spaces, empty, menus, the Field",
+      "kind": "title1",
+      "maxW": 4176
     }
   },
   "designSystems": []

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sidebar menus</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+body{margin:0}
+a{color:#F5F5F5}a:hover{color:#DEDEDE}
+.m{position:absolute;width:240px;box-sizing:border-box;padding:4px;border-radius:10px;background:#252525;box-shadow:inset 0 1px 0 0 rgba(255,255,255,.02),inset 0 0 0 1px rgba(255,255,255,.02),0 0 0 1px rgba(0,0,0,.12),0 1px 1px -0.5px rgba(0,0,0,.18),0 3px 3px -1.5px rgba(0,0,0,.18);z-index:5;font-size:13px;line-height:20px}
+.m.sub{width:224px}
+.mr{display:flex;align-items:center;gap:8px;height:36px;padding:0 8px;border-radius:6px;color:#A3A3A3;white-space:nowrap}
+.mr.lit{background:rgba(255,255,255,.06);color:#F5F5F5}
+.mr.on{background:rgba(255,255,255,.10);color:#F5F5F5;font-weight:600}
+.mr.off{opacity:.5}
+.mr .k{margin-left:auto;font-size:11px;line-height:14px;color:#A3A3A3;font-weight:400}
+.mr .v{margin-left:auto;font-size:12px;line-height:16px;color:#A3A3A3;font-weight:400}
+.mr.danger{color:#FCA5A5}
+.sep{height:1px;margin:4px -4px;background:rgba(245,245,245,.072)}
+.cap{position:absolute;font-size:12px;line-height:16px;color:#A3A3A3}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #171717; position: relative; font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #F5F5F5; overflow: hidden;">
+
+  <!-- 1 · Sessions: the view-options menu under the Projects header, Sort by open beside it -->
+  <div style="position: absolute; left: 0; top: 0; width: 260px; height: 900px; display: flex; flex-direction: column;">
+    <dc-import name="Sidebar" variant="hover" h="900" hint-size="260px,900px"></dc-import>
+  </div>
+  <div class="m" style="left: 8px; top: 356px; width: 244px;" role="menu" aria-label="View options">
+    <div class="mr" role="menuitem">Group by<span class="v">Project ›</span></div>
+    <div class="mr lit" role="menuitem">Sort by<span class="v">Recent activity ›</span></div>
+    <div class="sep"></div>
+    <div class="mr" role="menuitemcheckbox">Show empty projects</div>
+    <div class="mr" role="menuitemcheckbox">Show hidden<span class="v">3</span></div>
+    <div class="mr" role="menuitemcheckbox">Show archived</div>
+    <div class="mr off" role="menuitemcheckbox" aria-disabled="true">Show PR status<span class="v">Soon</span></div>
+    <div class="sep"></div>
+    <div class="mr" role="menuitemcheckbox">Search all projects<svg style="margin-left:auto" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12L9 17L20 6"/></svg></div>
+    <div class="mr" role="menuitem">Clear empty sessions</div>
+  </div>
+  <div class="m sub" style="left: 254px; top: 392px;" role="menu" aria-label="Sort by">
+    <div class="mr on" role="menuitemradio" aria-checked="true">Recent activity<svg style="margin-left:auto" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12L9 17L20 6"/></svg></div>
+    <div class="mr lit" role="menuitemradio">Created</div>
+    <div class="mr" role="menuitemradio">Name</div>
+  </div>
+  <div class="cap" style="left: 254px; top: 520px; width: 224px;">Sort by: three orders, pinned always first. Group by keeps its flip (Project ↔ Date) as a submenu of the same shape.</div>
+
+  <!-- 2 · Browse: right-click on a tab, Move to folder open -->
+  <div style="position: absolute; left: 520px; top: 0; width: 260px; height: 900px; display: flex; flex-direction: column; border-left: 1px solid rgba(245,245,245,.12);">
+    <dc-import name="Sidebar" variant="browse-hover" h="900" hint-size="260px,900px"></dc-import>
+  </div>
+  <div class="m" style="left: 672px; top: 324px;" role="menu" aria-label="Tab Dashboard 2024-25">
+    <div class="mr" role="menuitem">Duplicate</div>
+    <div class="mr" role="menuitem">Copy link<span class="k">⇧⌘C</span></div>
+    <div class="mr" role="menuitem">Pin tab</div>
+    <div class="mr lit" role="menuitem">Move to folder<span class="v">›</span></div>
+    <div class="sep"></div>
+    <div class="mr" role="menuitem">Close tab<span class="k">⌘W</span></div>
+    <div class="mr" role="menuitem">Close other tabs</div>
+  </div>
+  <div class="m sub" style="left: 914px; top: 432px;" role="menu" aria-label="Move to folder">
+    <div class="mr lit" role="menuitem">Karnataka review</div>
+    <div class="sep"></div>
+    <div class="mr" role="menuitem">New folder</div>
+  </div>
+  <div class="cap" style="left: 672px; top: 604px; width: 240px;">The menu opens at the pointer and lights the row it belongs to. Pinned tabs read "Unpin tab"; a tab in a folder adds "Remove from folder".</div>
+
+  <!-- 3 · the other three right-click menus -->
+  <div class="cap" style="left: 1160px; top: 64px;">Folder</div>
+  <div class="m" style="left: 1160px; top: 88px;" role="menu" aria-label="Folder Karnataka review">
+    <div class="mr" role="menuitem">Rename</div>
+    <div class="mr" role="menuitem">Close its tabs</div>
+    <div class="sep"></div>
+    <div class="mr danger" role="menuitem">Delete folder</div>
+  </div>
+  <div class="cap" style="left: 1160px; top: 260px; width: 240px;">Delete keeps the tabs: they move up into Today.</div>
+
+  <div class="cap" style="left: 1160px; top: 324px;">Task folder</div>
+  <div class="m" style="left: 1160px; top: 348px;" role="menu" aria-label="Task folder Checklist run">
+    <div class="mr lit" role="menuitem">Open chat</div>
+    <div class="mr" role="menuitem">Stop</div>
+    <div class="sep"></div>
+    <div class="mr" role="menuitem">Close its tabs</div>
+  </div>
+  <div class="cap" style="left: 1160px; top: 520px; width: 240px;">Stop is there only while the session runs.</div>
+
+  <div class="cap" style="left: 1160px; top: 584px;">Space chip</div>
+  <div class="m" style="left: 1160px; top: 608px;" role="menu" aria-label="Space Work">
+    <div class="mr" role="menuitem">Rename</div>
+    <div class="sep"></div>
+    <div class="mr danger" role="menuitem">Delete space</div>
+  </div>
+  <div class="cap" style="left: 1160px; top: 712px; width: 240px;">Delete asks first when the space still has tabs; the last space cannot be deleted.</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

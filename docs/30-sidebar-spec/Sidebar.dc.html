@@ -8,49 +8,52 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400&display=swap">
 <style>
 body{margin:0}
-a{color:#8489E0}a:hover{color:#9297EA}
-.sb{--bg:#121317;--s1:#17181D;--s2:#1C1E24;--s3:#23262D;--s4:#2A2D35;--fg:#E8EAEF;--fg2:#ABB0BB;--mut:#737985;--ink4:#4E535E;--line:#262930;--line2:#353945;--hov:rgba(255,255,255,.06);--sel:rgba(255,255,255,.10);--accent:#8489E0;--ring:rgba(132,137,224,.38);--info:#6AA9DC;--warn:#D9AA5C;--dang:#DE6F68;--succ:#5DB58C;
-  font-family:"Geist",-apple-system,"SF Pro Text","Helvetica Neue",Arial,sans-serif;color:var(--fg);-webkit-font-smoothing:antialiased;font-size:var(--fs);line-height:20px;}
+a{color:#F5F5F5}a:hover{color:#DEDEDE}
+.sb{--bg:#171717;--s1:#1E1E1E;--s2:#1E1E1E;--s3:#252525;--s4:#2C2C2C;--fg:#F5F5F5;--fg2:#A3A3A3;--mut:#A3A3A3;--ink4:#5D5D5D;--line:rgba(245,245,245,.12);--line2:rgba(245,245,245,.18);--hov:rgba(255,255,255,.06);--sel:rgba(255,255,255,.10);--accent:#F5F5F5;--ring:#6B97FF;--info:#93C5FD;--warn:#FCD34D;--dang:#FCA5A5;--succ:#86EFAC;
+  font-family:"Inter",-apple-system,"SF Pro Text","Helvetica Neue",Arial,sans-serif;color:var(--fg);-webkit-font-smoothing:antialiased;font-size:var(--fs);line-height:20px;}
 .sb *{box-sizing:border-box}
 .mono{font-family:"Geist Mono",ui-monospace,Menlo,monospace}
-.row{position:relative;display:flex;align-items:center;height:var(--row);padding:0 8px 0 0;border-radius:6px;color:var(--fg);white-space:nowrap}
+.row{position:relative;display:flex;align-items:center;height:var(--row);padding:0 8px 0 0;border-radius:6px;color:var(--mut);white-space:nowrap}
 .row.two{height:var(--row2)}
+/* pills never touch: a 1 px clear edge top and bottom inside the row's box (2 px between neighbours), pitch unchanged */
+.row{border-top:1px solid transparent;border-bottom:1px solid transparent;background-clip:padding-box}
 .row.nest{padding-left:16px}
-.row.hov{background:var(--hov)}
-.row.sel{background:var(--sel)}
-.row.sel .ttl{font-weight:var(--selw)}
+.row.hov{background:var(--hov);color:var(--fg)}
+.row.hov .lead{color:var(--fg)}
+.row.sel{background:var(--sel);color:var(--fg)}
+.row.sel .ttl{font-weight:600}
 .row.kbd{background:var(--hov)}
 .lead{flex:none;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--mut)}
-.ttl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;margin-left:8px;font-size:var(--fs);line-height:18px}
+.ttl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;margin-left:8px;font-size:var(--fs);line-height:20px}
 .by{font-size:12px;line-height:16px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tr{flex:none;margin-left:8px;font-size:12px;line-height:16px;color:var(--mut);font-variant-numeric:tabular-nums}
 .tr.micro{font-size:11px;line-height:14px}
 .sec{display:flex;align-items:center;height:28px;margin-top:12px;padding:0 4px 0 8px;font-size:12px;line-height:16px;color:var(--mut)}
-.sec .n{margin-left:6px;color:var(--ink4);font-variant-numeric:tabular-nums}
+.sec .n{margin-left:6px;color:var(--mut);font-variant-numeric:tabular-nums}
 .sec .acts{margin-left:auto;display:flex;gap:2px}
 .ph{display:flex;align-items:center;height:var(--row);padding:0 4px 0 0;border-radius:6px;color:var(--fg);white-space:nowrap}
-.ph .name{margin-left:8px;font-weight:500;font-size:var(--fs);line-height:18px;overflow:hidden;text-overflow:ellipsis}
+.ph .name{margin-left:8px;font-weight:400;color:var(--mut);font-size:var(--fs);line-height:18px;overflow:hidden;text-overflow:ellipsis}
 .ph .n{margin-left:6px;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
 .ph .br{margin-left:auto;padding-left:8px;font-size:11px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;max-width:96px}
 .ph .acts{margin-left:4px;display:flex;gap:2px;flex:none}
-.mark{width:16px;height:16px;border-radius:4px;flex:none;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#121317}
+.mark{width:16px;height:16px;border-radius:4px;flex:none;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#171717}
 .ib{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut);background:transparent;border:0;padding:0;cursor:pointer;flex:none}
 .ib:hover{background:var(--hov);color:var(--fg)}
 .dot{width:8px;height:8px;border-radius:999px;border:1px solid var(--ink4)}
-.dot.on{border:0;background:var(--info);box-shadow:0 0 0 3px rgba(106,169,220,.16)}
+.dot.on{border:0;background:var(--info);box-shadow:0 0 0 3px rgba(147,197,253,.16)}
 .dot.wait{border:0;background:var(--warn)}
 .dot.fail{border:0;background:var(--dang)}
 .dot.done{border:1px solid var(--succ)}
 .modes{display:flex;height:24px;padding:2px;border-radius:6px;background:var(--s2);gap:0}
 .modes button{width:28px;height:20px;border:0;border-radius:4px;background:transparent;color:var(--mut);padding:0;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.modes button.on{background:var(--s4);color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.35)}
+.modes button.on{background:var(--s4);border-radius:4px;color:var(--fg);box-shadow:inset 0 1px 0 0 rgba(255,255,255,.02),inset 0 0 0 1px rgba(255,255,255,.04),0 0 0 1px rgba(0,0,0,.14),0 1px 1px -0.5px rgba(0,0,0,.18),0 3px 3px -1.5px rgba(0,0,0,.18),0 6px 6px -3px rgba(0,0,0,.18)}
 .sk{height:12px;border-radius:4px;background:var(--s3)}
-.menu{background:var(--s3);border:1px solid var(--line2);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.45),0 1px 2px rgba(0,0,0,.4);padding:4px;position:absolute;left:8px;right:8px;z-index:3}
-.menu .mr{display:flex;align-items:center;height:28px;padding:0 8px;border-radius:4px;font-size:13px;color:var(--fg)}
-.menu .mr.hov{background:var(--hov)}
+.menu{background:var(--s3);border:0;border-radius:10px;box-shadow:inset 0 1px 0 0 rgba(255,255,255,.02),inset 0 0 0 1px rgba(255,255,255,.02),0 0 0 1px rgba(0,0,0,.12),0 1px 1px -0.5px rgba(0,0,0,.18),0 3px 3px -1.5px rgba(0,0,0,.18);padding:4px;position:absolute;left:8px;right:8px;z-index:3}
+.menu .mr{display:flex;align-items:center;height:36px;padding:0 8px;border-radius:6px;font-size:13px;color:var(--mut)}
+.menu .mr.hov{background:var(--hov);color:var(--fg)}
 .menu .mr .k{margin-left:auto;font-size:11px;color:var(--mut)}
 .menu .mr .v{margin-left:auto;font-size:12px;color:var(--mut)}
 .menu .mh{display:flex;align-items:center;height:28px;padding:0 8px;font-size:12px;color:var(--mut)}
@@ -73,7 +76,7 @@ a{color:#8489E0}a:hover{color:#9297EA}
 .caret{display:inline-block;width:1px;height:14px;background:var(--fg);margin-left:1px;vertical-align:-2px}
 </style>
 </helmet>
-<div class="sb" style="width: 260px; height: {{h}}px; display: flex; flex-direction: column; background: #121317; --row: {{rowH}}px; --row2: {{row2H}}px; --fs: {{fs}}px; --selw: {{selW}};">
+<div class="sb" style="width: 256px; height: {{h}}px; display: flex; flex-direction: column; background: #171717; --row: {{rowH}}px; --row2: {{row2H}}px; --fs: {{fs}}px; --selw: {{selW}};">
 
   <!-- title bar: traffic lights, then the collapse toggle right after them (it stays at x 84 whether the sidebar is open or collapsed, as Claude Desktop does); the Sessions ↔ Browse switch at the right -->
   <div style="height: 52px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 20px;">
@@ -92,13 +95,13 @@ a{color:#8489E0}a:hover{color:#9297EA}
       <!-- address: the page's host in fg, the path muted; a quiet field, no chrome beyond surface-2 -->
       <div class="field addr" role="textbox" aria-label="Address">
         <span class="lead"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg></span>
-        <span class="ttl"><span style="color: #E8EAEF;">pgi.udiseplus.gov.in</span><span style="color: #737985;">/#/home</span></span>
+        <span class="ttl"><span style="color: #F5F5F5;">pgi.udiseplus.gov.in</span><span style="color: #A3A3A3;">/#/home</span></span>
         <sc-if value="{{showKbd}}" hint-placeholder-val="{{false}}"><span class="tr micro">⌘L</span></sc-if>
       </div>
       <!-- page controls: back, forward, reload, page menu — 28 px ghost buttons on the icon axis -->
       <div style="display: flex; gap: 4px; height: 36px; align-items: center; padding-left: 2px;">
         <button class="ib" style="width: 28px; height: 28px;" aria-label="Back"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 3L5 8l5 5"/></svg></button>
-        <button class="ib" style="width: 28px; height: 28px; color: #4E535E;" aria-label="Forward"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3l5 5-5 5"/></svg></button>
+        <button class="ib" style="width: 28px; height: 28px; color: #5D5D5D;" aria-label="Forward"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3l5 5-5 5"/></svg></button>
         <button class="ib" style="width: 28px; height: 28px;" aria-label="Reload"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 3v2.5h-2.5"/></svg></button>
         <button class="ib" style="width: 28px; height: 28px;" aria-label="New tab"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
         <span style="flex: 1 1 auto;"></span>
@@ -110,7 +113,7 @@ a{color:#8489E0}a:hover{color:#9297EA}
     <!-- search: a quiet field. ⌘K appears on hover / focus only -->
     <div class="row">
       <span class="lead"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></span>
-      <span class="ttl" style="color: #737985;">Search</span>
+      <span class="ttl" style="color: #A3A3A3;">Search</span>
       <sc-if value="{{showKbd}}" hint-placeholder-val="{{false}}"><span class="tr micro">⌘K</span></sc-if>
     </div>
 
@@ -139,7 +142,7 @@ a{color:#8489E0}a:hover{color:#9297EA}
 
       <sc-if value="{{empty}}" hint-placeholder-val="{{false}}">
         <div class="sec">Projects<span class="acts"><button class="ib" aria-label="Add project"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button></span></div>
-        <div class="row"><span class="lead"></span><span class="ttl" style="color: #737985;">No projects yet</span></div>
+        <div class="row"><span class="lead"></span><span class="ttl" style="color: #A3A3A3;">No projects yet</span></div>
       </sc-if>
 
       <sc-if value="{{listed}}" hint-placeholder-val="{{true}}">
@@ -171,18 +174,22 @@ a{color:#8489E0}a:hover{color:#9297EA}
           <sc-if value="{{secActs}}" hint-placeholder-val="{{false}}">
             <span class="acts">
               <button class="ib" aria-label="Add project"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
-              <button class="ib" aria-label="View options"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 5h12M2 11h12"/><circle cx="6" cy="5" r="1.6" fill="#121317"/><circle cx="10" cy="11" r="1.6" fill="#121317"/></svg></button>
+              <button class="ib" aria-label="View options"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 5h12M2 11h12"/><circle cx="6" cy="5" r="1.6" fill="#171717"/><circle cx="10" cy="11" r="1.6" fill="#171717"/></svg></button>
             </span>
           </sc-if>
         </div>
         <sc-if value="{{showViewMenu}}" hint-placeholder-val="{{false}}">
           <div class="menu" style="top: 0; margin-top: 0;">
             <div class="mr hov">Group by<span class="v">Project ›</span></div>
-            <div class="mr">Sort by<span class="v">Last activity ›</span></div>
+            <div class="mr">Sort by<span class="v">Recent activity ›</span></div>
             <div class="sep"></div>
             <div class="mr">Show empty projects</div>
-            <div class="mr">Show PR status<span class="v">✓</span></div>
+            <div class="mr">Show hidden<span class="v">3</span></div>
             <div class="mr">Show archived</div>
+            <div class="mr" style="opacity: .5;">Show PR status<span class="v">Soon</span></div>
+            <div class="sep"></div>
+            <div class="mr">Search all projects<span class="v">✓</span></div>
+            <div class="mr">Clear empty sessions</div>
           </div>
         </sc-if>
 
@@ -207,7 +214,7 @@ a{color:#8489E0}a:hover{color:#9297EA}
               </div>
             </sc-if>
             <sc-if value="{{r.fold}}" hint-placeholder-val="{{false}}">
-              <div class="row nest"><span class="lead"></span><span class="ttl" style="color: #737985;">{{r.title}}</span></div>
+              <div class="row nest"><span class="lead"></span><span class="ttl" style="color: #A3A3A3;">{{r.title}}</span></div>
             </sc-if>
             <sc-if value="{{r.plain}}" hint-placeholder-val="{{true}}">
               <div class="{{r.cls}}">
@@ -232,44 +239,79 @@ a{color:#8489E0}a:hover{color:#9297EA}
     </sc-if>
 
     <sc-if value="{{browseMode}}" hint-placeholder-val="{{false}}">
-      <div class="sec">Pinned</div>
-      <div style="display: flex; gap: 8px; padding: 0 0 4px 8px;">
-        <span class="pin" aria-label="Unified dashboard">U</span>
-        <span class="pin" aria-label="Performance grades">P</span>
-        <span class="pin" aria-label="Open data portal">D</span>
-        <span class="pin" aria-label="Survey reports">N</span>
-      </div>
-      <div class="sec">Today<span class="n">5</span>
+      <!-- pins: the space's pinned sites, 4-up tiles; hidden when the space has none -->
+      <sc-if value="{{hasTabs}}" hint-placeholder-val="{{true}}">
+        <div class="sec">Pinned</div>
+        <div style="display: flex; gap: 8px; padding: 0 0 4px 8px;">
+          <span class="pin" aria-label="Unified dashboard">U</span>
+          <span class="pin" aria-label="Performance grades">P</span>
+          <span class="pin" aria-label="Open data portal">D</span>
+          <span class="pin" aria-label="Survey reports">N</span>
+        </div>
+      </sc-if>
+      <!-- your tabs: Today's tabs, then the folders you make -->
+      <div class="sec">Today<sc-if value="{{hasTabs}}" hint-placeholder-val="{{true}}"><span class="n">5</span></sc-if>
         <sc-if value="{{secActs}}" hint-placeholder-val="{{false}}"><span class="acts"><button class="ib" aria-label="New folder"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg></button><button class="ib" aria-label="Close all"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></span></sc-if>
       </div>
-      <div class="row sel"><span class="lead"><span class="mark" style="background:#23262D;color:#ABB0BB">S</span></span><span class="ttl">State scores 2023-24</span><button class="ib" aria-label="Close tab" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
-      <div class="row"><span class="lead"><span class="mark" style="background:#23262D;color:#ABB0BB">D</span></span><span class="ttl">Dashboard 2024-25</span></div>
-      <div class="row"><span class="lead"><span class="mark" style="background:#23262D;color:#ABB0BB">S</span></span><span class="ttl">State report cards</span></div>
-      <div class="ph"><span class="lead"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg></span><span class="name" style="font-weight: 400;">Karnataka review</span><span class="n">2</span></div>
-      <div class="row nest"><span class="lead"><span class="mark" style="background:#23262D;color:#ABB0BB">B</span></span><span class="ttl">Board results 2025</span></div>
-      <div class="row nest"><span class="lead"><span class="mark" style="background:#23262D;color:#ABB0BB">S</span></span><span class="ttl">Scheme review · Karnataka</span></div>
-      <!-- new tab: the one filled row, so it reads as the action -->
-      <div class="row newtab" style="margin-top: 8px;" role="button" aria-label="New tab">
-        <span class="lead" style="color: #E8EAEF;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></span>
-        <span class="ttl">New tab</span>
-        <span class="tr micro">⌘T</span>
-      </div>
-      <!-- spaces: the browser's own, as quiet chips above the footer -->
-      <div style="margin-top: auto; display: flex; gap: 4px; padding: 8px 0 8px; align-items: center;">
-        <span class="space on">Personal</span>
-        <span class="space">Work</span>
-        <span class="space">Lakshya</span>
-        <button class="ib" style="margin-left: auto;" aria-label="New space"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
+      <sc-if value="{{noTabs}}" hint-placeholder-val="{{false}}">
+        <div class="row"><span class="lead"></span><span class="ttl" style="color: #A3A3A3;">No tabs open</span></div>
+        <!-- new tab: the one filled row, directly under your tabs (owner 2026-10-11), above the task folders -->
+        <div class="row newtab" style="margin-top: 8px;" role="button" aria-label="New tab">
+          <span class="lead" style="color: #F5F5F5;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></span>
+          <span class="ttl">New tab</span>
+          <span class="tr micro">⌘T</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{hasTabs}}" hint-placeholder-val="{{true}}">
+        <sc-if value="{{naming}}" hint-placeholder-val="{{false}}">
+          <!-- a new folder is born named "New folder", in the rename field, at the top of Today -->
+          <div class="field" role="textbox" aria-label="Folder name">
+            <span class="lead"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg></span>
+            <span class="ttl"><span style="background: rgba(107,151,255,.32);">New folder</span><span class="caret"></span></span>
+          </div>
+        </sc-if>
+        <div class="{{tabSel}}"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></span><span class="ttl">State scores 2023-24</span><button class="ib" aria-label="Close tab State scores 2023-24" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+        <div class="{{tabHov}}"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">D</span></span><span class="ttl">Dashboard 2024-25</span><sc-if value="{{hover}}" hint-placeholder-val="{{false}}"><button class="ib" aria-label="Close tab Dashboard 2024-25" style="width:20px;height:20px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></sc-if></div>
+        <div class="row"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></span><span class="ttl">State report cards</span></div>
+        <!-- your folder: the project-head row (chevron on the icon axis, name, count), tabs nested one inset -->
+        <div class="ph"><span class="lead"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg></span><span class="name">Karnataka review</span><span class="n">2</span></div>
+        <div class="row nest"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">B</span></span><span class="ttl">Board results 2025</span></div>
+        <div class="row nest"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">S</span></span><span class="ttl">Scheme review · Karnataka</span></div>
+        <!-- new tab: the one filled row, directly under your tabs (owner 2026-10-11), above the task folders -->
+        <div class="row newtab" style="margin-top: 8px;" role="button" aria-label="New tab">
+          <span class="lead" style="color: #F5F5F5;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></span>
+          <span class="ttl">New tab</span>
+          <span class="tr micro">⌘T</span>
+        </div>
+        <!-- task folders, below a hairline: one per session that owns tabs. The session's own status dot replaces the chevron;
+             the status word sits at the row's end (warning only for "needs you"); always open; click = open its chat -->
+        <div style="height: 1px; background: rgba(245,245,245,.12); margin: 8px 8px;"></div>
+        <div class="ph"><span class="lead"><span class="dot wait"></span></span><span class="name">Checklist run</span><span class="br" style="font-family: inherit; font-size: 12px; color: #FCD34D;">needs you</span></div>
+        <div class="row nest"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">L</span></span><span class="ttl">Ledger</span><span class="tr micro mono">:5173</span></div>
+        <div class="ph"><span class="lead"><span class="dot on"></span></span><span class="name">Browser integration audit</span><span class="br" style="font-family: inherit; font-size: 12px;">reading</span></div>
+        <div class="row nest"><span class="lead"><span class="mark" style="background:#252525;color:#A3A3A3">G</span></span><span class="ttl">Pull request #412 · baaz</span></div>
+      </sc-if>
+      <!-- spaces: the browser's own, as quiet chips above the footer; ⌃1–9 switch; + names a new one in place -->
+      <div style="margin-top: auto; display: flex; gap: 4px; padding: 8px 0 8px; align-items: center;" role="tablist" aria-label="Spaces">
+        <span class="space on" role="tab">Personal</span>
+        <span class="space" role="tab">Work</span>
+        <span class="space" role="tab">Lakshya</span>
+        <sc-if value="{{naming}}" hint-placeholder-val="{{false}}">
+          <span class="space" style="background: #252525; color: #F5F5F5; box-shadow: 0 0 0 1px rgba(245,245,245,.12); min-width: 64px;" role="textbox" aria-label="Space name">Trip<span class="caret"></span></span>
+        </sc-if>
+        <sc-if value="{{notNaming}}" hint-placeholder-val="{{true}}">
+          <button class="ib" style="margin-left: auto;" aria-label="New space"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
+        </sc-if>
       </div>
     </sc-if>
 
     <sc-if value="{{showAccountMenu}}" hint-placeholder-val="{{false}}">
       <div class="menu" style="bottom: 8px;">
-        <div class="mr" style="height: 32px;"><span style="width:20px;height:20px;border-radius:999px;background:#5FB8B5;color:#121317;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;margin-right:8px">B</span>Bharani<span class="v">bharani91@gmail.com</span></div>
+        <div class="mr" style="height: 32px;"><span style="width:20px;height:20px;border-radius:999px;background:#5FB8B5;color:#171717;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;margin-right:8px">B</span>Bharani<span class="v">bharani91@gmail.com</span></div>
         <div class="sep"></div>
         <div class="mh">Usage</div>
         <div class="prov">
-          <div class="pn"><span class="mark" style="background:#6AA9DC;width:14px;height:14px;font-size:9px">M</span>Muse<span class="plan">High Usage</span></div>
+          <div class="pn"><span class="mark" style="background:#93C5FD;width:14px;height:14px;font-size:9px">M</span>Muse<span class="plan">High Usage</span></div>
           <div class="pl">Weekly<b>1%</b>resets in 47h 59m</div>
           <div class="meter"><i style="width:1%"></i></div>
         </div>
@@ -281,7 +323,7 @@ a{color:#8489E0}a:hover{color:#9297EA}
           <div class="meter"><i class="hi" style="width:83%"></i></div>
         </div>
         <div class="prov">
-          <div class="pn"><span class="mark" style="background:#5DB58C;width:14px;height:14px;font-size:9px">O</span>Codex<span class="plan">prolite</span></div>
+          <div class="pn"><span class="mark" style="background:#86EFAC;width:14px;height:14px;font-size:9px">O</span>Codex<span class="plan">prolite</span></div>
           <div class="pl">Weekly<b>19%</b>resets in 6d 23h</div>
           <div class="meter"><i style="width:19%"></i></div>
         </div>
@@ -289,22 +331,22 @@ a{color:#8489E0}a:hover{color:#9297EA}
         <div class="mr">Settings…<span class="k">⌘,</span></div>
         <div class="mr">Providers…</div>
         <div class="sep"></div>
-        <div class="mr" style="color: #DE6F68;">Sign out of Muse</div>
+        <div class="mr" style="color: #FCA5A5;">Sign out of Muse</div>
       </div>
     </sc-if>
   </div>
 
   <!-- footer: avatar · name · plan · chevron; usage lives in the menu -->
-  <div style="flex: none; border-top: 1px solid #262930; padding: 8px;">
+  <div style="flex: none; border-top: 1px solid rgba(245,245,245,.12); padding: 8px;">
     <div class="row" style="padding-left: 6px;">
-      <span style="width: 20px; height: 20px; border-radius: 999px; background: #5FB8B5; color: #121317; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);">B</span>
-      <span class="ttl" style="margin-left: 14px;">Bharani <span style="color: #737985;">· Max</span></span>
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#737985" stroke-width="1.5"><path d="M4 10l4-4 4 4"/></svg>
+      <span style="width: 20px; height: 20px; border-radius: 999px; background: #5FB8B5; color: #171717; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);">B</span>
+      <span class="ttl" style="margin-left: 14px;">Bharani <span style="color: #A3A3A3;">· Max</span></span>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#A3A3A3" stroke-width="1.5"><path d="M4 10l4-4 4 4"/></svg>
     </div>
   </div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["populated","hover","loading","empty","rename","browse","menus"],"default":"populated","section":"State"},"bylines":{"editor":"enum","options":["all","status"],"default":"all","section":"State"},"h":{"editor":"int","default":900,"min":400,"max":1200,"unit":"px","section":"Size"},"rowH":{"editor":"enum","options":[32,36],"default":32,"section":"Ladder"},"fs":{"editor":"enum","options":[13,14],"default":13,"section":"Ladder"},"selW":{"editor":"enum","options":[400,500],"default":400,"section":"Ladder"},"$preview":{"width":260,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["populated","hover","loading","empty","rename","browse","browse-hover","browse-empty","browse-naming","menus"],"default":"populated","section":"State"},"bylines":{"editor":"enum","options":["all","status"],"default":"all","section":"State"},"h":{"editor":"int","default":900,"min":400,"max":1200,"unit":"px","section":"Size"},"rowH":{"editor":"enum","options":[32,36],"default":32,"section":"Ladder"},"fs":{"editor":"enum","options":[13,14],"default":13,"section":"Ladder"},"selW":{"editor":"enum","options":[400,500],"default":400,"section":"Ladder"},"$preview":{"width":256,"height":900}}'>
 class Component extends DCLogic {
   renderVals() {
     const v = this.props.variant ?? 'populated';
@@ -329,7 +371,7 @@ class Component extends DCLogic {
       const f = flags || {};
       return { name, initial, tint, count, branch, chev: open ? 'M4 6l4 4 4-4' : 'M6 4l4 4-4 4', cls: ['ph', f.hov ? 'hov' : ''].filter(Boolean).join(' '), acts: !!f.hov, rows: [] };
     };
-    const harness = head('harness', 'h', '#D9AA5C', 4, 'feedback-mode', true, { hov: hover });
+    const harness = head('harness', 'h', '#FCD34D', 4, 'feedback-mode', true, { hov: hover });
     harness.rows = [
       mk('Checklist run', 'wait', '', 'Needs you · approve cargo build', '', { hov: hover }, true),
       mk('Token ladder audit', 'idle', '2h', '', 'Audit the ladder · 11 metrics → 7', { edit: v === 'rename' }, true),
@@ -343,10 +385,12 @@ class Component extends DCLogic {
       mk('Skeleton rows', 'idle', '1d', '', 'Three skeleton rows · looked at', {}, true),
     ];
     const lakshya = head('lakshya', 'l', '#C77FA3', 2, '', false, {});
-    const browse = v === 'browse';
+    const browse = v.startsWith('browse');
+    const bHover = v === 'browse-hover';
+    const naming = v === 'browse-naming';
     return {
       h: this.props.h ?? 900,
-      rowH, row2H: rowH + 16, fs, selW,
+      rowH, row2H: 46, fs, selW,
       pinned,
       projects: [harness, aui, lakshya],
       sessionsMode: !browse,
@@ -356,8 +400,15 @@ class Component extends DCLogic {
       loading: v === 'loading',
       empty: v === 'empty',
       listed: v !== 'loading' && v !== 'empty',
-      showKbd: hover,
-      secActs: hover,
+      showKbd: hover || bHover,
+      secActs: hover || bHover,
+      hover: bHover,
+      hasTabs: v !== 'browse-empty',
+      noTabs: v === 'browse-empty',
+      naming,
+      notNaming: !naming,
+      tabSel: 'row sel',
+      tabHov: bHover ? 'row hov' : 'row',
       showViewMenu: v === 'menus',
       showAccountMenu: v === 'menus',
     };

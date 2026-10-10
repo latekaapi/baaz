@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browse sidebar states</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+body{margin:0}
+a{color:#F5F5F5}a:hover{color:#DEDEDE}
+</style>
+</helmet>
+<div style="width: 1136px; height: 900px; background: #171717; display: flex; gap: 32px; font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #F5F5F5; overflow: hidden;">
+  <div style="width: 260px; height: 900px; display: flex; flex-direction: column;">
+    <dc-import name="Sidebar" variant="browse" h="{{h}}" hint-size="260px,900px"></dc-import>
+  </div>
+  <div style="width: 261px; height: 900px; display: flex; flex-direction: column; border-left: 1px solid rgba(245,245,245,.12);">
+    <dc-import name="Sidebar" variant="browse-hover" h="{{h}}" hint-size="260px,900px"></dc-import>
+  </div>
+  <div style="width: 261px; height: 900px; display: flex; flex-direction: column; border-left: 1px solid rgba(245,245,245,.12);">
+    <dc-import name="Sidebar" variant="browse-empty" h="{{h}}" hint-size="260px,900px"></dc-import>
+  </div>
+  <div style="width: 261px; height: 900px; display: flex; flex-direction: column; border-left: 1px solid rgba(245,245,245,.12);">
+    <dc-import name="Sidebar" variant="browse-naming" h="{{h}}" hint-size="260px,900px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1136,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { h: 900 };
+  }
+}
+</script>
+</body>
+</html>
