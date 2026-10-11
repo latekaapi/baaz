@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browse, new tab ground: subtle</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+body{margin:0}
+a{color:#F5F5F5}a:hover{color:#DEDEDE}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #171717; font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #F5F5F5;">
+  <dc-import name="NewTabBg" bg="subtle" hint-size="1440px,900px"></dc-import>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
