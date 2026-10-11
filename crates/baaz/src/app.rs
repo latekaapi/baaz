@@ -7589,7 +7589,6 @@ impl Render for Harness {
         // (and the Sort / Group submenu beside it, over the centre), never
         // over the right pane or the Browse page: they leave the page live.
         let view_options_open = false;
-        let account_open = false;
         let project_menu = self.render_project_menu(cx);
         // The Browse tab menu went with the old tab rows (D3); the v2 rows
         // carry no context menu yet.
@@ -7601,7 +7600,6 @@ impl Render for Harness {
         self.sync_browser(
             overflow.is_some(),
             view_options_open,
-            account_open,
             project_menu.is_some(),
             tab_menu.is_some(),
             window,

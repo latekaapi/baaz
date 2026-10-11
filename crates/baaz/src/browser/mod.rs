@@ -95,8 +95,6 @@ pub(crate) struct BrowserVisibility {
     /// The composer's view-local `+` menu stands open. Plain view state,
     /// never the shared overlay stack, so it gets its own input.
     pub plus_open: bool,
-    /// The account menu stands open.
-    pub account_menu_open: bool,
     /// A modal dialog stands open.
     pub dialog_open: bool,
     /// The file-drop overlay covers the window.
@@ -139,7 +137,6 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.palette_open
         && !inputs.menu_open
         && !inputs.plus_open
-        && !inputs.account_menu_open
         && !inputs.dialog_open
         && !inputs.drop_cover
         && !inputs.feedback_cover
@@ -2150,7 +2147,6 @@ impl Harness {
         &mut self,
         overflow: bool,
         view_options: bool,
-        account: bool,
         project_menu: bool,
         tab_menu: bool,
         window: &Window,
@@ -2289,7 +2285,6 @@ impl Harness {
             || view_options
             || project_menu
             || tab_menu;
-        let account_menu_open = menu_kind == Some(MenuKind::Account) || account;
         let dialog_open = overlays.dialog.is_some();
         // The composer's `+` menu is plain view state, never the overlay
         // stack — read it off the active view. Audit: caret popovers and
@@ -2379,7 +2374,6 @@ impl Harness {
             palette_open,
             menu_open,
             plus_open,
-            account_menu_open,
             dialog_open,
             drop_cover: self.browser.drop_cover,
             // F2 Active only: Paused leaves the app usable, so its pages
@@ -4318,7 +4312,6 @@ mod tests {
             palette_open: false,
             menu_open: false,
             plus_open: false,
-            account_menu_open: false,
             dialog_open: false,
             drop_cover: false,
             feedback_cover: false,
@@ -4342,7 +4335,6 @@ mod tests {
             palette_open: false,
             menu_open: false,
             plus_open: false,
-            account_menu_open: false,
             dialog_open: false,
             drop_cover: false,
             feedback_cover: false,
@@ -4544,7 +4536,7 @@ mod tests {
 
     #[test]
     fn every_covering_input_hides_the_native_view() {
-        let cases: [(&str, VisibilityFlip); 12] = [
+        let cases: [(&str, VisibilityFlip); 11] = [
             ("closed pane", |mut inputs| {
                 inputs.pane_open = false;
                 inputs
@@ -4571,10 +4563,6 @@ mod tests {
             }),
             ("plus menu", |mut inputs| {
                 inputs.plus_open = true;
-                inputs
-            }),
-            ("account menu", |mut inputs| {
-                inputs.account_menu_open = true;
                 inputs
             }),
             ("dialog", |mut inputs| {
