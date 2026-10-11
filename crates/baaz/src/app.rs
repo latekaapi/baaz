@@ -1009,6 +1009,10 @@ pub struct Harness {
     pub(crate) overlay_was_open: bool,
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
+    /// True only while the overlay window draws content the main window
+    /// would otherwise draw (the Browse modal): its listeners then run on
+    /// the main window ([`Harness::main_listener`]).
+    pub(crate) hosting_overlay: bool,
     /// Set when the next frame should move the keyboard to the composer.
     pub(crate) focus_composer: bool,
     /// The Settings surface's focus, tracked on the surface element.
@@ -1531,6 +1535,7 @@ impl Harness {
             overlay_was_open: false,
             focus_dialog: cx.focus_handle(),
             focus_palette: cx.focus_handle(),
+            hosting_overlay: false,
             focus_composer: true,
             settings_focus: cx.focus_handle(),
             focus_settings: false,
@@ -7528,7 +7533,10 @@ impl Render for Harness {
         } else {
             self.render_login(window, cx).into_any_element()
         };
-        let dialog = self.render_dialog(window, cx);
+        // In Browse the overlay window hosts the modals over the live page
+        // (`OverlayKind::Modal`): the main window draws neither.
+        let modal_hosted = self.modal_overlay_wanted(cx);
+        let dialog = if modal_hosted { None } else { self.render_dialog(window, cx) };
         // F2: the feedback capture layer (Active only); it paints above
         // the palette, dialog, settings and menus, with only toasts above
         // it (and toasts hide while a capture reads the window). The
@@ -7545,7 +7553,7 @@ impl Render for Harness {
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
-        let palette = self.render_palette(cx);
+        let palette = if modal_hosted { None } else { self.render_palette(cx) };
         // While capturing the window must read clean: toasts render after
         // the feedback layers, so they would leak into the capture.
         let toasts = if self.feedback.capturing { None } else { self.render_toasts(cx) };
@@ -7636,7 +7644,9 @@ impl Render for Harness {
             self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Projects);
         let commanding =
             self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Commands);
-        if searching {
+        if modal_hosted {
+            // The overlay window focuses the hosted modal's field itself.
+        } else if searching {
             let query = self.search_query.focus_handle(cx);
             if !query.is_focused(window) {
                 window.focus(&query, cx);

@@ -2248,7 +2248,10 @@ impl Harness {
         let overlays = self.overlays.read(cx);
         let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
         let settings_open = self.settings_open() || self.muse_sheet;
-        let palette_open = overlays.palette.is_some();
+        // A modal the overlay window hosts sits above the live page: it
+        // covers nothing (`OverlayKind::Modal`).
+        let modal_hosted = self.modal_overlay_wanted(cx);
+        let palette_open = overlays.palette.is_some() && !modal_hosted;
         // The Browse tab menu is pane state, never the overlay stack, so
         // it arrives as its own flag — and, like every other menu, covers
         // the native page while open.
@@ -2257,7 +2260,7 @@ impl Harness {
             || view_options
             || project_menu
             || tab_menu;
-        let dialog_open = overlays.dialog.is_some();
+        let dialog_open = overlays.dialog.is_some() && !modal_hosted;
         // The composer's `+` menu is plain view state, never the overlay
         // stack — read it off the active view. Audit: caret popovers and
         // chip pickers ride `overlays.menu` above; the row-detail card hangs
