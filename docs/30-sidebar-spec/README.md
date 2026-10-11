@@ -1,7 +1,7 @@
 # Sidebar v2 — the approved mock as the spec (2026-10-10)
 
 Source of truth: the Design canvas **Baaz sidebar v2** (https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP). The
-`*.dc.html` files here are its artboards as of version 28 (2026-10-11: new tab + rename field built; grounds A/B/C kept for the record); `Spec.dc.html` holds the
+`*.dc.html` files here are its artboards as of version 29 (2026-10-11: + SiteInfo as built, From sessions header); `Spec.dc.html` holds the
 measurement table. Regenerate PNGs from the canvas (download icon per board) into `png/` when the boards change.
 
 ## Board → gallery card (agentic-ui `design-v2`, crate `aui-gallery`)

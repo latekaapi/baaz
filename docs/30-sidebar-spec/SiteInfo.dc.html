@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browse, site information</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+body{margin:0}
+a{color:#F5F5F5}a:hover{color:#DEDEDE}
+.si{position:absolute;left:8px;top:88px;width:320px;box-sizing:border-box;padding:4px;border-radius:10px;background:#252525;box-shadow:inset 0 1px 0 0 rgba(255,255,255,.02),inset 0 0 0 1px rgba(255,255,255,.02),0 0 0 1px rgba(0,0,0,.12),0 1px 1px -0.5px rgba(0,0,0,.18),0 3px 3px -1.5px rgba(0,0,0,.18);font-size:13px;line-height:20px;color:#F5F5F5;z-index:5}
+.si .k{font-size:12px;line-height:16px;color:#A3A3A3}
+.si .f{padding:4px 8px}
+.si .lab{height:28px;display:flex;align-items:center;padding:0 8px;font-size:12px;line-height:16px;color:#A3A3A3}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; background: #171717; position: relative; font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif; color: #F5F5F5; overflow: hidden; display: flex;">
+  <dc-import name="Sidebar" variant="browse" h="{{h}}" hint-size="260px,900px"></dc-import>
+  <!-- the page stays live beside the panel: the panel is its own window over it -->
+  <div style="flex: 1 1 auto; min-width: 0; margin: 8px 8px 8px 0; border-radius: 10px; background: #FFFFFF; overflow: hidden; color: #191B21; padding: 40px 48px; box-sizing: border-box;">
+    <div style="font-size: 32px; line-height: 40px; font-weight: 600;">State scores 2023-24</div>
+  </div>
+  <!-- the shield opens it: FF dropdown chrome, 320 wide (w-80), under the address line -->
+  <div class="si" role="dialog" aria-label="Site information for pgi.udiseplus.gov.in">
+    <div style="padding: 8px 8px 4px; font-weight: 600;">pgi.udiseplus.gov.in</div>
+    <div style="display: flex; gap: 8px; padding: 8px;">
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#F5F5F5" stroke-width="2" style="flex: none; margin-top: 2px;"><path d="M8 1.5l5 2v4c0 3.2-2.2 5.6-5 7-2.8-1.4-5-3.8-5-7v-4z"/></svg>
+      <div><div>Connection is secure</div><div class="k">Information you send to this site, like passwords or card numbers, stays private.</div></div>
+    </div>
+    <div style="height: 1px; background: rgba(245,245,245,.072); margin: 4px -4px;"></div>
+    <div class="lab">Certificate</div>
+    <div class="f"><div class="k">Issued to</div><div>pgi.udiseplus.gov.in</div></div>
+    <div class="f"><div class="k">Issued by</div><div>R11 · Let's Encrypt</div></div>
+    <div class="f"><div class="k">Valid</div><div>20 Sep 2026 – 19 Dec 2026</div></div>
+    <div class="f"><div class="k">Connection</div><div>TLS 1.3</div></div>
+    <div class="f" style="padding-bottom: 8px;"><div class="k">SHA-256 fingerprint</div><div style="font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 14px; word-break: break-all;">4B:01:D1:CB:3D:64:D4:4C:B8:94:E5:37:D2:0F:9D:1E:A4:30:7D:7F:6C:A5:EE:9D:4F:DA:52:89:82:CB:7B:12</div></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { h: 900 };
+  }
+}
+</script>
+</body>
+</html>
