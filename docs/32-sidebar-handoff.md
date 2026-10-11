@@ -1,11 +1,11 @@
 # 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `4915fc3`. **harness** `feedback-mode` @ `8ba5fec` (+ this doc). Both trees clean.
+- **agentic-ui** `design-v2` @ `16f1fed`. **harness** `feedback-mode` @ `5b2223f` (+ this doc). Both trees clean.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
-- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v26** (v25 = the sidebar build; v26 adds NewTab2 for approval + BrowseFixes as built); repo copy in `docs/30-sidebar-spec/`.
+- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v28** (= the build: NewTab2 + chosen ground, BrowseFixes, rename field); repo copy in `docs/30-sidebar-spec/`.
 - Gates last run green: `cargo test -p baaz` 1486 · `cargo test -p aui -p aui-webview` 628 · `aui-cef` (own target dir,
   `cd crates/aui-cef && cargo test`) 44 · clippy `-D warnings` on all of them. Gallery clippy has one pre-existing failure
   (`aui-gallery/src/browse/screen.rs:2235`, not ours).
@@ -78,7 +78,17 @@ the real state dir (sessions list loads; an empty isolated dir stays on skeleton
 The 18-entry probe now reads right-git 28 / right-files 30 (+1 each since the morning) with or without this
 round's changes — time-dependent, not ours.
 
-**Waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
+**Built 2026-10-11 (morning):** the new tab = NewTab2 on "option B with C's background" (harness 5b2223f,
+`newtab_ground.rs`): the desktop picture — the aerial's still when an aerial is set, since
+`desktopImageURLForScreen:` answers DefaultDesktop.heic for aerials — blurred, dimmed 40 %, B's centre scrim,
+baked once per launch into `<state>/newtab/ground-<key>.png`; mesh fallback; deterministic clock bakes the mesh.
+Panel = surface-1 62 % (no backdrop blur in gpui). Rename field (aui 16f1fed): FF focused InputField in the row's
+pill, no dot, `FluidList::inert` keeps both blocks off it; gpui-base Textarea's 10 px text inset compensated
+(`TEXTAREA_TEXT_INSET`, measured with a marker). Seen via gpui `--screenshot` (screen locked): new tab rest +
+typing. NOT yet seen live: the rename field after the 10 px compensation (owner to glance), the new tab in the
+real window over CEF.
+
+**Superseded — was waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
 Not reproduced: the "border appears on hover" over the spaces strip (no pointer hover in scripted runs) — the
 always-on divider should make it moot; owner to confirm. Browse right-click menus still carry the native rim
