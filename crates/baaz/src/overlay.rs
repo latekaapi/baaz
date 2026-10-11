@@ -41,7 +41,13 @@ pub(crate) enum OverlayKind {
     /// The Field (⌘L, a click on the address line): the address input and
     /// its rows, anchored on the sidebar's address line, over the live page.
     Field,
+    /// The site-information panel (the shield): connection and certificate,
+    /// under the address line, over the live page.
+    SiteInfo,
 }
+
+/// The site-information panel's width: FF's dropdown `w-80`, 320.
+const SITE_INFO_WIDTH: f32 = scale::SP_7 * 10.0;
 
 /// The Field panel's width (canvas board "Field", 2026-10-11): 600.
 const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
@@ -140,6 +146,15 @@ impl Harness {
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(gpui::px(FIELD_WIDTH) + pad * 2.0, height))));
         }
+        if self.site_info_open && self.sidebar_open && self.browse_centre_state().is_some() {
+            // Under the address line, inside a clear rect like the Field's.
+            let metrics = cx.aui().metrics;
+            let pad = gpui::px(FIELD_SHADOW_PAD);
+            let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
+            let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
+            let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
+            return Some((OverlayKind::SiteInfo, Bounds::new(origin, gpui::size(gpui::px(SITE_INFO_WIDTH) + pad * 2.0, height))));
+        }
         let menu = self.browse_menu.as_ref()?;
         let space = self.browse_space().unwrap_or_default();
         let folders = self.browser.tabs.folders_in(&space).len();
@@ -197,7 +212,7 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    if kind == OverlayKind::Field {
+                    if matches!(kind, OverlayKind::Field | OverlayKind::SiteInfo) {
                         drop_native_chrome(window);
                     }
                     cx.new(|cx| {
@@ -254,6 +269,8 @@ impl Harness {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", self.browse_menu).hash(&mut hasher);
         self.browser.tabs.generation.hash(&mut hasher);
+        self.site_info_open.hash(&mut hasher);
+        self.browse_centre_shown().hash(&mut hasher);
         if self.browse_address.is_some() {
             self.browse_address_text(cx).hash(&mut hasher);
             self.browse_omnibox_selected.hash(&mut hasher);
@@ -287,6 +304,7 @@ impl Harness {
                 browse_menu("overlay-browse-menu", &browse, Some(on_intent), window, cx)
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
+            OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
         }
     }
 
@@ -424,6 +442,116 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The site-information panel (owner 2026-10-11: "certificate details
+    /// like Chrome"): the host, whether the connection is secure, and the
+    /// certificate — issued to, issued by, validity, protocol, SHA-256 — on
+    /// FF's dropdown chrome (container radius, p-1, caption group labels,
+    /// border/60 separators). Read from the engine when it opens.
+    fn render_site_info(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = cx.aui().colors;
+        let metrics = cx.aui().metrics;
+        let state = self.browse_centre_state();
+        let (url, security, cert) = match state.as_ref() {
+            Some(state) => {
+                let page = state.read(cx);
+                (page.url().to_string(), page.security(), page.certificate())
+            }
+            None => (String::new(), aui_webview::PageSecurity::Unknown, None),
+        };
+        let host = url.split("://").nth(1).and_then(|rest| rest.split('/').next()).unwrap_or(&url).to_owned();
+        let secure = cert.is_some() || security == aui_webview::PageSecurity::Secure;
+        let mut separator = p.line;
+        separator.a *= 0.6;
+        let inset = metrics.item_px / 2.0;
+        let label = |text: &'static str, cx: &App| {
+            div().h(metrics.control_md).px(metrics.item_px).flex().items_center().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(text)
+        };
+        let field = |name: &'static str, value: String, cx: &App| {
+            v_flex()
+                .px(metrics.item_px)
+                .py(gpui::px(scale::SP_1))
+                .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(name))
+                .child(div().text_role_in(TextRole::Body, Density::Standard).text_color(p.fg).child(value))
+        };
+        let (headline, detail) = if secure {
+            ("Connection is secure", "Information you send to this site, like passwords or card numbers, stays private.")
+        } else {
+            ("Connection is not secure", "Don't enter passwords or card details on this site: others can read what you send.")
+        };
+        let mut panel = v_flex()
+            .id("site-info")
+            .w_full()
+            .p(inset)
+            .role(gpui::Role::Dialog)
+            .aria_label(format!("Site information for {host}"))
+            .child(
+                div()
+                    .px(metrics.item_px)
+                    .pt(metrics.item_px)
+                    .pb(gpui::px(scale::SP_1))
+                    .text_role_in(TextRole::Body, Density::Standard)
+                    .semibold()
+                    .text_color(p.fg)
+                    .truncate()
+                    .child(host),
+            )
+            .child(
+                h_flex()
+                    .px(metrics.item_px)
+                    .py(gpui::px(scale::SP_2))
+                    .gap(metrics.gap)
+                    .items_start()
+                    .child(div().flex_none().pt(gpui::px(2.0)).child(icon(IconName::Shield).size(metrics.icon).color(if secure { p.fg } else { p.danger }).lit(true)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w(gpui::px(0.0))
+                            .child(div().text_role_in(TextRole::Body, Density::Standard).text_color(if secure { p.fg } else { p.danger }).child(headline))
+                            .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(detail)),
+                    ),
+            );
+        if let Some(cert) = cert {
+            let date = |secs: i64| {
+                chrono::DateTime::from_timestamp(secs, 0).map(|d| d.with_timezone(&chrono::Local).format("%-d %b %Y").to_string()).unwrap_or_default()
+            };
+            let named = |name: &str, org: &Option<String>| match org {
+                Some(org) if org != name => format!("{name} · {org}"),
+                _ => name.to_owned(),
+            };
+            panel = panel
+                .child(div().my(inset).mx(-inset).h(gpui::px(1.0)).bg(separator))
+                .child(label("Certificate", cx))
+                .child(field("Issued to", named(&cert.subject, &cert.subject_org), cx))
+                .child(field("Issued by", named(&cert.issuer, &cert.issuer_org), cx))
+                .child(field("Valid", format!("{} – {}", date(cert.valid_from), date(cert.valid_to)), cx));
+            if let Some(protocol) = cert.protocol.clone() {
+                panel = panel.child(field("Connection", protocol, cx));
+            }
+            if !cert.sha256.is_empty() {
+                panel = panel.child(
+                    v_flex()
+                        .px(metrics.item_px)
+                        .pt(gpui::px(scale::SP_1))
+                        .pb(metrics.item_px)
+                        .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("SHA-256 fingerprint"))
+                        .child(div().role_in(TextRole::Micro, cx).font_family(aui_tokens::scale::FONT_MONO).text_color(p.fg).child(cert.sha256.clone())),
+                );
+            }
+        }
+        let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+            this.site_info_open = false;
+            cx.notify();
+        });
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(gpui::px(FIELD_SHADOW_PAD))
+            .on_mouse_down(gpui::MouseButton::Left, leave)
+            .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_surface(panel)))
+            .into_any_element()
+    }
+
     /// Run `f` against the main window once the current event has finished:
     /// focus, pages and the address field's owner all live there.
     pub(crate) fn run_on_main(&self, cx: &mut Context<Self>, f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static) {
@@ -445,6 +573,10 @@ impl Harness {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
+            OverlayKind::SiteInfo => {
+                self.site_info_open = false;
+                cx.notify();
+            }
         }
     }
 

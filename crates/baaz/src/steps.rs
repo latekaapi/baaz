@@ -116,6 +116,8 @@
 //! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
 //! | `resize-sweep:<to_w,step_px>` | march the divider toward `to_w` one `step_px` per rendered frame, logging `baaz: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per tick |
 //! | `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>` | a frame-paced sidebar wheel gesture: `dy` for `finger_ticks` rendered frames, then decaying to 5% of `dy` over `tail_ticks` more, one push per tick (the in-process fallback for a real `CGEvent` gesture where the environment cannot confirm a landing window; pair with `BAAZ_FRAME_TRACE=1`) |
+//! | `page-eval:<js>` | run `js` in the Browse centre page (no `;` — it separates steps), e.g. `window.scrollTo(0,900)`; free |
+//! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page records a step failure |
 //! | `pointer:<x>,<y>` | dispatch one mouse move to that window point: the pointer resting on a row, so a following `sidebar-scroll-sweep:` shows hover under a scroll |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
 //! | `overflow` | open the header's overflow menu |
@@ -383,6 +385,19 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "wheel", run: |this, rest, window, cx| this.step_wheel(rest, window, cx) },
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "pointer", run: |this, rest, window, cx| this.step_pointer(rest, window, cx) },
+    WindowVerb { verb: "page-eval", run: |this, rest, _, cx| {
+        match this.browse_centre_state() {
+            Some(state) => state.update(cx, |state, _| state.eval_with_result(u64::MAX, rest)),
+            None => record_step_failure(&format!("page-eval:{rest}")),
+        }
+    } },
+    WindowVerb { verb: "site-info", run: |this, _, _, cx| {
+        this.site_info_open = this.browse_centre_state().is_some();
+        if !this.site_info_open {
+            record_step_failure("site-info");
+        }
+        cx.notify();
+    } },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
     WindowVerb {

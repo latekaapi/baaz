@@ -990,11 +990,16 @@ impl Harness {
         let snaps = self.browse_person_snaps(cx);
         let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
             self.browser.tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
-        let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool, loading: bool, favicon: Option<String>| BrowseTab {
+        // One tab is active in Browse: the one the centre shows. Each session
+        // also has an active tab of its own, and counting those lit every
+        // agent tab's row and moved the selected pill onto the last of them
+        // (owner screenshots 2026-10-11: the page's own row had none).
+        let shown = self.browse_centre_shown();
+        let tab = |id: crate::browser::TabId, title: String, initial: String, _owner_active: bool, loading: bool, favicon: Option<String>| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
             initial: initial.into(),
-            active,
+            active: Some(id) == shown,
             loading,
             favicon: favicon.map(Into::into),
         };
@@ -1331,6 +1336,10 @@ impl Harness {
             BrowseIntent::Address => {
                 let url = self.browse_centre_state().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
                 self.focus_browse_address_with(&url, window, cx);
+            }
+            BrowseIntent::SiteInfo => {
+                self.site_info_open = self.browse_centre_state().is_some();
+                cx.notify();
             }
             BrowseIntent::Back => self.browse_go_back(window, cx),
             BrowseIntent::Forward => self.browse_go_forward(window, cx),
@@ -2587,6 +2596,38 @@ mod tests {
     /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
     /// it (back to the person's active tab, closing nothing) and the
     /// moves are no-ops (they would act on the hidden person tab).
+    /// Owner screenshots 2026-10-11: the page's own row had no selected
+    /// pill. Each session's active tab also read "active", lighting every
+    /// agent row and taking the pill. Only the centre's tab is active now.
+    #[gpui::test]
+    fn only_the_centres_tab_is_active_in_browse(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("only-centre-active");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.browse_space();
+                let mine = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
+                let agent = h.browser.tabs.open(space, crate::browser::Owner::Session("s-1".to_owned()), "https://b.example/", None);
+                h.browser.tabs.activate(agent);
+                h.browser.tabs.activate(mine);
+                let model = h.browse_model(cx);
+                let actives: Vec<_> = model
+                    .tabs
+                    .iter()
+                    .chain(model.task_folders.iter().flat_map(|folder| folder.tabs.iter()))
+                    .filter(|tab| tab.active)
+                    .map(|tab| tab.id.clone())
+                    .collect();
+                assert_eq!(actives, vec![SharedString::from(browse_tab_key(mine))], "one active row: the centre's");
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
     /// A tab already navigating is never the new-tab page, even while its
     /// live page still reports about:blank (slow first load, 2026-10-11).
     #[gpui::test]
