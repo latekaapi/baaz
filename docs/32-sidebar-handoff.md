@@ -1,7 +1,7 @@
 # 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11, evening round included); next = owner's next list
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `a615d79`. **harness** `feedback-mode` @ `390b607` + this doc (evening round + round 2, below). Both trees clean. Never push.
+- **Superseded as the entry point by docs/33** (sidebar close-out handoff, 2026-10-12). agentic-ui `design-v2` @ `8967653`, harness `feedback-mode` @ docs/33's commit. Both trees clean. Never push.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
