@@ -192,8 +192,15 @@ fn close_and_keyboard_follow_the_shown_tab_not_the_project() {
         "was_active comes from the tab's own owner+space"
     );
     assert!(
-        body.contains("shown_window_active(window.is_window_active(), shown, &holds)"),
+        body.contains("shown_window_active(self.window_or_overlay_active(window), shown, &holds)"),
         "only the shown page's keyboard counts toward window-active"
+    );
+    // Baaz's own overlay window (the Field, Browse menus) sits above the
+    // page, so its holding the keyboard keeps the window "active" too
+    // (owner 2026-10-11: the page swapped for its square snapshot).
+    assert!(
+        body.contains("window.is_window_active() || self.overlay.is_some() || self.overlay_pending.is_some()"),
+        "the overlay window counts as the window being active"
     );
     assert!(
         !body.contains("states.values().any(|state| state.read(cx).holds_keyboard())"),

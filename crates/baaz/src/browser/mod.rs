@@ -826,6 +826,16 @@ impl Harness {
         browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
     }
 
+    /// Whether the window counts as active for page visibility: it is key,
+    /// or Baaz's own overlay window (the Field, a Browse menu) holds the
+    /// keyboard. That panel sits ABOVE the native page, so the page needs
+    /// no hiding; counting its key as "inactive" swapped the page for its
+    /// square-cornered snapshot while the Field was open, and flickered on
+    /// the first open before any snapshot existed (owner 2026-10-11).
+    fn window_or_overlay_active(&self, window: &Window) -> bool {
+        window.is_window_active() || self.overlay.is_some() || self.overlay_pending.is_some()
+    }
+
     /// The Browse centre page's rect for the window's `content` box: the
     /// whole column above — the centre page draws with
     /// [`WebviewPane::without_nav`](aui_webview::WebviewPane::without_nav),
@@ -2325,7 +2335,7 @@ impl Harness {
             // active while it or the currently SHOWN page holds the
             // keyboard — a hidden or obscured page can never keep it
             // "active", or its native view would show under an overlay.
-            window_active: shown_window_active(window.is_window_active(), shown, &holds),
+            window_active: shown_window_active(self.window_or_overlay_active(window), shown, &holds),
         };
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
@@ -2435,7 +2445,7 @@ impl Harness {
             centre_browse: centre_shown.is_some(),
             session_active: self.browse_centre_live(cx),
             terminal_covering: false,
-            window_active: shown_window_active(window.is_window_active(), centre_shown, &holds),
+            window_active: shown_window_active(self.window_or_overlay_active(window), centre_shown, &holds),
             chrome_popover_open,
             ..base
         });

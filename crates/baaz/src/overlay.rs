@@ -316,23 +316,28 @@ impl Harness {
         // (foreground, stroke 2) while it holds focus, which is always here.
         // Adaptation: the leading slot keeps the rows' 24 px icon axis, so
         // the icon and text line up with the rows below.
+        // With no rows (an empty field) the input is the whole panel: no
+        // divider, no gap, bleeding through the bottom padding too — a
+        // divider over nothing read as a double edge (owner 2026-10-11).
         let inset = metrics.item_px / 2.0;
+        let alone = rows.is_empty();
         let field = h_flex()
             .id("field-row")
             .h(metrics.control)
             .mx(-inset)
             .mt(-inset)
-            .mb(gpui::px(2.0))
+            .when(alone, |d| d.mb(-inset))
+            .when(!alone, |d| {
+                d.mb(gpui::px(2.0)).border_b_1().border_color({
+                    let mut line = p.line;
+                    line.a *= 0.6;
+                    line
+                })
+            })
             .pl(inset)
             .pr(metrics.item_px + inset)
             .items_center()
             .gap(metrics.gap)
-            .border_b_1()
-            .border_color({
-                let mut line = p.line;
-                line.a *= 0.6;
-                line
-            })
             .text_color(p.fg)
             .text_role_in(TextRole::Body, Density::Standard)
             .on_key_down(keys)
