@@ -907,7 +907,14 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let space = self.browse_space();
         let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
+        // Next to the current tab, and in its folder when it sits in one
+        // (owner 2026-10-11): a new tab opened from a folder used to land
+        // at the end of Today instead.
+        let folder = after.and_then(|after| self.browser.tabs.get(after)).filter(|tab| !tab.pinned).and_then(|tab| tab.folder.clone());
         let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
+        if let Some(folder) = folder {
+            self.browser.tabs.set_folder(id, Some(&folder));
+        }
         self.browse_session_tab = None;
         self.schedule_tabs_write(cx);
         self.ensure_tab_page(HOME_KEY, id, window, cx);
