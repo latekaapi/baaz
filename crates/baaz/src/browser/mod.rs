@@ -109,8 +109,6 @@ pub(crate) struct BrowserVisibility {
     /// intersect — an open dock leaves the page live. The input stays so
     /// a future full-width dock still hides the page.
     pub terminal_covering: bool,
-    /// The window holds the keyboard focus (its last frame landed).
-    pub window_active: bool,
     /// The Browse omnibox suggestion list stands open. It drops down over
     /// the page, so while it is open the page must be obscured (it shows
     /// its screenshot stand-in, as with the palette).
@@ -144,7 +142,6 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.omnibox_open
         && !inputs.chrome_popover_open
         && !inputs.page_error_open
-        && inputs.window_active
 }
 
 /// The shell header's height in pixels: the columns — and the browser
@@ -335,21 +332,6 @@ pub(crate) fn annotations_draft_block(annotations: &[Annotation], url: &str) -> 
         ));
     }
     out
-}
-
-/// Whether the window counts as active for the shown page: the OS window
-/// is active, or the currently SHOWN page holds the keyboard. Only the
-/// shown tab's page ever counts — a hidden or obscured page holding the
-/// keyboard (a click into a background Chromium page makes it key while
-/// the gpui window goes inactive) must never keep the window "active",
-/// or its native view would show under an overlay. Pure over a snapshot
-/// of who holds the keyboard, so tests drive it without a webview.
-pub(crate) fn shown_window_active(
-    window_active: bool,
-    shown: Option<TabId>,
-    holds_keyboard: &HashMap<TabId, bool>,
-) -> bool {
-    window_active || shown.is_some_and(|id| holds_keyboard.get(&id).copied().unwrap_or(false))
 }
 
 /// Whether a middle release on `id` closes it: the press started on this
@@ -864,16 +846,6 @@ impl Harness {
             })
             .detach();
         }
-    }
-
-    /// Whether the window counts as active for page visibility: it is key,
-    /// or Baaz's own overlay window (the Field, a Browse menu) holds the
-    /// keyboard. That panel sits ABOVE the native page, so the page needs
-    /// no hiding; counting its key as "inactive" swapped the page for its
-    /// square-cornered snapshot while the Field was open, and flickered on
-    /// the first open before any snapshot existed (owner 2026-10-11).
-    fn window_or_overlay_active(&self, window: &Window) -> bool {
-        window.is_window_active() || self.overlay.is_some() || self.overlay_pending.is_some()
     }
 
     /// Whether a page that was just covered is still live, waiting for the
@@ -2388,14 +2360,11 @@ impl Harness {
             omnibox_open: self.browse_omnibox_open(cx) && !self.field_overlay_wanted(cx),
             chrome_popover_open,
             page_error_open,
-            // A Chromium page is its own child window: clicking it makes
-            // the page key and the gpui window inactive. Counting that as
-            // inactive hid the page, which handed the keyboard back, so a
-            // click could never focus the page (B1b, live). The window is
-            // active while it or the currently SHOWN page holds the
-            // keyboard — a hidden or obscured page can never keep it
-            // "active", or its native view would show under an overlay.
-            window_active: shown_window_active(self.window_or_overlay_active(window), shown, &holds),
+            // No "window active" input: the page is a child window of
+            // ours, ordered with it, so another window taking the keyboard
+            // (a menu-bar menu, DevTools, the page itself) covers nothing.
+            // Hiding on deactivation blanked the page under every menu-bar
+            // click and the Inspect window (owner screenshots 2026-10-11).
         };
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
@@ -2505,7 +2474,6 @@ impl Harness {
             centre_browse: centre_shown.is_some(),
             session_active: self.browse_centre_live(cx),
             terminal_covering: false,
-            window_active: shown_window_active(self.window_or_overlay_active(window), centre_shown, &holds),
             chrome_popover_open,
             ..base
         });
@@ -4283,7 +4251,7 @@ mod tests {
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
         browser_session_active, browser_visible, initial_url, middle_release_closes,
         omnibox_dropdown_top, should_release_keyboard_on_mouse_down, should_remember,
-        shown_window_active, terminal_covers_browser, terminal_dock_bounds, Annotation,
+        terminal_covers_browser, terminal_dock_bounds, Annotation,
         BrowserVisibility, FakeWebBackend, WebviewState, BROWSE_TAB_STRIP_PX,
     };
     use super::{Owner, TabId};
@@ -4316,7 +4284,6 @@ mod tests {
             drop_cover: false,
             feedback_cover: false,
             terminal_covering: false,
-            window_active: true,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -4339,7 +4306,6 @@ mod tests {
             drop_cover: false,
             feedback_cover: false,
             terminal_covering: false,
-            window_active: true,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -4384,18 +4350,15 @@ mod tests {
 
     #[test]
     fn every_cover_hides_the_browse_centre_too() {
-        // The palette, the settings page and a dead window obscure the
-        // centre page exactly as they obscure the pane's: the same
-        // covering rules, not a second set.
+        // The palette and the settings page obscure the centre page
+        // exactly as they obscure the pane's: the same covering rules,
+        // not a second set.
         let mut palette = centre_clear();
         palette.palette_open = true;
         assert!(!browser_visible(palette), "the palette obscures the centre page");
         let mut settings = centre_clear();
         settings.settings_open = true;
         assert!(!browser_visible(settings), "settings obscure the centre page");
-        let mut dead = centre_clear();
-        dead.window_active = false;
-        assert!(!browser_visible(dead), "a dead window hides the centre page");
     }
 
     #[test]
@@ -4488,30 +4451,6 @@ mod tests {
         assert_eq!(full.size.height, gpui::px(900.0 - 44.0));
     }
 
-    #[test]
-    fn only_the_shown_page_keeps_the_window_active() {
-        let shown = TabId(1);
-        let hidden = TabId(2);
-        let mut holds = HashMap::new();
-        holds.insert(hidden, true);
-        // A hidden page holding the keyboard never keeps the window
-        // "active": only the shown tab's page counts.
-        assert!(!shown_window_active(false, Some(shown), &holds));
-        assert!(
-            !shown_window_active(false, None, &holds),
-            "nothing shown, nothing counts"
-        );
-        holds.insert(shown, true);
-        assert!(
-            shown_window_active(false, Some(shown), &holds),
-            "the shown page still carries B1b"
-        );
-        assert!(!shown_window_active(false, Some(shown), &HashMap::new()));
-        assert!(
-            shown_window_active(true, None, &HashMap::new()),
-            "an active window needs no page"
-        );
-    }
 
     #[test]
     fn middle_release_closes_only_its_own_press() {
@@ -4536,7 +4475,7 @@ mod tests {
 
     #[test]
     fn every_covering_input_hides_the_native_view() {
-        let cases: [(&str, VisibilityFlip); 11] = [
+        let cases: [(&str, VisibilityFlip); 10] = [
             ("closed pane", |mut inputs| {
                 inputs.pane_open = false;
                 inputs
@@ -4581,10 +4520,6 @@ mod tests {
                     Some(full_width_dock_rect()),
                     Some(overlapping_pane_rect()),
                 );
-                inputs
-            }),
-            ("dead window", |mut inputs| {
-                inputs.window_active = false;
                 inputs
             }),
         ];
