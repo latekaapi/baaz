@@ -785,6 +785,15 @@ impl Harness {
         self.browser.tabs.active_of(&Owner::Person, space.as_deref())
     }
 
+    /// Whether the centre's tab itself is blank (its stored URL): a tab
+    /// mid-way through its first navigation is not, even while its live
+    /// page still reports `about:blank`.
+    pub(crate) fn browse_centre_tab_blank(&self) -> bool {
+        self.browse_centre_shown()
+            .and_then(|id| self.browser.tabs.get(id))
+            .is_none_or(|tab| tab.url.is_empty() || tab.url == BLANK)
+    }
+
     /// The Browse centre's live page, when one already exists — the
     /// shown tab's state — never creating. The mouse-down hand-back
     /// reads this instead of the pane's page while in Browse.

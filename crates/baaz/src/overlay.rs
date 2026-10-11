@@ -269,7 +269,8 @@ impl Harness {
             && self.sidebar_open
             && !self.settings_open()
             && self.browse_address.is_some()
-            && !self.browse_centre_state().is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
+            && !(self.browse_centre_state().is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
+                && self.browse_centre_tab_blank())
     }
 
     /// The overlay's content for `kind`: the Browse menu panel, its intents
