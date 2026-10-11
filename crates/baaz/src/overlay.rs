@@ -64,18 +64,27 @@ const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
 /// window draws none of its own ([`drop_native_chrome`]).
 const SHADOW_PAD: f32 = scale::SP_1;
 
-/// Take macOS's own rim and shadow off an overlay window. gpui opens a
-/// `PopUp` as a titled panel, so the window server outlines the WHOLE window
-/// rect: around the Field's fixed transparent rect that drew an empty box
-/// below the rows and a second edge on top of the panel's FF ring (owner
-/// screenshot 2026-10-11). The panel's own FF shadow is its only edge.
+/// Take macOS's own chrome off an overlay window, and keep it from ever
+/// becoming the main window.
 ///
-/// Every overlay window goes through here, whatever it shows. It was first
-/// applied to the Field and site information only, so the tab menu — whose
-/// window is sized for its "Move to folder" submenu too — kept a translucent
-/// box beside it (owner screenshot 2026-10-11 5.31 PM).
+/// - **Shadow.** gpui opens a `PopUp` as a titled panel, so the window server
+///   shadows the WHOLE window rect: around the Field's fixed transparent rect
+///   that drew an empty box below the rows (owner screenshot 2026-10-11).
+/// - **Border.** A titled window also draws its own 1 px rim — the faint line
+///   that stayed above the tab menu after the shadow went (owner screenshot
+///   2026-10-11 7.14 PM). Menus, the Field and site information drop the
+///   titled bit and become borderless panels (gpui's panel class still
+///   answers `canBecomeKeyWindow`, so the Field types). The modal keeps it:
+///   it covers the whole window and needs the window server's rounded
+///   corners, and its rim lies on the main window's own.
+/// - **Main.** gpui's panel class answers YES to `canBecomeMainWindow`, so a
+///   panel taking the keyboard took main from Baaz's window and greyed its
+///   traffic lights (owner, same screenshot: Claude Desktop's menus never do).
+///   A panel is a utility: key, never main ([`never_main_panels`]).
+///
+/// Every overlay window goes through here, whatever it shows.
 #[cfg(target_os = "macos")]
-fn drop_native_chrome(window: &Window) {
+fn drop_native_chrome(window: &Window, kind: OverlayKind) {
     use objc2::{msg_send, runtime::AnyObject};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
@@ -86,17 +95,54 @@ fn drop_native_chrome(window: &Window) {
     };
     let view = appkit.ns_view.as_ptr() as *mut AnyObject;
     // SAFETY: `view` is the live NSView gpui just made for this window, on
-    // the main thread; `window` and `setHasShadow:` are plain AppKit calls.
+    // the main thread; these are plain AppKit setters on its window.
     unsafe {
         let ns_window: *mut AnyObject = msg_send![view, window];
-        if !ns_window.is_null() {
-            let _: () = msg_send![ns_window, setHasShadow: false];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setHasShadow: false];
+        if kind != OverlayKind::Modal {
+            // Borderless (no titled bit), keeping the two bits gpui's panel
+            // relies on: full-size content (its frame maths) and
+            // non-activating (a click in it never activates the app anew).
+            const FULL_SIZE_CONTENT: usize = 1 << 15;
+            const NON_ACTIVATING_PANEL: usize = 1 << 7;
+            let _: () = msg_send![ns_window, setStyleMask: FULL_SIZE_CONTENT | NON_ACTIVATING_PANEL];
         }
     }
 }
 
+/// Makes gpui's panel class answer NO to `canBecomeMainWindow`, once, before
+/// the first overlay opens: gpui makes a new panel key — and, unpatched,
+/// main — while creating it, so patching from the window's own setup left
+/// the first panel of a run main (seen live). The class is registered when
+/// the binary loads (gpui's `build_classes` ctor). Every gpui panel in Baaz
+/// is one of these overlays (Baaz opens no `Floating` or `Dialog` window), so
+/// the class-wide change is exactly the overlays'.
+#[cfg(target_os = "macos")]
+fn never_main_panels() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    extern "C-unwind" fn no(_: *mut AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    ONCE.call_once(|| {
+        let Some(class) = AnyClass::get(c"GPUIPanel") else {
+            return;
+        };
+        // SAFETY: gpui's `GPUIPanel` (a `ClassDecl` class), a selector with
+        // the `B@:` signature `no` implements; main thread.
+        unsafe {
+            let class = class as *const AnyClass as *mut AnyClass;
+            let imp: Imp = std::mem::transmute::<extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool, Imp>(no);
+            objc2::ffi::class_replaceMethod(class, objc2::sel!(canBecomeMainWindow), imp, c"B@:".as_ptr());
+        }
+    });
+}
+
 #[cfg(not(target_os = "macos"))]
-fn drop_native_chrome(_: &Window) {}
+fn drop_native_chrome(_: &Window, _: OverlayKind) {}
 
 /// The open overlay: its window, what it shows, and where (screen space).
 pub(crate) struct Overlay {
@@ -224,6 +270,8 @@ impl Harness {
         let Some((kind, bounds)) = wanted else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        never_main_panels();
         // Opened from a task, at app level: never inside this update (the
         // overlay's first draw reads Harness) and never inside render.
         let baaz = cx.entity().downgrade();
@@ -241,7 +289,7 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window);
+                    drop_native_chrome(window, kind);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
