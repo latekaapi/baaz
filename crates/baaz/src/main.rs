@@ -62,6 +62,7 @@ mod layout;
 mod log;
 mod login;
 mod mascot;
+mod newtab_ground;
 mod overlay;
 mod overlays;
 mod plan;

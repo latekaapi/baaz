@@ -848,6 +848,12 @@ pub struct Harness {
     /// in order (like the palette's `selected`). Meaningful only while
     /// [`Self::browse_address`] is `Some`. Never persists.
     pub(crate) browse_omnibox_selected: usize,
+    /// The new tab's baked ground ([`crate::newtab_ground`]): `None` until
+    /// the first new tab asks for it and the background bake lands, then
+    /// the file the page paints. `newtab_ground_asked` keeps it to one bake
+    /// per launch.
+    pub(crate) newtab_ground: Option<std::path::PathBuf>,
+    pub(crate) newtab_ground_asked: bool,
     /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
     /// activates the highlighted row once moved, and commits the raw text
     /// otherwise — so plain Enter navigates instead of asking. Set by
@@ -1478,6 +1484,8 @@ impl Harness {
             browse_address: None,
             browse_address_sub: None,
             browse_omnibox_selected: 0,
+            newtab_ground: None,
+            newtab_ground_asked: false,
             browse_omnibox_moved: false,
             back_bounds: None,
             browse_last_holds: false,
@@ -5864,6 +5872,7 @@ impl Harness {
                 // library.
                 if blank {
                     blank_page = true;
+                    self.ensure_newtab_ground(cx);
                     self.render_browse_newtab(window, cx)
                 } else if let Some(reason) =
                     state.read(cx).crashed().map(|crashed| crashed.to_string())
@@ -6021,33 +6030,67 @@ impl Harness {
         )
     }
 
-    /// The Baaz new-tab page (B2a-H4): a large centred field with the
-    /// address field's behaviour, the ⌘↵ ask hint, and up to 5 pick-up rows
-    /// from this project's open tabs, recent sessions and closed tabs.
+    /// Start the new tab's ground bake once per launch (off the main
+    /// thread; [`crate::newtab_ground`]). Captures under the deterministic
+    /// clock skip the desktop picture and bake the mesh, so they never
+    /// depend on the machine's wallpaper.
+    fn ensure_newtab_ground(&mut self, cx: &mut Context<Self>) {
+        if self.newtab_ground_asked {
+            return;
+        }
+        self.newtab_ground_asked = true;
+        let source = if crate::clock::deterministic() { None } else { crate::newtab_ground::current_source() };
+        let bake = cx.background_executor().spawn(async move { crate::newtab_ground::bake(source) });
+        cx.spawn(async move |this, cx| {
+            let baked = bake.await;
+            let _ = this.update(cx, |this, cx| {
+                this.newtab_ground = baked;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Baaz new-tab page (canvas v27, owner 2026-10-11: board NewTab2 on
+    /// "B with C's background"). The ground is the desktop picture, blurred
+    /// and dimmed with B's centre scrim ([`crate::newtab_ground`]). On it,
+    /// one 560 column a quarter of the way down holds:
+    /// - the Field inline on FF's composer chrome (`input-message.tsx`: p-2,
+    ///   container radius, subtitle 14/20; surface-3, edge = foreground 20 %
+    ///   when focused, else the border; shadow-3 over the picture);
+    /// - "Pick up where you left off" as FF menu rows (36 tall, px-2, gap-2,
+    ///   item radius; muted at rest, foreground when hovered) on a panel.
+    ///
+    /// Adaptation: gpui has no backdrop blur, so the panel is surface-1 at
+    /// 62 % over the already-blurred ground, which reads as the mock's frost.
+    /// The rows light on gpui hover instead of FF's gliding block.
     fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
         let editing = self.browse_address.is_some();
-        // The canvas NewTab board: the Field inline on FF's composer chrome
-        // (`input-message.tsx`: surface + shadow, container radius, 8 px
-        // around, subtitle text; the focus edge is the foreground at 20 %).
         let field_w = px(NEWTAB_FIELD_W);
+        let lit = |on: bool| icon(IconName::Search).size(metrics.icon).color(if on { p.fg } else { p.fg_muted }).lit(on);
         let shell = |editing: bool| {
             aui::interact::Shape::Container.rounded(
                 h_flex()
                     .w(field_w)
-                    .p(metrics.item_px)
+                    .h(metrics.control + metrics.item_px * 2.0)
+                    .px(metrics.item_px * 2.0)
                     .gap(metrics.gap)
                     .items_center()
                     .bg(p.surface(3))
                     .border_1()
                     .border_color(if editing { p.fg.alpha(0.2) } else { p.line })
+                    .shadow(p.floating_shadow())
+                    // FF's composer text: subtitle 14/20 at weight 400 (our
+                    // Subtitle role carries the semibold heading weight).
                     .text_role_in(TextRole::Subtitle, Density::Standard)
-                    .child(div().flex_none().pl(px(scale::SP_1)).child(icon(IconName::Search).size(metrics.icon).color(p.fg_muted))),
+                    .font_weight(gpui::FontWeight::NORMAL),
             )
         };
+        let asks = div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("⌘↵ asks");
         let field: AnyElement = if editing {
-            shell(true).child(self.browse_address_input(window, cx)).into_any_element()
+            shell(true).child(lit(true)).child(div().flex_1().min_w(px(0.0)).child(self.browse_address_input(window, cx))).child(asks).into_any_element()
         } else {
             let focus = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.focus_browse_address_with("", window, cx);
@@ -6056,43 +6099,71 @@ impl Harness {
                 .id("browse-newtab-field")
                 .cursor_pointer()
                 .role(gpui::Role::Button)
-                .aria_label("New tab. Search or type a URL")
+                .aria_label("New tab. Search, open a page, or ask")
                 .on_click(focus)
-                .child(shell(false).text_color(p.fg_muted).child("Search or type a URL"))
+                .child(shell(false).text_color(p.fg_muted).child(lit(false)).child(div().flex_1().child("Search, open a page, or ask")).child(asks))
                 .into_any_element()
         };
-        let mut column = v_flex()
-            .size_full()
-            .id("browse-newtab")
-            .items_center()
-            .justify_center()
-            .gap(px(scale::SP_4))
-            .role(gpui::Role::Group)
-            .aria_label("New tab")
-            .child(field)
-            .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("Type to switch tabs, search, or ask Claude · ⌘↵ asks"));
-        // The new-tab field's own dropdown, anchored under the centred
-        // field (the toolbar's anchors under the toolbar instead).
-        if let Some(list) = self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Newtab) {
+        let mut column = v_flex().w(field_w).mt(px(scale::SP_7 * 6.25)).gap(px(scale::SP_6)).child(field);
+        // Typing drops the Field's own rows under it (the omnibox list);
+        // the pick-up panel steps aside while they show.
+        let dropdown = self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Newtab);
+        let typing = dropdown.is_some();
+        if let Some(list) = dropdown {
             column = column.child(list);
         }
-        let pickup = self.browse_pickup_full();
+        let pickup = if typing { Vec::new() } else { self.browse_pickup_full() };
         if !pickup.is_empty() {
             let mut rows = v_flex()
-                .w(px(480.0))
-                .gap(px(2.0))
-                .child(div().ui(scale::FS_12).text_color(p.ink_3).child("Pick up where you left off"));
+                .id("browse-pickup-list")
+                .w_full()
+                .p(metrics.item_px / 2.0)
+                .role(gpui::Role::List)
+                .aria_label("Pick up where you left off")
+                .child(
+                    div()
+                        .h(metrics.control_md)
+                        .px(metrics.item_px)
+                        .flex()
+                        .items_center()
+                        .role_in(TextRole::Caption, cx)
+                        .text_color(p.fg_muted)
+                        .child("Pick up where you left off"),
+                );
             for (index, (row, target)) in pickup.into_iter().enumerate() {
-                let content = h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .h(px(28.0))
-                    .rounded(px(scale::R_SM))
-                    .ui(scale::FS_13)
-                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).child(row.title.clone()))
-                    .child(div().flex_none().text_color(p.ink_3).child(row.detail.clone()));
+                let lead: AnyElement = match &target {
+                    crate::browser::PickupTarget::Session(_) => icon(IconName::List).size(metrics.icon).color(p.fg_muted).into_any_element(),
+                    _ => aui::interact::Shape::Item
+                        .rounded(
+                            div()
+                                .size(metrics.icon)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(p.surface(4))
+                                .role_in(TextRole::Micro, cx)
+                                .semibold()
+                                .text_color(p.fg_muted)
+                                // The title's own letter: `tab_initial` reads an
+                                // empty URL as a blank tab ("N").
+                                .child(row.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "•".to_owned())),
+                        )
+                        .into_any_element(),
+                };
+                let content = aui::interact::Shape::Item.rounded(
+                    h_flex()
+                        .w_full()
+                        .h(metrics.control)
+                        .px(metrics.item_px)
+                        .gap(metrics.gap)
+                        .items_center()
+                        .text_color(p.fg_muted)
+                        .hover(|s| s.bg(p.hover_overlay()).text_color(p.fg))
+                        .child(div().flex_none().size(metrics.icon).flex().items_center().justify_center().child(lead))
+                        .child(div().flex_shrink(1.0).min_w(px(0.0)).truncate().text_role_in(TextRole::Body, Density::Standard).child(row.title.clone()))
+                        .child(div().flex_1())
+                        .child(div().flex_none().pl(px(scale::SP_4)).role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(row.detail.clone())),
+                );
                 // Pick-up rows press on mouse-down (pointer timing: the
                 // press must land before the address input's blur drops
                 // the field) and also answer clicks for accessibility
@@ -6100,7 +6171,7 @@ impl Harness {
                 // (selecting the same tab, reopening an already-reopened
                 // tab, or opening the now-active session again changes
                 // nothing).
-                match target {
+                let row_el = match target {
                     crate::browser::PickupTarget::Tab(id) => {
                         let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
                             this.select_browse_sidebar_tab(id, window, cx);
@@ -6108,16 +6179,7 @@ impl Harness {
                         let select = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                             this.select_browse_sidebar_tab(id, window, cx);
                         });
-                        rows = rows.child(
-                            div()
-                                .id(("browse-pickup", index))
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Open {}", row.title))
-                                .cursor_pointer()
-                                .on_mouse_down(gpui::MouseButton::Left, press)
-                                .on_click(select)
-                                .child(content),
-                        );
+                        div().id(("browse-pickup", index)).aria_label(format!("Open {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(select)
                     }
                     crate::browser::PickupTarget::Session(session) => {
                         let press_session = session.clone();
@@ -6133,16 +6195,7 @@ impl Harness {
                                 this.resume(session.clone(), window, cx);
                             }
                         });
-                        rows = rows.child(
-                            div()
-                                .id(("browse-pickup-session", index))
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Open {}", row.title))
-                                .cursor_pointer()
-                                .on_mouse_down(gpui::MouseButton::Left, press)
-                                .on_click(open)
-                                .child(content),
-                        );
+                        div().id(("browse-pickup-session", index)).aria_label(format!("Open {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(open)
                     }
                     crate::browser::PickupTarget::Closed(id) => {
                         let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
@@ -6151,22 +6204,28 @@ impl Harness {
                         let reopen = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                             this.reopen_browse_closed_tab(id, window, cx);
                         });
-                        rows = rows.child(
-                            div()
-                                .id(("browse-pickup-closed", index))
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Reopen {}", row.title))
-                                .cursor_pointer()
-                                .on_mouse_down(gpui::MouseButton::Left, press)
-                                .on_click(reopen)
-                                .child(content),
-                        );
+                        div().id(("browse-pickup-closed", index)).aria_label(format!("Reopen {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(reopen)
                     }
-                }
+                };
+                rows = rows.child(row_el.role(gpui::Role::Button).cursor_pointer().child(content));
             }
-            column = column.child(rows);
+            // The frosted panel: surface-1 at 62 % with FF's shadow-3 ring.
+            let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).shadow(p.floating_shadow()).child(rows));
+            column = column.child(panel);
         }
-        column.into_any_element()
+        let radius = if self.browse_page_card() { px(scale::SHAPE_CONTAINER) } else { px(0.0) };
+        let ground = self.newtab_ground.clone().map(|path| {
+            gpui::img(path).absolute().top(px(0.0)).left(px(0.0)).size_full().object_fit(gpui::ObjectFit::Cover).rounded(radius).into_any_element()
+        });
+        div()
+            .size_full()
+            .relative()
+            .id("browse-newtab")
+            .role(gpui::Role::Group)
+            .aria_label("New tab")
+            .children(ground)
+            .child(div().size_full().flex().flex_col().items_center().child(column))
+            .into_any_element()
     }
 
     /// The omnibox suggestion list (B2a-H4): the palette look — Ask the
