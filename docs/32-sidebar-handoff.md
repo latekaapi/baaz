@@ -1,12 +1,12 @@
-# 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11); next = owner's new bug list
+# 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11, evening round included); next = owner's next list
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `cdbe2a4`. **harness** `feedback-mode` @ `a110d99`. Both trees clean. Never push.
+- **agentic-ui** `design-v2` @ `b96b84c`. **harness** `feedback-mode` @ HEAD (evening round, below). Both trees clean. Never push.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
 - Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v29** (= the build: NewTab2 + ground, BrowseFixes, rename field, SiteInfo, From sessions header); repo copy in `docs/30-sidebar-spec/`.
-- Gates last run green: `cargo test -p baaz` 1496 · `cargo test -p aui -p aui-webview` 633 · `aui-cef` (own target dir,
+- Gates last run green (evening round): `cargo test -p baaz` 1495+ · `cargo test -p aui -p aui-webview` 640 · `aui-cef` (own target dir,
   `cd crates/aui-cef && cargo test`) 46 · clippy `-D warnings` on all of them. 18-entry probe: findings on every entry
   against pre-design-v2 baselines (unchanged all round; none of them shows Browse). Gallery clippy has one pre-existing failure
   (`aui-gallery/src/browse/screen.rs:2235`, not ours).
@@ -112,6 +112,40 @@ slow first load drew the new-tab page over a navigating tab (centre judged blank
 `browse_centre_tab_blank` (harness, after d53151b). Screen was unlocked: Field empty state, favicon row and
 page-under-Field all seen live.
 
+## Owner round 2026-10-11 evening — five bugs, one mechanism behind three
+
+Annotated screenshots + recordings 5.22–5.31 PM. Diagnosed live before any code (sample, kymographs, per-frame
+brightness of sidebar vs page). Commits (aui `b96b84c`; harness `c077099`, `61e9061`, `4ab3efc`, `86413a4`, then the
+hosted-modal commit):
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| Tab right-click menu: translucent box beside it, "again" | the Field's no-rim fix (`setHasShadow:NO`) went on two overlay *kinds*, not on the one window path; the menu's window is sized for its submenu | every overlay window drops the native chrome where it opens; menu gets the FF shadow-3 margin |
+| Sidebar resize laggy (~5 Hz page) | `push_frame` asked Chromium for a full-window PNG every resize frame (and every load end); CEF encodes on its UI thread = our main thread. Sample: 84 % of main thread in `rust_png` | no capture on resize/load; covers take their own picture; `capture()` forgets the old one; annotate-on captures. Live: 0 captures in a drag, ~100 ticks/s visible |
+| Account dropdown flicker/lag at end of open/close | the menu lives inside the sidebar column but counted as a cover → page hidden, picture taken, swapped in as the menu settled | not a cover any more |
+| ⌘K: sidebar greys first, page jerks dim later | gpui can't paint over the live page; the page hid only after its picture landed — measured 20 frames (~165 ms) late | **proper:** in Browse the palettes and dialogs draw in an `OverlayKind::Modal` panel over the whole window and the live page (no picture at all); listeners route to the main window (`main_listener`). Fallback for remaining in-window covers: fast JPEG stand-in (`capture_stand_in`, 36–44 ms vs 107–120 ms PNG), 8 ms cover drain, covers held until `cover_settling` ends |
+| Menu-bar click / Inspect turns the pane blank | `window_active` was a visibility input (WKWebView-era "dead window") | removed: the page is our child window; deactivation covers nothing |
+
+Seen live in the bundle (front-most test window, real CGEvent clicks + System Events keystrokes): tab menu without the
+box; account menu with the page live and no capture; sidebar + page dim on the same frame (frame 199) under ⌘K, page
+live; real typing in the hosted palette, results streaming in; a real click on a row opens the session via the main
+window; scrim click and Escape close; error dialog hosted; Baaz's Edit menu open and Finder in front — page stays.
+
+Adaptation written down: the hosted modal covers the traffic lights (they dim with the scrim and aren't clickable
+while a modal is up); in-window they stayed above the scrim. Sessions-mode covers (the right pane's page under ⌘K)
+still use the stand-in path.
+
+New traps:
+- `screencapture` (still or `-V` video) and losing focus pause gpui frames for a background test window; `resize-sweep`
+  then seems "slow". Measure tick rate with the window front-most and nothing capturing.
+- `resize-sweep:` does not block the step script — a following `wait:` + sweep cuts it short.
+- `System Events click at` is an AX press: gpui ignores it. Post real CGEvents (a 10-line Swift clicker).
+- Python's non-blocking *text* pipe drops data: read the child's stderr with `os.read` on the fd.
+- **Disk**: `search.db` is 1 GB; copying the real state per run filled the disk (Chromium then showed "profile could
+  not be loaded"). Copy once into one fixed dir and reuse; delete `$TMPDIR/bz.*` after a session.
+- `pkill -f "MacOS/Baaz --no-connect"` from the agent shell kills the shell itself (self-match). Kill by pid.
+- Rebuilding the bundle in place closes the owner's running Baaz.
+
 ## Live-check recipes (2026-10-11, all worked)
 - Locked screen? `screencapture -x f.png` then `magick f.png -alpha off -resize 5% -colorspace gray -format "%[fx:mean]" info:`
   — 0 = locked (macOS then refuses even `screencapture -l`). Use Baaz's gpui `--screenshot <png> --screenshot-delay <ms>`
@@ -142,7 +176,9 @@ recordings came from (b) or from gpui drawing where the page is:
    background showed black bands live (HN) and dark grounds in every stand-in. Fixed: white canvas (harness 8567ba2).
 3. **gpui tooltips beside the page** ran under it (the '+' New space tooltip). Fixed: `tip_within` (aui cdbe2a4).
 Rule for new UI: anything that can cross the page rect is an overlay window or accepts a stand-in; never assume
-gpui paints over the page.
+gpui paints over the page. **Evening addendum:** prefer the overlay window — the stand-in costs a main-thread encode,
+latency and a frozen page. A cover must be geometric (the account menu never touched the page and still hid it), and
+window activation is never a cover. Never capture the page outside an explicit request or a cover.
 
 Also this round: one active tab (agent sessions' own active tabs stole the selected pill; harness f786406),
 site information + certificate via CEF SSL status (aui 2d7e403, harness f786406), "From sessions" header.

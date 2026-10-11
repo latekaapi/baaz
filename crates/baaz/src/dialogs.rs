@@ -950,11 +950,11 @@ impl Harness {
         // The click carries the row id, so it runs that row directly instead
         // of rebuilding every row to map the id back to a position and the
         // position back to the same id (finding `performance-7`).
-        let select = cx.listener(move |this: &mut Self, id: &SharedString, window, cx| {
+        let select = self.main_listener(cx, move |this: &mut Self, id: &SharedString, window, cx| {
             crate::baaz_log!("palette select (click): {kind:?} {id}");
             this.run_palette_row(kind, id.clone(), window, cx);
         });
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.palette = None);
             cx.notify();
         });
@@ -987,16 +987,16 @@ impl Harness {
                 div()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_palette)
-                    .on_action(cx.listener(move |this, _: &SelectNext, _, cx| {
+                    .on_action(self.main_listener(cx, move |this, _: &SelectNext, _, cx| {
                         this.overlays.update(cx, |o, _| o.move_palette(1, count));
                         cx.notify();
                     }))
-                    .on_action(cx.listener(move |this, _: &SelectPrev, _, cx| {
+                    .on_action(self.main_listener(cx, move |this, _: &SelectPrev, _, cx| {
                         this.overlays.update(cx, |o, _| o.move_palette(-1, count));
                         cx.notify();
                     }))
-                    .on_action(cx.listener(|this, _: &Confirm, window, cx| this.confirm_palette(window, cx)))
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                    .on_action(self.main_listener(cx, |this, _: &Confirm, window, cx| this.confirm_palette(window, cx)))
+                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
@@ -1022,7 +1022,7 @@ impl Harness {
                     // palette row's click silently did nothing but dismiss.
                     // The row's own click runs first on
                     // the way up and this runs after it, idempotently.
-                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    .on_click(self.main_listener(cx, |this, _: &gpui::ClickEvent, _, cx| {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
@@ -1045,9 +1045,9 @@ impl Harness {
     /// it); Hand off starts the run.
     fn render_handoff_confirm(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.handoff_confirm.clone()?;
-        let confirm = cx.listener(|this: &mut Self, _: &(), window, cx| this.confirm_handoff(window, cx));
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        let confirm = self.main_listener(cx, |this: &mut Self, _: &(), window, cx| this.confirm_handoff(window, cx));
+        let close = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         let model = if state.to_model.trim().is_empty() { "provider default".to_owned() } else { state.to_model };
         let card = handoff_confirm(
             "handoff-confirm",
@@ -1068,7 +1068,7 @@ impl Harness {
                     .inset_0()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
+                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| this.close_dialog(cx)))
                     .child(card.into_any_element()),
             )
             .into_any_element(),
@@ -1113,7 +1113,7 @@ impl Harness {
             (false, DialogAction::MigrateSessions) => Some("Not now"),
             (false, _) => Some("Dismiss"),
         };
-        let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
+        let primary = self.main_listener(cx, move |this: &mut Self, _: &(), window, cx| {
             if action == DialogAction::Archive {
                 this.confirm_archive_dialog(window, cx);
                 return;
@@ -1194,7 +1194,7 @@ impl Harness {
         // The migration prompt's secondary is Never-ask-again ("Not now"):
         // the scrim and Escape beside it only close, so an accidental
         // dismissal re-asks next launch instead of stranding sessions.
-        let close = cx.listener(move |this: &mut Self, _: &(), _, cx| {
+        let close = self.main_listener(cx, move |this: &mut Self, _: &(), _, cx| {
             if action == DialogAction::MigrateSessions {
                 this.dismiss_session_migration(cx);
             } else {
@@ -1203,7 +1203,7 @@ impl Harness {
         });
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         // Critical errors (`DialogKind::Error`) draw a Baaz-owned card that
         // mirrors the library dialog's shell — same 420 pt width, 16 pt
         // padding, 12 pt gap, scrim, motion and action row — with the error
@@ -1311,7 +1311,7 @@ impl Harness {
                     .inset_0()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
+                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| this.close_dialog(cx)))
                     .child(card),
             )
             .into_any_element(),
@@ -2392,6 +2392,57 @@ mod tests {
             vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)),
             "settings obscure the page, so the stack is visible"
         );
+        restore_state(state);
+    }
+
+    /// Owner recording 2026-10-11 5.23 PM: the ⌘K scrim dimmed the sidebar before the page; in Browse the overlay window hosts the modal over the live page.
+    #[gpui::test]
+    fn the_overlay_window_hosts_a_modal_only_in_browse(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("modal-hosted");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = header_harness(vc, &state.2);
+        let wanted = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).modal_overlay_wanted(cx));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.mode = Mode::Sessions;
+            h.open_palette(PaletteKind::Search, cx);
+        }));
+        assert!(!wanted(vc), "Sessions draws its palette in the main window");
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = Mode::Browse));
+        assert!(wanted(vc), "Browse hosts the palette in the overlay window");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.overlays.update(cx, |o, _| o.palette = None);
+        }));
+        assert!(!wanted(vc), "Browse with neither palette nor dialog hosts nothing");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0))));
+        assert!(wanted(vc), "Browse hosts a dialog in the overlay window");
+        restore_state(state);
+    }
+
+    /// Owner recording 2026-10-11 5.23 PM: the ⌘K scrim dimmed the sidebar before the page; in Browse the overlay window hosts the modal over the live page.
+    #[gpui::test]
+    fn the_hosted_modal_takes_the_keyboard_at_its_own_handle(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let state = hermetic_state("modal-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = header_harness(vc, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.mode = Mode::Browse;
+            h.open_palette(PaletteKind::Search, cx);
+        }));
+        let (focus, query, dialog_focus) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            (h.modal_focus(cx), h.search_query.focus_handle(cx), h.focus_dialog.clone())
+        });
+        assert_eq!(focus, Some(query), "a Search palette is typed into its query field");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.overlays.update(cx, |o, _| o.palette = None);
+            h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0));
+        }));
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), Some(dialog_focus), "a dialog takes focus_dialog");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_dialog(cx)));
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), None, "no modal, no handle");
         restore_state(state);
     }
 }

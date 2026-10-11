@@ -44,6 +44,12 @@ pub(crate) enum OverlayKind {
     /// The site-information panel (the shield): connection and certificate,
     /// under the address line, over the live page.
     SiteInfo,
+    /// Browse's modals — the ⌘K palettes and the dialogs — with their scrim,
+    /// over the whole window and the live page. Drawn in the main window
+    /// they could only cover the page with a picture of it, which arrived
+    /// after the scrim had already dimmed the sidebar (owner recording
+    /// 2026-10-11 5.23 PM); here the page stays live and dims with the rest.
+    Modal,
 }
 
 /// The site-information panel's width: FF's dropdown `w-80`, 320.
@@ -116,6 +122,15 @@ impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
         let content = self.baaz.update(cx, |baaz, cx| baaz.overlay_content(kind, window, cx)).ok().flatten();
+        // The hosted modal's keyboard: its query field, the palette or the
+        // dialog, focused here in the panel (the main window never draws it).
+        if kind == OverlayKind::Modal {
+            if let Some(handle) = self.baaz.read_with(cx, |baaz, cx| baaz.modal_focus(cx)).ok().flatten() {
+                if !handle.is_focused(window) {
+                    window.focus(&handle, cx);
+                }
+            }
+        }
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
         let baaz = self.baaz.clone();
         div()
@@ -137,6 +152,12 @@ impl Harness {
     fn wanted_overlay(&self, window: &Window, cx: &App) -> Option<(OverlayKind, Bounds<Pixels>)> {
         if self.mode != crate::layout::Mode::Browse {
             return None;
+        }
+        if self.modal_overlay_wanted(cx) {
+            // The whole window: the scrim covers everything the in-window one
+            // did. The panel is titled like the main window, so the window
+            // server rounds it the same.
+            return Some((OverlayKind::Modal, window.bounds()));
         }
         if self.field_overlay_wanted(cx) {
             // One fixed transparent rect from the address line down: the
@@ -232,7 +253,13 @@ impl Harness {
                         cx.observe_window_activation(window, move |this: &mut OverlayView, window, cx| {
                             if window.is_window_active() {
                                 this.seen_active = true;
-                            } else if this.seen_active && std::env::var("BAAZ_OVERLAY_STICKY").as_deref() != Ok("1") {
+                            } else if this.seen_active
+                                && this.kind != OverlayKind::Modal
+                                && std::env::var("BAAZ_OVERLAY_STICKY").as_deref() != Ok("1")
+                            {
+                                // A modal stays through a switch away, as it
+                                // did in the main window; its scrim answers
+                                // clicks and Escape closes it.
                                 // `BAAZ_OVERLAY_STICKY=1` (captures of a background
                                 // launch, where the app never holds the keyboard)
                                 // keeps the panel up past a resign.
@@ -281,7 +308,49 @@ impl Harness {
             self.browse_address_text(cx).hash(&mut hasher);
             self.browse_omnibox_selected.hash(&mut hasher);
         }
+        // The hosted modal: which palette and row, what is typed, how many
+        // rows the query found (results land later than the keystroke), and
+        // which dialog.
+        let overlays = self.overlays.read(cx);
+        if let Some(palette) = overlays.palette.as_ref() {
+            format!("{:?}", palette.kind).hash(&mut hasher);
+            palette.selected.hash(&mut hasher);
+            self.palette_rows(palette.kind, cx).len().hash(&mut hasher);
+            self.search_status(cx).hash(&mut hasher);
+            for query in [&self.search_query, &self.projects_query, &self.commands_query] {
+                query.read(cx).value().hash(&mut hasher);
+            }
+        }
+        if let Some(dialog) = overlays.dialog.as_ref() {
+            dialog.title.hash(&mut hasher);
+            dialog.detail.hash(&mut hasher);
+        }
         hasher.finish()
+    }
+
+    /// Whether Browse's modal (a palette or a dialog) draws in the overlay
+    /// window rather than the main one: always, in Browse — one host per
+    /// mode, so a page loading under an open palette never moves it.
+    pub(crate) fn modal_overlay_wanted(&self, cx: &App) -> bool {
+        let overlays = self.overlays.read(cx);
+        self.mode == crate::layout::Mode::Browse && (overlays.palette.is_some() || overlays.dialog.is_some())
+    }
+
+    /// The handle the hosted modal's keyboard belongs to: the palette's own
+    /// query field where it has one, else the palette or the dialog.
+    pub(crate) fn modal_focus(&self, cx: &App) -> Option<FocusHandle> {
+        use crate::overlays::PaletteKind;
+        use gpui::Focusable as _;
+        let overlays = self.overlays.read(cx);
+        if let Some(palette) = overlays.palette.as_ref() {
+            return Some(match palette.kind {
+                PaletteKind::Search => self.search_query.focus_handle(cx),
+                PaletteKind::Projects => self.projects_query.focus_handle(cx),
+                PaletteKind::Commands => self.commands_query.focus_handle(cx),
+                _ => self.focus_palette.clone(),
+            });
+        }
+        overlays.dialog.is_some().then(|| self.focus_dialog.clone())
     }
 
     /// Whether the Field shows as an overlay: the address is being edited in
@@ -312,6 +381,14 @@ impl Harness {
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
+            OverlayKind::Modal => {
+                // The same elements the main window draws, their listeners
+                // routed back to it (`main_listener`).
+                self.hosting_overlay = true;
+                let modal = self.render_palette(cx).or_else(|| self.render_dialog(window, cx));
+                self.hosting_overlay = false;
+                Some(div().size_full().relative().children(modal).into_any_element())
+            }
         }
     }
 
@@ -573,6 +650,29 @@ impl Harness {
         });
     }
 
+    /// `cx.listener` for content the overlay window may host: drawn in the
+    /// main window it is exactly `cx.listener`; drawn in the overlay
+    /// ([`Harness::hosting_overlay`]) the handler runs on the main window's
+    /// next turn instead, so whatever it opens, focuses or measures lands
+    /// there — never in the panel that is about to close.
+    pub(crate) fn main_listener<E: Clone + 'static>(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &E, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+        let hosted = self.hosting_overlay;
+        let baaz = cx.entity().downgrade();
+        let f = std::rc::Rc::new(f);
+        move |event: &E, window: &mut Window, cx: &mut App| {
+            if hosted {
+                let (event, f) = (event.clone(), f.clone());
+                let _ = baaz.update(cx, |this, cx| this.run_on_main(cx, move |this, window, cx| f(this, &event, window, cx)));
+            } else {
+                let _ = baaz.update(cx, |this, cx| f(this, event, window, cx));
+            }
+        }
+    }
+
     /// Close what the overlay shows (Escape inside it, or it lost the key).
     pub(crate) fn close_overlay_content(&mut self, kind: OverlayKind, cx: &mut Context<Self>) {
         trace(format_args!("close {kind:?}"));
@@ -582,6 +682,13 @@ impl Harness {
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {
                 self.site_info_open = false;
+                cx.notify();
+            }
+            OverlayKind::Modal => {
+                self.overlays.update(cx, |overlays, _| overlays.palette = None);
+                if self.overlays.read(cx).dialog.is_some() {
+                    self.close_dialog(cx);
+                }
                 cx.notify();
             }
         }
