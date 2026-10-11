@@ -923,7 +923,24 @@ pub(crate) fn load() -> Tabs {
     for tab in &mut tabs.tabs {
         tab.last_shown = Some(now);
     }
+    forget_devtools_pages(&mut tabs);
     tabs
+}
+
+/// Tabs the DevTools front end took over before its browser was kept apart
+/// (aui-cef `foreign`, owner screenshot 2026-10-11) stored `devtools://` as
+/// their address: reopened, that is a disconnected DevTools page. They come
+/// back as blank tabs (the page they held was overwritten), and closed ones
+/// are forgotten.
+fn forget_devtools_pages(tabs: &mut Tabs) {
+    for tab in &mut tabs.tabs {
+        if tab.url.starts_with("devtools:") {
+            tab.url = BLANK.to_owned();
+            tab.title = String::new();
+            tab.favicon = None;
+        }
+    }
+    tabs.closed.retain(|tab| !tab.url.starts_with("devtools:"));
 }
 
 /// Now, as ms since the epoch: the clock behind `last_shown`.
@@ -1012,6 +1029,25 @@ mod tests {
 
     fn session(id: &str) -> Owner {
         Owner::Session(id.to_owned())
+    }
+
+    /// Owner screenshot 2026-10-11: a tab DevTools took over stored the
+    /// front end's address; reopened it was a dead DevTools page. Loading
+    /// turns it back into a blank tab and forgets closed ones.
+    #[test]
+    fn loading_forgets_devtools_pages() {
+        let mut model = tabs();
+        let hijacked = model.open(None, Owner::Person, "devtools://devtools/bundled/devtools_app.html", None);
+        let page = model.open(None, Owner::Person, "https://a.example/", None);
+        model.tabs.iter_mut().find(|tab| tab.id == hijacked).expect("tab").title = "DevTools - a.example/".to_owned();
+        let mut closed = model.get(page).expect("tab").clone();
+        closed.url = "devtools://devtools/x".to_owned();
+        model.closed.push(closed);
+        forget_devtools_pages(&mut model);
+        let tab = model.get(hijacked).expect("the tab stays");
+        assert_eq!((tab.url.as_str(), tab.title.as_str()), (BLANK, ""));
+        assert_eq!(model.get(page).expect("tab").url, "https://a.example/", "real pages untouched");
+        assert!(model.closed.is_empty(), "closed DevTools pages are forgotten");
     }
 
     #[test]
