@@ -182,8 +182,10 @@ fn a_visible_page_never_dirties_tabs_json() {
 }
 
 /// Closing from another space reads `was_active` off the tab's OWN space
-/// (like `Tabs::close` does), never the current project's — and only the
-/// currently shown page can keep the window "active" for the keyboard.
+/// (like `Tabs::close` does), never the current project's — and window
+/// activation is no cover at all: the page is a child window of ours, so a
+/// menu-bar menu or the DevTools window taking the keyboard left the page
+/// blank (owner screenshots 2026-10-11).
 #[test]
 fn close_and_keyboard_follow_the_shown_tab_not_the_project() {
     let body = source("browser/mod.rs");
@@ -191,21 +193,8 @@ fn close_and_keyboard_follow_the_shown_tab_not_the_project() {
         body.contains("active_of(&tab.owner, tab.space.as_deref())"),
         "was_active comes from the tab's own owner+space"
     );
-    assert!(
-        body.contains("shown_window_active(self.window_or_overlay_active(window), shown, &holds)"),
-        "only the shown page's keyboard counts toward window-active"
-    );
-    // Baaz's own overlay window (the Field, Browse menus) sits above the
-    // page, so its holding the keyboard keeps the window "active" too
-    // (owner 2026-10-11: the page swapped for its square snapshot).
-    assert!(
-        body.contains("window.is_window_active() || self.overlay.is_some() || self.overlay_pending.is_some()"),
-        "the overlay window counts as the window being active"
-    );
-    assert!(
-        !body.contains("states.values().any(|state| state.read(cx).holds_keyboard())"),
-        "no hidden or obscured page keeps the window active"
-    );
+    assert!(!body.contains("pub window_active: bool"), "window activation is not a visibility input");
+    assert!(!body.contains("shown_window_active("), "no window-active rule remains to hide the page");
 }
 
 /// Captures never touch the owner's tabs: the store is skipped in both
