@@ -7607,6 +7607,26 @@ impl Render for Harness {
             window,
             cx,
         );
+        // A cover waits for the covered page's picture: until it stands in,
+        // the live page is still above gpui, so the cover would show only
+        // where it misses the page (the scrim dimmed the sidebar first).
+        // Held covers stay mounted — the palette keeps the keyboard — and
+        // paint transparent; the frames keep coming until the page settles.
+        let hold_covers = self.browser_cover_settling(cx);
+        if hold_covers {
+            window.request_animation_frame();
+        }
+        let held = |cover: Option<AnyElement>| {
+            cover.map(|cover| {
+                if hold_covers {
+                    div().absolute().inset_0().opacity(0.0).child(cover).into_any_element()
+                } else {
+                    cover
+                }
+            })
+        };
+        let (palette, dialog, settings, muse_sheet) = (held(palette), held(dialog), held(settings), held(muse_sheet));
+        let (overflow, back_history, project_menu) = (held(overflow), held(back_history), held(project_menu));
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the

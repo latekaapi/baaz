@@ -879,6 +879,16 @@ impl Harness {
         window.is_window_active() || self.overlay.is_some() || self.overlay_pending.is_some()
     }
 
+    /// Whether a page that was just covered is still live, waiting for the
+    /// picture that stands in for it ([`WebviewState::cover_settling`]).
+    /// The frame holds its covering UI back until it is not: gpui cannot
+    /// paint over the live page, so a cover drawn sooner showed only its
+    /// part over the gpui ground — the ⌘K scrim dimmed the sidebar ~165 ms
+    /// before the page (owner recording 2026-10-11).
+    pub(crate) fn browser_cover_settling(&self, cx: &gpui::App) -> bool {
+        self.browser.states.values().any(|state| state.read(cx).cover_settling())
+    }
+
     /// The Browse centre page's rect for the window's `content` box: the
     /// whole column above — the centre page draws with
     /// [`WebviewPane::without_nav`](aui_webview::WebviewPane::without_nav),
@@ -2114,7 +2124,7 @@ impl Harness {
             let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
             let visible =
                 (frame_live && Some(id) == shown || centre_live && Some(id) == centre) && !blank;
-            state.update(cx, |state, _cx| state.set_obscured(!visible));
+            state.update(cx, |state, cx| state.set_obscured(!visible, cx));
         }
     }
 
