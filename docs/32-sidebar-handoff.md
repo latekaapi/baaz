@@ -1,18 +1,21 @@
-# 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
+# 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11); next = owner's new bug list
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `cdbe2a4`. **harness** `feedback-mode` @ `f786406` (+ this doc). Both trees clean.
+- **agentic-ui** `design-v2` @ `cdbe2a4`. **harness** `feedback-mode` @ `a110d99`. Both trees clean. Never push.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
-- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v28** (= the build: NewTab2 + chosen ground, BrowseFixes, rename field); repo copy in `docs/30-sidebar-spec/`.
-- Gates last run green: `cargo test -p baaz` 1486 · `cargo test -p aui -p aui-webview` 628 · `aui-cef` (own target dir,
-  `cd crates/aui-cef && cargo test`) 44 · clippy `-D warnings` on all of them. Gallery clippy has one pre-existing failure
+- Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v29** (= the build: NewTab2 + ground, BrowseFixes, rename field, SiteInfo, From sessions header); repo copy in `docs/30-sidebar-spec/`.
+- Gates last run green: `cargo test -p baaz` 1496 · `cargo test -p aui -p aui-webview` 633 · `aui-cef` (own target dir,
+  `cd crates/aui-cef && cargo test`) 46 · clippy `-D warnings` on all of them. 18-entry probe: findings on every entry
+  against pre-design-v2 baselines (unchanged all round; none of them shows Browse). Gallery clippy has one pre-existing failure
   (`aui-gallery/src/browse/screen.rs:2235`, not ours).
 
 ## Read first
 1. This file. 2. `docs/31-fluid-design.md` §6–§8 (FF is the spec; what was built and adapted). 3. `docs/31a-ff-component-values.md`.
-4. Memory: `feedback-ff-is-the-spec`, `project-sidebar-finish-2026-10-11`, `feedback-live-verify-without-screen-control`.
+4. Memory: `feedback-native-page-above-gpui` (READ FIRST for any Browse bug), `feedback-ff-is-the-spec`,
+   `project-owner-bugs-browse-2026-10-11`, `feedback-live-verify-without-screen-control`.
+6. The section "The recurring Browse rendering faults" below, and "Live-check recipes".
 5. `CLAUDE.md` (18-entry probe; build first; baselines only on main).
 
 ## What this round built (where to look)
@@ -109,6 +112,20 @@ slow first load drew the new-tab page over a navigating tab (centre judged blank
 `browse_centre_tab_blank` (harness, after d53151b). Screen was unlocked: Field empty state, favicon row and
 page-under-Field all seen live.
 
+## Live-check recipes (2026-10-11, all worked)
+- Locked screen? `screencapture -x f.png` then `magick f.png -alpha off -resize 5% -colorspace gray -format "%[fx:mean]" info:`
+  — 0 = locked (macOS then refuses even `screencapture -l`). Use Baaz's gpui `--screenshot <png> --screenshot-delay <ms>`
+  for gpui-only screens (it paints a stand-in for web pages; a *connected* run's screenshot never fires).
+- Window ids: tiny Swift `CGWindowListCopyWindowInfo` lister (rebuild it in the scratchpad; pick the largest layer-0
+  window; overlay panels are layer 101). Unlocked: full `screencapture -x` + crop shows overlays and native pages.
+- Steps added this round: `pointer:x,y`, `site-info`, `page-eval:<js>` (no `;`), `tab-new:<url>`, `tab-select:<n>`,
+  `palette`, `omnibox:<text>`, `page-focus`, `sidebar-scroll-sweep:dy,ticks,tail`. Overlays in background runs need
+  `BAAZ_OVERLAY_STICKY=1`.
+- Real sessions list: copy `~/Library/Application Support/Baaz/{baaz.db,sessions.json,projects.json,layout.json,…}` into a
+  temp `BAAZ_STATE_DIR` (an empty one stays on skeletons); the debug binary has no CEF — page loads need the bundle.
+- Motion: `screencapture -x -V <s> -R x,y,w,h rec.mov`, then ffmpeg frames; per-frame RMSE on an uncovered region is a
+  flicker detector.
+
 ## The recurring Browse rendering faults — one root, two causes (2026-10-11 afternoon)
 
 The owner asked whether something fundamental was being missed. Yes. **The Chromium page is a separate native
@@ -131,6 +148,10 @@ Also this round: one active tab (agent sessions' own active tabs stole the selec
 site information + certificate via CEF SSL status (aui 2d7e403, harness f786406), "From sessions" header.
 Videos: H.264/AAC don't play — stock CEF has proprietary_codecs off (docs/24 H3); needs our own CEF build +
 a licensing decision (docs/24a). Not started; owner's call.
+
+**Open, owner's call:** H.264 video (own CEF build, docs/24a). **Not seen live:** `tip_within` tooltips (no pointer hover
+in scripts), the active-pill fix with real agent tabs (unit-tested only). **Next:** the owner has more issues for a new
+session.
 
 **Superseded — was waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
