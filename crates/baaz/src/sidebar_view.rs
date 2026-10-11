@@ -2587,6 +2587,30 @@ mod tests {
     /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
     /// it (back to the person's active tab, closing nothing) and the
     /// moves are no-ops (they would act on the hidden person tab).
+    /// A tab already navigating is never the new-tab page, even while its
+    /// live page still reports about:blank (slow first load, 2026-10-11).
+    #[gpui::test]
+    fn a_navigating_tab_is_not_blank(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("navigating-not-blank");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.browse_space();
+                let blank = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, crate::browser::tabs::BLANK, None);
+                h.browser.tabs.activate(blank);
+                assert!(h.browse_centre_tab_blank(), "a fresh tab is blank");
+                let going = h.browser.tabs.open(space, crate::browser::Owner::Person, "https://news.example/", Some(blank));
+                h.browser.tabs.activate(going);
+                assert!(!h.browse_centre_tab_blank(), "a tab opened on a URL is not blank");
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
     /// Owner 2026-10-11: New tab opens next to the current tab, and inside
     /// its folder when the current tab sits in one.
     #[gpui::test]

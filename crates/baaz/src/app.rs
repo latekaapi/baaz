@@ -5865,8 +5865,12 @@ impl Harness {
         let mut blank_page = false;
         let body = match self.browse_centre_page(window, cx) {
             Some(state) => {
-                let blank =
-                    matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK);
+                // Blank only when the TAB is blank too: during a slow first
+                // load the live page still reports about:blank, which drew
+                // the new-tab page over a tab already navigating (seen live
+                // 2026-10-11).
+                let blank = matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK)
+                    && self.browse_centre_tab_blank();
                 // `about:blank` tabs render the Baaz new-tab page instead of
                 // a white page — gpui, since about:blank is hidden by the
                 // library.
