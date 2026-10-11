@@ -848,6 +848,9 @@ pub struct Harness {
     /// in order (like the palette's `selected`). Meaningful only while
     /// [`Self::browse_address`] is `Some`. Never persists.
     pub(crate) browse_omnibox_selected: usize,
+    /// The new tab's "Pick up" row the pointer lights (its FluidList's
+    /// report), so that row's text lights with the gliding block.
+    pub(crate) browse_pickup_hover: Option<usize>,
     /// The new tab's baked ground ([`crate::newtab_ground`]): `None` until
     /// the first new tab asks for it and the background bake lands, then
     /// the file the page paints. `newtab_ground_asked` keeps it to one bake
@@ -1491,6 +1494,7 @@ impl Harness {
             browse_address: None,
             browse_address_sub: None,
             browse_omnibox_selected: 0,
+            browse_pickup_hover: None,
             newtab_ground: None,
             site_info_open: false,
             newtab_ground_asked: false,
@@ -6076,7 +6080,9 @@ impl Harness {
     ///
     /// Adaptation: gpui has no backdrop blur, so the panel is surface-1 at
     /// 62 % over the already-blurred ground, which reads as the mock's frost.
-    /// The rows light on gpui hover instead of FF's gliding block.
+    /// The rows are a FluidList: FF's gliding block, fading in on entry
+    /// (they lit on plain gpui hover, which snapped and lagged — owner
+    /// recording 2026-10-11 7.18 PM).
     fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
@@ -6143,7 +6149,21 @@ impl Harness {
                         .text_color(p.fg_muted)
                         .child("Pick up where you left off"),
                 );
+            let hover = self.browse_pickup_hover;
+            let report = cx.entity().downgrade();
+            let mut list = aui::interact::fluid_list("browse-pickup-rows", aui::interact::Axis::Y)
+                .label("Pick up where you left off")
+                .gap(px(0.0))
+                .on_highlight(move |index, _, cx| {
+                    let _ = report.update(cx, |this, cx| {
+                        if this.browse_pickup_hover != index {
+                            this.browse_pickup_hover = index;
+                            cx.notify();
+                        }
+                    });
+                });
             for (index, (row, target)) in pickup.into_iter().enumerate() {
+                let lit = hover == Some(index);
                 // A tab row's favicon when it has one (open or recently
                 // closed), else its letter tile; a session row its glyph.
                 let favicon = match &target {
@@ -6179,8 +6199,7 @@ impl Harness {
                         .px(metrics.item_px)
                         .gap(metrics.gap)
                         .items_center()
-                        .text_color(p.fg_muted)
-                        .hover(|s| s.bg(p.hover_overlay()).text_color(p.fg))
+                        .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(div().flex_none().size(metrics.icon).flex().items_center().justify_center().child(lead))
                         .child(div().flex_shrink(1.0).min_w(px(0.0)).truncate().text_role_in(TextRole::Body, Density::Standard).child(row.title.clone()))
                         .child(div().flex_1())
@@ -6229,8 +6248,9 @@ impl Harness {
                         div().id(("browse-pickup-closed", index)).aria_label(format!("Reopen {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(reopen)
                     }
                 };
-                rows = rows.child(row_el.role(gpui::Role::Button).cursor_pointer().child(content));
+                list = list.item(index, row_el.role(gpui::Role::Button).cursor_pointer().child(content));
             }
+            rows = rows.child(list);
             // The frosted panel: surface-1 at 62 % with FF's shadow-3 ring.
             let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).shadow(p.floating_shadow()).child(rows));
             column = column.child(panel);
@@ -6287,6 +6307,10 @@ impl Harness {
     /// The omnibox list box itself, unpositioned: section headers and rows
     /// for the already-ranked `rows`, with `anchor` deciding the placement
     /// in [`Self::render_omnibox_dropdown`].
+    /// FluidList indices for the suggestion lists' group labels: past any
+    /// row index, static (a label is a gap to the nearest rule).
+    pub(crate) const OMNI_HEADER_BASE: usize = 10_000;
+
     fn omnibox_list(
         &self,
         rows: &[crate::browser::OmniRow],
@@ -6299,7 +6323,7 @@ impl Harness {
         // FF's dropdown chrome (`dropdown.tsx`): the popup surface, a 4 px
         // inset, 36 px rows on the item radius lit by the hover overlay,
         // Caption group labels — the same rows the Field overlay draws.
-        let mut list = v_flex()
+        let list = v_flex()
             .id("browse-omni-list")
             .debug_selector(|| "browse-omni-list".into())
             .p(metrics.item_px / 2.0)
@@ -6308,6 +6332,24 @@ impl Harness {
             .shadow(p.floating_shadow())
             .role(gpui::Role::ListBox)
             .aria_label("Address suggestions");
+        // FF DropdownSearch: one fluid highlight that the pointer and the
+        // arrows both drive — a hover moves the selection, so Enter opens
+        // what is lit (it lit on the keyboard alone, with no pointer hover).
+        let report = cx.entity().downgrade();
+        let mut rows_list = aui::interact::fluid_list("browse-omni-rows", aui::interact::Axis::Y)
+            .label("Address suggestions")
+            .gap(px(0.0))
+            .highlighted(Some(selected))
+            .on_highlight(move |index, _, cx| {
+                if let Some(index) = index {
+                    let _ = report.update(cx, |this, cx| {
+                        if this.browse_omnibox_selected != index {
+                            this.browse_omnibox_selected = index;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
         let mut last_kind: Option<crate::browser::SuggestKind> = None;
         for (index, row) in rows.iter().enumerate() {
             let header = match row.suggestion.kind {
@@ -6325,7 +6367,8 @@ impl Harness {
                 _ => None,
             };
             if let Some(header) = header {
-                list = list.child(
+                rows_list = rows_list.item_static(
+                    Self::OMNI_HEADER_BASE + index,
                     div().h(metrics.control_md).px(metrics.item_px).flex().items_center().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(header),
                 );
             }
@@ -6349,7 +6392,6 @@ impl Harness {
                 .px(metrics.item_px)
                 .h(metrics.control)
                 .rounded(px(scale::SHAPE_ITEM))
-                .when(lit, |d| d.bg(p.hover_overlay()))
                 .child(
                     div()
                         .flex_1()
@@ -6362,7 +6404,8 @@ impl Harness {
             if !row.suggestion.hint.is_empty() {
                 item = item.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(row.suggestion.hint.clone()));
             }
-            list = list.child(
+            rows_list = rows_list.item(
+                index,
                 div()
                     .id(("browse-omni", index))
                     .role(gpui::Role::ListBoxOption)
@@ -6374,7 +6417,7 @@ impl Harness {
             );
         }
         let _ = window;
-        list
+        list.child(rows_list)
     }
 
     /// The Browse centre with no person tab (B2a-H2b): the empty state

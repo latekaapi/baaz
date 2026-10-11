@@ -495,7 +495,23 @@ impl Harness {
             .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(IconName::Search).size(metrics.icon).color(p.fg).lit(true)))
             .children(input)
             .child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("esc"));
-        let mut list = v_flex().w_full().gap(gpui::px(0.0)).child(field);
+        // FF DropdownSearch: one fluid highlight the pointer and the arrows
+        // both drive; a hover moves the selection (it was keyboard-only).
+        let report = cx.entity().downgrade();
+        let mut rows_list = aui::interact::fluid_list("field-rows", aui::interact::Axis::Y)
+            .label("Suggestions")
+            .gap(gpui::px(0.0))
+            .highlighted(Some(selected))
+            .on_highlight(move |index, _, cx| {
+                if let Some(index) = index {
+                    let _ = report.update(cx, |this, cx| {
+                        if this.browse_omnibox_selected != index {
+                            this.browse_omnibox_selected = index;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
         let mut last: Option<&'static str> = None;
         for (index, row) in rows.iter().enumerate() {
             let group = match row.suggestion.kind {
@@ -507,7 +523,8 @@ impl Harness {
                 crate::browser::SuggestKind::Search => "Search",
             };
             if last != Some(group) {
-                list = list.child(
+                rows_list = rows_list.item_static(
+                    Harness::OMNI_HEADER_BASE + index,
                     div().h(metrics.control_md).mt(metrics.item_px / 2.0).px(metrics.item_px).flex().items_center().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(group),
                 );
                 last = Some(group);
@@ -528,7 +545,6 @@ impl Harness {
                 .items_center()
                 .gap(metrics.gap)
                 .pr(metrics.item_px)
-                .when(lit, |d| d.bg(p.hover_overlay()))
                 .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(glyph).size(metrics.icon).color(if lit { p.fg } else { p.fg_muted }).lit(lit)))
                 .child(
                     div()
@@ -543,7 +559,8 @@ impl Harness {
             if !row.suggestion.hint.is_empty() {
                 item = item.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(row.suggestion.hint.clone()));
             }
-            list = list.child(
+            rows_list = rows_list.item(
+                index,
                 div()
                     .id(("field-row", index))
                     .role(gpui::Role::ListBoxOption)
@@ -553,6 +570,7 @@ impl Harness {
                     .child(Shape::Item.rounded(item)),
             );
         }
+        let list = v_flex().w_full().gap(gpui::px(0.0)).child(field).child(rows_list);
         let _ = window;
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
             this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx));
