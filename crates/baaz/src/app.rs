@@ -853,6 +853,9 @@ pub struct Harness {
     /// the file the page paints. `newtab_ground_asked` keeps it to one bake
     /// per launch.
     pub(crate) newtab_ground: Option<std::path::PathBuf>,
+    /// The site-information panel (the address row's shield) stands open
+    /// over the page ([`crate::overlay`]).
+    pub(crate) site_info_open: bool,
     pub(crate) newtab_ground_asked: bool,
     /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
     /// activates the highlighted row once moved, and commits the raw text
@@ -1485,6 +1488,7 @@ impl Harness {
             browse_address_sub: None,
             browse_omnibox_selected: 0,
             newtab_ground: None,
+            site_info_open: false,
             newtab_ground_asked: false,
             browse_omnibox_moved: false,
             back_bounds: None,
