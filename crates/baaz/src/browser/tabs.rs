@@ -82,6 +82,10 @@ pub(crate) struct Tab {
     /// space), or none (Today).
     #[serde(default)]
     pub folder: Option<String>,
+    /// The page's icon URL as the engine last reported it, so a discarded
+    /// or relaunched tab keeps its favicon ([`super::favicons`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favicon: Option<String>,
     /// A background tab holds a permission ask: the sidebar draws its
     /// "needs you" dot until the tab is shown (B2a-H5). Live state, never
     /// persisted: a relaunch starts with no dots.
@@ -227,6 +231,7 @@ impl Tabs {
             pinned: false,
             last_shown: None,
             folder: None,
+            favicon: None,
             needs_attention: false,
         };
         let at = after
@@ -567,6 +572,17 @@ impl Tabs {
     /// report never clobbers a real URL: when the tab already holds one,
     /// an empty or `about:blank` URL (and an empty title) is skipped, so
     /// a rebuild does not overwrite the saved page with blank.
+    /// Record the page's icon URL for tab `id`; true when it changed.
+    pub(crate) fn set_favicon(&mut self, id: TabId, favicon: &str) -> bool {
+        match self.tabs.iter_mut().find(|tab| tab.id == id) {
+            Some(tab) if tab.favicon.as_deref() != Some(favicon) && !favicon.is_empty() => {
+                tab.favicon = Some(favicon.to_owned());
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn set_url_title(&mut self, id: TabId, url: &str, title: &str) -> bool {
         let changed = match self.tabs.iter_mut().find(|tab| tab.id == id) {
             Some(tab) => {

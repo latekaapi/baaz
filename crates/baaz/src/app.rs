@@ -6131,8 +6131,17 @@ impl Harness {
                         .child("Pick up where you left off"),
                 );
             for (index, (row, target)) in pickup.into_iter().enumerate() {
-                let lead: AnyElement = match &target {
-                    crate::browser::PickupTarget::Session(_) => icon(IconName::List).size(metrics.icon).color(p.fg_muted).into_any_element(),
+                // A tab row's favicon when it has one (open or recently
+                // closed), else its letter tile; a session row its glyph.
+                let favicon = match &target {
+                    crate::browser::PickupTarget::Tab(id) => self.browser.tabs.get(*id).and_then(|tab| tab.favicon.clone()),
+                    crate::browser::PickupTarget::Closed(id) => self.browser.tabs.closed.iter().find(|tab| tab.id == *id).and_then(|tab| tab.favicon.clone()),
+                    crate::browser::PickupTarget::Session(_) => None,
+                }
+                .and_then(|url| self.browser.favicons.file(&url).cloned());
+                let lead: AnyElement = match (&target, favicon) {
+                    (crate::browser::PickupTarget::Session(_), _) => icon(IconName::List).size(metrics.icon).color(p.fg_muted).into_any_element(),
+                    (_, Some(path)) => gpui::img(path).size(metrics.icon).into_any_element(),
                     _ => aui::interact::Shape::Item
                         .rounded(
                             div()
