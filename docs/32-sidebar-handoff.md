@@ -101,6 +101,14 @@ Seen: favicon rows via gpui `--screenshot` from a live run's state; the live run
 NOT seen (screen locked; macOS refused even per-window captures): the Field over the live page — corners and the
 flicker are fixed by cause, owner to confirm.
 
+**Recording 2.11 PM (Field over HN, page shifted up/no gap):** that was the old build's snapshot stand-in shown
+while the overlay held the key (fixed in 075ddf2). Live-verified on the fix: screen recording across the first
+⌘L — the page stays live and unchanged (no RMSE spike in the uncovered region), header in place. The stand-in's
+misplacement itself did not reproduce under the palette or with the app in the background. Found on the way: a
+slow first load drew the new-tab page over a navigating tab (centre judged blank by the live URL) — fixed,
+`browse_centre_tab_blank` (harness, after d53151b). Screen was unlocked: Field empty state, favicon row and
+page-under-Field all seen live.
+
 **Superseded — was waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
 Not reproduced: the "border appears on hover" over the spaces strip (no pointer hover in scripted runs) — the
