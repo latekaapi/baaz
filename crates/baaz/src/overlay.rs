@@ -52,17 +52,22 @@ const SITE_INFO_WIDTH: f32 = scale::SP_7 * 10.0;
 /// The Field panel's width (canvas board "Field", 2026-10-11): 600.
 const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
 
-/// The clear margin around the Field panel inside its window: room for FF's
-/// shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which the
-/// window's edge would otherwise clip — the panel's only edge, since the
+/// The clear margin around every overlay panel inside its window: room for
+/// FF's shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which
+/// the window's edge would otherwise clip — the panel's only edge, since the
 /// window draws none of its own ([`drop_native_chrome`]).
-const FIELD_SHADOW_PAD: f32 = scale::SP_1;
+const SHADOW_PAD: f32 = scale::SP_1;
 
 /// Take macOS's own rim and shadow off an overlay window. gpui opens a
 /// `PopUp` as a titled panel, so the window server outlines the WHOLE window
 /// rect: around the Field's fixed transparent rect that drew an empty box
 /// below the rows and a second edge on top of the panel's FF ring (owner
 /// screenshot 2026-10-11). The panel's own FF shadow is its only edge.
+///
+/// Every overlay window goes through here, whatever it shows. It was first
+/// applied to the Field and site information only, so the tab menu — whose
+/// window is sized for its "Move to folder" submenu too — kept a translucent
+/// box beside it (owner screenshot 2026-10-11 5.31 PM).
 #[cfg(target_os = "macos")]
 fn drop_native_chrome(window: &Window) {
     use objc2::{msg_send, runtime::AnyObject};
@@ -141,7 +146,7 @@ impl Harness {
             let top = metrics.header + metrics.item_px / 2.0;
             // The panel sits at (item_px, top); the window reaches the
             // shadow margin past it on every side.
-            let pad = gpui::px(FIELD_SHADOW_PAD);
+            let pad = gpui::px(SHADOW_PAD);
             let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(gpui::px(FIELD_WIDTH) + pad * 2.0, height))));
@@ -149,7 +154,7 @@ impl Harness {
         if self.site_info_open && self.sidebar_open && self.browse_centre_state().is_some() {
             // Under the address line, inside a clear rect like the Field's.
             let metrics = cx.aui().metrics;
-            let pad = gpui::px(FIELD_SHADOW_PAD);
+            let pad = gpui::px(SHADOW_PAD);
             let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
             let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
@@ -159,8 +164,11 @@ impl Harness {
         let space = self.browse_space().unwrap_or_default();
         let folders = self.browser.tabs.folders_in(&space).len();
         let size = browse_menu_size(menu, folders, cx);
-        let origin = window.bounds().origin + menu.at;
-        Some((OverlayKind::BrowseMenu, Bounds::new(origin, size)))
+        // The menu sits at the pointer; its window reaches the shadow
+        // margin past it on every side ([`OverlayView`] pads the content).
+        let pad = gpui::px(SHADOW_PAD);
+        let origin = window.bounds().origin + menu.at - gpui::point(pad, pad);
+        Some((OverlayKind::BrowseMenu, Bounds::new(origin, gpui::size(size.width + pad * 2.0, size.height + pad * 2.0))))
     }
 
     /// Open, move or close the overlay window to match what is wanted.
@@ -212,9 +220,7 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    if matches!(kind, OverlayKind::Field | OverlayKind::SiteInfo) {
-                        drop_native_chrome(window);
-                    }
+                    drop_native_chrome(window);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
@@ -301,7 +307,8 @@ impl Harness {
                 let on_intent = std::rc::Rc::new(move |intent: SidebarIntent, _: &mut Window, cx: &mut App| {
                     let _ = baaz.update(cx, |baaz, cx| baaz.queue_sidebar_intent(intent, cx));
                 });
-                browse_menu("overlay-browse-menu", &browse, Some(on_intent), window, cx)
+                let menu = browse_menu("overlay-browse-menu", &browse, Some(on_intent), window, cx)?;
+                Some(div().p(gpui::px(SHADOW_PAD)).child(menu).into_any_element())
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
@@ -430,7 +437,7 @@ impl Harness {
             .size_full()
             .flex()
             .flex_col()
-            .p(gpui::px(FIELD_SHADOW_PAD))
+            .p(gpui::px(SHADOW_PAD))
             .on_mouse_down(gpui::MouseButton::Left, leave)
             .child(
                 div()
@@ -546,7 +553,7 @@ impl Harness {
             .size_full()
             .flex()
             .flex_col()
-            .p(gpui::px(FIELD_SHADOW_PAD))
+            .p(gpui::px(SHADOW_PAD))
             .on_mouse_down(gpui::MouseButton::Left, leave)
             .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_surface(panel)))
             .into_any_element()
