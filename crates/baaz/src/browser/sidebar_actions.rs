@@ -47,6 +47,40 @@ impl Harness {
         cx.notify();
     }
 
+    /// The page controls' ⋯: the page menu at the pointer, as a Browse menu
+    /// in the overlay window over the live page. It opened the Sessions
+    /// header's overflow menu (Rename / Fork / Archive) at the window's top
+    /// right, over the page (owner screenshot 2026-10-12) — a wire left from
+    /// the D3 re-shell. The rows are the B2a page menu's.
+    pub(crate) fn open_browse_page_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.browse_centre_state() else {
+            return;
+        };
+        let page = state.read(cx);
+        let target = aui::screens::sidebar::BrowseMenuTarget::Page {
+            safari: self.browse_safari_url(cx).is_some(),
+            devtools: page.supports(aui_webview::BackendFeature::DevTools),
+            annotating: page.annotating(),
+        };
+        self.open_browse_menu(BrowseMenu { target, at: window.mouse_position() }, cx);
+    }
+
+    /// A page menu row: the B2a page menu's actions, on the shown page.
+    pub(crate) fn browse_page_action(&mut self, action: aui::screens::sidebar::PageAction, window: &mut Window, cx: &mut Context<Self>) {
+        use aui::screens::sidebar::PageAction;
+        self.close_browse_menu(cx);
+        match action {
+            PageAction::NewTab => self.new_browse_sidebar_tab(window, cx),
+            PageAction::Find => self.open_browse_find(window, cx),
+            PageAction::CopyLink => self.copy_shown_browse_link(cx),
+            PageAction::OpenInSafari => self.open_browse_in_safari(cx),
+            PageAction::Annotate => self.toggle_browse_annotate(cx),
+            PageAction::Screenshot => self.capture_browse_screenshot(cx),
+            PageAction::DevTools => self.open_browse_devtools(cx),
+            PageAction::Settings => self.open_browse_settings(cx),
+        }
+    }
+
     /// Close the right-click menu, if one is open.
     pub(crate) fn close_browse_menu(&mut self, cx: &mut Context<Self>) {
         if self.browse_menu.take().is_some() {
