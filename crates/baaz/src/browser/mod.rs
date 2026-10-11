@@ -42,6 +42,7 @@ use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
 pub(crate) mod chrome;
+pub(crate) mod favicons;
 mod sidebar_actions;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
@@ -824,6 +825,28 @@ impl Harness {
             gpui::px(0.0)
         };
         browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
+    }
+
+    /// Start a fetch for every tab favicon not yet asked for this launch
+    /// ([`favicons`]); each landing repaints the sidebar through the
+    /// favicon generation in its key.
+    fn fetch_favicons(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<String> = self.browser.tabs.tabs.iter().filter_map(|tab| tab.favicon.clone()).collect();
+        for url in wanted {
+            if !self.browser.favicons.needs_fetch(&url) {
+                continue;
+            }
+            let fetch_url = url.clone();
+            let task = cx.background_executor().spawn(async move { favicons::fetch(&fetch_url) });
+            cx.spawn(async move |this, cx| {
+                let path = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.browser.favicons.landed(url, path);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// Whether the window counts as active for page visibility: it is key,
@@ -2106,28 +2129,34 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         // Live pages report into their tabs — debounced to actual changes,
         // never one write per poll.
-        let live: Vec<(TabId, String, String)> = self
+        let live: Vec<(TabId, String, String, Option<String>)> = self
             .browser
             .states
             .iter()
             .map(|(id, state)| {
                 let page = state.read(cx);
-                (*id, page.url().to_string(), page.title().to_string())
+                (*id, page.url().to_string(), page.title().to_string(), page.favicon().map(|url| url.to_string()))
             })
             .collect();
         let mut tabs_dirty = false;
-        for (id, url, title) in &live {
+        for (id, url, title, favicon) in &live {
             if self.browser.tabs.set_url_title(*id, url, title) {
                 tabs_dirty = true;
             }
+            if let Some(favicon) = favicon {
+                if self.browser.tabs.set_favicon(*id, favicon) {
+                    tabs_dirty = true;
+                }
+            }
         }
+        self.fetch_favicons(cx);
         // The session's active tab keeps writing `browser_url`, so older
         // builds still restore — debounced to actual changes, never one
         // write per poll. B7: a navigation is not searchable, so it
         // persists through the cheap debounced write — never the
         // session-list settle.
         let urls: HashMap<TabId, String> =
-            live.iter().map(|(id, url, _)| (*id, url.clone())).collect();
+            live.iter().map(|(id, url, _, _)| (*id, url.clone())).collect();
         let actives: Vec<(Owner, String)> = self
             .browser
             .tabs
@@ -2160,7 +2189,7 @@ impl Harness {
         // stack exactly like a fresh one. Whether a load runs is the
         // engine's own `WebviewState::loading`, read where the stop/reload
         // control needs it — never tracked here.
-        for (id, url, _) in &live {
+        for (id, url, _, _) in &live {
             self.browser.histories.entry(*id).or_default().note_navigated(url);
         }
         // B2a-H5, before the shown-tab computation below: popups become
@@ -4109,6 +4138,8 @@ pub(crate) struct BrowserRegistry {
     /// destroyed — except by discard, which drops the state and keeps the
     /// tab's URL for a rebuild on show.
     pub states: HashMap<TabId, Entity<WebviewState>>,
+    /// Favicon URL → local file ([`favicons`]).
+    pub favicons: favicons::Favicons,
     /// Set at boot: scripted page (`--screenshot`, tests) vs WKWebView.
     pub fake: bool,
     /// An external file drag currently covers the window.
@@ -4193,6 +4224,7 @@ impl BrowserRegistry {
     pub(crate) fn new(fake: bool) -> Self {
         Self {
             states: HashMap::new(),
+            favicons: favicons::Favicons::default(),
             fake,
             drop_cover: false,
             shot_pending: HashSet::new(),

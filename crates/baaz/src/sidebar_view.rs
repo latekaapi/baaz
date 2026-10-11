@@ -274,6 +274,8 @@ pub(crate) struct SidebarKey {
     browse_expanded: Vec<String>,
     browse_session_tab: Option<u64>,
     tab_menu: Option<u64>,
+    /// Bumped as favicons land, so the column repaints with them.
+    favicons: u64,
     /// The v2 screen's own inputs: the lifted pinned rows, what the
     /// pointer is over (the screen swaps trailing slots on it), the
     /// sections' and menus' open state, the view options, the loading
@@ -310,10 +312,13 @@ pub(crate) struct BrowseTabSnap {
     pub(crate) audible: bool,
     pub(crate) crashed: bool,
     pub(crate) discarded: bool,
+    /// The favicon's local file, once fetched ([`crate::browser::favicons`]).
+    pub(crate) favicon: Option<String>,
 }
 
 /// One session tab under From sessions, still owned by its session.
 pub(crate) struct BrowseSessionTabSnap {
+    favicon: Option<String>,
     id: crate::browser::TabId,
     title: String,
     initial: String,
@@ -485,6 +490,7 @@ impl SidebarKey {
             browse_expanded,
             browse_session_tab,
             tab_menu,
+            favicons: baaz.browser.favicons.generation,
             pinned: Rc::as_ptr(&baaz.sidebar_pinned(cx)) as usize,
             hovered: baaz.sidebar_hovered.clone(),
             hovered_group: baaz.hovered_group.clone(),
@@ -639,6 +645,12 @@ impl Harness {
     /// inset of its own: the library's gutter positions the nav rows, and
     /// Baaz block inset shifted them 4 px off the session rows'
     /// gutter (measured: nav icon centre 41 vs session dot centre 36).
+    /// The local favicon file for `tab`, once its icon has been fetched.
+    fn favicon_file(&self, tab: &crate::browser::tabs::Tab) -> Option<String> {
+        let url = tab.favicon.as_deref()?;
+        Some(self.browser.favicons.file(url)?.to_string_lossy().into_owned())
+    }
+
     pub(crate) fn browse_person_snaps(&self, cx: &gpui::App) -> Vec<BrowseTabSnap> {
         if !self.browser.tabs_loaded {
             return Vec::new();
@@ -672,6 +684,7 @@ impl Harness {
                     discarded: page.is_none()
                         && tab.url != crate::browser::tabs::BLANK
                         && !tab.url.is_empty(),
+                    favicon: self.favicon_file(tab),
                 }
             })
             .collect()
@@ -703,6 +716,7 @@ impl Harness {
                 let rows = tabs
                     .iter()
                     .map(|tab| BrowseSessionTabSnap {
+                        favicon: self.favicon_file(tab),
                         id: tab.id,
                         title: crate::browser::tabs::tab_label(&tab.title, &tab.url),
                         initial: crate::browser::tabs::tab_initial(&tab.title, &tab.url),
@@ -976,23 +990,24 @@ impl Harness {
         let snaps = self.browse_person_snaps(cx);
         let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
             self.browser.tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
-        let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool, loading: bool| BrowseTab {
+        let tab = |id: crate::browser::TabId, title: String, initial: String, active: bool, loading: bool, favicon: Option<String>| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
             initial: initial.into(),
             active,
             loading,
+            favicon: favicon.map(Into::into),
         };
         let mut pins = Vec::new();
         let mut today = Vec::new();
         let mut in_folders: std::collections::HashMap<String, Vec<BrowseTab>> = std::collections::HashMap::new();
         for snap in snaps {
             if snap.pinned {
-                pins.push(BrowsePin { id: browse_tab_key(snap.id).into(), initial: snap.initial.into(), label: snap.title.into() });
+                pins.push(BrowsePin { id: browse_tab_key(snap.id).into(), initial: snap.initial.into(), label: snap.title.into(), favicon: snap.favicon.map(Into::into) });
                 continue;
             }
             let folder = folder_of.get(&snap.id).cloned().flatten();
-            let row = tab(snap.id, snap.title, snap.initial, snap.active, snap.loading);
+            let row = tab(snap.id, snap.title, snap.initial, snap.active, snap.loading, snap.favicon);
             match folder.filter(|id| self.browser.tabs.folders.iter().any(|f| &f.id == id)) {
                 Some(folder) => in_folders.entry(folder).or_default().push(row),
                 None => today.push(row),
@@ -1032,7 +1047,7 @@ impl Harness {
                     open: true,
                     // A session's tabs load in its own pane; their rows keep
                     // the favicon (the groups key carries no page facts).
-                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active, false)).collect(),
+                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active, false, row.favicon)).collect(),
                 }
             })
             .collect();
@@ -2572,6 +2587,49 @@ mod tests {
     /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
     /// it (back to the person's active tab, closing nothing) and the
     /// moves are no-ops (they would act on the hidden person tab).
+    /// Owner 2026-10-11: New tab opens next to the current tab, and inside
+    /// its folder when the current tab sits in one.
+    #[gpui::test]
+    fn new_tab_opens_beside_the_current_tab_in_its_folder(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("new-tab-beside");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let (first, folded) = vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+                h.browser.tabs_loaded = true;
+                let space = h.browse_space();
+                let first = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
+                h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://b.example/", None);
+                let folded = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://c.example/", None);
+                let folder = h.browser.tabs.add_folder(space.as_deref().unwrap_or_default(), "Reading");
+                h.browser.tabs.set_folder(folded, Some(&folder));
+                h.browser.tabs.activate(first);
+                (first, folded)
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_browse_sidebar_tab(window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
+            let at = ids.iter().position(|id| *id == first).expect("first");
+            let new = ids[at + 1];
+            assert!(h.browser.tabs.get(new).is_some_and(|tab| tab.url == crate::browser::tabs::BLANK && tab.folder.is_none()), "a Today tab's new tab sits right after it, in Today");
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.browser.tabs.activate(folded)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_browse_sidebar_tab(window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
+            let at = ids.iter().position(|id| *id == folded).expect("folded");
+            let new = h.browser.tabs.get(ids[at + 1]).expect("a tab after the folded one");
+            assert_eq!(new.url, crate::browser::tabs::BLANK);
+            assert_eq!(new.folder, h.browser.tabs.get(folded).and_then(|tab| tab.folder.clone()), "a folder tab's new tab joins its folder");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
     #[gpui::test]
     fn browse_shortcuts_defer_to_the_shown_session_tab(cx: &mut TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
