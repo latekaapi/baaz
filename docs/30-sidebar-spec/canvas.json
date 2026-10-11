@@ -135,9 +135,17 @@
       "w": 1440,
       "h": 900,
       "title": "New tab ground component (imported; tweak: bg)"
+    },
+    "SiteInfo.dc.html": {
+      "x": 0,
+      "y": 7820,
+      "w": 1440,
+      "h": 900,
+      "title": "Browse \u00b7 site information (the shield) \u2014 as built"
     }
   },
   "order": [
+    "SiteInfo.dc.html",
     "NewTabSubtle.dc.html",
     "NewTabVibrant.dc.html",
     "NewTabWallpaper.dc.html",
@@ -192,6 +200,13 @@
       "text": "New tab grounds \u2014 chosen and built: B's scrim + frosted list on C's ground (your desktop picture, blurred)",
       "kind": "title1",
       "maxW": 4480
+    },
+    "t5": {
+      "x": 0,
+      "y": 7580,
+      "text": "Owner round 2026-10-11 (afternoon) \u2014 built: site information + certificate, From sessions header, one active tab",
+      "kind": "title1",
+      "maxW": 2960
     }
   },
   "designSystems": []

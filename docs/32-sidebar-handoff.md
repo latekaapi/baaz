@@ -1,7 +1,7 @@
 # 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `42c0bc0`. **harness** `feedback-mode` @ `d53151b` (+ this doc). Both trees clean.
+- **agentic-ui** `design-v2` @ `cdbe2a4`. **harness** `feedback-mode` @ `f786406` (+ this doc). Both trees clean.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
@@ -108,6 +108,29 @@ misplacement itself did not reproduce under the palette or with the app in the b
 slow first load drew the new-tab page over a navigating tab (centre judged blank by the live URL) — fixed,
 `browse_centre_tab_blank` (harness, after d53151b). Screen was unlocked: Field empty state, favicon row and
 page-under-Field all seen live.
+
+## The recurring Browse rendering faults — one root, two causes (2026-10-11 afternoon)
+
+The owner asked whether something fundamental was being missed. Yes. **The Chromium page is a separate native
+window stacked above everything Baaz draws** (docs/24-browser.md H4; cmux saw the same). gpui can never paint over
+it, so anything that must appear over the page either (a) lives in its own overlay window (the Field, Browse
+menus, now site information) or (b) hides the page and paints a *stand-in* picture of it. Every fault in the
+recordings came from (b) or from gpui drawing where the page is:
+1. **The stand-in was taken at page load**, not when covering: ⌘K / the account menu showed the page at the load-
+   time scroll position with stale content ("rendering changes"), and a fresh page had none (flicker). Fixed in
+   aui-webview 57929c4: covering asks for a picture NOW, keeps the live page up until it lands (+40 ms handoff),
+   falls back to the flat surface at 300 ms — never to an old picture. Live-verified: scrolled Lightbulb page under
+   ⌘K shows the scrolled position.
+2. **Every Chromium page's background was Baaz's dark surface** (a WKWebView-era guard): pages that paint no
+   background showed black bands live (HN) and dark grounds in every stand-in. Fixed: white canvas (harness 8567ba2).
+3. **gpui tooltips beside the page** ran under it (the '+' New space tooltip). Fixed: `tip_within` (aui cdbe2a4).
+Rule for new UI: anything that can cross the page rect is an overlay window or accepts a stand-in; never assume
+gpui paints over the page.
+
+Also this round: one active tab (agent sessions' own active tabs stole the selected pill; harness f786406),
+site information + certificate via CEF SSL status (aui 2d7e403, harness f786406), "From sessions" header.
+Videos: H.264/AAC don't play — stock CEF has proprietary_codecs off (docs/24 H3); needs our own CEF build +
+a licensing decision (docs/24a). Not started; owner's call.
 
 **Superseded — was waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
