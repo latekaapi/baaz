@@ -1,7 +1,7 @@
 # 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11, evening round included); next = owner's next list
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `b96b84c`. **harness** `feedback-mode` @ HEAD (evening round, below). Both trees clean. Never push.
+- **agentic-ui** `design-v2` @ `b96b84c`. **harness** `feedback-mode` @ `8134287` + this doc (evening round, below). Both trees clean. Never push.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
@@ -131,6 +131,10 @@ box; account menu with the page live and no capture; sidebar + page dim on the s
 live; real typing in the hosted palette, results streaming in; a real click on a row opens the session via the main
 window; scrim click and Escape close; error dialog hosted; Baaz's Edit menu open and Finder in front — page stays.
 
+Independent visual check (a Sonnet agent driving the real bundle): tab menu, account menu (page crops RMSE 0, no
+capture), ⌘K hosted modal (scrim + live page together, real typing, scrim click), error dialog, Edit menu + Finder in
+front — all PASS. Resize: 0 captures; ~64–100 ticks/s once the window has had one real input event.
+
 Adaptation written down: the hosted modal covers the traffic lights (they dim with the scrim and aren't clickable
 while a modal is up); in-window they stayed above the scrim. Sessions-mode covers (the right pane's page under ⌘K)
 still use the stand-in path.
@@ -138,6 +142,8 @@ still use the stand-in path.
 New traps:
 - `screencapture` (still or `-V` video) and losing focus pause gpui frames for a background test window; `resize-sweep`
   then seems "slow". Measure tick rate with the window front-most and nothing capturing.
+- A scripted run that has never received a real input event barely draws (23 ticks in 11 s, page or not); one real
+  click and it runs at 60–100 frames/s. Bisected: not a code change. Give frame-rate checks one real click first.
 - `resize-sweep:` does not block the step script — a following `wait:` + sweep cuts it short.
 - `System Events click at` is an AX press: gpui ignores it. Post real CGEvents (a 10-line Swift clicker).
 - Python's non-blocking *text* pipe drops data: read the child's stderr with `os.read` on the fd.
