@@ -1114,6 +1114,10 @@ pub struct Harness {
     /// The Browse sidebar's open right-click menu (tab, folder, task
     /// folder or space) at the pointer; drawn in the overlay window.
     pub(crate) browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
+    /// When the page menu last closed: the press on ⋯ that closes it (by
+    /// taking the keyboard from its overlay window) must not reopen it on
+    /// the same click's release.
+    pub(crate) page_menu_closed: Option<std::time::Instant>,
     /// The Browse name field in flight (a folder or a space), edited in
     /// the shared `rename` textarea.
     pub(crate) browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
@@ -1637,6 +1641,7 @@ impl Harness {
             browse_drop_at_end: false,
             tab_menu: None,
             browse_menu: None,
+            page_menu_closed: None,
             browse_naming: None,
             menu_dismissed: None,
             overlay: None,
@@ -4951,22 +4956,29 @@ impl Harness {
             }
             None => None,
         };
-        // The ⋯ menu placeholder, like the full toolbar's: Annotate,
-        // Screenshot and DevTools stay one press away with no sidebar.
+        // The page menu, as the sidebar's ⋯ opens it: Annotate, Screenshot
+        // and DevTools stay one press away with no sidebar. It was a
+        // placeholder that only repainted (found 2026-10-12).
+        use gpui_kit::base::ElementExt as _;
+        let anchor: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = std::rc::Rc::new(std::cell::Cell::new(None));
+        let at = anchor.clone();
+        let page_menu_open =
+            self.browse_menu.as_ref().is_some_and(|m| matches!(m.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }));
         let more = div()
             .id("hd-minimal-more")
             .debug_selector(|| "hd-minimal-more".into())
             .flex_none()
-            .role(gpui::Role::Button)
-            .aria_label("More")
+            .on_prepaint(move |bounds, _, _| anchor.set(Some(bounds)))
             .child(
                 icon_button("hd-minimal-more-button", IconName::Dots)
                     .ghost()
                     .muted()
                     .size(ButtonSize::Sm)
-                    .accessibility_label("More")
-                    // B2a-H5: the ⋯ menu.
-                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify())),
+                    .accessibility_label("Page menu")
+                    .menu_open(page_menu_open)
+                    .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                        this.toggle_browse_page_menu(at.get(), window, cx);
+                    })),
             );
         // The shell pins the Show-sidebar toggle at x 84 and pads this row
         // clear of it and the lights (`edge_control` / `centre_clear`).

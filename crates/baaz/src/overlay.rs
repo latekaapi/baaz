@@ -61,8 +61,10 @@ const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
 /// The clear margin around every overlay panel inside its window: room for
 /// FF's shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which
 /// the window's edge would otherwise clip — the panel's only edge, since the
-/// window draws none of its own ([`drop_native_chrome`]).
-const SHADOW_PAD: f32 = scale::SP_1;
+/// window draws none of its own ([`drop_native_chrome`]). 6 px: `SP_1` is
+/// 2 px, and the 2 px margin it was clipped the drop (and the dropdown's
+/// 4 px enter slide).
+const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
 
 /// Take macOS's own chrome off an overlay window, and keep it from ever
 /// becoming the main window.

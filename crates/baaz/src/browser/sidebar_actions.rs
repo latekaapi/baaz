@@ -14,6 +14,41 @@ use crate::app::Harness;
 /// A folder's name until the person types one.
 const NEW_FOLDER: &str = "New folder";
 
+/// How long after the page menu closes a press on ⋯ still counts as the
+/// one that closed it (the sidebar menus' guard: 400 ms).
+const PAGE_MENU_REPRESS: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What a click on ⋯ does.
+#[derive(Debug, PartialEq, Eq)]
+enum PageMenuPress {
+    /// The menu is open: close it.
+    Close,
+    /// The press already closed it (its overlay lost the keyboard): stay closed.
+    AlreadyClosed,
+    /// Open it.
+    Open,
+}
+
+/// The ⋯ toggle as a pure rule: `open` now, and how long ago the page menu
+/// last closed.
+fn page_menu_press(open: bool, closed_ago: Option<std::time::Duration>) -> PageMenuPress {
+    if open {
+        PageMenuPress::Close
+    } else if closed_ago.is_some_and(|ago| ago < PAGE_MENU_REPRESS) {
+        PageMenuPress::AlreadyClosed
+    } else {
+        PageMenuPress::Open
+    }
+}
+
+/// The page menu's top-left for a `width`-wide menu under the ⋯ at
+/// `anchor` (window coordinates): FF's dropdown, 6 px below its trigger,
+/// right edges aligned, never past the window's left edge.
+fn page_menu_origin(anchor: gpui::Bounds<gpui::Pixels>, width: gpui::Pixels) -> gpui::Point<gpui::Pixels> {
+    let gap = gpui::px(aui_tokens::scale::SP_2 + aui_tokens::scale::SP_1);
+    gpui::point((anchor.right() - width).max(gpui::px(0.0)), anchor.bottom() + gap)
+}
+
 impl Harness {
     /// The person's tab ids in the current space, Today and folders alike,
     /// pinned ones excluded unless `pinned`.
@@ -47,22 +82,38 @@ impl Harness {
         cx.notify();
     }
 
-    /// The page controls' ⋯: the page menu at the pointer, as a Browse menu
-    /// in the overlay window over the live page. It opened the Sessions
-    /// header's overflow menu (Rename / Fork / Archive) at the window's top
-    /// right, over the page (owner screenshot 2026-10-12) — a wire left from
-    /// the D3 re-shell. The rows are the B2a page menu's.
-    pub(crate) fn open_browse_page_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The page controls' ⋯: opens the page menu under the button (FF's
+    /// dropdown: 6 px below, right edges aligned, so it stays over the
+    /// sidebar), or closes it when it is open. The menu lives in an overlay
+    /// window that holds the keyboard, so the press on ⋯ has usually closed
+    /// it already (resign-key) by the time this click lands: a close within
+    /// the guard window counts as this click's own (owner screenshot
+    /// 2026-10-12 1:21 AM: ⋯ never toggled, the menu jumped to the pointer).
+    pub(crate) fn toggle_browse_page_menu(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+        use aui::screens::sidebar::BrowseMenuTarget;
+        let open = self.browse_menu.as_ref().is_some_and(|m| matches!(m.target, BrowseMenuTarget::Page { .. }));
+        match page_menu_press(open, self.page_menu_closed.map(|at| at.elapsed())) {
+            PageMenuPress::Close => return self.close_browse_menu(cx),
+            PageMenuPress::AlreadyClosed => {
+                self.page_menu_closed = None;
+                return;
+            }
+            PageMenuPress::Open => {}
+        }
         let Some(state) = self.browse_centre_state() else {
             return;
         };
         let page = state.read(cx);
-        let target = aui::screens::sidebar::BrowseMenuTarget::Page {
+        let target = BrowseMenuTarget::Page {
             safari: self.browse_safari_url(cx).is_some(),
             devtools: page.supports(aui_webview::BackendFeature::DevTools),
             annotating: page.annotating(),
         };
-        self.open_browse_menu(BrowseMenu { target, at: window.mouse_position() }, cx);
+        let mut menu = BrowseMenu { target, at: window.mouse_position() };
+        if let Some(anchor) = anchor {
+            menu.at = page_menu_origin(anchor, aui::screens::sidebar::browse_menu_size(&menu, 0, cx).width);
+        }
+        self.open_browse_menu(menu, cx);
     }
 
     /// A page menu row: the B2a page menu's actions, on the shown page.
@@ -83,7 +134,10 @@ impl Harness {
 
     /// Close the right-click menu, if one is open.
     pub(crate) fn close_browse_menu(&mut self, cx: &mut Context<Self>) {
-        if self.browse_menu.take().is_some() {
+        if let Some(menu) = self.browse_menu.take() {
+            if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) {
+                self.page_menu_closed = Some(std::time::Instant::now());
+            }
             cx.notify();
         }
     }
@@ -314,5 +368,34 @@ impl Harness {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod page_menu_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Owner screenshot 2026-10-12 1:21 AM: a second click on ⋯ left the
+    /// menu open (its press closed it, its release reopened it).
+    #[test]
+    fn a_second_click_on_the_dots_closes_the_menu() {
+        assert_eq!(page_menu_press(true, None), PageMenuPress::Close, "open: the click closes it");
+        assert_eq!(page_menu_press(false, Some(Duration::from_millis(30))), PageMenuPress::AlreadyClosed, "the press just closed it");
+        assert_eq!(page_menu_press(false, Some(Duration::from_millis(900))), PageMenuPress::Open, "a later click opens it");
+        assert_eq!(page_menu_press(false, None), PageMenuPress::Open);
+    }
+
+    /// The menu hung off the pointer and followed it on every click.
+    #[test]
+    fn the_page_menu_hangs_under_its_button_right_aligned() {
+        use gpui::{point, px, size, Bounds};
+        let dots = Bounds::new(point(px(212.0), px(56.0)), size(px(28.0), px(28.0)));
+        let at = page_menu_origin(dots, px(240.0));
+        assert_eq!(at.x, px(0.0), "clamped at the window's left edge (240 > 240 − 0)");
+        let wide = Bounds::new(point(px(400.0), px(56.0)), size(px(28.0), px(28.0)));
+        let at = page_menu_origin(wide, px(240.0));
+        assert_eq!(at.x + px(240.0), wide.right(), "right edges aligned");
+        assert_eq!(at.y, wide.bottom() + px(6.0), "6 px below the button");
     }
 }

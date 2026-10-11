@@ -1349,7 +1349,7 @@ impl Harness {
                 }
             }
             BrowseIntent::NewTab => self.new_browse_sidebar_tab(window, cx),
-            BrowseIntent::PageMenu => self.open_browse_page_menu(window, cx),
+            BrowseIntent::PageMenu(anchor) => self.toggle_browse_page_menu(anchor, window, cx),
             BrowseIntent::Page(action) => self.browse_page_action(action, window, cx),
             BrowseIntent::OpenPin(id) | BrowseIntent::SelectTab(id) => {
                 if let Some(id) = browse_tab_id(&id) {
