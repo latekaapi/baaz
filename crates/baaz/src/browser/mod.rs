@@ -377,13 +377,24 @@ pub(crate) fn initial_url(stored: Option<&str>) -> &str {
     stored.unwrap_or(BLANK)
 }
 
+/// Chromium's own default canvas: white. A page that paints no background
+/// of its own (HN's margins, many articles) shows this, as in Chrome. It was
+/// Baaz's dark surface — a WKWebView-era guard against a white about:blank —
+/// which drew black bands beside such pages and baked dark grounds into
+/// every cover snapshot (owner screenshots 2026-10-11). Blank tabs never
+/// show their native view (the new-tab page is gpui), so white costs nothing.
+#[cfg(feature = "cef")]
+const PAGE_CANVAS: (u8, u8, u8, u8) = (255, 255, 255, 255);
+
 /// How many page screenshots one run keeps: enough to re-read the last
 /// few captures, bounded so a long session never fills the disk.
 /// The Chromium page engine for a new pane page, when the bundle carries CEF
 /// and `BAAZ_BROWSER_ENGINE=webkit` does not ask for WebKit. `None` means
 /// "use WKWebView": CEF unavailable, or it failed to open a page (logged).
+/// The host's ground goes to WKWebView only; Chromium paints white.
 #[cfg(feature = "cef")]
-fn cef_backend(window: &Window, url: &str, rgba: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+fn cef_backend(window: &Window, url: &str, _host_ground: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+    let rgba = PAGE_CANVAS;
     if !aui_cef::available() || std::env::var("BAAZ_BROWSER_ENGINE").as_deref() == Ok("webkit") {
         return None;
     }
