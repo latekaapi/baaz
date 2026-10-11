@@ -1,7 +1,7 @@
 # 32 — Handoff: sidebar round done, owner bug round next (2026-10-11)
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `16f1fed`. **harness** `feedback-mode` @ `5b2223f` (+ this doc). Both trees clean.
+- **agentic-ui** `design-v2` @ `42c0bc0`. **harness** `feedback-mode` @ `d53151b` (+ this doc). Both trees clean.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
@@ -87,6 +87,19 @@ pill, no dot, `FluidList::inert` keeps both blocks off it; gpui-base Textarea's 
 (`TEXTAREA_TEXT_INSET`, measured with a marker). Seen via gpui `--screenshot` (screen locked): new tab rest +
 typing. NOT yet seen live: the rename field after the 10 px compensation (owner to glance), the new tab in the
 real window over CEF.
+
+**Afternoon 2026-10-11 (owner screenshots, rename confirmed fine):**
+- Field open → card corners square + first-open flicker: the overlay panel takes the keyboard, the main window
+  goes inactive, `shown_window_active` covered the page with its (unrounded, initially missing) snapshot. Own
+  overlay now counts as active (`window_or_overlay_active`, harness 075ddf2); stand-in rounds to the page radius
+  anyway (aui b5e6917). Empty Field: no divider/gap with no rows (075ddf2).
+- Favicons: tab keeps the engine's icon URL (persisted); `browser/favicons.rs` fetches once per launch via
+  /usr/bin/curl or decodes data: URLs → 32 px PNG / SVG in `<state>/favicons/`; sidebar key carries the
+  generation (harness d53151b, aui 42c0bc0). Pins and new-tab pick-up use them too.
+- New tab beside the current one, in its folder (harness 280f526; test in d53151b).
+Seen: favicon rows via gpui `--screenshot` from a live run's state; the live run fetched HN's SVG icon.
+NOT seen (screen locked; macOS refused even per-window captures): the Field over the live page — corners and the
+flicker are fixed by cause, owner to confirm.
 
 **Superseded — was waiting on the owner:** canvas v26 board "NewTab2" (Field on FF composer chrome, ⌘↵ asks, "Pick up where you
 left off" as FF menu rows with project · age) — build only after approval. Board "BrowseFixes" = the four fixes.
