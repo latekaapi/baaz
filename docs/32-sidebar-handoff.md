@@ -1,12 +1,12 @@
 # 32 — Handoff: sidebar + Browse owner rounds done (2026-10-11, evening round included); next = owner's next list
 
 ## State (nothing pushed)
-- **agentic-ui** `design-v2` @ `b96b84c`. **harness** `feedback-mode` @ `8134287` + this doc (evening round, below). Both trees clean. Never push.
+- **agentic-ui** `design-v2` @ `a615d79`. **harness** `feedback-mode` @ `390b607` + this doc (evening round + round 2, below). Both trees clean. Never push.
 - harness `Cargo.toml` still pins aui **v0.3.21**; the git-ignored `.cargo/config.toml` path-patches `aui`, `aui-cef`, … to
   `../agentic-ui`. Repin only after the owner pushes a tag.
 - Bundle: `CEF_PATH=$HOME/.local/share/cef scripts/bundle.sh` → `target/bundle/Baaz.app` (currently running = latest build).
 - Canvas "Baaz sidebar v2" https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP **v29** (= the build: NewTab2 + ground, BrowseFixes, rename field, SiteInfo, From sessions header); repo copy in `docs/30-sidebar-spec/`.
-- Gates last run green (evening round): `cargo test -p baaz` 1495+ · `cargo test -p aui -p aui-webview` 640 · `aui-cef` (own target dir,
+- Gates last run green (evening round 2): `cargo test -p baaz` 1500 · `cargo test -p aui -p aui-webview` 641 · `aui-cef` 47 (own target dir,
   `cd crates/aui-cef && cargo test`) 46 · clippy `-D warnings` on all of them. 18-entry probe: findings on every entry
   against pre-design-v2 baselines (unchanged all round; none of them shows Browse). Gallery clippy has one pre-existing failure
   (`aui-gallery/src/browse/screen.rs:2235`, not ours).
@@ -151,6 +151,26 @@ New traps:
   not be loaded"). Copy once into one fixed dir and reuse; delete `$TMPDIR/bz.*` after a session.
 - `pkill -f "MacOS/Baaz --no-connect"` from the agent shell kills the shell itself (self-match). Kill by pid.
 - Rebuilding the bundle in place closes the owner's running Baaz.
+
+## Owner round 2026-10-11 evening, part 2 — five more, all seen live
+
+Screenshots 7.14 PM + recordings 7.16 / 7.18 PM. Commits aui `6698ef3`, `a615d79`; harness `24c584a`, `c53ae4e`, `390b607`.
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| DevTools "opened here too", couldn't be closed | CEF gives DevTools (Chromium's Inspect, ⌥⌘I, `show_dev_tools`) the inspected page's own client, so `on_after_created` adopted DevTools' window as the page, title/address callbacks renamed the tab, its close would close the page | aui-cef: a page serves one browser (`Shared::browser_id`, first created); 23 stateful callbacks return CEF's default for any other (`foreign`). DevTools = its own window (owner decision). Tabs saved with `devtools://` load as blank tabs |
+| Faint line above the tab menu | titled panel's own 1 px rim (`setHasShadow:NO` leaves it) | menus, Field, site info are borderless panels (keep full-size-content + non-activating bits); the modal stays titled for rounded corners |
+| Traffic lights grey with a menu open | gpui's `GPUIPanel` answers YES to `canBecomeMainWindow`; a panel taking key took main | class patched to NO before the first overlay opens (gpui makes a panel key+main while creating it) |
+| Hover pill moving on the reload row | page controls were a static item = a *gap* to FluidList's nearest rule, so the pointer on them lit the address row or Search | `FluidList::item_toolbar`: measured (the pointer is ON it), never lit/selected/reported/activated. Also the spaces strip and the Projects header |
+| New-tab list not fluid / laggy | pick-up rows on plain gpui hover (an adaptation noted at build time); the Field's suggestion rows keyboard-only | FluidList for the pick-up list, the new-tab suggestions and the ⌘L panel rows; pointer and arrows drive one highlight (hover moves the selection) |
+
+Seen live (front-most test window, real CGEvent moves/clicks/right-click): no line above the menu and coloured traffic lights on the
+FIRST menu of a run; pointer resting across the nav row lights nothing (8 positions); suggestion pill glides row to row with the text
+lighting; right-click → Inspect opens DevTools in its own 800×600 window connected to the page, the tab stays "Hacker News",
+closing DevTools leaves the tab live.
+
+Disk trap (again): `harness/target/debug` reached 100 GB (39 GB incremental), `agentic-ui/target/debug` 36 GB. Clearing
+`target/debug/incremental` in both repos (+ aui-cef's) freed ~52 GB with no data loss; do it when `df` runs low.
 
 ## Live-check recipes (2026-10-11, all worked)
 - Locked screen? `screencapture -x f.png` then `magick f.png -alpha off -resize 5% -colorspace gray -format "%[fx:mean]" info:`
