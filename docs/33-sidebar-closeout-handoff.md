@@ -1,5 +1,6 @@
 # 33 — Handoff: close out the fluid-design sidebar (collapse + mode-switch motion)
 
+> **Superseded in part (2026-10-12 late): the closed states are being redesigned as v3 surfaces — see docs/34-v3-surfaces-handoff.md.**
 > **Read §0 first** (2026-10-12 session): the menu work is done and live-checked; the open/closed states are
 > mocked on the canvas for iteration; nothing of the collapse/peek/mode switch is built yet. The sections after §0
 > are the original handoff (still valid for the method, traps and the native-page constraint).
