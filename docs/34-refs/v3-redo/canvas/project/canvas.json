@@ -1,0 +1,131 @@
+{
+ "v": 3,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-12T15:50:00Z"
+ },
+ "title": "Baaz v3",
+ "launch": {
+  "view": "canvas"
+ },
+ "pages": [],
+ "boards": {
+  "Main.dc.html": {
+   "x": 0,
+   "y": 0,
+   "w": 1440,
+   "h": 520,
+   "title": "Tone"
+  },
+  "Depth.dc.html": {
+   "x": 0,
+   "y": 640,
+   "w": 1440,
+   "h": 620,
+   "title": "Depth"
+  },
+  "Composers.dc.html": {
+   "x": 0,
+   "y": 1380,
+   "w": 1440,
+   "h": 360,
+   "title": "Composer"
+  },
+  "SessionsOpen.dc.html": {
+   "x": 0,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Sessions \u00b7 open"
+  },
+  "SessionsClosed.dc.html": {
+   "x": 1520,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Sessions \u00b7 closed"
+  },
+  "BrowseOpen.dc.html": {
+   "x": 0,
+   "y": 3020,
+   "w": 1440,
+   "h": 900,
+   "title": "Browse \u00b7 open"
+  },
+  "BrowseClosed.dc.html": {
+   "x": 1520,
+   "y": 3020,
+   "w": 1440,
+   "h": 900,
+   "title": "Browse \u00b7 closed"
+  }
+ },
+ "order": [
+  "BrowseClosed.dc.html",
+  "BrowseOpen.dc.html",
+  "SessionsClosed.dc.html",
+  "SessionsOpen.dc.html",
+  "Composers.dc.html",
+  "Depth.dc.html",
+  "Main.dc.html"
+ ],
+ "notes": {
+  "n6": {
+   "x": 3040,
+   "y": 2480,
+   "w": 420,
+   "fill": "blue",
+   "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the pills' 18 from the top. Pill end caps: text and lights 14 from the end. Browse open uses the same drawn chrome and account footer as Sessions."
+  },
+  "t1": {
+   "x": 0,
+   "y": -240,
+   "kind": "title1",
+   "maxW": 2960,
+   "text": "Baaz v3 \u2014 FINAL 2026-10-12: tone, depth, composer, then the four screens"
+  },
+  "t2": {
+   "x": 0,
+   "y": 1760,
+   "kind": "title1",
+   "maxW": 2960,
+   "text": "The four screens \u2014 Sessions and Browse, open and closed"
+  },
+  "n1": {
+   "x": 1520,
+   "y": 0,
+   "w": 420,
+   "fill": "blue",
+   "text": "Why the previous rounds read flat: a seven-unit step between near-black greys is about 3 L* and the eye needs 4 to 5 to see a level without a line. Drawing the line back in made it look outlined. So: a darker frame, nine-unit steps, highlight on the top edge instead of a border, and a slight cool bias so the greys are not dead."
+  },
+  "n2": {
+   "x": 1520,
+   "y": 640,
+   "w": 420,
+   "fill": "blue",
+   "text": "FINAL (owner, 2026-10-12): the cool-neutral ladder, light edge (7 % top highlight + 6 % white ring on every surface), floating drop 8/24 at 40 %, dialog drop 24/56 at 50 %. Only two kinds of depth exist: a surface that sits in another (fill + top highlight) and a surface that floats (a faint ring + one soft drop). FF's stacked small drops at 18 % are replaced by one diffuse drop; FF's structure (substrate + offset, surface-relative overlays, the springs) stays."
+  },
+  "n3": {
+   "x": 1520,
+   "y": 1380,
+   "w": 420,
+   "fill": "blue",
+   "text": "A is used on the screens. The chips lose their borders; the composer card is the single edge at the bottom of the sheet. Provider stays visible as a mark, model and mode as text controls that light on hover."
+  },
+  "n4": {
+   "x": 3040,
+   "y": 2000,
+   "w": 420,
+   "fill": "blue",
+   "text": "Sidebar on the frame with no vertical divider and no footer rule: the sheet's own edge is the only divider. The sheet is 6 px in from the window and never moves. Closed: the sidebar leaves, two pills float over the sheet (lights \u00b7 Show sidebar \u00b7 switch \u00b7 title | actions); content runs under them through the sheet's fade."
+  },
+  "n5": {
+   "x": 3040,
+   "y": 3020,
+   "w": 420,
+   "fill": "blue",
+   "text": "Browse: the page is the sheet, white on the frame. Closed: the left pill adds back, forward, reload and the address at rest; the right pill Ask, the page menu and new tab. No tab strip: tabs are one hover away in the peek. Pills over the native page are overlay windows."
+  }
+ },
+ "designSystems": []
+}
