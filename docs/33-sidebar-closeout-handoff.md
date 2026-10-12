@@ -1,5 +1,97 @@
 # 33 — Handoff: close out the fluid-design sidebar (collapse + mode-switch motion)
 
+> **Read §0 first** (2026-10-12 session): the menu work is done and live-checked; the open/closed states are
+> mocked on the canvas for iteration; nothing of the collapse/peek/mode switch is built yet. The sections after §0
+> are the original handoff (still valid for the method, traps and the native-page constraint).
+
+## 0. Session 2026-10-12 — where it stands
+
+### State (nothing pushed — never push)
+- **agentic-ui** `design-v2` @ `3497f46`; **harness** `feedback-mode` @ this doc's commit. Both trees clean.
+- Gates at the last code commit: aui 664 · baaz 1502 · clippy `-D warnings` clean in both (the old gallery
+  failure is fixed) · 18-entry probe = the same old-baseline findings as every round (baselines predate design-v2).
+- A test bundle with all of it: `target/bundle-check/Baaz.app` (built from a copy of `scripts/bundle.sh` with
+  `OUT=$ROOT/target/bundle-check/Baaz.app`, so the owner's running `target/bundle/Baaz.app` is never closed).
+  The owner's `target/bundle` is still the pre-session build.
+
+### Done this session (item 1 of the brief: the menu bug, owner screenshot 1:21 AM)
+- **One dropdown** (aui `07b53ac`, `3497f46`): `aui::interact::Dropdown` is FF's dropdown and every menu renders
+  through it — sidebar view options / account / Browse menus, legacy `ViewMenu`/`ViewSubmenu` (project, overflow,
+  back-history, colour, skill mode), composer `+` and pickers; the `/` and `@` caret menus keep their rows but take
+  the panel, labels, FluidList glide and timings. `EnterExit::POPUP` = FF 80 / 60 ms (was the v1 120). Legacy
+  `AccountMenu` deleted. `Button::menu_open` = trigger holds its pressed look and drops its tooltip.
+  Submenus are laid out *inside* the menu's box (an absolute submenu turned every pick into an outside press —
+  Sort by / Group by never worked before).
+- **⋯ page menu** (harness `627205c`, `fa730bd`): toggles (400 ms guard for the overlay's resign-key close),
+  hangs 6 px under the button right-aligned, the collapsed-chrome ⋯ (was a dead placeholder) opens it too,
+  ⌘B closes Browse menus, overlay windows keep a 6 px shadow margin (`SP_1` is **2 px**, not 4 — trap).
+- Live-verified in the test bundle with real CGEvents, front-most: open/toggle/Escape/outside close, Copy link,
+  Find, Open in Safari, collapsed ⋯, account toggle, view-options submenu pick persists, picker hover lights label.
+- Trap: gpui-kit `presence` samples a never-opened element as *Exiting* — use `progress > 0`, not the phase
+  (it drew closed composer menus into a deferred layer and broke cached views: arena panic in 6 tests).
+- Not a bug, left alone: Claude Code chip "Opus 5" checks no picker row (full id vs alias — deliberate, providers.rs).
+
+### Items 2 + 3 (open/collapse, mode switch): designed, NOT built
+Owner decisions (asked up front): collapsed = **hidden, FF offcanvas** (no 16 px strip, both modes); **peek on
+hover** (FF `peek="hover"`: 12 px edge strip, hairline on hover, arm 150 ms, dismiss 250 ms, card slides from
+−108 % on `spring.moderate`, leaves on `moderate.exit` 0.12 s; ⌘B while peeking pins); mode-switch motion = my call
+from FF, "needn't be overboard".
+
+Owner corrections this session (memory `feedback-prototype-in-agentic-ui`): my first canvas boards were low-fi
+frame strips with placeholder content — rejected ("why is this so different in quality?"). Motion is to be built in
+agentic-ui itself and reviewed there; static states are mocked **from captures of the built app**, at the quality of
+the other boards.
+
+**Canvas "Baaz sidebar v2" v38** (https://claude.ai/artifact/GACTNjKyXA9necGvwPvovP), row "Close-out 2026-10-12":
+| Board | What |
+|---|---|
+| `SidebarOpen.dc.html` | Sessions, sidebar open — the built screen (FF `variant="sidebar"`, hairline edge, no card; 44 px row centred on the lights at y 22; owl empty state; composer 824 wide) |
+| `SidebarClosed.dc.html` | Sessions, closed — offcanvas; lights, toggle (x 85, "Show sidebar"), the Sessions/Browse switch parked at **x 115**, title from x 191, composer re-centred |
+| `BrowseOpen.dc.html` | Browse, open — built sidebar (address, controls, Pinned, Today, folder, New tab, From sessions, spaces) + page in FF inset card (8 px, r 10) |
+| `BrowseClosed.dc.html` | Browse, closed — row 1: lights, toggle, switch (Browse), back/fwd/reload, address at rest (title · host), Ask, ⋯, +; row 2: tab strip (as built); page full-bleed, square |
+Notes `n8` / `n9` beside them carry the interaction text. The old `Collapsed.dc.html` (2026-10-09) is retitled superseded.
+The old `Main.dc.html` shows Sessions in an inset card — the build does NOT (the card is Browse-only); boards follow the build.
+
+**Open questions for the owner** (asked, unanswered): (a) the switch parked after the toggle when closed, both modes —
+approve? (b) Browse closed: keep the tab strip (as built) or one row only (tabs via ⌘1–9 / the address)?
+
+### FF facts gathered (don't re-research)
+- FF sidebar (`registry/default/sidebar-core.tsx`, fetched 2026-10-12): `collapsible` = `offcanvas | none` only (no
+  icon rail). Column `animate width: open ? width : 0`, AND the fixed-width panel inside animates `x: 0 ↔ −100 %` on the
+  same transition (content slides with the edge, never wiped). Open = `spring.slow` (0.24 s, bounce 0.12 → aui
+  `SpringKind::Slow` 685 / 46.1 / 1, ζ 0.88, peak +0.4 px at ~260 ms, within 0.5 px at 215 ms); close =
+  `spring.slow.exit` = 0.16 s tween (motion's default curve for a duration-only transition: ease-in-out). Drag = 0,
+  mid-drag flip = moderate. Reduced motion = 0.
+- FF has **no** panel transition for tabs (TabPanel swaps); the closest primitive is the icon swap (leaving 60 ms
+  ease-in, arriving 80 ms ease-out, simultaneous; + 4 px blur / 0.6 scale for glyphs). Proposed for the mode switch:
+  opacity-only cross-fade of the sidebar body + centre at those timings; native page alpha follows; indicator on
+  moderate (exists). Not yet shown to the owner as a running thing.
+- Today's build: collapse uses the old non-FF `SpringKind::Layout` (360/32/1); content is clipped static (wiped);
+  the sidebar header's mode tabs pop in late on expand (threshold) — frame review 2026-10-12 (~16 frames each way).
+
+### How to iterate on the canvas boards
+- Read the four boards with the Artifact tool (`path: project/<Board>.dc.html`), edit, publish with `root` + `files`.
+  They are self-contained (no `dc-import`); the owl is asset `/_blob/32f8077c1893c70aa92dc89c186d75f3`
+  (`crates/baaz/assets/mascot/hero/chill-ambient@2x.png`).
+- **Look before publishing**: strip `support.js`, the `x-dc`/`helmet` tags and the script block, swap the blob for a
+  `file://` path, then `qlmanage -t -s 1440 -o <dir> <file>.html` renders it (WebKit, ~1.4× crop). The canvas UI in
+  the in-app browser pane is too small to judge boards.
+- Reference captures of the build: launch `target/bundle-check` with `--steps "mode:sessions;new"` (or
+  `mode:browse;wait:1500;tab-new:<url>`), bring front, `screencapture -R 36,41,1440,900` (window at 36,41), ⌘B for
+  closed. The app remembers per-mode sidebar state — check which state you captured.
+- Live-check tools were rebuilt in the session scratchpad (gone with it); sources survive in
+  `/private/tmp/claude-501/-Users-latekaapi-Projects-harness/5d52b452-…/scratchpad/tools/{mouse,wins,click}.swift, runts.py`.
+  `$TMPDIR/bzreal` holds one copy of real state (no search.db); delete Chromium `Singleton*` in it if CEF fails to init.
+
+### Next
+1. Iterate the four boards with the owner until approved (open questions above first).
+2. Then build in agentic-ui (owner: real components, not mocks): AppShell offcanvas width + panel slide on FF slow /
+   slow.exit (one value), switch parked after the toggle when closed, peek (Browse: overlay window over the page),
+   mode-switch cross-fade, native page frame/alpha in step. A gallery card the owner can drive, then Baaz.
+3. Update the "Baaz Two Tracks" tracker (not touched this session).
+
+---
+
 Written 2026-10-12 at the end of the 2026-10-11 owner rounds (docs/32 has the full history of those rounds).
 
 ## State (nothing pushed — never push)
