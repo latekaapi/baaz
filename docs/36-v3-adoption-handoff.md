@@ -52,7 +52,7 @@ agentic-ui (`crates/…`):
 - **Gallery** `screens/shell-v3` — drivable card (both modes, open/closed, pills, peek).
 
 Baaz (`crates/baaz/src`): `app.rs` root render — Settings keeps the old shell; everything else `.sheets(true)`;
-`render_v3_pills`, `render_browse_pill_parts`, `session_header_actions`, `session_header_label`, `set_browse_holes`;
+`render_v3_chrome` (was `render_v3_pills`), `render_browse_pill_parts`, `session_header_actions`, `session_header_label`, `set_browse_holes`;
 `browser/mod.rs` `sheet_page_rect`, `browse_page_card()` always in Browse, `browse_strip_shown()` → false (no tab strip);
 `session/render.rs` composer band (no hairline, 12 above the sheet bottom); `TRANSCRIPT_PAD_TOP` 80; sidebar
 `.transparent()`; step `peek`.
