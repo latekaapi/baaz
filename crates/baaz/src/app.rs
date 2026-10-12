@@ -2456,6 +2456,10 @@ impl Harness {
     /// never touches Sessions' own sidebar, and back again.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        // A Browse menu hangs off a sidebar row or the page controls: with
+        // the sidebar gone it pointed at nothing (seen live 2026-10-12, the
+        // page menu stayed where the sidebar had been).
+        self.close_browse_menu(cx);
         self.persist_layout(cx);
         cx.notify();
     }
@@ -5582,6 +5586,7 @@ impl Harness {
         };
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
+        let overflow_open = self.overlays.read(cx).is_open(MenuKind::Overflow);
         // The session title leads the row: first child of the header cell,
         // so its left edge sits where the project crumb's did. The title
         // flexes inside the header cell and clips to one line, so a whole
@@ -5686,6 +5691,7 @@ impl Harness {
                             .muted()
                             .size(ButtonSize::Sm)
                             .accessibility_label("Open session menu")
+                            .menu_open(overflow_open)
                             .on_click(overflow),
                     ),
             )

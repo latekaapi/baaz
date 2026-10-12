@@ -1984,8 +1984,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             "plus",
             vec![
                 PlusMenuItem::new("attach", IconName::Paperclip, "Attach file or photo").key("⌘U"),
-                PlusMenuItem::new("mention", IconName::At, "@ Mention file"),
-                PlusMenuItem::new("commands", IconName::Slash, "/ Slash commands"),
+                PlusMenuItem::new("mention", IconName::At, "Mention file").key("@"),
+                PlusMenuItem::new("commands", IconName::Slash, "Slash commands").key("/"),
             ],
             self.plus_open,
         )
