@@ -420,7 +420,7 @@ impl Harness {
     pub(crate) fn overlay_content(&mut self, kind: OverlayKind, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         match kind {
             OverlayKind::BrowseMenu => {
-                let model = self.sidebar_model(false, cx);
+                let model = self.sidebar_model(cx);
                 let browse = model.browse?;
                 let baaz = cx.entity().downgrade();
                 let on_intent = std::rc::Rc::new(move |intent: SidebarIntent, _: &mut Window, cx: &mut App| {

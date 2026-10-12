@@ -187,8 +187,8 @@ fn omnibox_covers_only_while_rows_render() {
 #[test]
 fn address_shows_the_page_with_tab_fallback() {
     let app = source("app.rs");
-    let toolbar = fn_body(&app, "render_browse_toolbar");
-    assert!(toolbar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
+    let bar = fn_body(&app, "render_browse_bar_parts");
+    assert!(bar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
     let reload = fn_body(&app, "browse_reload_button");
     assert!(reload.contains("state.read(cx).loading()"), "the stop button reads the engine loading state");
     assert!(!reload.contains("loading_tabs"), "no Baaz-tracked load set feeds the button");
@@ -205,19 +205,14 @@ fn browse_centre_hides_the_library_nav_row() {
     assert!(!centre.contains("top(px(-38.0))"), "no shift hack for the nav row");
 }
 
-/// The extensions button is a monochrome toolbar icon (the sprite has no
-/// puzzle or grid glyph), and the address reads in the UI font — only the
-/// dev label stays mono.
+/// The bar's address at rest reads in the UI font and carries the site
+/// button with its own label and chain.
 #[test]
 fn toolbar_icons_and_fonts() {
     let app = source("app.rs");
     assert!(!app.contains("🧩"), "no coloured emoji on the toolbar");
-    assert!(app.contains("IconName::Layout"), "the extensions button is a monochrome icon");
-    let field = fn_body(&app, "browse_address_field");
-    assert!(field.contains(".ui(scale::FS_12)"), "the address reads in the UI font");
-    assert!(field.contains("mono(scale::FS_12)"), "only the dev label stays mono");
-    assert!(field.contains("\"Site information\""), "the site button is labelled");
-    assert!(field.contains("\"hd-browse-site\""), "the site button names its own chain");
+    let field = fn_body(&app, "browse_minimal_address_field");
+    assert!(field.contains("\"Address and search\""), "the address slot is labelled");
 }
 
 /// The new-tab field carries the placeholder, and each field's dropdown

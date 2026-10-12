@@ -303,52 +303,6 @@ impl ModeSlots {
     }
 }
 
-/// Where Browse shows the person's tabs (B2a-H6): down the sidebar, as
-/// the window always did — or in a strip row above the page, with the
-/// sidebar keeping only New tab, From sessions and Agents. Owned by the
-/// Settings → Browser page; changing it is instant.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BrowserTabs {
-    /// The tab list down the sidebar.
-    #[default]
-    Vertical,
-    /// A tab strip row above the page.
-    Horizontal,
-}
-
-impl BrowserTabs {
-    /// Every layout the Settings segmented control offers, in order.
-    pub const ALL: [BrowserTabs; 2] = [BrowserTabs::Vertical, BrowserTabs::Horizontal];
-
-    /// The machine name: what `layout.json` stores and `settings-set:`
-    /// parses.
-    pub fn slug(self) -> &'static str {
-        match self {
-            BrowserTabs::Vertical => "vertical",
-            BrowserTabs::Horizontal => "horizontal",
-        }
-    }
-
-    /// The inverse of [`BrowserTabs::slug`]: `None` for an unknown string,
-    /// so a hand-edited file reads as today's behaviour, never an error.
-    pub fn parse(s: &str) -> Option<BrowserTabs> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "vertical" => Some(BrowserTabs::Vertical),
-            "horizontal" => Some(BrowserTabs::Horizontal),
-            _ => None,
-        }
-    }
-
-    /// The user-visible name: the Settings segmented control's labels.
-    pub fn label(self) -> &'static str {
-        match self {
-            BrowserTabs::Vertical => "Vertical",
-            BrowserTabs::Horizontal => "Horizontal",
-        }
-    }
-}
-
 /// Whether provider sessions may inherit the owner's own MCP servers
 /// and connectors (Z5). Off means inherit-nothing: Codex sessions carry
 /// the full-table disables (plus plugin disables) and Claude Code
@@ -492,11 +446,6 @@ pub struct Layout {
     /// read unchanged.
     #[serde(rename = "modeMemory", default, skip_serializing_if = "ModeSlots::is_default_all")]
     pub mode_memory: ModeSlots,
-    /// Where Browse shows the person's tabs (B2a-H6): [`BrowserTabs`].
-    /// Missing in every file written before this feature, which reads as
-    /// vertical — today's Baaz.
-    #[serde(rename = "browserTabs", default)]
-    pub browser_tabs: BrowserTabs,
     /// The engine an address commit searches with (B2a-H6): what the
     /// Settings → Browser page owns. Missing reads as Google, like the
     /// old toolbar const.
@@ -574,7 +523,6 @@ impl Default for Layout {
             use_own_mcp: UseOwnMcp::default(),
             mode: Mode::Sessions,
             mode_memory: ModeSlots::default(),
-            browser_tabs: BrowserTabs::Vertical,
             search_engine: crate::browser::toolbar::SearchEngine::Google,
             download_dir: None,
         }
@@ -762,7 +710,6 @@ mod tests {
                 },
                 browse: ModeState::default(),
             },
-            browser_tabs: BrowserTabs::Horizontal,
             search_engine: crate::browser::toolbar::SearchEngine::Kagi,
             download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
         };
@@ -785,7 +732,6 @@ mod tests {
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         assert!(text.contains("\"mode\":\"browse\""));
         assert!(text.contains("\"modeMemory\":{\"sessions\":{\"sidebarOpen\":true,\"rightOpen\":true"));
-        assert!(text.contains("\"browserTabs\":\"horizontal\""));
         assert!(text.contains("\"searchEngine\":\"kagi\""));
         assert!(text.contains("\"downloadDir\":\"/tmp/baaz-downloads\""));
         let back: Layout = serde_json::from_str(&text).unwrap();
@@ -813,7 +759,6 @@ mod tests {
         assert_eq!(back.mode_memory.sessions.selected_session.as_deref(), Some("s-1"));
         assert!(back.mode_memory.sessions.sidebar_open);
         assert!(back.mode_memory.browse.is_default());
-        assert_eq!(back.browser_tabs, BrowserTabs::Horizontal);
         assert_eq!(back.search_engine, crate::browser::toolbar::SearchEngine::Kagi);
         assert_eq!(back.download_dir, Some(PathBuf::from("/tmp/baaz-downloads")));
         // An old file with only a width still reads, taking the new defaults.
@@ -1035,24 +980,6 @@ mod tests {
         assert_eq!(slots.get(Mode::Browse), &browse_hidden);
     }
 
-    /// B2a-H6: tabs live down the sidebar unless horizontal is stored —
-    /// old files read vertical, and the slugs round-trip.
-    #[test]
-    fn browser_tabs_default_vertical_and_round_trip() {
-        assert_eq!(BrowserTabs::default(), BrowserTabs::Vertical);
-        assert_eq!(Layout::default().browser_tabs, BrowserTabs::Vertical);
-        assert_eq!(BrowserTabs::parse("horizontal"), Some(BrowserTabs::Horizontal));
-        assert_eq!(BrowserTabs::parse(" Vertical "), Some(BrowserTabs::Vertical));
-        assert_eq!(BrowserTabs::parse("diagonal"), None);
-        assert_eq!(BrowserTabs::Horizontal.slug(), "horizontal");
-        assert_eq!(BrowserTabs::Vertical.label(), "Vertical");
-        assert_eq!(BrowserTabs::Horizontal.label(), "Horizontal");
-        assert_eq!(BrowserTabs::ALL, [BrowserTabs::Vertical, BrowserTabs::Horizontal]);
-        let old: Layout = serde_json::from_str("{}").unwrap();
-        assert_eq!(old.browser_tabs, BrowserTabs::Vertical, "old files read vertical");
-        let text = serde_json::to_string(&BrowserTabs::Horizontal).unwrap();
-        assert_eq!(text, "\"horizontal\"");
-    }
 
     /// B2a-H6: downloads land in `~/Downloads` until chosen, and the row
     /// shows `~/…` for home paths.

@@ -35,13 +35,12 @@ use aui::screens::sidebar::{
 };
 use aui_tokens::AgentState;
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled, Palette};
+use aui_tokens::{scale, ActiveAui, Palette};
 use gpui::{
     div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset, Pixels, Render,
     SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::input::TextareaState;
-use gpui_kit::base::h_flex;
 
 use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
 use crate::login::Auth;
@@ -65,6 +64,9 @@ use crate::tier::Tier;
 /// steers through `ListState` rather than prepaint intents — the reveal's
 /// own outside-the-draw pane-notify task in [`Harness::reveal_sidebar_row`])
 /// dirty it directly through the view tree.
+/// How long the sidebar's new rows take to arrive after a mode switch.
+pub(crate) const MODE_FADE: std::time::Duration = std::time::Duration::from_millis(80);
+
 pub(crate) struct SidebarPane {
     baaz: WeakEntity<Harness>,
 }
@@ -268,7 +270,6 @@ pub(crate) struct SidebarKey {
     mode: crate::layout::Mode,
     browse_tabs: Vec<(u64, bool, bool, bool)>,
     tabs_generation: u64,
-    tabs_layout: crate::layout::BrowserTabs,
     browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
     browse_groups: Vec<BrowseGroupPrint>,
     browse_expanded: Vec<String>,
@@ -309,9 +310,6 @@ pub(crate) struct BrowseTabSnap {
     pub(crate) active: bool,
     pub(crate) pinned: bool,
     pub(crate) loading: bool,
-    pub(crate) audible: bool,
-    pub(crate) crashed: bool,
-    pub(crate) discarded: bool,
     /// The favicon's local file, once fetched ([`crate::browser::favicons`]).
     pub(crate) favicon: Option<String>,
 }
@@ -410,24 +408,6 @@ impl SidebarKey {
     }
 }
 
-pub(crate) struct BrowseTabGhost(pub(crate) String);
-
-impl Render for BrowseTabGhost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = cx.aui().colors;
-        h_flex()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(scale::R_SM))
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
-            .text_color(p.ink)
-            .ui(scale::FS_12)
-            .child(self.0.clone())
-    }
-}
-
 impl SidebarKey {
     /// The key the pane would render this frame.
     pub(crate) fn current(baaz: &Harness, cx: &gpui::App) -> Self {
@@ -484,7 +464,6 @@ impl SidebarKey {
             mode: baaz.mode,
             browse_tabs,
             tabs_generation,
-            tabs_layout: baaz.layout.browser_tabs,
             browse_flags,
             browse_groups,
             browse_expanded,
@@ -664,13 +643,12 @@ impl Harness {
             .iter()
             .map(|tab| {
                 let page = self.browser.states.get(&tab.id);
-                let (loading, audible, crashed) = match page {
+                let loading = match page {
                     Some(state) => {
-                        let page = state.read(cx);
-                        let progress = page.progress();
-                        (progress > 0.0 && progress < 1.0, page.audible(), page.crashed().is_some())
+                        let progress = state.read(cx).progress();
+                        progress > 0.0 && progress < 1.0
                     }
-                    None => (false, false, false),
+                    None => false,
                 };
                 BrowseTabSnap {
                     id: tab.id,
@@ -679,11 +657,6 @@ impl Harness {
                     active: Some(tab.id) == active,
                     pinned: tab.pinned,
                     loading,
-                    audible,
-                    crashed,
-                    discarded: page.is_none()
-                        && tab.url != crate::browser::tabs::BLANK
-                        && !tab.url.is_empty(),
                     favicon: self.favicon_file(tab),
                 }
             })
@@ -761,7 +734,7 @@ impl Harness {
         // length — `reset` after a regroup, `splice` after a local insert.
         let grouping = self.sidebar_grouping(cx);
         let rows = flatten_sidebar(&grouping, false);
-        let model = self.sidebar_model(false, cx);
+        let model = self.sidebar_model(cx);
         // Browse draws no session list: leave its state (and its scroll
         // offset) exactly as Sessions left it, so switching back lands where
         // the person was. Sessions syncs it to the rows; while loading the
@@ -786,11 +759,9 @@ impl Harness {
             .width(px(self.resize.width))
             .rename_textarea(&self.rename)
             // v3: the sidebar has no ground of its own — on the frame in the
-            // column, on Floating in the peek card — and no title bar: the
-            // shell's chrome row carries the toggle and the switch in both
-            // states (it would only repeat them, and in the peek it did).
+            // column, on Floating in the peek card; the shell's bar carries
+            // the toggle and the switch.
             .transparent()
-            .title_bar(false)
             // Browse's right-click menus draw in the overlay window, over the
             // native page (`overlay.rs`).
             .external_menus(true)
@@ -801,8 +772,22 @@ impl Harness {
         // hangs off its right edge.
         let pane_report = cx.entity().downgrade();
         let wheel = cx.entity().downgrade();
+        // A mode switch: the new rows arrive on FF's swap timing (80 ms
+        // ease-out), the one motion the Sessions | Browse switch has beside
+        // its indicator's slide.
+        let fade = match self.mode_fade_since {
+            Some(since) => {
+                let k = (cx.background_executor().now().duration_since(since).as_secs_f32() / MODE_FADE.as_secs_f32()).clamp(0.0, 1.0);
+                if k < 1.0 {
+                    window.request_animation_frame();
+                }
+                aui_tokens::Easing::OUT.sample(k)
+            }
+            None => 1.0,
+        };
         div()
             .size_full()
+            .opacity(fade)
             // A real wheel over the sidebar is the person's scroll: it
             // disarms a pending reveal (theirs wins) and dismisses the group
             // menu and the hover card, like the scripted sweep does. The
@@ -825,10 +810,10 @@ impl Harness {
     /// The window's toggle for a collapsed Sessions sidebar: the library
     /// draws it in the sidebar's title bar while open; collapsed, the
     /// centre header carries it at the same x, past the traffic lights.
-    pub(crate) fn render_collapsed_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
-        // The v3 shell draws this in both states, so the label says what a
-        // click does now.
+        // The shell's bar draws this in both states, so the label says what
+        // a click does now.
         let label = if self.sidebar_open { "Hide sidebar" } else { "Show sidebar" };
         div()
             .id("hd-minimal-sidebar")
@@ -849,7 +834,7 @@ impl Harness {
     /// hover facts the intents below write, the view options from the
     /// filter flags, the account from the signed-in identity (its usage
     /// cards only while the menu is open), and Browse mode's rows.
-    pub(crate) fn sidebar_model(&self, collapsed: bool, cx: &mut Context<Self>) -> SidebarModel {
+    pub(crate) fn sidebar_model(&self, cx: &mut Context<Self>) -> SidebarModel {
         let view_menu_open = self.overlays.read(cx).is_open(MenuKind::ViewOptions);
         let account_menu_open = self.overlays.read(cx).is_open(MenuKind::Account);
         // One identity per chain: the selected row is the head (Y2a).
@@ -906,7 +891,6 @@ impl Harness {
             highlighted: None,
             editing,
             loading: !(self.sessions_loaded && self.index_loaded),
-            collapsed,
             view_menu_open,
             view_options: ViewOptions {
                 group_by,
@@ -1128,14 +1112,6 @@ impl Harness {
                     });
                 }
             },
-            SidebarIntent::SwitchMode(mode) => {
-                let mode = match mode {
-                    Mode::Sessions => crate::layout::Mode::Sessions,
-                    Mode::Browse => crate::layout::Mode::Browse,
-                };
-                self.set_mode(mode, window, cx);
-            }
-            SidebarIntent::Collapse => self.toggle_sidebar(cx),
             SidebarIntent::Select(id) => {
                 // A sidebar click never arms the reveal: the clicked row is
                 // under the cursor (owner round 6). It dismisses the hover
@@ -3381,7 +3357,7 @@ mod tests {
                 (filed, pinned, session)
             })
         });
-        let browse = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_model(false, cx).browse));
+        let browse = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_model(cx).browse));
         let browse = browse.expect("Browse mode carries a browse model");
         assert_eq!(browse.folders.len(), 1);
         assert_eq!(browse.folders[0].name.as_ref(), "Reading");

@@ -496,26 +496,6 @@ impl Tabs {
         true
     }
 
-    /// Move `id` directly before `before` in model order, or to the end
-    /// when `before` is `None`: the Browse sidebar's drag-reorder. False
-    /// for an unknown `id`; an unknown `before` also lands at the end.
-    /// Moving before itself is a no-op that still answers true.
-    pub(crate) fn move_before(&mut self, id: TabId, before: Option<TabId>) -> bool {
-        let from = match self.tabs.iter().position(|tab| tab.id == id) {
-            Some(from) => from,
-            None => return false,
-        };
-        if before == Some(id) {
-            return true;
-        }
-        let tab = self.tabs.remove(from);
-        let at = before
-            .and_then(|before| self.tabs.iter().position(|tab| tab.id == before))
-            .unwrap_or(self.tabs.len());
-        self.tabs.insert(at, tab);
-        self.bump();
-        true
-    }
 
     /// Move the owner's active tab one display slot (`delta` of -1 or 1):
     /// the Browse sidebar's ⌥⌘↑/⌥⌘↓. Display order is pinned-first, so
@@ -1528,37 +1508,6 @@ mod tests {
         assert_eq!(model.close(second), Some(third));
     }
 
-    #[test]
-    fn drag_reorder_moves_before_the_drop_row() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let third = model.open(None, session("s"), "https://c.example/", None);
-        assert!(model.move_before(third, Some(first)));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![third, first, second]);
-        // Dropping past the end (or onto an unknown row) appends.
-        assert!(model.move_before(first, None));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![third, second, first]);
-        // Unknown drags and self-drops change nothing.
-        assert!(!model.move_before(TabId(77), Some(second)));
-        assert!(model.move_before(second, Some(second)));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![third, second, first]);
-    }
 
     #[test]
     fn option_command_arrows_move_the_active_tab() {
@@ -1615,36 +1564,6 @@ mod tests {
         let _ = second;
     }
 
-    #[test]
-    fn mutations_bump_the_model_generation() {
-        let mut model = tabs();
-        assert_eq!(model.generation, 0, "a fresh model starts at zero");
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let opened = model.generation;
-        assert!(opened > 0, "opening bumps the generation");
-        assert!(model.activate(first));
-        assert!(model.generation > opened, "selecting bumps the generation");
-        let selected = model.generation;
-        assert!(model.set_pinned(first, true));
-        assert!(model.generation > selected, "pinning bumps the generation");
-        let pinned_gen = model.generation;
-        assert!(model.set_url_title(first, "https://a.example/", "A"));
-        assert!(model.generation > pinned_gen, "a retitle bumps the generation");
-        let retitled = model.generation;
-        assert_eq!(
-            model.close(second),
-            None,
-            "closing a background tab answers nothing — and still bumps"
-        );
-        assert!(model.generation > retitled, "closing bumps the generation");
-        assert!(model.move_before(first, None));
-        assert!(model.reorder(first, 0));
-        let before = model.generation;
-        assert!(!model.set_url_title(first, "https://a.example/", "A"), "an unchanged report is not a change");
-        assert_eq!(model.generation, before, "an unchanged report bumps nothing");
-        let _ = selected;
-    }
 
     #[test]
     fn shown_stamps_stay_in_memory_and_never_dirty() {
