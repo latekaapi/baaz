@@ -786,8 +786,11 @@ impl Harness {
             .width(px(self.resize.width))
             .rename_textarea(&self.rename)
             // v3: the sidebar has no ground of its own — on the frame in the
-            // column, on Floating in the peek card.
+            // column, on Floating in the peek card — and no title bar: the
+            // shell's chrome row carries the toggle and the switch in both
+            // states (it would only repeat them, and in the peek it did).
             .transparent()
+            .title_bar(false)
             // Browse's right-click menus draw in the overlay window, over the
             // native page (`overlay.rs`).
             .external_menus(true)
@@ -824,6 +827,9 @@ impl Harness {
     /// centre header carries it at the same x, past the traffic lights.
     pub(crate) fn render_collapsed_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
+        // The v3 shell draws this in both states, so the label says what a
+        // click does now.
+        let label = if self.sidebar_open { "Hide sidebar" } else { "Show sidebar" };
         div()
             .id("hd-minimal-sidebar")
             .debug_selector(|| "hd-minimal-sidebar".into())
@@ -832,7 +838,7 @@ impl Harness {
                 icon_button("sidebar-show", IconName::Sidebar)
                     .ghost()
                     .size(ButtonSize::Sm)
-                    .accessibility_label("Show sidebar")
+                    .accessibility_label(label)
                     .on_click(move |e, w, cx| show(e, w, cx)),
             )
             .into_any_element()

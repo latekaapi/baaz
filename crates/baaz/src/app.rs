@@ -1669,8 +1669,8 @@ impl Harness {
             this.layout.right_kind = remembered.right_kind;
             this.right_resize.width = layout::right_width(&this.layout);
         }
-        // B2a-H6: boot onto the mode's own sidebar — a Browse relaunch
-        // with a hidden sidebar stays hidden, Sessions is untouched.
+        // Boot onto the remembered sidebar (one state for both modes; the
+        // boot mode's slot is as good as the other's, see `persist_layout`).
         this.sidebar_open = this.layout.mode_memory.get(this.mode).sidebar_open;
         // The CEF claim check's live-mode flag starts where the window
         // starts; every switch after this rides `set_mode`.
@@ -2573,9 +2573,11 @@ impl Harness {
         let leaving = self.mode_state(cx);
         let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
-        // B2a-H6: each mode keeps its own sidebar — entering restores
-        // what it remembered, leaving already saved above.
-        self.sidebar_open = entering.sidebar_open;
+        // One sidebar for both modes (owner, 2026-10-12; reverses B2a-H6's
+        // per-mode memory): the switch lives in the chrome row, so a mode
+        // change must never open or close the column on its own — a closed
+        // sidebar stays closed across the switch, an open one stays open.
+        // `sidebar_open` is deliberately not read from `entering`.
         // A mode switch unparks any carried session tab, leaves the address
         // field (its dropdown belongs to Browse's centre) and resets the
         // page-holds edge, so Browse never reopens onto stale centre state.
@@ -2629,10 +2631,15 @@ impl Harness {
     /// stays a no-op under `BAAZ_DETERMINISTIC=1`.
     pub(crate) fn persist_layout(&mut self, cx: &gpui::App) {
         let live = self.mode_state(cx);
+        let sidebar_open = live.sidebar_open;
         match self.mode {
             layout::Mode::Sessions => self.layout.mode_memory.sessions = live,
             layout::Mode::Browse => self.layout.mode_memory.browse = live,
         }
+        // The sidebar is one state for both modes: both slots carry it, so
+        // a relaunch into either mode boots onto the same column.
+        self.layout.mode_memory.sessions.sidebar_open = sidebar_open;
+        self.layout.mode_memory.browse.sidebar_open = sidebar_open;
         layout::write(&self.layout);
     }
 
@@ -4899,12 +4906,14 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The closed state's two pills (v3, canvas "Baaz v3"): the left one
-    /// leads with Show sidebar and the mode switch (the shell reserves the
-    /// window's lights before them), then the session title — or, in Browse,
-    /// the page controls and the address; the right one holds the header's
-    /// actions — or Ask, the page menu and new tab.
-    fn render_v3_pills(&self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+    /// The v3 chrome row (canvas "Baaz v3", chrome revised 2026-10-12: the
+    /// lights, the toggle and the switch never move). In order: the lead
+    /// (the sidebar toggle, drawn by the shell past the window's lights), the
+    /// mode switch, the left tab's closed-only content — the session title,
+    /// or in Browse the page controls and the address at rest — and the
+    /// right tab's content: the header's actions, or Ask, the page menu and
+    /// new tab.
+    fn render_v3_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement, AnyElement, AnyElement) {
         let p = cx.aui().colors;
         let toggle = self.render_collapsed_toggle(cx);
         let switch_to = cx.entity().downgrade();
@@ -4922,29 +4931,25 @@ impl Harness {
         if self.mode == layout::Mode::Browse {
             let (left, right) = self.render_browse_pill_parts(window, cx);
             let sep = div().flex_none().w(px(1.0)).h(px(16.0)).mx(px(6.0)).bg(p.line);
-            (h_flex().items_center().child(toggle).child(switch).child(sep).child(left).into_any_element(), right)
+            (toggle, switch.into_any_element(), h_flex().items_center().child(sep).child(left).into_any_element(), right)
         } else {
             let title = self.session_header_label(cx).unwrap_or_default();
-            let left = h_flex().items_center().child(toggle).child(switch).when(!title.is_empty(), |d| {
-                d.child(
-                    div()
-                        .ml(px(8.0))
-                        .mr(px(10.0))
-                        .max_w(px(PILL_TITLE_MAX_W))
-                        .truncate()
-                        .ui(scale::FS_13)
-                        .semibold()
-                        .text_color(p.ink)
-                        .child(title),
-                )
-            });
-            (left.into_any_element(), self.session_header_actions(cx))
+            let closed_only = div()
+                .ml(px(2.0))
+                .max_w(px(PILL_TITLE_MAX_W))
+                .truncate()
+                .ui(scale::FS_13)
+                .semibold()
+                .text_color(p.ink)
+                .child(title)
+                .into_any_element();
+            (toggle, switch.into_any_element(), closed_only, self.session_header_actions(cx))
         }
     }
 
-    /// Hands the v3 shell's floating chrome (the pills, the peek card) to
-    /// the Browse page as holes, so they show over the native page and take
-    /// the clicks there; none outside Browse.
+    /// Hands the v3 shell's chrome over the sheet (the corner tabs, the peek
+    /// card) to the Browse page as holes, so they show over the native page
+    /// and take the clicks there; none outside Browse.
     pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
         let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
             rects
@@ -7375,7 +7380,7 @@ impl Render for Harness {
         let showing_login =
             !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
         let body: AnyElement = if self.show_connect {
-            aui::shell::place_native_lights(false, window, cx);
+            aui::shell::place_native_lights(window, cx);
             self.render_connect(window, cx).into_any_element()
         } else if !showing_login {
             // The column is its own cached view: clean,
@@ -7573,7 +7578,7 @@ impl Render for Harness {
             let shell = if settings_open {
                 // The lights belong in the title bar here, wherever the v3
                 // shell last put them; the page carries no holes.
-                aui::shell::place_native_lights(false, window, cx);
+                aui::shell::place_native_lights(window, cx);
                 self.set_browse_holes(Vec::new(), cx);
                 // Settings keeps its layout (v3: inherit the tokens, mock
                 // before any layout change): the section list in a full
@@ -7599,15 +7604,18 @@ impl Render for Harness {
                     .centre(centre)
                     .into_any_element()
             } else {
-                // v3 (canvas "Baaz v3", docs/31 §9): the sidebar on the frame,
-                // the work area a sheet 6 px in that never moves; closed, two
-                // floating pills carry the chrome and the peek brings the
-                // sidebar back on the left edge. Sessions animates on FF's
-                // springs (gpui only); Browse is instant — the native page
-                // cannot follow a per-frame resize without jank — and cuts
-                // holes for the pills and the peek so they show over the page.
+                // v3 (canvas "Baaz v3", docs/31 §9; chrome revised 2026-10-12):
+                // the sidebar on the frame, the work area a sheet 6 px in that
+                // never moves; the chrome row (lights, toggle, switch) is the
+                // shell's and stays put in both states; closed, its ends are
+                // two corner tabs (title | actions) and the peek brings the
+                // sidebar back from the toggle or the left edge. Sessions
+                // animates on FF's springs (gpui only); Browse is instant —
+                // the native page cannot follow a per-frame resize without
+                // jank — and cuts holes for the tabs and the peek so they show
+                // over the page.
                 let browse = self.mode == layout::Mode::Browse;
-                let (pill_left, pill_right) = self.render_v3_pills(window, cx);
+                let (lead, switch, closed_only, actions) = self.render_v3_chrome(window, cx);
                 let peek = self.sidebar_pane.clone().into_any_element();
                 let holes = cx.entity().downgrade();
                 app_shell("shell")
@@ -7625,7 +7633,10 @@ impl Render for Harness {
                     .header_right(header_right_el)
                     .sidebar(sidebar)
                     .peek(peek)
-                    .pills(pill_left, pill_right)
+                    .chrome_lead(lead)
+                    .chrome(switch)
+                    .chrome_closed(closed_only)
+                    .chrome_right(actions)
                     .peek_open(self.peek_pinned)
                     .on_overlay_bounds(move |rects, _, cx| {
                         let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
@@ -7696,7 +7707,7 @@ impl Render for Harness {
             }
             stack.into_any_element()
         } else {
-            aui::shell::place_native_lights(false, window, cx);
+            aui::shell::place_native_lights(window, cx);
             self.render_login(window, cx).into_any_element()
         };
         // In Browse the overlay window hosts the modals over the live page
@@ -9374,27 +9385,57 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6: the sidebar toggle is remembered per mode — hiding it in
-    /// Browse never touches Sessions' own sidebar, and coming back
-    /// restores what Browse had.
+    /// One sidebar for both modes (owner, 2026-10-12; reverses B2a-H6): a
+    /// mode switch never opens or closes the column — the four combinations
+    /// the owner listed, in both directions, with the state persisted into
+    /// both slots so a relaunch into either mode agrees.
     #[gpui::test]
-    fn sidebar_hidden_is_remembered_per_mode(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("sidebar-per-mode");
+    fn sidebar_state_is_shared_across_modes(cx: &mut gpui::TestAppContext) {
+        use crate::layout::Mode;
+        let state = hermetic_state("sidebar-shared");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).sidebar_open), "the sidebar starts open");
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).sidebar_open), "Browse hides its own sidebar");
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Sessions, window, cx))
+        macro_rules! open {
+            () => {
+                vc.update(|_, cx| baaz.read(cx).sidebar_open)
+            };
+        }
+        macro_rules! set {
+            ($mode:expr) => {
+                vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode($mode, window, cx)))
+            };
+        }
+        macro_rules! toggle {
+            () => {
+                vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)))
+            };
+        }
+        assert!(open!(), "the sidebar starts open");
+        // Sessions open → Browse: still open.
+        set!(Mode::Browse);
+        assert!(open!(), "switching to Browse keeps an open sidebar open");
+        // Browse: close, then back to Sessions: still closed.
+        toggle!();
+        assert!(!open!(), "⌘B closes it in Browse");
+        set!(Mode::Sessions);
+        assert!(!open!(), "switching to Sessions keeps a closed sidebar closed");
+        // Sessions closed → Browse: still closed; open there; back: open.
+        set!(Mode::Browse);
+        assert!(!open!(), "switching back to Browse keeps it closed");
+        toggle!();
+        assert!(open!(), "⌘B opens it in Browse");
+        set!(Mode::Sessions);
+        assert!(open!(), "switching to Sessions keeps an open sidebar open");
+        // Both slots agree with the live state after a toggle.
+        toggle!();
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(!h.layout.mode_memory.sessions.sidebar_open);
+            assert!(!h.layout.mode_memory.browse.sidebar_open);
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).sidebar_open), "Sessions kept its own open sidebar");
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).sidebar_open), "Browse restores its hidden sidebar");
         restore_state(state);
     }
 
@@ -9436,9 +9477,10 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6: sidebar-hidden in Browse draws the one-row chrome — the
-    /// Show-sidebar toggle, the wide field and `+` — and reopening the
-    /// sidebar takes it back down.
+    /// B2a-H6 (v3 chrome, 2026-10-12): the sidebar toggle is the shell's
+    /// chrome row and renders in both states; sidebar-hidden in Browse adds
+    /// the one-row chrome — the wide field, ⋯ and `+` — to the corner tabs,
+    /// and reopening the sidebar takes that back down.
     #[gpui::test]
     fn browse_minimal_chrome_renders_when_sidebar_hidden(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-minimal-chrome");
@@ -9458,17 +9500,19 @@ mod tests {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
         });
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_none(), "sidebar-open Browse keeps the full toolbar");
+        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle is chrome in both states");
+        assert!(vc.debug_bounds("hd-minimal-address").is_none(), "sidebar-open Browse keeps the full toolbar");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the Show-sidebar toggle renders");
+        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle still renders");
         assert!(vc.debug_bounds("hd-minimal-address").is_some(), "the wide field renders");
         assert!(vc.debug_bounds("hd-minimal-site").is_some(), "the security glyph renders");
         assert!(vc.debug_bounds("hd-minimal-more").is_some(), "the ⋯ menu renders");
         assert!(vc.debug_bounds("hd-minimal-new-tab").is_some(), "the `+` renders");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_none(), "reopening the sidebar restores the toolbar");
+        assert!(vc.debug_bounds("hd-minimal-address").is_none(), "reopening the sidebar restores the toolbar");
+        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle stays");
         restore_state(state);
     }
 
