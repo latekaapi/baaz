@@ -111,3 +111,31 @@ Nobody has seen these in the real window:
 3. Rebuild the bundle-check app, render the states offscreen (`--steps` with `sidebar`, `peek`, `mode:browse`, …), and
    compare against the canvas boards side by side before changing anything.
 4. Fix in agentic-ui first (gallery card `screens/shell-v3`), then Baaz; gates per CLAUDE.md; commit per step; never push.
+
+## 7. Update 2026-10-12 (later session): the owner's first complaints, fixed
+
+Owner's complaints (with a Claude Desktop recording): BaazCheck "doesn't work properly at all" — the session/browse
+toggle and the sidebar toggle "mixed up"; the pill with the lights drops from its open-state position (jarring); the
+pill should be the sidebar's colour; hover on the toggle should bring the sidebar up (Claude Desktop); all four
+mode × sidebar combinations must work and be tested; and a researched plan for Claude-Desktop-like depth gradients.
+
+Done (agentic-ui design-v2 `437da5c` + `5493bf1`, harness feedback-mode `332436b` + this doc):
+- **The chrome row never moves.** The shell draws lights (12,16), the host's toggle (x 84) and the mode switch
+  (x 118) at the window's corner in both states; the sidebar screen has `title_bar(false)`. Closed, the row's ends
+  are two **corner tabs on the frame colour** (one rounded corner r 8, the 6 % edge on the two sides that meet the
+  sheet), left with the title / Browse page controls (FF popup fade in once the column settles), right with the
+  actions at the exact spot the sheet row drew them. The pills, `PILL_*`, `PEEK_TOP` and the lights-in-pill move are
+  gone; `place_native_lights(window, cx)` has no side. This is a **canvas change** (SessionsClosed / BrowseClosed
+  boards show pills) — the owner asked for it; the boards are not yet updated.
+- **Peek from the toggle**: resting on the toggle arms the peek like the left strip; one arm/dismiss clock across
+  toggle, strip and card (`SheetsState::set_hover`, unit-tested). Opening out of a peek starts the column at rest.
+- **One sidebar for both modes** (reverses B2a-H6): `set_mode` no longer restores a per-mode `sidebar_open`;
+  `persist_layout` writes it into both slots. Offscreen captures proved the old fault: close in Sessions → switch to
+  Browse rendered Browse-open byte for byte. Test `sidebar_state_is_shared_across_modes` covers the four
+  combinations in both directions.
+- Gates: aui tests + clippy `-D warnings` green; Baaz tests (1390 + suites) + clippy green; offscreen renders of
+  the four states, the two cross-mode switches while closed, re-open, and the pinned peek (`--steps`), looked at.
+- **Depth gradients: docs/37** — measured off the recording, three proposals, three owner decisions. Not built.
+
+Not seen by anyone: the real lights in the corner tab (offscreen renders cannot show native lights), the hover
+peek with a real pointer, the tabs as holes over a live page. BaazCheck was rebuilt from this tree (see §1 for how).
