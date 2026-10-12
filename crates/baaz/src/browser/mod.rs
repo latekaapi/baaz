@@ -232,12 +232,19 @@ fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
 /// window's content box: the pane hangs off the content's right edge,
 /// under the header, `right_width` wide. Pure so tests can drive it.
 pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) -> Bounds<Pixels> {
+    // v3: the right pane is a second sheet — 6 px in from the window on
+    // top, right and bottom (its left gap is the column's own 6), its
+    // header row inside it.
+    let inset = gpui::px(PAGE_CARD_INSET);
     Bounds {
         origin: Point {
             x: content.origin.x + content.size.width - right_width,
-            y: content.origin.y + gpui::px(HEADER_PX),
+            y: content.origin.y + inset + gpui::px(HEADER_PX),
         },
-        size: gpui::size(right_width, content.size.height - gpui::px(HEADER_PX)),
+        size: gpui::size(
+            (right_width - inset).max(gpui::px(0.0)),
+            (content.size.height - inset * 2.0 - gpui::px(HEADER_PX)).max(gpui::px(0.0)),
+        ),
     }
 }
 
@@ -818,7 +825,8 @@ impl Harness {
         if !self.layout.terminal_open {
             return gpui::px(0.0);
         }
-        let centre_height = f32::from(window.bounds().size.height).max(0.0) - HEADER_PX;
+        // v3: the centre column is the sheet, 6 px in top and bottom.
+        let centre_height = f32::from(window.bounds().size.height).max(0.0) - 2.0 * PAGE_CARD_INSET;
         let want =
             self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
         gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
@@ -4192,6 +4200,9 @@ pub(crate) struct BrowserRegistry {
     /// The loading line's rect while a page loads (v3): cut through the
     /// page as a hole so the line shows on the sheet's top edge.
     pub progress_hole: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The page the v3 holes were last cut through, so they are taken back
+    /// when it stops being the centre.
+    pub holes_on: Option<gpui::WeakEntity<WebviewState>>,
     /// The session tab carried into Browse full-width (B2a-H4): the
     /// pane's "Browse" button parks the session's active tab here and the
     /// centre shows it — with the ↩ chip — instead of the project's
@@ -4260,6 +4271,7 @@ impl BrowserRegistry {
             middle_pressed: None,
             centre_page_rect: None,
             progress_hole: Default::default(),
+            holes_on: None,
             centre_override: None,
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
@@ -4650,8 +4662,8 @@ mod tests {
         };
         let pane = browser_page_bounds(content, gpui::px(400.0));
         assert_eq!(f32::from(pane.origin.x), 1040.0);
-        assert_eq!(f32::from(pane.origin.y), 44.0);
-        assert_eq!(f32::from(pane.size.width), 400.0);
+        assert_eq!(f32::from(pane.origin.y), 6.0 + 44.0, "v3: the second sheet, its header inside it");
+        assert_eq!(f32::from(pane.size.width), 394.0);
         let dock =
             terminal_dock_bounds(content, gpui::px(260.0), gpui::px(1040.0), gpui::px(260.0));
         assert_eq!(f32::from(dock.origin.y), 640.0);

@@ -798,6 +798,8 @@ pub struct Harness {
     /// the shell's `resizing` bypass. User toggles never set it, so they
     /// keep animating exactly as today.
     pub(crate) right_snap: bool,
+    /// The `peek` step's hold: the v3 peek open with no hover (captures).
+    pub(crate) peek_pinned: bool,
     /// Generation of the debounced right-pane `sessions.json` write (B7):
     /// every cheap right-state persist bumps it and arms a delayed
     /// off-thread write; only the latest generation writes, so quick
@@ -1524,6 +1526,7 @@ impl Harness {
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
+            peek_pinned: false,
             right_save_epoch: 0,
             right_save_pending: false,
             right_kind_migrate: std::collections::HashSet::new(),
@@ -3476,9 +3479,10 @@ impl Harness {
         cx.notify();
     }
 
-    /// The centre column's height: the window minus the 44 px header cell.
+    /// The centre column's height: v3's sheet, the window less its 6 px
+    /// inset top and bottom.
     fn centre_height(&self, window: &Window) -> f32 {
-        f32::from(window.bounds().size.height).max(0.0) - 44.0
+        f32::from(window.bounds().size.height).max(0.0) - 2.0 * aui::shell::SHEET_INSET
     }
 
     /// The dock's height now: the stored one, clamped into `[120px, 70% of
@@ -4951,8 +4955,19 @@ impl Harness {
         } else {
             Vec::new()
         };
-        if let Some(state) = self.browse_centre_state() {
+        // Holes belong to the page shown now: a page that stopped being the
+        // centre (another tab, Sessions, Settings) gets its own back whole.
+        let current = self.browse_centre_state();
+        if let Some(previous) = self.browser.holes_on.take() {
+            if current.as_ref().map(|c| c.entity_id()) != Some(previous.entity_id()) {
+                if let Some(previous) = previous.upgrade() {
+                    previous.update(cx, |state, _| state.set_holes(Vec::new()));
+                }
+            }
+        }
+        if let Some(state) = current {
             state.update(cx, |state, _| state.set_holes(holes));
+            self.browser.holes_on = Some(state.downgrade());
         }
     }
 
@@ -7360,6 +7375,7 @@ impl Render for Harness {
         let showing_login =
             !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
         let body: AnyElement = if self.show_connect {
+            aui::shell::place_native_lights(false, window, cx);
             self.render_connect(window, cx).into_any_element()
         } else if !showing_login {
             // The column is its own cached view: clean,
@@ -7555,6 +7571,10 @@ impl Render for Harness {
                     )
                 };
             let shell = if settings_open {
+                // The lights belong in the title bar here, wherever the v3
+                // shell last put them; the page carries no holes.
+                aui::shell::place_native_lights(false, window, cx);
+                self.set_browse_holes(Vec::new(), cx);
                 // Settings keeps its layout (v3: inherit the tokens, mock
                 // before any layout change): the section list in a full
                 // column, the settings header over the content.
@@ -7606,6 +7626,7 @@ impl Render for Harness {
                     .sidebar(sidebar)
                     .peek(peek)
                     .pills(pill_left, pill_right)
+                    .peek_open(self.peek_pinned)
                     .on_overlay_bounds(move |rects, _, cx| {
                         let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
                     })
@@ -7675,6 +7696,7 @@ impl Render for Harness {
             }
             stack.into_any_element()
         } else {
+            aui::shell::place_native_lights(false, window, cx);
             self.render_login(window, cx).into_any_element()
         };
         // In Browse the overlay window hosts the modals over the live page
