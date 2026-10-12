@@ -139,3 +139,22 @@ Done (agentic-ui design-v2 `437da5c` + `5493bf1`, harness feedback-mode `332436b
 
 Not seen by anyone: the real lights in the corner tab (offscreen renders cannot show native lights), the hover
 peek with a real pointer, the tabs as holes over a live page. BaazCheck was rebuilt from this tree (see §1 for how).
+
+### §7 addendum (same night, later): depth built, canvas v10, tracker, QA blocked
+
+- **Depth (docs/37) built** by my own decision as the owner delegated it: contact shadow `.16` over 20 px beside the
+  open sidebar, the peek's drop turned sideways, a 24 px fade under the chrome row and at the peek card's top
+  (aui `2de2fb3`, `448e0e2`). Measured on a capture: the frame goes 18 → 15 across the strip's last 16 px, the sheet's
+  ring at 262 untouched.
+- **Canvas v10** (gen_canvas.py, harness `54a4749`): the closed boards show the corner tabs, the open boards the contact
+  shadow and list fade, notes n4/n5/n6 rewritten. **Two Tracks tracker v5** published: the sidebar is marked finished,
+  D4 Transcript is "here now".
+- **Trap found:** a capture that closes the sidebar on the same tick as `fixture-session:` (which also enters Browse)
+  hangs forever in layout (sampled: taffy, no "capturing anyway"). `wait:800` before `sidebar` works, and
+  `mode:browse;sidebar` works. Not reproduced live. Left as is; use a wait.
+- **Visual QA blocked:** the Sonnet agent's `request_access` for BaazCheck was **denied** (user_denied) — no live look
+  happened. BaazCheck is left running from `target/bundle-check` with the replayed transcript and a scratch state dir.
+  Checked instead: offscreen renders of Sessions open/closed, Browse open/closed, the pinned peek, the four
+  cross-mode switches, the contact shadow and the tabs (crops in `.relay/owner-2026-10-12/` and the scratchpad).
+  Still unseen by anyone: real lights in the tab, hover peek with a real pointer, tabs as holes over a live page.
+- State: agentic-ui design-v2 `448e0e2`, harness feedback-mode this commit. Gates green both repos. Nothing pushed.
