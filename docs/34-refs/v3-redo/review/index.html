@@ -1,0 +1,131 @@
+<title>Baaz v3 Surfaces</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<style>
+/* layout: one reading column of decisions; each decision = question, visuals, my pick */
+:root{--bg:#171717;--fg:#F5F5F5;--muted:#A3A3A3;--card:#1E1E1E;--line:rgba(245,245,245,.12);--pick:#6B97FF;--sans:Inter,-apple-system,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;color-scheme:dark}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){--bg:#FAFAFA;--fg:#171717;--muted:#737373;--card:#FFFFFF;--line:rgba(23,23,23,.12);color-scheme:light}}
+:root[data-theme="light"]{--bg:#FAFAFA;--fg:#171717;--muted:#737373;--card:#FFFFFF;--line:rgba(23,23,23,.12);color-scheme:light}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:22px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1100px;margin:0 auto;padding-block:40px 80px;padding-inline:20px}
+h1{font-size:28px;line-height:34px;font-weight:600;margin:0 0 8px;text-wrap:balance}
+h2{font-size:16px;line-height:22px;font-weight:600;margin:48px 0 8px;padding-top:24px;border-top:1px solid var(--line)}
+h2 span{color:var(--muted);font-weight:400;margin-right:10px;font-variant-numeric:tabular-nums}
+p{margin:0 0 12px;max-width:72ch}
+.lede{color:var(--muted);max-width:80ch}
+ul{margin:0 0 12px;padding-left:20px;max-width:80ch} li{margin:4px 0}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:16px 0}
+.opt{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:0}
+.opt img{display:block;width:100%;height:auto;background:#000}
+.opt .cap{padding:10px 12px;font-size:13px;line-height:18px;color:var(--muted)}
+.opt .cap b{color:var(--fg);font-weight:600;display:block;margin-bottom:2px}
+.opt.pick{border-color:var(--pick)} .opt.pick .cap b::after{content:" · my pick";color:var(--pick);font-weight:500}
+.big{margin:16px 0} .big img{display:block;width:100%;height:auto;border-radius:10px;border:1px solid var(--line)}
+.big .cap{font-size:13px;color:var(--muted);margin-top:6px}
+.zoom .opt img{image-rendering:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;line-height:18px;margin:12px 0 20px}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-top:1px solid var(--line)} th{color:var(--muted);font-weight:500}
+td.k{white-space:nowrap;font-weight:600}
+code{font-family:var(--mono);font-size:12.5px;background:var(--card);padding:1px 5px;border-radius:4px}
+.pickline{margin:8px 0 0;padding:10px 14px;border-left:2px solid var(--pick);background:var(--card);border-radius:0 8px 8px 0;max-width:80ch}
+.pickline b{color:var(--pick)}
+.note{color:var(--muted);font-size:13px;line-height:19px;max-width:80ch}
+@media (max-width:640px){.wrap{padding-block:24px 48px} h1{font-size:24px;line-height:30px}}
+</style>
+<div class="wrap">
+<h1>Baaz v3 surfaces: the decisions, with the screens</h1>
+<p class="lede">Every screen below is composed from captures of the built app (test bundle, this evening). Only the thing being decided is redrawn. The previous v3 draft was invented from scratch; this one changes the real screen and nothing else. Reply with a decision per item, or "all as recommended".</p>
+
+<h2><span>D0</span>The frame: what is a card?</h2>
+<p>This is the decision the other nine hang off. The draft made the session itself a card. Claude Desktop, the reference you pointed at, does the opposite: the conversation lives on the base and only the things beside it are cards. The page in Browse must be a card either way (a foreign white rectangle needs a rounded inset).</p>
+<div class="opts">
+ <div class="opt"><img src="img/U1-SessionsOpen.png" alt="U1: the session as a card"><div class="cap"><b>U1 · everything is a card</b>Sidebar on the base, the session in an s2 card, composer lifted to s3 inside it. FF's inset sidebar, literally. Reads boxed: a frame around what you read, and the composer floats inside a float.</div></div>
+ <div class="opt pick"><img src="img/U2-SessionsOpen.png" alt="U2: the base is the room"><div class="cap"><b>U2 · the base is the room</b>Sidebar and transcript share the base, no line between them. Cards are the composer, the right pane, the page, the peek sidebar, menus, dialogs. The title row sits on the base and the transcript scrolls under it through a 48 px fade. This is Claude Desktop's model on FF's values.</div></div>
+</div>
+<p class="pickline"><b>Recommend U2.</b> The rule becomes one sentence: you read and write on the base; anything you look at or reach for is a card lifted one step. Sessions and Browse then share one look (compare the Browse boards under D2), and nothing floats inside a float.</p>
+
+<h2><span>D1</span>Edge strength on a card</h2>
+<p>FF's dark shadow-2 ring is 2 % white and reads as nothing on a 7-unit fill step. Claude Desktop draws a real 1 px line (measured #303030 on a #1D1D1D card). FF has two line tokens of its own: <code>border</code> (foreground 12 %) and <code>border/60</code> (7.2 %), which it uses for menu separators. Crops at 2×, composer corner and right-pane edge:</p>
+<div class="opts zoom">
+ <div class="opt"><img src="img/edge-ring.png" alt="FF ring only"><div class="cap"><b>A · FF exact</b>shadow-2 alone: the 2 % ring. The card is a tone, not an object.</div></div>
+ <div class="opt pick"><img src="img/edge-b60.png" alt="border/60"><div class="cap"><b>B · border/60 + shadow-2</b>FF's separator token on the card edge. Lands within a few units of Claude Desktop's line, and it is still an FF value.</div></div>
+ <div class="opt"><img src="img/edge-b100.png" alt="border 12%"><div class="cap"><b>C · border + shadow-2</b>The full 12 % line (what the build uses for every hairline today). Crisper, but every card starts to look like a form field.</div></div>
+</div>
+<p class="pickline"><b>Recommend B.</b> Fill step + border/60 + shadow-2 for every s2 card on the base. Popups and dialogs keep their own recipes (shadow-3, shadow-5), which already carry a black 12–16 % outer ring.</p>
+
+<h2><span>D2</span>Collapsed: where the window chrome lives</h2>
+<p>You asked for the header bar to go, with "only the traffic lights plus a few icons / the title in a fixed pill-like surface". I built the pill properly and then measured Claude Desktop collapsed: it has no pill. The lights, toggle, mode switch and title sit on the base with no fill and no line, and the content scrolls underneath. Top-left at 2×:</p>
+<div class="opts zoom">
+ <div class="opt"><img src="img/chrome-CD.png" alt="Claude Desktop collapsed"><div class="cap"><b>Reference · Claude Desktop collapsed</b>Lights, sidebar toggle, chat/code switch, back/forward, title. Nothing behind them.</div></div>
+ <div class="opt pick"><img src="img/chrome-N.png" alt="N: chrome on the base"><div class="cap"><b>N · chrome on the base</b>Same row as when open, minus the sidebar: lights, Show sidebar at x 85, the switch parked after it, title. Transcript scrolls under a 48 px fade.</div></div>
+ <div class="opt"><img src="img/chrome-P.png" alt="P: pills"><div class="cap"><b>P · pills, refined</b>32 px, s2 + border/60, lights inside, regular-weight title, actions in a second pill. Better than the draft, still two floating objects over text.</div></div>
+</div>
+<div class="opts">
+ <div class="opt pick"><img src="img/U2-SessionsClosed.png" alt="Sessions closed, N"><div class="cap"><b>Sessions closed · N</b></div></div>
+ <div class="opt"><img src="img/P-SessionsClosed.png" alt="Sessions closed, P"><div class="cap"><b>Sessions closed · P</b></div></div>
+</div>
+<p>Browse is where this is decided, because pills over the page would have to be overlay windows covering the site's own top-left. With N, the row simply stays on the base and the page card keeps its 8 px inset below it; the card does not change shape when the sidebar goes.</p>
+<div class="opts">
+ <div class="opt"><img src="img/U2-BrowseOpen.png" alt="Browse open"><div class="cap"><b>Browse open</b>As built, with the D1 edge on the page card.</div></div>
+ <div class="opt pick"><img src="img/U2-BrowseClosed.png" alt="Browse closed, N"><div class="cap"><b>Browse closed · N</b>One row: lights · Show sidebar · switch · back/forward/reload · title and host at rest · Ask · ⋯ · +. No tab strip (see D9). The page card below, 8 px inset.</div></div>
+</div>
+<p class="pickline"><b>Recommend N for both modes.</b> It is the reference's own answer, it needs no overlay windows, the lights never move, and Sessions and Browse collapse into the same row. P stays on file if you want the pill anyway.</p>
+
+<h2><span>D3</span>Traffic lights</h2>
+<p class="pickline"><b>Under N they never move.</b> Under P they would jump into the pill at the end of the close and back at the start of the open (per-frame stepping is untested). Moot if D2 = N.</p>
+
+<h2><span>D4</span>Right pane level</h2>
+<div class="big"><img src="img/U2-Pane.png" alt="Right pane as a sibling card with the model picker open"><div class="cap">Right pane as an s2 card (8 px inset, D1 edge), tabs inside its header. The model picker is open from the composer: a popup lifts two steps from its substrate, so from the s2 composer it lands at s4 with the shadow pinned at 3.</div></div>
+<p class="pickline"><b>Recommend the sibling card at s2.</b> Claude Desktop's panel is darker and cooler than its base; FF's ladder only lifts, and a darker panel beside a lifted composer would put two depth systems on one screen.</p>
+
+<h2><span>D5</span>Lines</h2>
+<p>Rule: no line ever separates two surfaces; a line may run inside one surface. That removes the session header hairline (the fade replaces it) and the composer's top rule (it is a card now). Two remain in question:</p>
+<div class="opts">
+ <div class="opt"><img src="img/U2-SessionsOpen-hairline.png" alt="with the sidebar hairline"><div class="cap"><b>Sidebar hairline kept</b>FF's <code>variant="sidebar"</code> and Claude Desktop both keep a faint inner-edge line.</div></div>
+ <div class="opt pick"><img src="img/U2-SessionsOpen.png" alt="no sidebar hairline"><div class="cap"><b>No sidebar hairline</b>Sidebar and transcript are one surface; the transcript column starts 150 px further in anyway. In Browse the card edge is the divider, so this makes the two modes identical.</div></div>
+</div>
+<p class="pickline"><b>Recommend no sidebar hairline; keep the footer rule</b> (it is inside the sidebar, FF's own separator). Same for separators inside menus and the diff.</p>
+
+<h2><span>D6</span>Row contents when collapsed</h2>
+<ul>
+<li><b>Sessions:</b> title only, semibold, as today. The project · branch crumb returns only when two projects are open at once (as the build already does); otherwise it is noise next to the title.</li>
+<li><b>Browse:</b> back · forward · reload · the address at rest (shield, title semibold, host muted) · Ask · ⋯ · +. ⌘L still opens the Field over the address.</li>
+<li><b>Mode switch:</b> stays in the row when collapsed, parked after the toggle (Claude Desktop keeps its chat/code switch there too). ⌥⌘B works either way.</li>
+</ul>
+<p class="pickline"><b>Recommend as listed.</b></p>
+
+<h2><span>D7</span>Collapsed card inset</h2>
+<p class="pickline"><b>8 px all round, unchanged from open.</b> The Browse card never changes shape; only the sidebar column leaves. Full bleed would make the collapse a second layout rather than the same layout minus one column.</p>
+
+<h2><span>D8</span>Composer</h2>
+<p class="pickline"><b>One card, chips inside, as built.</b> s2 + the D1 edge, radius 10, 824 wide, 12 px above the window edge, no top rule. Claude Desktop splits input from an options row because its options are a separate control row; ours are chips that belong to the message. Inside a narrower centre (right pane open) it shrinks to the column minus 48.</p>
+
+<h2><span>D9</span>Carried over from docs/33</h2>
+<ul>
+<li>(a) Switch parked after the toggle when closed: <b>yes</b> (D6).</li>
+<li>(b) Browse closed tab strip: <b>no strip</b>. Closed means the page; tabs are one hover away in the peek, plus ⌘1–9 and the Field.</li>
+</ul>
+
+<h2><span>D10</span>Scope before build, and the rest of the ladder</h2>
+<div class="opts">
+ <div class="opt"><img src="img/U2-Depth.png" alt="Dialog, select, tooltip, toast"><div class="cap"><b>Depth on a real screen</b>Dialog at s5 + shadow-5 over a 40 % scrim; its select opens at s7; tooltip inverted, no shadow; toast = popup rules (s3, shadow-3) bottom right. Buttons: hint left, secondary, primary right.</div></div>
+ <div class="opt"><img src="img/U2-Peek.png" alt="Peek sidebar"><div class="cap"><b>Peek</b>The sidebar as a card: s2, D1 edge, shadow-5, radius 10, under the chrome row (so the lights stay where they are), 8 px from the left and bottom. Slides in on spring.moderate, out on its exit tween.</div></div>
+</div>
+<p>The ladder as Baaz will use it. Dark values are FF's; light flattens to white from s3 and the shadow recipe alone separates (not shown: the app is dark-only today, the light column is written down so the build does not guess).</p>
+<table>
+<tr><th>Thing</th><th>Surface</th><th>Edge / shadow</th><th>Radius</th></tr>
+<tr><td class="k">Base, sidebar, transcript, chrome row</td><td>s1 #171717 / #FAFAFA</td><td>none</td><td>—</td></tr>
+<tr><td class="k">Card on the base: composer, right pane, page, peek, code block, table</td><td>s2 #1E1E1E / #FCFCFC</td><td>border/60 + shadow-2 (peek: shadow-5)</td><td>10</td></tr>
+<tr><td class="k">User turn, chips, selected row</td><td>s3 / white 10 % overlay</td><td>none</td><td>10 / 6</td></tr>
+<tr><td class="k">Popup (menu, picker, toast)</td><td>substrate + 2 (s3 on base, s4 from a card)</td><td>shadow-3, pinned</td><td>10, rows 6, inset 4</td></tr>
+<tr><td class="k">Dialog</td><td>s5, 40 % scrim</td><td>shadow-5</td><td>10</td></tr>
+<tr><td class="k">Select inside a dialog</td><td>s7</td><td>shadow-3</td><td>10</td></tr>
+<tr><td class="k">Tooltip</td><td>inverted (foreground fill)</td><td>none</td><td>6</td></tr>
+<tr><td class="k">Hover / pressed / selected</td><td>white 6 % / 10 % / 10 % overlay, surface-relative</td><td>—</td><td>of the row</td></tr>
+<tr><td class="k">Nested radius</td><td colspan="3">inner = outer − inset when an inner surface hugs the outer corner (card 10, inset 4 → 6); free-standing controls 6; nothing ever larger than its container's radius</td></tr>
+</table>
+<p>What I propose to design before any code, on the canvas, same method: <b>Settings</b> (page on the base, sections as cards or not: D0 decides), <b>⌘K</b> (a dialog at s5 with a list; the Field already follows the popup rule), <b>approval card</b> (an s2 card in the transcript, status colour as a 1 px line only). What waits for its own lane: terminal, new tab (already designed, its ground is its own thing), toasts beyond the one above.</p>
+<p class="pickline"><b>Recommend:</b> approve D0–D9 now, then I revise the canvas v3 row to these boards plus Settings, ⌘K and the approval card, then build (agentic-ui gallery first, then Baaz, folding in docs/33's collapse and mode-switch motion).</p>
+
+<h2><span>Notes</span>How to read these</h2>
+<p class="note">Captures: test bundle at 1440×900, Sessions with a replayed transcript fixture, Browse on fluidfunctionalism.com/docs/surfaces. The sidebar, transcript, composer chips, page and files pane are pixels from those captures; the chrome row, cards, fade, menus, dialog, tooltip, toast and peek are drawn. Claude Desktop measured from your recording: base #141414, composer card #1D1D1D with a #303030 line, side panel #131215 with #242424, title row with no bar, content scrolling under it. Fonts in the drawn parts are Inter via Chrome, so hinting differs slightly from gpui's.</p>
+</div>
