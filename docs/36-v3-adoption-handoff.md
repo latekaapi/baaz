@@ -158,3 +158,46 @@ peek with a real pointer, the tabs as holes over a live page. BaazCheck was rebu
   cross-mode switches, the contact shadow and the tabs (crops in `.relay/owner-2026-10-12/` and the scratchpad).
   Still unseen by anyone: real lights in the tab, hover peek with a real pointer, tabs as holes over a live page.
 - State: agentic-ui design-v2 `448e0e2`, harness feedback-mode this commit. Gates green both repos. Nothing pushed.
+
+## 8. Owner round 2 (2026-10-13, 2 AM): the bar — redone, not patched
+
+Owner's notes with two side-by-side recordings (Claude Desktop vs BaazCheck): the collapse is janky, not Emil-smooth;
+the peek never showed from the toggle; the peek must draw behind the lights like a real sidebar; "this header sticking
+out of the bar is not looking good — make it a proper horizontal bar"; clean up the legacy code; why is the switch
+beside the toggle and not at the sidebar's right edge; and the mode switch has no motion.
+
+**What the recordings showed (120 fps, tiled every 2nd frame):** Baaz's close and open completed in 3–4 frames
+(~50–70 ms) with big jumps — not a bad curve but **frame starvation**: every frame re-laid out the whole transcript
+at a new width. Claude Desktop slides over ~15 frames (~250 ms). The lead's hover never armed the peek because the
+toggle's own hover state swallowed the wrapper's report.
+
+**Built (aui design-v2, harness feedback-mode, both unpushed):**
+- `AppShell` rewritten (`crates/aui/src/shell/app_shell.rs`, ~700 lines, one layout): a **44 px bar** on the frame
+  across the window; the sidebar column and the sheet (6 px in, from y 50) under it. Slots: `chrome_lead` (toggle, x 84),
+  `chrome_switch` (at the sidebar's resting right edge, 12 in), `chrome_title` (x = sidebar width + 22, both states),
+  `chrome_closed` (closed-only content in the title slot, 80/60 ms fade), `chrome_right` (16 from the right). The old
+  shell (rail, `edge_control`, `centre_clear`, `full_height_sidebar`, `inset`, `header_sidebar`, `header_centre`,
+  `sheets`, pills, corner tabs) is gone; `SidebarHeader` is gone; the sidebar screen has no title bar, no collapsed
+  strip, no `collapsed` model flag, no `Collapse`/`SwitchMode` intents.
+- **Motion**: column on an ease-out tween `cubic-bezier(.22,1,.36,1)`, 260 ms open / 220 ms close (Emil: ease-out for
+  what the person asked for, no bounce on a panel that must land exactly — a deliberate deviation from FF `spring.slow`
+  bounce .12). **The sheet's content is laid out once at the resting width of the target state and slides with the
+  sheet's edge** (`content_w` in the shell), so no frame re-measures the transcript. The right sheet keeps its moderate
+  spring with the same trick.
+- **Peek**: card from y 6 to the bottom, behind the bar's controls and the window's lights, rows start under the bar
+  (24 px fade), side drop; arms from the toggle by **geometry** (pointer vs the lead's last rect, frames requested while
+  on it) and from the left strip; one arm/dismiss clock across toggle, strip and card.
+- **Mode switch**: at the sidebar's right edge; the indicator slides on `moderate`; the sidebar's new rows fade in over
+  80 ms (`Harness::mode_fade_since`, `MODE_FADE`), replacing the old translate spring.
+- **Baaz**: `render_bar_chrome` → `BarChrome {lead, switch, title, closed_only, right}`; Settings on the same shell
+  (`render_settings_chrome`: breadcrumb in the title slot, close at the right, no switch); `render_centre_header` →
+  `render_session_title`; `render_browse_toolbar`, the horizontal tab strip (`render_browse_tab_strip`, chips, tiles,
+  `BrowseTabDrag`, `BrowseTabGhost`, `reorder_browse_tab`, `Tabs::move_before`, `open_tab_menu`), the
+  `BrowserTabs` setting (enum, layout field, Settings group, `settings-set:browser-tabs`, probe entry
+  `browse-horizontal`) are deleted. The downloads button moved to the bar's right in Browse. `TRANSCRIPT_PAD_TOP` 80 → 32.
+- Gallery: `shell/app-shell`, `shell/app-shell-native`, `screens/sidebar-collapsed` cards deleted; `screens/shell-v3`,
+  the assistant screen, the browse screen and `examples/minimal.rs` ported. aui integration tests for the rail deleted.
+- Canvas v11: the four screens drawn around the bar; notes n4/n5 rewritten.
+
+**Still to do when you read this:** gates (see the commit), the 18-entry probe, a bundle rebuild, frame pacing measured
+in the bundle (`BAAZ_FRAME_TRACE=1`, window frontmost), and the agent's live look (computer use was denied last time).
