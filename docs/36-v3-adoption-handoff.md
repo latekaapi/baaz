@@ -199,5 +199,8 @@ toggle's own hover state swallowed the wrapper's report.
   the assistant screen, the browse screen and `examples/minimal.rs` ported. aui integration tests for the rail deleted.
 - Canvas v11: the four screens drawn around the bar; notes n4/n5 rewritten.
 
-**Still to do when you read this:** gates (see the commit), the 18-entry probe, a bundle rebuild, frame pacing measured
-in the bundle (`BAAZ_FRAME_TRACE=1`, window frontmost), and the agent's live look (computer use was denied last time).
+**Measured (release bundle, frontmost, `BAAZ_FRAME_TRACE=1`, replayed transcript):** close = 36 frames over 282 ms,
+mean gap 8.1 ms, longest 9.1 ms, longest draw 2.4 ms; open = 34 frames over 265 ms, mean 8.0 ms, longest 9.0 ms,
+draw 2.2 ms. The previous build drew 3–4 frames per transition. Gates: tests + clippy green in both repos (aui
+`9212e91`, harness `a18a5d8`); the 18-entry probe runs and flags all 18 (old baselines); bundle rebuilt and signed.
+Note: the trace's `sidebar_w` column is the resting width, not the animated column — group by time gaps instead.
