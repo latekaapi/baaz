@@ -184,8 +184,6 @@ ENTRIES = {
     # person tabs (`settings-set:` lands instantly, like the Settings
     # segmented control). Offline, fake backend, no baselines — capture
     # and look.
-    "browse-horizontal":    {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "settings-set:browser-tabs=horizontal;mode:browse;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-new:https://example.com"]},
     # B2a-H7: a link from another app, driven through the scripted twin of
     # the open-URL event (`open-url:` runs the same path `on_open_urls`
     # drains into): a person tab on wikipedia in Browse. Offline, fake

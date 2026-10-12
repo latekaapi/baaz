@@ -54,7 +54,7 @@ use gpui_kit::component::switch::Switch;
 
 use crate::app::Harness;
 use crate::browser::toolbar::SearchEngine;
-use crate::layout::{browser_download_dir, tilde_path, BrowserTabs, Layout};
+use crate::layout::{browser_download_dir, tilde_path, Layout};
 use crate::providers::ProviderId;
 
 /// Flip one Sidebar switch in `layout` by row id. `false` is an unknown id,
@@ -191,7 +191,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
         "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
         | "feedback_mode" => Some("general"),
         "group_chevron" | "compact_rows" | "group_branch" => Some("sidebar"),
-        "browser-tabs" | "search-engine" | "download-dir" => Some("browser"),
+        "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
         _ if id.starts_with("shortcut:") || parse_shortcut_row_id(id).is_some() => Some("shortcuts"),
@@ -613,16 +613,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Set where Browse shows the person's tabs, instantly: the sidebar
-    /// list or the strip above the page. The Settings → Browser page's
-    /// segmented control and the `settings-set:browser-tabs=` verb share
-    /// this one path.
-    pub(crate) fn set_browser_tabs(&mut self, tabs: BrowserTabs, cx: &mut Context<Self>) {
-        self.layout.browser_tabs = tabs;
-        self.persist_layout(cx);
-        cx.notify();
-    }
-
     /// Set the engine an address commit searches with. The Settings →
     /// Browser page's rows own it; the toolbar reads it on every commit.
     pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
@@ -703,10 +693,6 @@ impl Harness {
         let (key, value) =
             rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
         match key {
-            "browser-tabs" => match BrowserTabs::parse(value) {
-                Some(tabs) => self.set_browser_tabs(tabs, cx),
-                None => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
-            },
             "search-engine" => match SearchEngine::parse(value) {
                 Some(engine) => self.set_search_engine(engine, cx),
                 None => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
@@ -872,10 +858,10 @@ impl Harness {
         list.into_any_element()
     }
 
-    /// The centre header cell while the page is open: the breadcrumb
-    /// (`Settings / Providers / Codex`) as a navigation landmark, a
-    /// spacer, and one ghost close button labelled "Close settings".
-    pub(crate) fn render_settings_centre_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The bar while Settings is open: the breadcrumb (`Settings / Providers /
+    /// Codex`) as a navigation landmark in the title slot, one ghost close
+    /// button labelled "Close settings" at the right; no mode switch.
+    pub(crate) fn render_settings_chrome(&self, cx: &mut Context<Self>) -> crate::app::BarChrome {
         let p = cx.aui().colors;
         let crumbs = settings_breadcrumb(&self.settings_page.section);
         let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
@@ -896,21 +882,18 @@ impl Harness {
                     .child(crumb.clone()),
             );
         }
-        h_flex()
-            .w_full()
-            .flex_1()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .child(trail)
-            .child(div().flex_1())
-            .child(
-                icon_button("settings-close", IconName::X)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label("Close settings")
-                    .on_click(move |_, window, cx| close(&(), window, cx)),
-            )
-            .into_any_element()
+        crate::app::BarChrome {
+            lead: self.render_sidebar_toggle(cx),
+            switch: None,
+            title: Some(trail.into_any_element()),
+            closed_only: None,
+            right: icon_button("settings-close", IconName::X)
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Close settings")
+                .on_click(move |_, window, cx| close(&(), window, cx))
+                .into_any_element(),
+        }
     }
 
     /// The settings surface: centre+right merged into one column, max 680
@@ -1116,81 +1099,6 @@ impl Harness {
             .into_any_element()
     }
 
-    /// One half of the Tabs layout segmented control: its name in content
-    /// ink (muted off), on the raised surface while selected — the mode
-    /// switch's segments, without the counts.
-    fn browser_tabs_segment(&self, tabs: BrowserTabs, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let selected = self.layout.browser_tabs == tabs;
-        let mut segment = h_flex()
-            .id(SharedString::from(format!("settings-browser-tabs-{}", tabs.slug())))
-            .flex_1()
-            .h(px(26.0))
-            .items_center()
-            .justify_center()
-            .rounded(px(scale::R_SM))
-            .cursor_pointer()
-            .role(gpui::Role::Tab)
-            .aria_label(format!("Tabs layout, {}", tabs.label()))
-            .aria_selected(selected)
-            .child(
-                div()
-                    .ui(scale::FS_12)
-                    .text_color(if selected { p.ink } else { p.ink_3 })
-                    .child(tabs.label().to_string()),
-            );
-        if selected {
-            segment = segment.bg(p.surface_1);
-        }
-        let set = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.set_browser_tabs(tabs, cx);
-        });
-        // Named again beside the click, so the a11y ratchet's window
-        // sees the click is named.
-        segment.aria_label(format!("Tabs layout, {}", tabs.label())).on_click(set).into_any_element()
-    }
-
-    /// The Tabs group: the Vertical / Horizontal segmented control. The
-    /// change is instant — the strip (or the sidebar list) redraws on the
-    /// next frame.
-    fn settings_browser_tabs_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let mut control = h_flex()
-            .id("settings-browser-tabs")
-            .debug_selector(|| "settings-browser-tabs".into())
-            .flex_none()
-            .items_center()
-            .p(px(2.0))
-            .gap(px(2.0))
-            .rounded(px(scale::R_MD))
-            .bg(p.surface_2)
-            .border_1()
-            .border_color(p.line)
-            .role(gpui::Role::TabList)
-            .aria_label("Tabs layout");
-        for tabs in BrowserTabs::ALL {
-            control = control.child(self.browser_tabs_segment(tabs, cx));
-        }
-        let row = h_flex()
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Tabs layout".to_string()))
-                    .child(
-                        div()
-                            .text_color(p.ink_3)
-                            .ui(scale::FS_12)
-                            .child("Vertical lists tabs down the sidebar; horizontal strips them above the page."),
-                    ),
-            )
-            .child(control);
-        self.settings_group("Tabs", vec![row.into_any_element()], cx)
-    }
 
     /// One Default-search-engine row: the radio dot (accent while
     /// checked) and the engine's name. Every row carries a role and a
@@ -1375,7 +1283,6 @@ impl Harness {
         let mut page = v_flex()
             .w_full()
             .gap(px(scale::SP_4))
-            .child(self.settings_browser_tabs_group(cx))
             .child(self.settings_browser_search_group(cx))
             .child(self.settings_browser_downloads_group(cx));
         if cfg!(feature = "cef") {
@@ -2142,13 +2049,12 @@ mod tests {
         assert_eq!(ids, ["general", "sidebar", "browser", "providers", "shortcuts", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
-        assert_eq!(normalize_settings_target("browser-tabs", ""), "browser");
+        assert_eq!(normalize_settings_target("search-engine", ""), "browser");
         assert_eq!(
             settings_breadcrumb("browser"),
             vec!["Settings".to_owned(), "Browser".to_owned()]
         );
         assert_eq!(settings_blurb("browser"), "How Baaz browses: tabs, search, downloads.");
-        assert_eq!(setting_home("browser-tabs"), Some("browser"));
         assert_eq!(setting_home("search-engine"), Some("browser"));
         assert_eq!(setting_home("download-dir"), Some("browser"));
     }

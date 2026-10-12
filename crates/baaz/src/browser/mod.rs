@@ -153,27 +153,25 @@ const HEADER_PX: f32 = 44.0;
 /// draws at a 38 px minimum above the native page.
 const BROWSER_NAV_PX: f32 = 38.0;
 
-/// The horizontal tab strip's height in pixels (B2a-H6): the row above
-/// the page when [`crate::layout::BrowserTabs::Horizontal`] is set. The
-/// native page rect and the gpui strip share this one const, so the page
-/// hangs exactly under the row with no gap.
-pub(crate) const BROWSE_TAB_STRIP_PX: f32 = 34.0;
 
 /// The Browse page card's inset — v3's sheet inset: 6 px from the window,
 /// the sidebar column and the right sheet (canvas "Baaz v3").
 pub(crate) const PAGE_CARD_INSET: f32 = aui::shell::SHEET_INSET;
+/// The shell's bar above the sheet (the standard density's header height).
+pub(crate) const BAR_H: f32 = aui_tokens::scale::BAR_DEFAULT;
 
 /// v3: the page's rect on the sheet for the window's `content` box, a
 /// `sidebar` column (0 when closed), a `right` column including its own 6 px
 /// gap (0 when closed) and the open dock under the page. Pure, for tests.
 pub(crate) fn sheet_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: Pixels, dock: Pixels) -> Bounds<Pixels> {
     let inset = gpui::px(PAGE_CARD_INSET);
+    let bar = gpui::px(BAR_H);
     let right_gap = if right > gpui::px(0.0) { right } else { inset };
     Bounds {
-        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + inset },
+        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + bar + inset },
         size: gpui::size(
             (content.size.width - sidebar - inset - right_gap).max(gpui::px(0.0)),
-            (content.size.height - inset * 2.0 - dock).max(gpui::px(0.0)),
+            (content.size.height - bar - inset * 2.0 - dock).max(gpui::px(0.0)),
         ),
     }
 }
@@ -192,30 +190,9 @@ pub(crate) fn page_card_rect(page: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
-/// A person tab mid-drag between tab rows: the sidebar's rows and the
-/// horizontal strip's chips share this one payload, so a drag reorders
-/// from either side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BrowseTabDrag(pub TabId);
-
-/// How far the native page hangs below the centre column's top: the
-/// strip's height when horizontal, zero when the tabs live down the
-/// sidebar. Pure, so tests pin the rect without a window.
-pub(crate) fn browse_strip_offset(strip: bool) -> Pixels {
-    if strip {
-        gpui::px(BROWSE_TAB_STRIP_PX)
-    } else {
-        gpui::px(0.0)
-    }
-}
-
 /// The toolbar-anchored omnibox list's top offset within the Browse
-/// centre: under the toolbar's address field in vertical mode, under the
-/// tab strip in horizontal mode — never over the strip. Pure, so tests
-/// pin the anchor without a window.
-pub(crate) fn omnibox_dropdown_top(strip: bool) -> Pixels {
-    gpui::px(6.0) + browse_strip_offset(strip)
-}
+/// centre: under the address field's row.
+pub(crate) const OMNIBOX_DROPDOWN_TOP: f32 = 6.0;
 
 /// The window's content box in window coordinates. `Window::content_mask`
 /// is only valid while painting (a debug assertion aborts a debug build when
@@ -533,17 +510,6 @@ impl Harness {
         }
     }
 
-    /// Whether Browse hangs the horizontal tab strip over the page: only with
-    /// the sidebar hidden (the setting's one remaining place). With the
-    /// sidebar open its rows ARE the tabs and the page spans the full
-    /// height (docs/27 v2 cut horizontal tabs; owner note 2026-10-11).
-    pub(crate) fn browse_strip_shown(&self) -> bool {
-        // v3 (canvas "Baaz v3"): no tab strip when closed — tabs are one
-        // hover away in the peek. The setting stays stored, unused.
-        let _ = self.layout.browser_tabs;
-        false
-    }
-
     /// The browser space Browse shows: person tabs are keyed by it, never by
     /// the project (docs/27 §4.2). Before the tab file loads (or in a test
     /// that skips the migration) it reads as Personal.
@@ -825,8 +791,9 @@ impl Harness {
         if !self.layout.terminal_open {
             return gpui::px(0.0);
         }
-        // v3: the centre column is the sheet, 6 px in top and bottom.
-        let centre_height = f32::from(window.bounds().size.height).max(0.0) - 2.0 * PAGE_CARD_INSET;
+        // The centre column is the sheet: the window less the bar and the
+        // 6 px inset top and bottom.
+        let centre_height = f32::from(window.bounds().size.height).max(0.0) - BAR_H - 2.0 * PAGE_CARD_INSET;
         let want =
             self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
         gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
@@ -898,18 +865,10 @@ impl Harness {
         // column and the right sheet; the dock below it inside the column.
         if !self.settings_open() {
             let sidebar = if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
-            let right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(PAGE_CARD_INSET) } else { gpui::px(0.0) };
+            let right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(2.0 * PAGE_CARD_INSET) } else { gpui::px(0.0) };
             return sheet_page_rect(content, sidebar, right, self.open_dock_height_px(window));
         }
-        let content = self.browse_centre_content_rect(content, window);
-        // B2a-H6: the horizontal strip hangs its gpui row above the page,
-        // so the native page hangs below it by the same const — one source
-        // for placement and release, never a gap.
-        let strip = browse_strip_offset(self.browse_strip_shown());
-        let page = Bounds {
-            origin: Point { x: content.origin.x, y: content.origin.y + strip },
-            size: gpui::size(content.size.width, (content.size.height - strip).max(gpui::px(0.))),
-        };
+        let page = self.browse_centre_content_rect(content, window);
         if self.browse_page_card() {
             page_card_rect(page)
         } else {
@@ -1230,39 +1189,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Drop the dragged person tab before the target row: the sidebar's
-    /// drag-reorder. `None` appends at the end. Either unknown id only
-    /// closes the drop slot.
-    pub(crate) fn reorder_browse_tab(
-        &mut self,
-        dragged: TabId,
-        before: Option<TabId>,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_tabs_loaded(cx);
-        self.browse_drop_target = None;
-        self.browse_drop_at_end = false;
-        if self.browser.tabs.move_before(dragged, before) {
-            self.schedule_tabs_write(cx);
-        }
-        cx.notify();
-    }
-
-    /// Open the person tab `id`'s right-click menu as a floating popup
-    /// anchored at the clicked row (see
-    /// [`Harness::render_tab_menu_popup`]). A closed `id` only closes
-    /// whatever stands open. Opening a menu clears the drag slots: a menu
-    /// never opens mid-drag, and a cancelled drag's stale line must not
-    /// survive under it.
-    pub(crate) fn open_tab_menu(&mut self, id: TabId, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        self.tab_menu = self.browser.tabs.get(id).is_some().then_some(id);
-        self.tab_menu_bounds = None;
-        self.browse_drop_target = None;
-        self.browse_drop_at_end = false;
-        cx.notify();
-    }
-
     /// Close the open tab menu, if any: Escape and click-outside share
     /// this one path. Answers whether one stood open.
     pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1275,6 +1201,10 @@ impl Harness {
         }
     }
 
+    /// Show a session-owned tab in the Browse centre (From sessions):
+    /// the model activates it for its session and the centre builds its
+    /// page — ownership never moves. A closed or person-owned `id` is a
+    /// no-op.
     /// Show a session-owned tab in the Browse centre (From sessions):
     /// the model activates it for its session and the centre builds its
     /// page — ownership never moves. A closed or person-owned `id` is a
@@ -4295,9 +4225,9 @@ mod tests {
     use super::{
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
         browser_session_active, browser_visible, initial_url, middle_release_closes,
-        omnibox_dropdown_top, should_release_keyboard_on_mouse_down, should_remember,
+        should_release_keyboard_on_mouse_down, should_remember,
         terminal_covers_browser, terminal_dock_bounds, Annotation,
-        BrowserVisibility, FakeWebBackend, WebviewState, BROWSE_TAB_STRIP_PX,
+        BrowserVisibility, FakeWebBackend, WebviewState,
     };
     use super::{Owner, TabId};
     use aui_webview::WebBackend as _;
@@ -4404,23 +4334,6 @@ mod tests {
         let mut settings = centre_clear();
         settings.settings_open = true;
         assert!(!browser_visible(settings), "settings obscure the centre page");
-    }
-
-    #[test]
-    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal() {
-        // The toolbar-anchored list hangs 6 px under the address field's
-        // row: the centre's top in vertical mode, the strip's bottom in
-        // horizontal mode — never over the strip.
-        assert_eq!(
-            omnibox_dropdown_top(false),
-            gpui::px(6.0),
-            "vertical anchors under the toolbar"
-        );
-        assert_eq!(
-            omnibox_dropdown_top(true),
-            gpui::px(6.0 + BROWSE_TAB_STRIP_PX),
-            "horizontal anchors under the strip"
-        );
     }
 
     #[test]
