@@ -59,7 +59,6 @@ use aui::data::{button, icon_button, spinner, ButtonSize};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
-use aui::screens::sidebar::{collapsed_strip_width, traffic_light_gap};
 use aui::shell::{
     RESIZE_HANDLE_W, TabItem, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header, tab_strip,
@@ -263,6 +262,12 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 
 /// The new-tab page's Field width (canvas NewTab board): 560.
 const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
+/// The closed Sessions pill's title cap (v3): the pill grows with its
+/// title up to this, then truncates.
+const PILL_TITLE_MAX_W: f32 = 480.0;
+/// The closed Browse pill's address at rest (v3): wide enough for a page
+/// title and its host; the field truncates past it.
+const BROWSE_PILL_ADDRESS_W: f32 = 360.0;
 
 /// The context the composer holder wears, so Enter reaches [`SendTurn`] instead
 /// of the textarea. Shift+Enter matches no binding and falls through to the
@@ -4890,6 +4895,67 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The closed state's two pills (v3, canvas "Baaz v3"): the left one
+    /// leads with Show sidebar and the mode switch (the shell reserves the
+    /// window's lights before them), then the session title — or, in Browse,
+    /// the page controls and the address; the right one holds the header's
+    /// actions — or Ask, the page menu and new tab.
+    fn render_v3_pills(&self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        let p = cx.aui().colors;
+        let toggle = self.render_collapsed_toggle(cx);
+        let switch_to = cx.entity().downgrade();
+        let shown = match self.mode {
+            layout::Mode::Browse => aui::screens::sidebar::Mode::Browse,
+            _ => aui::screens::sidebar::Mode::Sessions,
+        };
+        let switch = aui::screens::sidebar::mode_switch("pill-modes", shown).on_switch(move |mode, window, cx| {
+            let target = match mode {
+                aui::screens::sidebar::Mode::Sessions => layout::Mode::Sessions,
+                aui::screens::sidebar::Mode::Browse => layout::Mode::Browse,
+            };
+            let _ = switch_to.update(cx, |this, cx| this.set_mode(target, window, cx));
+        });
+        if self.mode == layout::Mode::Browse {
+            let (left, right) = self.render_browse_pill_parts(window, cx);
+            let sep = div().flex_none().w(px(1.0)).h(px(16.0)).mx(px(6.0)).bg(p.line);
+            (h_flex().items_center().child(toggle).child(switch).child(sep).child(left).into_any_element(), right)
+        } else {
+            let title = self.session_header_label(cx).unwrap_or_default();
+            let left = h_flex().items_center().child(toggle).child(switch).when(!title.is_empty(), |d| {
+                d.child(
+                    div()
+                        .ml(px(8.0))
+                        .mr(px(10.0))
+                        .max_w(px(PILL_TITLE_MAX_W))
+                        .truncate()
+                        .ui(scale::FS_13)
+                        .semibold()
+                        .text_color(p.ink)
+                        .child(title),
+                )
+            });
+            (left.into_any_element(), self.session_header_actions(cx))
+        }
+    }
+
+    /// Hands the v3 shell's floating chrome (the pills, the peek card) to
+    /// the Browse page as holes, so they show over the native page and take
+    /// the clicks there; none outside Browse.
+    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
+        let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
+            rects
+                .iter()
+                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0))).iter())
+                .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _| state.set_holes(holes));
+        }
+    }
+
     /// The sidebar-hidden one-row chrome (B2a-H6): the sidebar toggle,
     /// the ↩ session chip when the shown tab came from a session, back,
     /// forward, reload/stop, a wide address field (security glyph, zoom
@@ -4898,7 +4964,7 @@ impl Harness {
     /// reservation, so this row is the whole chrome and its first control
     /// still clears the traffic lights. Tabs stay a ⌘1–9 / omnibox away.
     /// Extensions stays out, like the board.
-    fn render_browse_minimal_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_browse_pill_parts(&self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let p = cx.aui().colors;
         let state = self.browse_centre_state();
         let tab = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).cloned());
@@ -4984,17 +5050,26 @@ impl Harness {
                         this.toggle_browse_page_menu(at.get(), window, cx);
                     })),
             );
-        // The shell pins the Show-sidebar toggle at x 84 and pads this row
-        // clear of it and the lights (`edge_control` / `centre_clear`).
-        let mut row = header_cell("hd-minimal");
-        if let Some(chip) = chip {
-            row = row.child(chip);
-        }
-        let row = row
+        // v3 (canvas "Baaz v3", Browse · closed): the left pill carries the
+        // page's way back, back / forward / reload and the address at rest;
+        // the right pill Ask, the page menu and new tab.
+        let address = div()
+            .flex_none()
+            .w(px(BROWSE_PILL_ADDRESS_W))
+            .flex()
+            .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx));
+        let left = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.0))
+            .children(chip)
             .child(self.browse_back_button(cx))
             .child(self.browse_forward_button(cx))
             .child(self.browse_reload_button(cx))
-            .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx));
+            .child(address)
+            .into_any_element();
+        let ask = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.browse_ask_page(window, cx));
+        let row = h_flex().flex_none().items_center().gap(px(2.0));
         // R2: the feedback header slot (toggle icon, count, Done and
         // Discard — or the Done confirmation), just left of the header
         // icon buttons — the region pages never cover.
@@ -5008,7 +5083,16 @@ impl Harness {
             Some(slot) => row.child(slot),
             None => row,
         };
-        row.child(more)
+        let right = row
+            .child(
+                icon_button("hd-minimal-ask", IconName::Sparkle)
+                    .ghost()
+                    .muted()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("Ask about this page")
+                    .on_click(ask),
+            )
+            .child(more)
             .child(
                 div()
                     .id("hd-minimal-new-tab")
@@ -5024,7 +5108,8 @@ impl Harness {
                             .on_click(new),
                     ),
             )
-            .into_any_element()
+            .into_any_element();
+        (left, right)
     }
 
     /// The one-row chrome's address field: the live input while editing
@@ -5054,12 +5139,13 @@ impl Harness {
             .flex_1()
             .min_w(px(0.0))
             .items_center()
-            .justify_center()
             .h(px(28.0))
             .px(px(8.0))
-            .gap(px(6.0))
-            .rounded(px(scale::R_SM))
-            .bg(p.surface_2)
+            .gap(px(8.0))
+            .rounded(px(scale::R_MD))
+            // v3: the address at rest in the pill — no field box; the
+            // surface-relative hover tint says it is pressable.
+            .hover(|d| d.bg(p.hover_overlay()))
             .ui(scale::FS_13)
             .overflow_hidden();
         if self.browse_address.is_some() && !blank {
@@ -5109,10 +5195,10 @@ impl Harness {
             let host = view.host;
             let mut pair = h_flex().flex_none().min_w(px(0.0)).items_center().overflow_hidden();
             pair = pair.child(
-                div().min_w(px(0.0)).truncate().text_color(p.ink).child(title),
+                div().min_w(px(0.0)).truncate().text_color(p.ink).semibold().child(title),
             );
             if !host.is_empty() {
-                pair = pair.child(div().flex_none().pl(px(6.0)).text_color(p.ink_3).child(format!("· {host}")));
+                pair = pair.child(div().flex_none().pl(px(8.0)).text_color(p.ink_2).child(host));
             }
             slot = slot.child(pair);
             // A non-default zoom wears its pill; pressing it resets to
@@ -5570,23 +5656,7 @@ impl Harness {
             return self.render_browse_toolbar(window, cx);
         }
         let p = cx.aui().colors;
-        // The click's target, from the list entry — never the view, so the
-        // header answers on the click's own frame, before any page arrives.
-        let target =
-            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        // One identity per chain: header, window and selection all resolve
-        // the raw id to its head, and the collapsed view row names it —
-        // the same label the sidebar's one row wears (Y2a, Y2a3).
-        let target = target.map(|id| self.chain_head(&id));
-        // The Skills page names itself plainly while open: "Skills".
-        let label = if self.skills.open {
-            Some("Skills".to_owned())
-        } else {
-            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
-        };
-        let overflow =
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        let overflow_open = self.overlays.read(cx).is_open(MenuKind::Overflow);
+        let label = self.session_header_label(cx);
         // The session title leads the row: first child of the header cell,
         // so its left edge sits where the project crumb's did. The title
         // flexes inside the header cell and clips to one line, so a whole
@@ -5641,10 +5711,46 @@ impl Harness {
         // never-covered region.
         let toast_chip = self.render_toast_chip(cx);
         let feedback_slot = self.render_feedback_header_slot(cx);
-        // No expand button: the header row stands still while the sidebar
-        // collapses, so the toggle in the sidebar header stays put and the
-        // centre cell never slides under the native lights.
-        let cell = header_cell("hd-centre");
+        // v3: the sheet's own 32 px title row owns the height and insets.
+        let cell = header_cell("hd-centre").bare(true);
+        let cell = cell.child(title);
+        let cell = match toast_chip {
+            Some(chip) => cell.child(chip),
+            None => cell,
+        };
+        let cell = match feedback_slot {
+            Some(slot) => cell.child(slot),
+            None => cell,
+        };
+        cell.child(self.session_header_actions(cx)).into_any_element()
+    }
+
+    /// The session header's title: the open session's chain head label, or
+    /// "Skills" while the Skills page is open.
+    fn session_header_label(&self, cx: &mut Context<Self>) -> Option<String> {
+        // The click's target, from the list entry — never the view, so the
+        // header answers on the click's own frame, before any page arrives.
+        let target =
+            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        // One identity per chain: header, window and selection all resolve
+        // the raw id to its head, and the collapsed view row names it —
+        // the same label the sidebar's one row wears (Y2a, Y2a3).
+        let target = target.map(|id| self.chain_head(&id));
+        // The Skills page names itself plainly while open: "Skills".
+        if self.skills.open {
+            Some("Skills".to_owned())
+        } else {
+            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
+        }
+    }
+
+    /// The session header's actions — terminal, the session menu, the right
+    /// pane — drawn in the sheet's title row while the sidebar is open and in
+    /// the right pill while it is closed (v3); one of the two at a time.
+    fn session_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let overflow =
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
+        let overflow_open = self.overlays.read(cx).is_open(MenuKind::Overflow);
         // The terminal toggle: ⌃`'s button, lit while the dock stands open.
         let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.toggle_terminal(window, cx);
@@ -5663,16 +5769,10 @@ impl Harness {
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
-        let cell = cell.child(title);
-        let cell = match toast_chip {
-            Some(chip) => cell.child(chip),
-            None => cell,
-        };
-        let cell = match feedback_slot {
-            Some(slot) => cell.child(slot),
-            None => cell,
-        };
-        cell
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.0))
             .child(term_button)
             .child(
                 div()
@@ -5925,7 +6025,7 @@ impl Harness {
                     // The page sits in the rounded card (canvas BrowseWindow):
                     // its native corners take the card's radius, square when
                     // there is no card.
-                    let radius = if self.browse_page_card() { scale::SHAPE_CONTAINER } else { 0.0 };
+                    let radius = if self.browse_page_card() { aui::shell::SHEET_RADIUS } else { 0.0 };
                     state.update(cx, |state, _| state.set_corner_radius(radius));
                     aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
@@ -6004,33 +6104,22 @@ impl Harness {
             .children(downloads)
             .children(extensions)
             .children(more);
-        if !self.browse_page_card() {
-            return centre.into_any_element();
-        }
-        // Browse with the sidebar: FF's sidebar `variant=inset` content card
-        // (sidebar-core.tsx:1141-1151) — `m-2` with no margin beside the
-        // sidebar, surface-2 + shadow-2, the container radius, and no hairline
-        // (the window rim and the sidebar's border beside one read as double
-        // lines; owner 2026-10-11). The native page's rect and radius match
-        // (`browse_centre_page_rect`, `set_corner_radius`).
-        let inset = px(crate::browser::PAGE_CARD_INSET);
-        div()
-            .size_full()
-            .relative()
-            .pt(inset)
-            .pr(inset)
-            .pb(inset)
-            .child(aui::interact::surface(2, centre).shape(aui::interact::Shape::Container).fill())
-            .children(self.render_page_progress(cx))
-            .into_any_element()
+        // v3: the shell draws the page's sheet (6 px in, radius 8, the 50 %
+        // black ring) and this fills it; the native page's rect and radius
+        // match (`browse_centre_page_rect`, `set_corner_radius`). The loading
+        // line rides the sheet's top edge.
+        div().size_full().relative().child(centre).children(self.render_page_progress(cx)).into_any_element()
     }
 
     /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
     /// the foreground filling a border-12 % track in proportion to the
     /// engine's progress, along the card's top edge between its corner radii.
-    /// Adaptation: the native page covers anything gpui draws over the card,
-    /// so the line rides the 8 px gap, flush on the card's top edge.
+    /// v3: the line runs along the sheet's top edge between its corner
+    /// radii, inside the page's rect — it is cut through the page as a hole
+    /// while it shows (`set_browse_holes`), since the native page covers
+    /// anything gpui draws under it.
     fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.browser.progress_hole.set(None);
         let state = self.browse_centre_state()?;
         let (loading, progress) = {
             let page = state.read(cx);
@@ -6039,10 +6128,11 @@ impl Harness {
         if !loading {
             return None;
         }
+        use gpui_kit::base::ElementExt as _;
+        let hole = self.browser.progress_hole.clone();
         let p = cx.aui().colors;
         let line = px(2.0);
-        let radius = px(scale::SHAPE_CONTAINER);
-        let inset = px(crate::browser::PAGE_CARD_INSET);
+        let radius = px(aui::shell::SHEET_RADIUS);
         let fill = progress.clamp(0.0, 1.0);
         Some(
             div()
@@ -6050,9 +6140,9 @@ impl Harness {
                 .role(gpui::Role::ProgressIndicator)
                 .aria_label("Loading page")
                 .absolute()
-                .top(inset - line)
+                .top(px(0.0))
                 .left(radius)
-                .right(inset + radius)
+                .right(radius)
                 .h(line)
                 .rounded(line / 2.0)
                 .overflow_hidden()
@@ -6061,6 +6151,7 @@ impl Harness {
                 .flex_row()
                 .child(div().h_full().bg(p.fg).flex_grow(fill))
                 .child(div().h_full().flex_grow(1.0 - fill))
+                .on_prepaint(move |bounds, _, _| hole.set(Some(bounds)))
                 .into_any_element(),
         )
     }
@@ -7401,64 +7492,8 @@ impl Render for Harness {
                     cx,
                 )
             };
-            // B2a-H6: sidebar-hidden in Browse is a one-row chrome — the
-            // sidebar header cell collapses to the lights reservation, the
-            // rail hides, and the centre header carries the toggle, chip,
-            // nav, address, ⋯ and `+`. Everywhere else the header stands
-            // exactly as it did.
-            let browse_minimal =
-                self.mode == layout::Mode::Browse && !self.sidebar_open && !settings_open;
-            // D3: the v2 sidebar draws its own title bar (the traffic-light
-            // gap, the toggle, the mode switch), so its column spans the
-            // window's height and the centre header starts beside it.
-            // Collapsed, the column is the library's edge strip and the
-            // centre header carries the toggle at the same x. Browse with
-            // the sidebar open shows the page full height, no pane header.
-            let collapsed_strip: AnyElement = if self.sidebar_open || settings_open {
-                div().into_any_element()
-            } else {
-                self.render_collapsed_strip(cx)
-            };
-            let browse_full = self.mode == layout::Mode::Browse && self.sidebar_open && !settings_open;
-            let shell = app_shell("shell")
-                .full_height_sidebar(!settings_open)
-                .rail_width(collapsed_strip_width())
-                .centre_header(!browse_full)
-                // FF `variant=inset` with the page card: no sidebar border
-                // beside the card's own edge (owner 2026-10-11).
-                .inset(self.browse_page_card())
-                .sidebar_width(px(self.resize.width))
-                .right_width(px(self.right_resize.width))
-                .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
-                .traffic_lights(false)
-                .sidebar_open(self.sidebar_open)
-                // The collapsed toggle stands at x 84 in the title strip while
-                // the sidebar slides in and out under it, and the centre
-                // header clears it on the sidebar's animated width — nothing
-                // in the header swaps at the start or end of a collapse
-                // (docs/31 §7).
-                .edge_control(traffic_light_gap(), cx.aui().metrics.control_sm, self.render_collapsed_toggle(cx))
-                .centre_clear(traffic_light_gap() + cx.aui().metrics.control_sm + cx.aui().metrics.gap)
-                // The header row stands still while the pane collapses: the
-                // sidebar cell keeps its width — and the native-lights
-                // reservation — so the toggle and search stay where they are.
-                .header_follows_sidebar(browse_minimal)
-                .right_open(right_open)
-                .header_sidebar(
-                    sidebar_header("hd-side")
-                        .native_lights(true)
-                        .collapsed(browse_minimal)
-                        .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
-                        .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
-                )
-                .header_centre(if settings_open {
-                    self.render_settings_centre_header(cx)
-                } else if browse_minimal {
-                    div().size_full().flex().items_center().child(self.render_browse_minimal_toolbar(window, cx)).into_any_element()
-                } else {
-                    self.render_centre_header(window, cx)
-                })
-                .header_right({
+            // The right pane's header: its tab strip and the close control.
+            let header_right_el = {
                     // B8: the pane's tab strip — Changes · Files · Browser —
                     // in place of the old plain title. No title (the tabs
                     // name the pane) and no `+` (the tabs are fixed). The
@@ -7518,18 +7553,66 @@ impl Render for Harness {
                                     ),
                             ),
                     )
-                })
-                .sidebar(sidebar)
-                // Browse-with-sidebar-hidden shows no rail: the page runs
-                // full width under the one-row chrome (the native page's
-                // rect already starts at the window's left edge down there),
-                // while Sessions keeps its rail. The collapsed sidebar
-                // header cell above keeps the native-lights reservation, so
-                // the toolbar's first control still clears the lights.
-                .rail(collapsed_strip)
-                .right(right)
-                .centre(centre)
-                .into_any_element();
+                };
+            let shell = if settings_open {
+                // Settings keeps its layout (v3: inherit the tokens, mock
+                // before any layout change): the section list in a full
+                // column, the settings header over the content.
+                app_shell("shell")
+                    .full_height_sidebar(false)
+                    .sidebar_width(px(self.resize.width))
+                    .right_width(px(self.right_resize.width))
+                    .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
+                    .traffic_lights(false)
+                    .sidebar_open(self.sidebar_open)
+                    .right_open(right_open)
+                    .header_sidebar(
+                        sidebar_header("hd-side")
+                            .native_lights(true)
+                            .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+                            .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
+                    )
+                    .header_centre(self.render_settings_centre_header(cx))
+                    .header_right(header_right_el)
+                    .sidebar(sidebar)
+                    .right(right)
+                    .centre(centre)
+                    .into_any_element()
+            } else {
+                // v3 (canvas "Baaz v3", docs/31 §9): the sidebar on the frame,
+                // the work area a sheet 6 px in that never moves; closed, two
+                // floating pills carry the chrome and the peek brings the
+                // sidebar back on the left edge. Sessions animates on FF's
+                // springs (gpui only); Browse is instant — the native page
+                // cannot follow a per-frame resize without jank — and cuts
+                // holes for the pills and the peek so they show over the page.
+                let browse = self.mode == layout::Mode::Browse;
+                let (pill_left, pill_right) = self.render_v3_pills(window, cx);
+                let peek = self.sidebar_pane.clone().into_any_element();
+                let holes = cx.entity().downgrade();
+                app_shell("shell")
+                    .sheets(true)
+                    .native_lights(true)
+                    .animate(!browse)
+                    .page_sheet(browse)
+                    .sidebar_width(px(self.resize.width))
+                    .right_width(px(self.right_resize.width))
+                    .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
+                    .sidebar_open(self.sidebar_open)
+                    .right_open(right_open)
+                    .centre_header(!browse)
+                    .header_centre(if browse { div().into_any_element() } else { self.render_centre_header(window, cx) })
+                    .header_right(header_right_el)
+                    .sidebar(sidebar)
+                    .peek(peek)
+                    .pills(pill_left, pill_right)
+                    .on_overlay_bounds(move |rects, _, cx| {
+                        let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
+                    })
+                    .right(right)
+                    .centre(centre)
+                    .into_any_element()
+            };
             // The strip sits over the divider, centred on the settled edge:
             // the handle reports the drag, this only positions it. Hidden
             // with the sidebar: there is no divider to grab on the rail.
@@ -9524,11 +9607,11 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6: horizontal tabs render the strip above the page — the
-    /// chips and `+` at the end — while the sidebar drops its Tabs list
-    /// and keeps New tab.
+    /// v3 (canvas "Baaz v3"): no tab strip in Browse, open or closed, even
+    /// with the stored horizontal setting — tabs are one hover away in the
+    /// peek; the closed state is the two pills.
     #[gpui::test]
-    fn horizontal_tabs_render_a_strip_and_drop_the_sidebar_list(cx: &mut gpui::TestAppContext) {
+    fn v3_browse_draws_no_tab_strip_even_horizontal(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-horizontal-strip");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -9547,32 +9630,19 @@ mod tests {
         }
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("browse-strip").is_none(), "with the sidebar open its rows are the tabs: no strip");
-        // The strip's one remaining place: the sidebar hidden.
+        assert!(vc.debug_bounds("browse-strip").is_none(), "open: the sidebar's rows are the tabs");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("browse-strip").is_some(), "horizontal strips the tabs above the page");
-        assert!(vc.debug_bounds("browse-strip-new-tab").is_some(), "the strip ends in `+`");
-        // B2a-H6b: the chips scroll inside their own area while the `+`
-        // rides outside it, so a long strip never scrolls it away.
-        assert!(
-            vc.debug_bounds("browse-strip-scroll").is_some(),
-            "the chips scroll inside their own area"
-        );
-        let scroll = vc.debug_bounds("browse-strip-scroll").expect("the scrolling area draws");
-        let plus = vc.debug_bounds("browse-strip-new-tab").expect("the `+` draws");
-        assert!(
-            plus.origin.x >= scroll.origin.x + scroll.size.width,
-            "the `+` rides outside the scrolling area"
-        );
+        assert!(vc.debug_bounds("browse-strip").is_none(), "closed: no strip, the pills carry the chrome");
+        assert!(vc.debug_bounds("hd-minimal-new-tab").is_some(), "the right pill carries New tab");
         restore_state(state);
     }
 
-    /// B2a-H6b: the stored centre page hangs under the strip in horizontal
-    /// mode and under the header in sidebar-hidden minimal mode — the one
+    /// v3: the stored centre page is the sheet — 6 px in from the window
+    /// (closed) or from the sidebar column (open), on every side — the one
     /// rect behind placement and the mouse-down hand-back.
     #[gpui::test]
-    fn centre_page_rect_hangs_under_strip_or_header(cx: &mut gpui::TestAppContext) {
+    fn centre_page_rect_is_the_v3_sheet(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-page-rect");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -9589,24 +9659,21 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
+        draw_shell(&mut *vc, &baaz);
+        let (open_page, width) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            (h.browser.centre_page_rect.expect("the sync stores the rect"), h.resize.width)
+        });
+        assert_eq!(open_page.origin, gpui::point(gpui::px(width + 6.0), gpui::px(6.0)), "open: 6 px past the column");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
-        let strip_page =
+        let closed_page =
             vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
+        assert_eq!(closed_page.origin, gpui::point(gpui::px(6.0), gpui::px(6.0)), "closed: 6 px from the window");
         assert_eq!(
-            strip_page.origin.y,
-            gpui::px(44.0 + 34.0),
-            "horizontal hangs the page under the strip"
-        );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
-        draw_shell(&mut *vc, &baaz);
-        let minimal_page =
-            vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
-        assert_eq!(
-            minimal_page.origin.y,
-            gpui::px(44.0),
-            "sidebar-hidden hangs the page under the header"
+            closed_page.size.width - open_page.size.width,
+            gpui::px(width),
+            "the sheet never moves: closing only removes the column"
         );
         restore_state(state);
     }
@@ -9675,11 +9742,11 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6b: the toolbar-anchored omnibox list hangs under the tab
-    /// strip in horizontal mode — never over it — and under the toolbar
-    /// otherwise.
+    /// The toolbar address edits through the Field overlay, which carries
+    /// its rows over the page (canvas board "Field", 2026-10-11): no list
+    /// draws in the window.
     #[gpui::test]
-    fn omnibox_dropdown_anchors_under_the_strip_when_horizontal_and_vertical_uses_the_field(cx: &mut gpui::TestAppContext) {
+    fn omnibox_edits_through_the_field_overlay(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-omni-anchor");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -9696,32 +9763,12 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://docs.rs/", window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=horizontal", cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
         });
         draw_shell(&mut *vc, &baaz);
-        let strip = vc.debug_bounds("browse-strip").expect("the strip draws");
-        let strip_bottom = strip.origin.y + strip.size.height;
-        let list = vc.debug_bounds("browse-omni-list").expect("the dropdown draws");
-        assert!(
-            list.origin.y >= strip_bottom,
-            "the dropdown anchors under the strip, never over it"
-        );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("browser-tabs=vertical", cx)));
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
-        });
-        draw_shell(&mut *vc, &baaz);
-        // Vertical tabs (the sidebar layout): the Field overlay carries the
-        // rows over the page (canvas board "Field", 2026-10-11), so no list
-        // draws in the window.
-        assert!(vc.debug_bounds("browse-omni-list").is_none(), "vertical shows the Field overlay, not an in-window list");
+        assert!(vc.debug_bounds("browse-omni-list").is_none(), "the Field overlay, not an in-window list");
         assert!(vc.update(|_, cx| baaz.read(cx).field_overlay_wanted(cx)), "the Field overlay is wanted");
-        let _ = strip_bottom;
         restore_state(state);
     }
 

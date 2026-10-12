@@ -36,7 +36,7 @@ fn no_project_picker_in_either_centre_header() {
     for banned in ["hd-project", "Open project menu", "project_crumb", "crumb_bounds"] {
         assert!(!app.contains(banned), "app.rs carries no {banned}");
     }
-    for site in ["render_browse_toolbar", "render_browse_minimal_toolbar", "render_centre_header"] {
+    for site in ["render_browse_toolbar", "render_browse_pill_parts", "render_centre_header", "render_v3_pills"] {
         let body = fn_body(&app, site);
         for banned in ["hd-project", "Open project menu", "project_crumb", "crumb_bounds"] {
             assert!(!body.contains(banned), "{site} renders no picker ({banned})");

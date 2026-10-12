@@ -816,17 +816,6 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The collapsed column: the library's edge strip (one labelled
-    /// control that expands the sidebar), built from the same model.
-    pub(crate) fn render_collapsed_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let baaz = cx.entity().downgrade();
-        sidebar_screen("sidebar-strip", self.sidebar_model(true, cx), self.sidebar_list.clone(), self.sidebar_fluid.clone())
-            .on_intent(move |intent, window, cx| {
-                let _ = baaz.update(cx, |this, cx| this.sidebar_intent(intent, window, cx));
-            })
-            .into_any_element()
-    }
-
     /// The window's toggle for a collapsed Sessions sidebar: the library
     /// draws it in the sidebar's title bar while open; collapsed, the
     /// centre header carries it at the same x, past the traffic lights.

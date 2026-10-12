@@ -159,9 +159,24 @@ const BROWSER_NAV_PX: f32 = 38.0;
 /// hangs exactly under the row with no gap.
 pub(crate) const BROWSE_TAB_STRIP_PX: f32 = 34.0;
 
-/// The Browse page card's inset from the centre's top, right and bottom
-/// edges (the sidebar side has none), in pixels: FF's inset card `m-2`.
-pub(crate) const PAGE_CARD_INSET: f32 = 8.0;
+/// The Browse page card's inset — v3's sheet inset: 6 px from the window,
+/// the sidebar column and the right sheet (canvas "Baaz v3").
+pub(crate) const PAGE_CARD_INSET: f32 = aui::shell::SHEET_INSET;
+
+/// v3: the page's rect on the sheet for the window's `content` box, a
+/// `sidebar` column (0 when closed), a `right` column including its own 6 px
+/// gap (0 when closed) and the open dock under the page. Pure, for tests.
+pub(crate) fn sheet_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: Pixels, dock: Pixels) -> Bounds<Pixels> {
+    let inset = gpui::px(PAGE_CARD_INSET);
+    let right_gap = if right > gpui::px(0.0) { right } else { inset };
+    Bounds {
+        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + inset },
+        size: gpui::size(
+            (content.size.width - sidebar - inset - right_gap).max(gpui::px(0.0)),
+            (content.size.height - inset * 2.0 - dock).max(gpui::px(0.0)),
+        ),
+    }
+}
 
 /// The native page's rect inside the card for the centre `page` rect: the
 /// whole card, inset on top, right and bottom. The card has no hairline
@@ -516,7 +531,10 @@ impl Harness {
     /// sidebar open its rows ARE the tabs and the page spans the full
     /// height (docs/27 v2 cut horizontal tabs; owner note 2026-10-11).
     pub(crate) fn browse_strip_shown(&self) -> bool {
-        self.layout.browser_tabs == crate::layout::BrowserTabs::Horizontal && !self.sidebar_open
+        // v3 (canvas "Baaz v3"): no tab strip when closed — tabs are one
+        // hover away in the peek. The setting stays stored, unused.
+        let _ = self.layout.browser_tabs;
+        false
     }
 
     /// The browser space Browse shows: person tabs are keyed by it, never by
@@ -868,6 +886,13 @@ impl Harness {
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
     fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+        // v3: the page is the sheet — 6 px in from the window, the sidebar
+        // column and the right sheet; the dock below it inside the column.
+        if !self.settings_open() {
+            let sidebar = if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
+            let right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(PAGE_CARD_INSET) } else { gpui::px(0.0) };
+            return sheet_page_rect(content, sidebar, right, self.open_dock_height_px(window));
+        }
         let content = self.browse_centre_content_rect(content, window);
         // B2a-H6: the horizontal strip hangs its gpui row above the page,
         // so the native page hangs below it by the same const — one source
@@ -888,7 +913,8 @@ impl Harness {
     /// the sidebar open (canvas BrowseWindow; owner note 2026-10-11 — a
     /// square page's corner poked past the window's rounded corner).
     pub(crate) fn browse_page_card(&self) -> bool {
-        self.mode == crate::layout::Mode::Browse && self.sidebar_open && !self.settings_open() && !self.browse_strip_shown()
+        // v3: the page is always the sheet in Browse, open or closed.
+        self.mode == crate::layout::Mode::Browse && !self.settings_open()
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -4163,6 +4189,9 @@ pub(crate) struct BrowserRegistry {
     /// (see `browse_centre_page_rect`), never a second computation.
     /// `None` outside Browse and before the first sync.
     pub centre_page_rect: Option<Bounds<Pixels>>,
+    /// The loading line's rect while a page loads (v3): cut through the
+    /// page as a hole so the line shows on the sheet's top edge.
+    pub progress_hole: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The session tab carried into Browse full-width (B2a-H4): the
     /// pane's "Browse" button parks the session's active tab here and the
     /// centre shows it — with the ↩ chip — instead of the project's
@@ -4230,6 +4259,7 @@ impl BrowserRegistry {
             agent_tabs: HashMap::new(),
             middle_pressed: None,
             centre_page_rect: None,
+            progress_hole: Default::default(),
             centre_override: None,
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),

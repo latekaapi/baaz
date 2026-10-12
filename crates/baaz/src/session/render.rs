@@ -103,18 +103,14 @@ impl SessionView {
             }
         }
         let composer = self.render_composer(cx);
-        let p = cx.aui().colors;
-        // The docked band spans the pane, hairline included; only the
-        // composer's content is bound to the measure, as in the design.
-        // The library's docked composer draws its own top hairline, which
-        // would stop at the measure's edges: the band draws the pane-wide
-        // one and the composer is pulled up a pixel so its own lies on it.
-        div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
+        // v3: the composer is a raised card on the transcript's measure,
+        // 12 px inside the sheet's bottom (18 from the window, the pills'
+        // 18 from the top); no pane-wide band or hairline.
+        div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(COMPOSER_BOTTOM)).child(
             div()
                 .w_full()
                 .max_w(px(TRANSCRIPT_MEASURE))
                 .mx_auto()
-                .mt(px(-1.0))
                 .relative()
                 .child(composer),
         ).into_any_element()
@@ -1994,8 +1990,11 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
         // The chip wears the session's own provider mark: a Codex session
         // never shows the Muse "M".
+        // v3 (canvas "Baaz v3", Composer A): one raised card with text
+        // controls, on the transcript measure.
         let mut element = composer("composer", &self.composer, self.display_provider().icon(), self.model())
             .docked(true)
+            .raised(true)
             .mode(self.mode_label())
             .effort(crate::overlays::effort_label(self.effort))
             .context(self.context())
