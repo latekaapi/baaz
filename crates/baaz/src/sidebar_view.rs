@@ -785,6 +785,9 @@ impl Harness {
         let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.sidebar_list.clone(), self.sidebar_fluid.clone())
             .width(px(self.resize.width))
             .rename_textarea(&self.rename)
+            // v3: the sidebar has no ground of its own — on the frame in the
+            // column, on Floating in the peek card.
+            .transparent()
             // Browse's right-click menus draw in the overlay window, over the
             // native page (`overlay.rs`).
             .external_menus(true)
