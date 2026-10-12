@@ -40,7 +40,7 @@ I = dict(
  search='<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
 )
 def ib(icon, label): return f'<button class="ib" aria-label="{label}">{ico(I[icon], fill=(icon=="dots"))}</button>'
-def lights(x=13, y=16): return (f'<span style="position:absolute;left:{x}px;top:{y}px;display:flex;gap:8px" aria-hidden="true">'
+def lights(x=12, y=16): return (f'<span style="position:absolute;left:{x}px;top:{y}px;display:flex;gap:8px;z-index:4" aria-hidden="true">'
     '<i style="width:12px;height:12px;border-radius:999px;background:#FF5F57;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#FEBC2E;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#28C840;display:block"></i></span>')
 def lights_inline(): return ('<span style="display:flex;gap:8px;margin:0 8px 0 10px" aria-hidden="true">'
     '<i style="width:12px;height:12px;border-radius:999px;background:#FF5F57;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#FEBC2E;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#28C840;display:block"></i></span>')
@@ -67,7 +67,11 @@ a{{color:{FG}}}a:hover{{color:#fff}}
 .fade{{position:absolute;left:0;right:0;top:0;height:64px;background:linear-gradient({L1} 20%,rgb(from {L1} r g b / 0));pointer-events:none}}
 .row{{position:absolute;left:0;right:0;top:0;height:32px;display:flex;align-items:center;z-index:2}}
 .title{{font-weight:600;color:{FG};white-space:nowrap}}
-.pill{{position:absolute;top:18px;height:36px;border-radius:18px;background:{L3};box-shadow:{FLOAT};display:flex;align-items:center;padding:0 4px;z-index:3}}
+.tab{{position:absolute;top:0;height:44px;background:{L0};display:flex;align-items:center;gap:6px;z-index:3}}
+.tab.l{{left:0;padding:0 14px 0 84px;border-radius:0 0 8px 0;box-shadow:inset -1px -1px 0 rgba(255,255,255,.06)}}
+.tab.r{{right:0;padding:0 16px 0 14px;border-radius:0 0 0 8px;box-shadow:inset 1px -1px 0 rgba(255,255,255,.06)}}
+.contact{{position:absolute;left:242px;top:6px;bottom:6px;width:20px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,.16));z-index:1}}
+.lfade{{position:absolute;left:0;top:44px;width:256px;height:24px;background:linear-gradient({L0},rgb(from {L0} r g b / 0));z-index:2}}
 .comp{{position:absolute;background:{L2};border-radius:12px;box-shadow:{RAISED};padding:8px;display:flex;flex-direction:column;gap:4px}}
 .ph{{font-size:14px;line-height:20px;color:{MUTED};padding:8px}}
 .ctl{{height:28px;padding:0 8px;border-radius:6px;display:inline-flex;align-items:center;gap:6px;color:{MUTED};font-size:13px;white-space:nowrap;background:transparent;border:0}}
@@ -178,14 +182,16 @@ def actions():
 TITLE = "Show me the validation summary with code and links."
 
 def chrome(mode):
+    # The chrome row (2026-10-12 revision): lights, the toggle at x 84, the switch right after it at x 118 —
+    # the same spots in the closed state's left tab, so nothing moves.
     return (f'{lights()}'
-            f'<button class="ib" aria-label="Hide sidebar" style="position:absolute;left:85px;top:8px">{ico(I["side"])}</button>'
-            f'<div style="position:absolute;left:186px;top:10px">{switch(mode)}</div>')
+            f'<button class="ib" aria-label="Hide sidebar" style="position:absolute;left:84px;top:8px;z-index:4">{ico(I["side"])}</button>'
+            f'<div style="position:absolute;left:118px;top:10px;z-index:4">{switch(mode)}</div>')
 
 def sidebar_sessions(src):
     return (f'{chrome("s")}'
             f'<div style="position:absolute;left:0;top:44px">{img("sb-sessions-rows",254,804,src)}</div>'
-            f'<div style="position:absolute;left:0;top:852px">{img("sb-footer",254,48,src)}</div>')
+            f'<div style="position:absolute;left:0;top:852px">{img("sb-footer",254,48,src)}</div><div class="contact"></div><div class="lfade"></div>')
 
 # ---------------- boards ----------------
 def b_sessions_open(src):
@@ -203,26 +209,26 @@ def b_sessions_closed(src):
     b += f'<div style="position:absolute;left:268px;top:76px;width:892px;height:648px">{img("tx-closed",892,648,src)}</div>'
     b += f'<div class="fade" style="height:92px"></div></div>'
     b += composer_a((1440-880)//2, 18)
-    b += (f'<div class="pill" style="left:18px">{lights_inline()}{ib("side","Show sidebar")}{switch("s")}'
-          f'<span class="title" style="margin:0 10px 0 8px">{TITLE}</span></div>')
-    b += f'<div class="pill" style="right:18px">{ib("term","Terminal")}{ib("dots","Session menu")}{ib("right","Show right pane")}</div>'
+    b += (f'<div class="tab l">{ib("side","Show sidebar")}{switch("s")}'
+          f'<span class="title" style="margin-left:2px">{TITLE}</span></div>{lights()}')
+    b += f'<div class="tab r">{ib("term","Terminal")}{ib("dots","Session menu")}{ib("right","Show right pane")}</div>'
     return b + '</div>'
 
 def b_browse_open(src):
     b = f'<div class="w" style="width:1440px;height:900px"><div style="position:absolute;left:0;top:0">{img("sb-browse",254,900,src)}</div>'
     # one chrome for both modes: cover the captured top row and footer with the drawn ones Sessions uses
     b += f'<div style="position:absolute;left:0;top:0;width:256px;height:44px;background:{L0}"></div>{chrome("b")}'
-    b += f'<div style="position:absolute;left:0;top:852px">{img("sb-footer",254,48,src)}</div>'
+    b += f'<div style="position:absolute;left:0;top:852px">{img("sb-footer",254,48,src)}</div><div class="contact"></div><div class="lfade"></div>'
     b += f'<div class="sheet" style="left:262px;top:6px;right:6px;bottom:6px;background:#FAFAFA;box-shadow:0 0 0 1px rgba(0,0,0,.5)"><div style="position:absolute;left:0;top:0">{img("page",1168,881,src)}</div></div>'
     return b + '</div>'
 
 def b_browse_closed(src):
     b = f'<div class="w" style="width:1440px;height:900px">'
     b += f'<div class="sheet" style="left:6px;top:6px;right:6px;bottom:6px;background:#FAFAFA;box-shadow:0 0 0 1px rgba(0,0,0,.5)"><div style="position:absolute;left:0;top:0">{img("page-closed",1424,848,src)}</div></div>'
-    b += (f'<div class="pill" style="left:18px">{lights_inline()}{ib("side","Show sidebar")}{switch("b")}'
+    b += (f'<div class="tab l">{ib("side","Show sidebar")}{switch("b")}'
           f'<span style="width:1px;height:16px;background:{HAIR};margin:0 6px"></span>{ib("back","Back")}{ib("fwd","Forward")}{ib("reload","Reload")}'
-          f'<span class="addr" style="padding:0 10px 0 8px">{ico(I["shield"],size=14)}<b>Fluid Functionalism</b>www.fluidfunctionalism.com</span></div>')
-    b += f'<div class="pill" style="right:18px">{ib("spark","Ask")}{ib("dots","Page menu")}{ib("plus","New tab")}</div>'
+          f'<span class="addr" style="padding:0 10px 0 8px">{ico(I["shield"],size=14)}<b>Fluid Functionalism</b>www.fluidfunctionalism.com</span></div>{lights()}')
+    b += f'<div class="tab r">{ib("spark","Ask")}{ib("dots","Page menu")}{ib("plus","New tab")}</div>'
     return b + '</div>'
 
 # ---- Tone study: the same miniature in three ladders ----
@@ -294,14 +300,14 @@ for f, (t, fn, w, h, x, y) in boards.items():
     index["boards"][f] = {"x": x, "y": y, "w": w, "h": h, "title": t}
     index["order"].insert(0, f)
 index["notes"] = {
- "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the pills' 18 from the top. Pill end caps: text and lights 14 from the end. Browse open uses the same drawn chrome and account footer as Sessions."},
+ "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the chrome row 44 tall. Tab end caps: content 14 from the rounded corner. Browse open uses the same drawn chrome and account footer as Sessions."},
  "t1": {"x": 0, "y": -240, "kind": "title1", "maxW": 2960, "text": "Baaz v3 — FINAL 2026-10-12: tone, depth, composer, then the four screens"},
  "t2": {"x": 0, "y": 1760, "kind": "title1", "maxW": 2960, "text": "The four screens — Sessions and Browse, open and closed"},
  "n1": {"x": 1520, "y": 0, "w": 420, "fill": "blue", "text": "Why the previous rounds read flat: a seven-unit step between near-black greys is about 3 L* and the eye needs 4 to 5 to see a level without a line. Drawing the line back in made it look outlined. So: a darker frame, nine-unit steps, highlight on the top edge instead of a border, and a slight cool bias so the greys are not dead."},
  "n2": {"x": 1520, "y": 640, "w": 420, "fill": "blue", "text": "FINAL (owner, 2026-10-12): the cool-neutral ladder, light edge (7 % top highlight + 6 % white ring on every surface), floating drop 8/24 at 40 %, dialog drop 24/56 at 50 %. Only two kinds of depth exist: a surface that sits in another (fill + top highlight) and a surface that floats (a faint ring + one soft drop). FF's stacked small drops at 18 % are replaced by one diffuse drop; FF's structure (substrate + offset, surface-relative overlays, the springs) stays."},
  "n3": {"x": 1520, "y": 1380, "w": 420, "fill": "blue", "text": "A is used on the screens. The chips lose their borders; the composer card is the single edge at the bottom of the sheet. Provider stays visible as a mark, model and mode as text controls that light on hover."},
- "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Sidebar on the frame with no vertical divider and no footer rule: the sheet's own edge is the only divider. The sheet is 6 px in from the window and never moves. Closed: the sidebar leaves, two pills float over the sheet (lights · Show sidebar · switch · title | actions); content runs under them through the sheet's fade."},
- "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. Closed: the left pill adds back, forward, reload and the address at rest; the right pill Ask, the page menu and new tab. No tab strip: tabs are one hover away in the peek. Pills over the native page are overlay windows."},
+ "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Revised 2026-10-12 (owner round 1): the chrome row — lights (12,16), Hide/Show sidebar at x 84, the switch at x 118 — never moves. Closed: the sidebar leaves and the row's two ends stay as corner tabs on the frame colour (one rounded corner r 8, the 6 % edge on the sides that meet the sheet): left with the title, right with the actions where the open row drew them. No pills. Hover on the toggle or the left edge peeks the sidebar as a Floating card under the row. Depth: the sheet casts one contact shadow onto the frame beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px)."},
+ "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. Closed: the left tab adds back, forward, reload and the address at rest; the right tab Ask, the page menu and new tab. No tab strip: tabs are one hover away in the peek. Tabs and the peek over the native page are holes cut through the page window."},
 }
 json.dump(index, open(f"{P}/canvas.json", "w"), indent=1)
 print("wrote", list(boards))
