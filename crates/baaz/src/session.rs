@@ -166,9 +166,15 @@ fn reply_complete(turn: &Turn) -> bool {
     }
     saw_text
 }
-/// Top inset: the first turn's first line must clear the header (a
-/// screenshot showed it cut off). Same step as the horizontal gutter.
-const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7;
+/// Top inset: the first turn's first line must clear the sheet's own 32 px
+/// title row (v3: it overlays the transcript, which scrolls under it through
+/// the fade) by one 24 px step — canvas "Baaz v3", the first turn at 56.
+/// One value for both states: closed (pills, canvas 76) would re-measure the
+/// list's first item on every toggle.
+const TRANSCRIPT_PAD_TOP: f32 = 56.0;
+/// The composer's distance from the sheet's bottom edge (v3: 12, so 18 from
+/// the window — the pills' 18 from the top).
+const COMPOSER_BOTTOM: f32 = 12.0;
 /// The key context the transcript list wears, so ⌘C reaches the selection
 /// copy without ever matching inside the composer or a card field.
 pub const TRANSCRIPT_CONTEXT: &str = "BaazTranscript";
