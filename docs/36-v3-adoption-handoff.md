@@ -204,3 +204,12 @@ mean gap 8.1 ms, longest 9.1 ms, longest draw 2.4 ms; open = 34 frames over 265 
 draw 2.2 ms. The previous build drew 3–4 frames per transition. Gates: tests + clippy green in both repos (aui
 `9212e91`, harness `a18a5d8`); the 18-entry probe runs and flags all 18 (old baselines); bundle rebuilt and signed.
 Note: the trace's `sidebar_w` column is the resting width, not the animated column — group by time gaps instead.
+
+**Agent QA (2026-10-13, Sonnet with computer use on BaazCheck, access approved by the owner):** bar static across
+⌘B (toggle, switch, title, lights at the same window px open and closed); the sheet grew into the column's place with
+no wrap or jump at rest; the peek card showed from the toggle, behind the lights and the toggle, rows under the bar, no
+toggle row inside, dismissed on leaving; hover-then-click opened the sidebar with no flash; Browse ↔ Sessions kept the
+sidebar state both ways (closed stayed closed, open stayed open); `+` in the closed Browse bar made a second tab; the
+contact shadow reads as a soft gradient. Not observable through the tool's ~0.5–1 s screenshot latency: the slide and
+the switch's indicator/row motion — the frame trace above stands for those. One note, not a defect: on a blank new tab
+the closed Browse bar shows the title "New tab" with no host, as designed for a tab without a URL.
