@@ -2,7 +2,9 @@
 
 The owner pointed at Claude Desktop: "faded gradients at the right edge of the sidebar and below the chat transcript
 header — this gives it depth. I'm looking for something like this." This file is the research and the proposal.
-**Nothing here is built.** The canvas "Baaz v3" is the spec; the values below go onto it only after the owner picks.
+**Built 2026-10-12 (later the same night)** — the owner delegated the call ("you decide, natural not forced"): G1 at
+`.16` (not `.25`), G2, and G3b are in agentic-ui `2de2fb3` + `448e0e2` (`AppShell::sheets`: `CONTACT_W`, `LIST_FADE`,
+`peek_shadow`), canvas v10 shows them on the open boards. The rule amendment in §3 is therefore in force.
 
 ## 1. What Claude Desktop actually draws (measured off the owner's recording, 2× pixels → pt)
 
