@@ -62,6 +62,7 @@ mod layout;
 mod log;
 mod login;
 mod mascot;
+mod native_lights;
 mod newtab_ground;
 mod overlay;
 mod overlays;

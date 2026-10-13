@@ -261,9 +261,7 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 
 /// The new-tab page's Field width (canvas NewTab board): 560.
 const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
-/// The closed Sessions pill's title cap (v3): the pill grows with its
-/// title up to this, then truncates.
-/// What the host hands the shell's bar (see `Harness::render_bar_chrome`).
+/// What the host hands the shell's chrome row (see `Harness::render_bar_chrome`).
 pub(crate) struct BarChrome {
     pub(crate) lead: AnyElement,
     pub(crate) switch: Option<AnyElement>,
@@ -802,8 +800,9 @@ pub struct Harness {
     pub(crate) right_snap: bool,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
-    /// The `strip` step's hold: the fading Browse strip shown (captures).
-    pub(crate) strip_pinned: bool,
+    /// Whether the window's traffic lights are hidden now (closed sidebar,
+    /// no peek), so the native call runs only on a change.
+    pub(crate) lights_hidden: bool,
     /// Generation of the debounced right-pane `sessions.json` write (B7):
     /// every cheap right-state persist bumps it and arms a delayed
     /// off-thread write; only the latest generation writes, so quick
@@ -1533,7 +1532,7 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             peek_pinned: false,
-            strip_pinned: false,
+            lights_hidden: false,
             right_save_epoch: 0,
             right_save_pending: false,
             right_kind_migrate: std::collections::HashSet::new(),
@@ -4478,15 +4477,15 @@ impl Harness {
         }
     }
 
-    /// Hands the v3 shell's chrome over the sheet (the corner tabs, the peek
-    /// card) to the Browse page as holes, so they show over the native page
+    /// Hands the v3 shell's chrome over the sheet (the peek card) to the
+    /// Browse page as holes, so they show over the native page
     /// and take the clicks there; none outside Browse.
-    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels, f32)>, cx: &mut Context<Self>) {
-        let holes: Vec<[f32; 6]> = if self.mode == layout::Mode::Browse {
+    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
+        let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
             rects
                 .iter()
-                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0), 1.0)).iter())
-                .map(|(b, r, cut)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r), *cut])
+                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0))).iter())
+                .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
                 .collect()
         } else {
             Vec::new()
@@ -4582,8 +4581,7 @@ impl Harness {
     }
 
     /// The session header's actions — terminal, the session menu, the right
-    /// pane — drawn in the sheet's title row while the sidebar is open and in
-    /// the right pill while it is closed (v3); one of the two at a time.
+    /// pane — drawn in the sheet's title row while the sidebar is open.
     fn session_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -6380,8 +6378,8 @@ impl Render for Harness {
             // One shell for every page (canvas "Baaz v3", chrome revised
             // 2026-10-13): the sidebar column full height with the chrome row
             // at its top; the work area a sheet 6 px in with its own title
-            // row; closed, the row is a pill that reveals the title and the
-            // actions on hover. Settings puts its section list in the column,
+            // row; closed, nothing stays (not even the lights) and the top or
+            // left edge peeks the sidebar. Settings puts its section list in the column,
             // its breadcrumb and close button in the sheet's row. Sessions animates (ease-out, the sheet's content laid out
             // once at the resting width); Browse is instant — the native page
             // cannot follow a per-frame resize without jank — and cuts a hole
@@ -6398,10 +6396,6 @@ impl Render for Harness {
                 .native_lights(true)
                 .animate(!browse)
                 .page_sheet(browse)
-                // Browse closed: the strip fades (owner 2026-10-13) — a
-                // native page cannot run under it the way the transcript does.
-                .strip_fades(browse)
-                .strip_shown(self.strip_pinned)
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
@@ -6411,8 +6405,17 @@ impl Render for Harness {
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
                 .peek_open(self.peek_pinned)
-                .on_overlay_bounds(move |rects, _, cx| {
-                    let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
+                .on_overlay_bounds(move |rects, window, cx| {
+                    let _ = holes.update(cx, |this, cx| {
+                        // The lights belong to the sidebar's row: gone with
+                        // the column, back while the peek card is on screen.
+                        let hidden = !this.sidebar_open && rects.is_empty();
+                        if hidden != this.lights_hidden {
+                            this.lights_hidden = hidden;
+                            crate::native_lights::set_traffic_lights_hidden(window, hidden);
+                        }
+                        this.set_browse_holes(rects, cx);
+                    });
                 })
                 .right(right)
                 .centre(centre);

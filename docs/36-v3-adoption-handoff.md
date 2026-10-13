@@ -338,3 +338,34 @@ peek over a live page — the Sonnet agent's live run on BaazCheck is next (owne
 **Answers to the three questions:** (a) sidebar signed off once the live check passes; (b) downloads → the Browse
 sidebar's control row beside ✦ · ⋯; toast chip + feedback slot → the sheet's bottom-right in both modes (an overlay
 window above a native page); (c) checkpoint merge after the live check.
+
+## 14. Owner round 7b (2026-10-13, later): "everything is stuck/slow"; closed = nothing; cleanup
+
+Owner: the app is stuck/slow; and the spec, restated — open: no separate app-wide header in either mode, the title
+and icons over a faded gradient like Claude Desktop; closed: nothing, not even the traffic lights; the pointer over
+the top edge brings the peek; everything performant; clean up the iteration's dead code.
+
+**Slowness, diagnosed (not guessed):** a `target/debug/baaz` offscreen capture from the *previous* session
+(`fixture-session:…;sidebar;wait:700`, the hang noted in §7's addendum) had been spinning at 96 % CPU for 20 h 49 m in
+taffy layout; the Mac was swapping (17 GB RAM, 4.8 of 6 GB swap used, millions of pageouts) under that plus my parallel
+release build, test build and five capture processes; the disk was at 12 GB free (`target/debug/deps` 65 GB, the
+library's target 35 GB, 3,250 scratch state dirs 5.6 GB). Killed the zombie and the test instance, removed the scratch
+dirs, pruned artifacts older than two days and the incremental caches: 34 GB free. The hang did **not** reproduce on
+the current tree (the same capture completes in seconds); it is recorded, not chased. Lesson (memory
+`feedback-disk-targets-fill-the-mac`, extended): never leave an offscreen capture unbounded — wrap it in a timeout —
+and never run a release build, a test build and captures at once on this machine.
+
+**The closed state, rebuilt (aui design-v2, harness feedback-mode, see the commits):** the fading strip of §13 is
+gone, as are the pill, its hover geometry, the hole "cut" depth and the `strip` step. Closed draws nothing: the
+chrome row is rendered only while the column shows or while the peek card is on screen (it rides in with the card),
+the toggle's last rect is cleared so it cannot re-arm the peek, and Baaz hides the window's traffic lights whenever
+the sidebar is closed and no peek card is on screen (`native_lights.rs`, `standardWindowButton:` `setHidden:`,
+called only on a change from the overlay-bounds report). Peek sources: the window's top edge (the 6 px frame band)
+and its left 12 px, plus the toggle while it is visible; one 150 ms arm / 250 ms dismiss clock as before. Holes are
+back to five values; the chained-mask union from §13 stays (it is the fix for the page showing through the peek).
+Sessions and Browse behave the same. Canvas v19: the closed boards show nothing at the top; n4/n5 rewritten.
+
+**Gates:** Baaz 1372 + suites, clippy clean; aui / aui-webview / gallery / aui-cef tests + clippy (see the session
+log); renders of Sessions open / closed / peek and Browse closed / peek looked at. Not seen by anyone: the lights
+hiding and returning (native; offscreen renders cannot show them), the top-edge peek with a real pointer, the peek
+over a live page with the union mask. The agent's live run is still owed (the access prompt was denied once).

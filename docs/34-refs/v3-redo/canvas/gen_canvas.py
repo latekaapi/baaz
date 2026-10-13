@@ -67,7 +67,6 @@ a{{color:{FG}}}a:hover{{color:#fff}}
 .fade{{position:absolute;left:0;right:0;top:0;height:64px;background:linear-gradient({L1} 20%,rgb(from {L1} r g b / 0));pointer-events:none}}
 .row{{position:absolute;left:0;right:0;top:0;height:32px;display:flex;align-items:center;z-index:2}}
 .title{{font-weight:600;color:{FG};white-space:nowrap}}
-.pill{{position:absolute;height:44px;background:{L0};z-index:3}}
 .contact{{position:absolute;left:242px;top:6px;bottom:6px;width:20px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,.16));z-index:1}}
 .lfade{{position:absolute;left:0;top:44px;width:256px;height:24px;background:linear-gradient({L0},rgb(from {L0} r g b / 0));z-index:2}}
 .comp{{position:absolute;background:{L2};border-radius:12px;box-shadow:{RAISED};padding:8px;display:flex;flex-direction:column;gap:4px}}
@@ -186,12 +185,6 @@ def chrome(mode):
             f'<button class="ib" aria-label="Hide sidebar" style="position:absolute;left:84px;top:8px;z-index:4">{ico(I["side"])}</button>'
             f'<div style="position:absolute;left:184px;top:10px;z-index:4">{switch(mode)}</div>')
 
-def pill(mode):
-    # Closed: the row becomes a pill — the sidebar's own top strip, flush with the window, the sidebar's width, 44 tall,
-    # the FRAME's colour, no edge, no drop, no rounding (the peek column continues it) — holding exactly lights, toggle, switch at the same x and y.
-    # Resting on it (or the toggle, or the window's left strip) peeks the whole sidebar as a Floating card behind it.
-    return f'<div class="pill" style="left:0;top:0;width:256px"></div>{chrome(mode)}'
-
 def sidebar_sessions(src):
     return (f'{chrome("s")}'
             f'<div style="position:absolute;left:0;top:44px">{img("sb-sessions-rows",254,804,src)}</div>'
@@ -213,7 +206,7 @@ def b_sessions_closed(src):
     b += f'<div style="position:absolute;left:268px;top:76px;width:892px;height:648px">{img("tx-closed",892,648,src)}</div>'
     b += f'<div class="fade" style="height:92px"></div></div>'
     b += composer_a((1440-880)//2, 18)
-    b += pill("s")
+    # Closed (owner 2026-10-13, round 7): nothing at the top — no row, no toggle, no lights; the top or left edge peeks.
     return b + '</div>'
 
 def b_browse_open(src):
@@ -227,7 +220,6 @@ def b_browse_open(src):
 def b_browse_closed(src):
     b = f'<div class="w" style="width:1440px;height:900px">'
     b += f'<div class="sheet" style="left:6px;top:6px;right:6px;bottom:6px;background:#FAFAFA;box-shadow:0 0 0 1px rgba(0,0,0,.5)"><div style="position:absolute;left:0;top:0">{img("page-closed",1424,848,src)}</div></div>'
-    b += pill("b")
     return b + '</div>'
 
 # ---- Tone study: the same miniature in three ladders ----
@@ -299,14 +291,14 @@ for f, (t, fn, w, h, x, y) in boards.items():
     index["boards"][f] = {"x": x, "y": y, "w": w, "h": h, "title": t}
     index["order"].insert(0, f)
 index["notes"] = {
- "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the strip = the sidebar's top 44, flush, the frame's colour, no rounding. Browse open uses the same drawn chrome and account footer as Sessions."},
+ "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: titles are 600. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom. Browse open uses the same drawn chrome and account footer as Sessions."},
  "t1": {"x": 0, "y": -240, "kind": "title1", "maxW": 2960, "text": "Baaz v3 — FINAL 2026-10-12: tone, depth, composer, then the four screens"},
  "t2": {"x": 0, "y": 1760, "kind": "title1", "maxW": 2960, "text": "The four screens — Sessions and Browse, open and closed"},
  "n1": {"x": 1520, "y": 0, "w": 420, "fill": "blue", "text": "Why the previous rounds read flat: a seven-unit step between near-black greys is about 3 L* and the eye needs 4 to 5 to see a level without a line. Drawing the line back in made it look outlined. So: a darker frame, nine-unit steps, highlight on the top edge instead of a border, and a slight cool bias so the greys are not dead."},
  "n2": {"x": 1520, "y": 640, "w": 420, "fill": "blue", "text": "FINAL (owner, 2026-10-12): the cool-neutral ladder, light edge (7 % top highlight + 6 % white ring on every surface), floating drop 8/24 at 40 %, dialog drop 24/56 at 50 %. Only two kinds of depth exist: a surface that sits in another (fill + top highlight) and a surface that floats (a faint ring + one soft drop). FF's stacked small drops at 18 % are replaced by one diffuse drop; FF's structure (substrate + offset, surface-relative overlays, the springs) stays."},
  "n3": {"x": 1520, "y": 1380, "w": 420, "fill": "blue", "text": "A is used on the screens. The chips lose their borders; the composer card is the single edge at the bottom of the sheet. Provider stays visible as a mark, model and mode as text controls that light on hover."},
- "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Revised 2026-10-13 (owner round 6): the sidebar column full height on the frame with its chrome row on top — lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once); the row stays as the sidebar's top strip — a plain rectangle flush with the window's top and left, the sidebar's width, 44 tall, the frame's colour, no edge, no drop, no rounding — holding exactly lights · toggle · switch at the same x and y. A 150 ms rest on the strip, the toggle or the left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, one surface with the strip, rounded 8 at the bottom right with a drop to its right; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px)."},
- "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed: the pill holds lights · toggle · switch and nothing else; the peek brings the sidebar with the address, the tabs and the controls. No tab strip. The pill and the peek over the native page are holes cut through the page window."},
+ "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Revised 2026-10-13 (owner round 7): the sidebar column full height on the frame with its chrome row on top — lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line over a 64 px fade, like Claude Desktop — no app-wide header in either mode. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once) and NOTHING stays — no row, no toggle, not even the traffic lights (hidden with the column). A 150 ms rest on the window's top edge (the 6 px frame band above the sheet) or its left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, rounded 8 at the bottom right with a drop to its right, its own row (lights · toggle · switch) riding in with it; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px)."},
+ "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed (owner round 7): nothing sits over the page — the sheet is the whole window less the 6 px frame; the top or left edge peeks the sidebar with the address, the tabs and the controls over the page. No tab strip. The peek over the native page is a hole cut through the page window (holes add up, so an overlap never flips back)."},
 }
 json.dump(index, open(f"{P}/canvas.json", "w"), indent=1)
 print("wrote", list(boards))
