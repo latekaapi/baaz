@@ -6,8 +6,8 @@ round 7 changed and why; the canvas "Baaz v3" (v19) is the spec; the tracker "Ba
 ## Where the code is (merged and PUSHED)
 | Repo | Branch | State |
 |---|---|---|
-| agentic-ui | `main` (the only branch) | **v0.4.1** tagged and pushed (563fd2a) |
-| harness (Baaz) | `main` (the only branch) | pinned to agentic-ui v0.4.1 (c0c1908), probe baselines regenerated on main (cb3dd32), pushed |
+| agentic-ui | `main` (the only branch) | **v0.4.2** tagged and pushed (6f8b209) |
+| harness (Baaz) | `main` (the only branch) | pinned to agentic-ui v0.4.2 (cdfeed7), probe clean against the baselines, pushed |
 
 **Git is clean (2026-10-13 evening):** both repos have only `main`, no stashes, no worktrees. Every unmerged branch
 and the old stash were tagged `archive/<branch>` (dashes for slashes) and the tags pushed — 7 in agentic-ui
@@ -61,6 +61,21 @@ scratchpad), run it, then `PlistBuddy -c "Set :CFBundleIdentifier sh.baaz.check"
   6 of 6 cold launches paint.
 - Canvas v23: the page sheet has no ring. Baselines regenerated with the pointer parked (an old baseline had caught
   a hover state).
+
+## Closed later the same night (owner round 9)
+- **Window drag / double-click zoom from the sidebar's row:** the shell's drag region wrapped an absolutely placed
+  row and had no height, so it never saw a press. The region now has the row's box. Driven live: drag moves the window
+  (row, peek row, Sessions title row), double-click zooms and restores.
+- **Dark page margins (Hacker News' body):** the CEF window and browser view had no background colour; in the
+  non-opaque page window a page without its own background showed the host's dark ground. Both are opaque white now
+  (aui-cef `PAGE_GROUND`). Measured live: white margins with the sidebar open, zoomed.
+- **"Page stretched after collapse"** (owner's screenshot, taken on the 19:35 v0.4.0 build): not reproducible on the
+  current build across ⌘B, Window › Zoom and double-click zoom (a CEF trace showed the window bounds right and the
+  page re-laid out). A horizontally squashed page is what the covered page's stand-in picture looked like when its
+  rect changed (`img().size_full()` stretches); the stand-in now uses `ObjectFit::Cover`. A measurement trap found on
+  the way: `screencapture` without a window filter caught another app's window over the page and read as "dark
+  margins" — sample through the computer-use screenshot or a window-bounded capture.
+- Probe trap, again: park the pointer OUTSIDE the 1440×900 capture area (screen bottom-right), or hover states leak.
 
 ## Open items to carry
 1. **Homeless controls** (owner's call, not built): the Browse downloads button → the Browse sidebar's control row
