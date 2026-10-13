@@ -291,3 +291,11 @@ peek brings the Browse sidebar (address, tabs), and switching to Sessions from t
 contact shadow reads as a soft gradient. One note the agent raised — the pill looking ~5 px narrower than the
 column — is its 8 px bottom-right rounding measured near the bottom: in the capture the pill's right edge at y 20 is
 x 256, the column's width exactly. Still only measurable by trace, not by screenshots: the slide itself.
+
+## 12. Owner round 6 (2026-10-13, ~7 AM): the strip is square; the peek is the frame colour, one surface with it
+
+Owner: fix the "5 px narrower" look (the strip's bottom rounding), and make the peek the same colour as the actual
+sidebar so it merges with the strip. **Built:** the pill/strip is a plain rectangle (no rounding; its hole radius 0);
+the peek card is `surface_1` (the frame) with no edge ring, rounded 8 at the bottom right only, the side drop as its
+only separation from the sheet, its rows rendered on the frame like the open column (no Floating ambient scope).
+Canvas v17. The sidebar is finished as far as the owner's notes go; the next session starts the original plan (D4).
