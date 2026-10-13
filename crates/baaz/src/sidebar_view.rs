@@ -807,13 +807,11 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The window's toggle for a collapsed Sessions sidebar: the library
-    /// draws it in the sidebar's title bar while open; collapsed, the
-    /// centre header carries it at the same x, past the traffic lights.
+    /// The sidebar's toggle, drawn by the shell in the sidebar's chrome row
+    /// (open) and in the peek card's row (closed).
     pub(crate) fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
-        // The shell's bar draws this in both states, so the label says what
-        // a click does now.
+        // The label says what a click does now.
         let label = if self.sidebar_open { "Hide sidebar" } else { "Show sidebar" };
         div()
             .id("hd-minimal-sidebar")
