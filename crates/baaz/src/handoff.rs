@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use aui::transcript::{HandoffStep, HandoffStepState, default_handoff_steps};
 use aui_protocol::{Block, HandoffItem, HandoffState, Session, TodoState, Turn};
 
@@ -847,6 +848,63 @@ pub fn handoff_tick_wanted(handoffs: &HashMap<String, HandoffRun>) -> bool {
     handoffs.values().any(HandoffRun::is_live)
 }
 
+
+/// A card id that stamps its own creation wall-ms: `handoff-<rand>-<ms>`.
+/// The stamp keeps two moves started in the same session apart.
+fn handoff_card_id() -> String {
+    let ms =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    format!("handoff-{}-{ms}", nanoid())
+}
+
+
+/// Records `call` as a touched file when it edited or wrote one.
+fn push_touched(files: &mut Vec<String>, call: &aui_protocol::ToolCall) {
+    if !matches!(call.kind, aui_protocol::ToolKind::Edit | aui_protocol::ToolKind::Write) {
+        return;
+    }
+    let target = call.target.trim();
+    if !target.is_empty() {
+        push_unique(files, format!("{} {target}", call.verb.trim()));
+    }
+}
+
+fn push_unique(out: &mut Vec<String>, item: String) {
+    if !out.iter().any(|existing| existing == &item) {
+        out.push(item);
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max + 4));
+    for (i, c) in text.chars().enumerate() {
+        if i >= max {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn block_text_first(blocks: &[Block]) -> &str {
+    for block in blocks {
+        if let Block::Text { text, .. } = block {
+            let line = text.lines().next().unwrap_or("").trim();
+            if !line.is_empty() {
+                return line;
+            }
+        }
+    }
+    ""
+}
+
+fn nanoid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    format!("{:08x}", nanos ^ (std::process::id().wrapping_mul(0x9E37)))
+}
+
 /// Mark the library's four default steps from a run's state — the one
 /// mapping both [`HandoffRun::steps`] and the transcript's card build
 /// share (the protocol card carries no step list, so the transcript
@@ -857,6 +915,7 @@ pub fn handoff_tick_wanted(handoffs: &HashMap<String, HandoffRun>) -> bool {
 /// `elapsed_secs` details the one current step (`"n s"`), when the
 /// caller knows a basis for it. The failed step carries the reason;
 /// refused stays all pending (nothing started).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn handoff_steps(
     state: &HandoffState,
@@ -941,19 +1000,10 @@ pub fn handoff_steps(
     steps
 }
 
-/// A card id that stamps its own creation wall-ms: `handoff-<rand>-<ms>`.
-/// The [`Block::Handoff`] card carries no timestamps, so the elapsed
-/// counter on its current step reads this back at render time with
-/// [`handoff_card_started_ms`] against the frame clock.
-fn handoff_card_id() -> String {
-    let ms =
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    format!("handoff-{}-{ms}", nanoid())
-}
-
 /// The run-age basis a card id stamps: `Some(ms)` for ids minted by
 /// [`handoff_card_id`], `None` for the older stamp-less shape (replays
 /// and snapshots from before it) — those cards show no counter.
+#[cfg(test)]
 pub fn handoff_card_started_ms(card_id: &str) -> Option<u64> {
     let rest = card_id.strip_prefix("handoff-")?;
     let (_, ms) = rest.rsplit_once('-')?;
@@ -961,53 +1011,6 @@ pub fn handoff_card_started_ms(card_id: &str) -> Option<u64> {
         return None;
     }
     ms.parse().ok()
-}
-
-/// Records `call` as a touched file when it edited or wrote one.
-fn push_touched(files: &mut Vec<String>, call: &aui_protocol::ToolCall) {
-    if !matches!(call.kind, aui_protocol::ToolKind::Edit | aui_protocol::ToolKind::Write) {
-        return;
-    }
-    let target = call.target.trim();
-    if !target.is_empty() {
-        push_unique(files, format!("{} {target}", call.verb.trim()));
-    }
-}
-
-fn push_unique(out: &mut Vec<String>, item: String) {
-    if !out.iter().any(|existing| existing == &item) {
-        out.push(item);
-    }
-}
-
-fn truncate_chars(text: &str, max: usize) -> String {
-    let mut out = String::with_capacity(text.len().min(max + 4));
-    for (i, c) in text.chars().enumerate() {
-        if i >= max {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn block_text_first(blocks: &[Block]) -> &str {
-    for block in blocks {
-        if let Block::Text { text, .. } = block {
-            let line = text.lines().next().unwrap_or("").trim();
-            if !line.is_empty() {
-                return line;
-            }
-        }
-    }
-    ""
-}
-
-fn nanoid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    format!("{:08x}", nanos ^ (std::process::id().wrapping_mul(0x9E37)))
 }
 
 #[cfg(test)]
@@ -1188,7 +1191,7 @@ mod tests {
             target: target.to_owned(),
             status: ToolStatus::Success,
             duration_ms: Some(1),
-            body: ToolBody::Read { lines: 1 },
+            body: ToolBody::Read { lines: 1, output_lines: Vec::new() },
             diff_stat: None,
         };
         let mut session = Session::new("s", aui_protocol::Provider::Muse, "m", "/tmp/proj");

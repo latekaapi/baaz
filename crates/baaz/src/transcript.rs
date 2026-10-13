@@ -17,21 +17,18 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use aui::data::button;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
-    goal_card, handoff_card, live_activity_row, marker_row, parse_markdown, plan_card,
-    question_card, runnable_command, summary_card, thinking_block, todo_list, tool_card,
-    tool_group, turn_fold, user_turn, AssistantTurnAction, GenericItemIntent, HandoffIntent,
-    LinkTarget, MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent, ToolCardAction,
+    goal_card, live_activity_row, marker_row, plan_card,
+    question_card, summary_card, thinking_block, todo_list, tool_card,
+    tool_group, turn_fold, user_turn, AssistantTurnAction, GenericItemIntent,
+    LinkTarget, MessageSelection, QuestionOutcome, SpanEvent,
     ToolCardIntent, ToolGroupData, ToolGroupIntent, TurnFoldIntent, UserTurnAction,
 };
 use aui_protocol::{
     ActivityState, Answer, ApprovalState, Block, Diff, DiffKind, DiffLine, HandoffState, Hunk, MarkerKind,
     PlanSection, PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, ToolStatus, Turn, TurnMeta,
 };
-use crate::handoff::{SummaryKind, handoff_card_started_ms, handoff_steps};
-use crate::terminal::{RunRequest, send_enter_for_alt};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
@@ -155,16 +152,6 @@ pub struct Folds {
     pub span_event: Option<SpanEventHandler>,
     /// Tool-group header and per-call intents, keyed by the group's fold key (C8).
     pub tool_group: Option<ToolGroupActionHandler>,
-    /// D49 play buttons: run the request in the terminal dock. Wired on
-    /// shell tool cards ("Run in terminal") and under assistant turns with
-    /// runnable fences ("Run"), and honoured under `--replay` — the request
-    /// is entirely local, never a turn, never the wire.
-    pub terminal_run: Option<TerminalRunHandler>,
-    /// D51 "Open terminal" on terminal tool cards: the tab to focus, when
-    /// the card names one — `None` opens the dock on its active tab.
-    /// Entirely local like [`Folds::terminal_run`], honoured under
-    /// `--replay` too.
-    pub open_terminal: Option<OpenTerminalHandler>,
     /// D51 live mirror: tool-call id → the block's last lines and whether
     /// it is still running, snapshotted once per frame by the session view
     /// from the terminal host. Empty under `--replay` (no host), where
@@ -198,15 +185,19 @@ pub struct Folds {
     /// switch lives outside this module's scope; this is the per-frame
     /// backing the view fills in.
     pub fold_finished_turns: bool,
-    /// B12: "Open full text" on a generic card (and the open-in-pane fold
-    /// row on search/MCP cards): the card's title and its whole text, out
-    /// to the right pane's read-only doc view. `None` leaves the card's
-    /// own capped body as the whole affordance.
-    pub open_full_text: Option<FullTextHandler>,
     /// B12: the turn fold's `+N −M` chip: the turn id, out to the Changes
     /// view scoped to that turn (or the session without a per-turn
     /// checkpoint). `None` draws the chip without its tap.
     pub open_turn_diff: Option<CardHandler>,
+    /// D4: what each user turn was sent with (pictures, files, quotation,
+    /// annotation batch), by turn id — Baaz's own record (`crate::sent`).
+    pub sent: Rc<HashMap<String, crate::sent::SentItem>>,
+    /// D4: a sent picture or file was pressed: its path, out to the right
+    /// pane (a picture previews, a file is revealed in Files).
+    pub open_attachment: Option<CardHandler>,
+    /// D4: a quote at the top of a bubble was pressed: the id of the turn it
+    /// was quoted from, to scroll back to.
+    pub scroll_to_turn: Option<CardHandler>,
     /// Q1b: tool-call id → the wall time (epoch ms) its block first
     /// appeared, snapshotted once per frame by the session view. Live
     /// run rows tick from the run's first member start, never from summed
@@ -241,16 +232,12 @@ pub fn refresh_tool_starts(turns: &[Rc<Turn>], starts: &mut HashMap<String, u64>
     starts.retain(|id, _| seen.contains(id));
 }
 
-/// B12: show a whole text elsewhere (the right pane's doc view): the
-/// card's title and its full text, out.
-pub type FullTextHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
-
 /// What a handoff card needs to talk back: "Open the new session" opens
 /// the destination by id, "Cancel" aborts the move by the card's block id.
 pub struct HandoffCards {
-    /// Open a session by id: the card's destination session.
+    /// Open a session by id: the marker's destination session.
     pub open: CardHandler,
-    /// Cancel the move: the card's own block id.
+    /// Cancel a move still in progress: the block's own id.
     pub cancel: CardHandler,
 }
 
@@ -270,25 +257,6 @@ pub fn skill_load_name(call: &ToolCall) -> Option<&str> {
         _ => None,
     }
 }
-
-/// The quiet row's text: "Loaded skill `name`", with the scope joined when
-/// the catalog reported one (D63).
-pub fn skill_load_text(name: &str, scope: Option<&str>) -> String {
-    match scope.filter(|scope| !scope.trim().is_empty()) {
-        Some(scope) => format!("Loaded skill `{name}` · {scope}"),
-        None => format!("Loaded skill `{name}`"),
-    }
-}
-
-/// A play button press: the resolved command and whether Enter follows the
-/// paste. The view emits it as [`crate::session::SessionEvent::RunInTerminal`];
-/// the application owns the dock.
-pub type TerminalRunHandler = Rc<dyn Fn(RunRequest, &mut Window, &mut App)>;
-
-/// An "Open terminal" press: the tab to focus, when the card names one.
-/// The view emits it as [`crate::session::SessionEvent::OpenTerminal`];
-/// the application opens the dock on that tab.
-pub type OpenTerminalHandler = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
 
 /// One frame's live mirror of a terminal tab's block (D51): the block's
 /// last lines for the card body, and whether the tab is still busy.
@@ -310,27 +278,9 @@ pub const TERMINAL_MIRROR_LINES: usize = 6;
 /// Skills page on that skill.
 pub type SkillOpenHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
-/// The header action id of "Run in terminal" on shell tool cards.
-pub const RUN_IN_TERMINAL_ACTION_ID: &str = "run-in-terminal";
-
-/// The header action label of "Run in terminal" on shell tool cards.
-pub const RUN_IN_TERMINAL_LABEL: &str = "Run in terminal";
-
-/// The header action id of "Open terminal" on terminal tool cards (D51):
-/// opens the dock and focuses the card's tab.
-pub const OPEN_IN_TERMINAL_ACTION_ID: &str = "open-terminal";
-
-/// The header action label of "Open terminal" on terminal tool cards.
-/// The label is the accessible name: the library's button only takes a
-/// role with an explicit accessibility label, and its action slot carries
-/// id/label/icon alone — so the human label here is what a screen reader
-/// has to announce the control with.
-pub const OPEN_IN_TERMINAL_LABEL: &str = "Open terminal";
-
 /// Whether a tool call is a terminal tool call (D51): a shell card whose
 /// verb is the folds' terminal verb, on every lane. Only these cards get
-/// the "Open terminal" action and the live mirror; every other shell card
-/// keeps "Run in terminal".
+/// the live mirror.
 pub fn is_terminal_card(call: &ToolCall) -> bool {
     matches!(&call.kind, ToolKind::Shell)
         && (call.verb == TERMINAL_RUNNING_VERB || call.verb == TERMINAL_RAN_VERB)
@@ -364,28 +314,6 @@ pub fn terminal_command(target: &str) -> String {
             command.trim_end().to_owned()
         }
         _ => target.to_owned(),
-    }
-}
-
-/// The run row's button label under assistant turns with runnable fences.
-pub const RUN_LABEL: &str = "Run";
-
-/// The command a shell tool card offers to run (D49): Muse's shell tool and
-/// the `!` userShell both fold to [`ToolKind::Shell`] with a
-/// [`ToolBody::Shell`] body, so one match covers both. The card's command
-/// text is its target; anything else — a read, a search that fell back to a
-/// shell body, a blank target — offers no button. Terminal cards offer
-/// none either: their command already ran in the dock, and their action
-/// is "Open terminal", not a rerun.
-pub fn shell_run_command(call: &ToolCall) -> Option<String> {
-    if is_terminal_card(call) {
-        return None;
-    }
-    match (&call.kind, &call.body) {
-        (ToolKind::Shell, ToolBody::Shell { .. }) if !call.target.trim().is_empty() => {
-            Some(call.target.clone())
-        }
-        _ => None,
     }
 }
 
@@ -577,69 +505,6 @@ pub fn display_target(call: &ToolCall, workspace_root: &str, home: &str) -> Stri
     }
 }
 
-/// Whether the pressed header action is the open-terminal action: the
-/// payload of [`ToolCardIntent::Action`] is the action's index in the
-/// order the card received them, so the check is against the id at that
-/// index — the same index rule [`action_is_run`] follows.
-pub fn action_is_open(actions: &[ToolCardAction], index: usize) -> bool {
-    actions.get(index).is_some_and(|action| action.id == OPEN_IN_TERMINAL_ACTION_ID)
-}
-
-/// Whether the pressed header action is the run action: the payload of
-/// [`ToolCardIntent::Action`] is the action's index in the order the card
-/// received them, so the check is against the id at that index — a card
-/// carrying more than one action still maps back to the right command.
-pub fn action_is_run(actions: &[ToolCardAction], index: usize) -> bool {
-    actions.get(index).is_some_and(|action| action.id == RUN_IN_TERMINAL_ACTION_ID)
-}
-
-/// The command a fenced code block offers to run (D49): exactly what
-/// [`runnable_command`] returns — the decision function owns which fences
-/// count, so a `console` block runs its prompt lines with prompts stripped,
-/// and a `rust` block offers no button.
-pub fn code_run_command(lang: Option<&str>, code: &str) -> Option<String> {
-    runnable_command(lang.unwrap_or(""), code)
-}
-
-/// One runnable fence of an assistant turn, in fence order: the label the
-/// run row shows and the exact command the press runs.
-pub struct RunnableBlock {
-    /// The command's first line, elided: what the run row names.
-    pub label: String,
-    /// What [`runnable_command`] returned: what the press runs.
-    pub command: String,
-}
-
-/// A command's first line as a one-line label, overlong commands cut with
-/// an ellipsis.
-fn run_label(command: &str) -> String {
-    const MAX: usize = 80;
-    let first = command.lines().next().unwrap_or("").trim();
-    if first.chars().count() <= MAX {
-        return first.to_owned();
-    }
-    let cut: String = first.chars().take(MAX - 1).collect();
-    format!("{cut}…")
-}
-
-/// The runnable fenced blocks of assistant prose, in fence order: exactly
-/// the fences [`runnable_command`] returns `Some` for, running what it
-/// returns.
-pub fn runnable_blocks(text: &str) -> Vec<RunnableBlock> {
-    parse_markdown(text)
-        .iter()
-        .filter_map(|block| match block {
-            MarkdownBlock::CodeBlock { lang, text } => {
-                code_run_command(lang.as_deref(), text).map(|command| RunnableBlock {
-                    label: run_label(&command),
-                    command,
-                })
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// A markdown link click: the target the library parsed out.
 pub type TurnLinkHandler = Rc<dyn Fn(LinkTarget, &mut Window, &mut App)>;
 
@@ -759,6 +624,12 @@ pub struct Cards {
     /// How long each pending question has left, by block id, against how long
     /// it was given. The app ticks the clock; the card only draws it.
     pub countdowns: HashMap<String, (u64, u64)>,
+    /// D4 wizard: a several-question prompt shows one question at a time.
+    /// By block id, the question's step and whether it is the current one;
+    /// a pending sibling that is not current draws nothing.
+    pub wizard: HashMap<String, (aui::transcript::Wizard, bool)>,
+    /// "Back" in a wizard: the block id of the question showing.
+    pub back: CardHandler,
     /// "Retry" on an error card: the id of the turn that failed.
     pub retry: CardHandler,
     /// Which failed turns still have their prompt text, so the button is only
@@ -1735,11 +1606,29 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
     // draw its own underneath.
     let silent = silent_reasoning(turn);
     match turn {
-        Turn::User { id, text, timestamp, .. } => {
+        Turn::User { id, text, timestamp, attachments, .. } => {
             if row != 0 {
                 return div().into_any_element();
             }
-            let mut turn = user_turn(SharedString::from(id.clone()), text.clone()).actions_bottom(true);
+            // D4: what went out with the turn — Baaz's own record first (it
+            // keeps the pictures' paths), else what the wire echoed.
+            let sent = folds.sent.get(id);
+            let shown: Vec<aui_protocol::Attachment> = sent.map(|item| item.attachments.clone()).unwrap_or_else(|| attachments.clone());
+            let mut turn = user_turn(SharedString::from(id.clone()), text.clone())
+                .attachments(shown.clone())
+                .annotations(sent.and_then(|item| item.annotations.as_ref()).map(|batch| batch.batch()));
+            if let Some(open) = &folds.open_attachment {
+                let open = open.clone();
+                turn = turn.on_attachment(move |index, window, cx| {
+                    if let Some(path) = shown.get(index).and_then(|a| a.path.clone()) {
+                        open(path, window, cx);
+                    }
+                });
+            }
+            if let Some(scroll) = &folds.scroll_to_turn {
+                let scroll = scroll.clone();
+                turn = turn.on_quote(move |source, window, cx| scroll(source, window, cx));
+            }
             // The how-long-ago caption under the bubble, beside the action
             // rail. A turn the wire never timed draws no caption and keeps
             // its old height.
@@ -1890,69 +1779,17 @@ pub fn artifact_summary_text(detail: &str) -> String {
 }
 
 /// B12: the fallback card for an unknown item kind: collapsed to a preview
-/// by default, with a working chevron and "Open full text" into the right
-/// pane's read-only doc view.
+/// by default, with a working chevron; open, its body unfolds in place
+/// (D4: "N more lines" in the card, no hop to the pane).
 fn generic_card(key: &str, id: ElementId, kind: &str, status: &str, text: &str, folds: &Folds) -> AnyElement {
-    let mut card = generic_item_card(id, kind.to_owned(), status.to_owned(), text.to_owned())
-        .open(folds.open(key, false));
     let toggle = folds.toggle.clone();
     let key = key.to_owned();
-    let title = kind.to_owned();
-    let body = text.to_owned();
-    let open_full = folds.open_full_text.clone();
-    let (full_title, full_body) = (title.clone(), body.clone());
-    card = card.on_intent(move |intent, window, cx| match intent {
-        GenericItemIntent::Toggle => toggle(key.clone(), window, cx),
-        GenericItemIntent::OpenFull => {
-            if let Some(open_full) = &open_full {
-                open_full(title.clone(), body.clone(), window, cx);
-            } else {
-                toggle(key.clone(), window, cx);
-            }
-        }
-    });
-    if let Some(open_full) = &folds.open_full_text {
-        let open_full = open_full.clone();
-        card = card.on_open_full(move |window, cx| open_full(full_title.clone(), full_body.clone(), window, cx));
-    }
-    card.into_any_element()
-}
-
-/// B12: the whole text an open-in-pane fold row offers: search hits, MCP
-/// results and shell output open in the right pane's doc view instead of
-/// inlining past a few lines. `None` is a card with nothing worth opening
-/// (reads, bare headers), which keeps its toggle.
-fn tool_pane_text(call: &ToolCall) -> Option<(String, String)> {
-    let title = if call.target.trim().is_empty() {
-        call.verb.clone()
-    } else {
-        format!("{} {}", call.verb, call.target)
-    };
-    match &call.body {
-        ToolBody::Search { hits } => {
-            let text = hits
-                .iter()
-                .map(|hit| format!("{}:{}: {}", hit.path, hit.line, hit.snippet))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some((title, text))
-        }
-        ToolBody::Mcp { result_json, .. } => Some((title, result_json.clone())),
-        ToolBody::Shell { output_lines, .. } => Some((title, output_lines.join("\n"))),
-        ToolBody::Web { results, .. } => {
-            let text = results
-                .iter()
-                .map(|result| format!("{} — {}", result.title, result.url))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some((title, text))
-        }
-        ToolBody::Read { .. }
-        | ToolBody::Edit { .. }
-        | ToolBody::Browser { .. }
-        | ToolBody::SubAgent { .. }
-        | ToolBody::None => None,
-    }
+    generic_item_card(id, kind.to_owned(), status.to_owned(), text.to_owned())
+        .open(folds.open(key.as_str(), false))
+        .on_intent(move |intent, window, cx| match intent {
+            GenericItemIntent::Toggle => toggle(key.clone(), window, cx),
+        })
+        .into_any_element()
 }
 
 /// One block of an assistant turn.
@@ -1977,7 +1814,7 @@ fn block(
 ) -> AnyElement {
     let id = ElementId::from(SharedString::from(key.to_owned()));
     match block {
-        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds, cx),
+        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds),
         Block::Thinking { text, elapsed_ms, summary, state } => {
             thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
                 .unwrap_or_else(|| div().into_any_element())
@@ -2028,77 +1865,27 @@ fn block(
     }
 }
 
-/// One handoff card: the move's state, its progress steps, what the pack
-/// carried and what it left behind, and the two intents the card raises
-/// ("Open the new session", "Cancel"). Read-only without [`Folds::handoff`].
-///
-/// The protocol card carries no step list, so the steps re-derive here
-/// from the block's own fields through [`handoff_steps`]: the same
-/// mapping [`crate::handoff::HandoffRun::steps`] uses. The wait reads off
-/// the Checkpointed shape (extractive kind, no destination yet); the
-/// current step's elapsed counter reads the run's age off the card id's
-/// creation stamp against this frame's clock, so it ticks on any
-/// re-render — a stamp-less id simply shows no counter. Every step row
-/// already carries its role and label from the library.
+/// A hand-off (D4; the owner retired the card, 2026-10-13): one marker row
+/// with both providers' marks and where the move is; once the fresh session
+/// exists, "Open the new session". The confirm dialog shows what crossed
+/// over, once, before it happens.
 fn handoff_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement {
-    let Block::Handoff {
-        id: handoff_id,
-        from,
-        to,
-        from_model,
-        to_model,
-        state,
-        carried,
-        lost,
-        pack_tokens,
-        destination_session,
-    } = block
-    else {
+    let Block::Handoff { id: handoff_id, from, to, to_model, state, destination_session, .. } = block else {
         return div().into_any_element();
     };
-    let summary_kind = carried
-        .first()
-        .and_then(|item| item.detail.as_deref())
-        .and_then(|detail| {
-            if detail == SummaryKind::Model.label() {
-                Some(SummaryKind::Model)
-            } else if detail == SummaryKind::Extractive.label() {
-                Some(SummaryKind::Extractive)
-            } else {
-                None
-            }
-        });
-    let waiting = matches!(state, HandoffState::Checkpointed)
-        && !matches!(summary_kind, Some(SummaryKind::Model))
-        && destination_session.is_none();
-    let elapsed = handoff_card_started_ms(handoff_id)
-        .map(|started| folds.now_ms.saturating_sub(started) / 1000);
-    let steps = handoff_steps(
-        state,
-        *to,
-        summary_kind,
-        waiting,
-        destination_session.is_some(),
-        !carried.is_empty(),
-        elapsed,
-    );
-    let card = handoff_card(id, *from, *to, to_model.clone(), state.clone())
-        .from_model(from_model.clone())
-        .carried(carried.clone())
-        .lost(lost.clone())
-        .pack_tokens(*pack_tokens)
-        .steps(steps)
-        .destination_session(destination_session.clone());
-    let Some(handoff) = &folds.handoff else { return card.into_any_element() };
-    let (open, cancel) = (handoff.open.clone(), handoff.cancel.clone());
-    // The Cancel intent names no card — the block id rides in the closure
-    // the card captured, which is this render's own handoff id.
-    let handoff_id = handoff_id.clone();
-    card.on_intent(move |intent, window, cx| match intent {
-        HandoffIntent::OpenSession(destination) => open(destination, window, cx),
-        HandoffIntent::Cancel => cancel(handoff_id.clone(), window, cx),
-    })
-    .into_any_element()
+    let row = aui::transcript::handoff_marker(id, *from, *to, to_model, state);
+    let in_progress = matches!(state, HandoffState::Requested | HandoffState::Quiescing | HandoffState::Checkpointed | HandoffState::Prepared);
+    match (destination_session, &folds.handoff) {
+        (Some(destination), Some(handoff)) if matches!(state, HandoffState::Activated) => {
+            let (open, destination) = (handoff.open.clone(), destination.clone());
+            row.link("Open the new session", move |_, window, cx| open(destination.clone(), window, cx)).into_any_element()
+        }
+        (_, Some(handoff)) if in_progress => {
+            let (cancel, handoff_id) = (handoff.cancel.clone(), handoff_id.clone());
+            row.link("Cancel", move |_, window, cx| cancel(handoff_id.clone(), window, cx)).into_any_element()
+        }
+        _ => row.into_any_element(),
+    }
 }
 
 /// A skill load's quiet one-line row (D63): muted text, no card chrome, no
@@ -2107,27 +1894,23 @@ fn handoff_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement
 fn skill_load_row(id: ElementId, name: &str, folds: &Folds, cx: &mut App) -> AnyElement {
     use aui_tokens::{ActiveAui, AuiStyled};
     let p = cx.aui().colors;
-    let text = skill_load_text(name, folds.skill_scopes.get(name).map(String::as_str));
-    let row = h_flex()
-        .w_full()
-        .items_center()
-        .gap(px(scale::SP_2))
-        .py(px(2.0))
-        .ui(scale::FS_13)
-        .text_color(p.ink_3)
-        .child(text);
+    // D4 (docs/41 §2.4): a quiet status row — the spark glyph, "Loaded
+    // skill", the name in mono, its source faint. A click opens the Skills
+    // page on it (the owner kept the click, 2026-10-14), so it carries no
+    // chevron.
+    let scope = folds.skill_scopes.get(name).cloned();
+    let mut row = aui::transcript::quiet_status_row(id, aui_icons::icon(IconName::Sparkle).size(px(14.0)).color(p.ink_2))
+        .part(div().flex_none().child("Loaded skill"))
+        .part(div().flex_none().mono(scale::FS_12).child(name.to_owned()));
+    if let Some(scope) = scope {
+        row = row.part(div().flex_none().text_color(p.ink_4).child(format!("· {scope}")));
+    }
     match &folds.open_skill {
         Some(open) => {
             let open = open.clone();
             let skill = name.to_owned();
-            let label = format!("Open skill {skill} in the Skills page.");
-            row.id(id)
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .on_click(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                    open(skill.clone(), window, cx);
-                })
+            row.label(format!("Open skill {skill} in the Skills page."))
+                .on_toggle(move |_, window, cx| open(skill.clone(), window, cx))
                 .into_any_element()
         }
         None => row.into_any_element(),
@@ -2157,14 +1940,14 @@ fn text_card(
     meta: Option<&TurnMeta>,
     timestamp: Option<u64>,
     folds: &Folds,
-    cx: &mut App,
 ) -> AnyElement {
-    // Pin has no meaning on a turn — it lives on sidebar sessions — so the
-    // row keeps copy, retry and fork only.
+    // D4: the hover rail (copy + footer) belongs to the message, so only
+    // the closing block carries it; relative image paths resolve against
+    // the workspace.
     let mut turn = assistant_turn(id.clone(), text.to_owned())
-        .actions(&[AssistantTurnAction::Copy, AssistantTurnAction::Retry, AssistantTurnAction::Fork])
         .streaming(streaming)
-        .actions_bottom(last);
+        .rail(last)
+        .image_root((!folds.workspace_root.is_empty()).then(|| SharedString::from(folds.workspace_root.clone())));
     if let Some(meta) = meta {
         if last && !streaming && meta != &TurnMeta::default() {
             // The library draws the footer from the meta as handed over,
@@ -2214,73 +1997,7 @@ fn text_card(
             turn = turn.on_action(move |action, window, cx| act(turn_id.clone(), action, window, cx));
         }
     }
-    let body = turn.into_any_element();
-    // D49's "Run" row: one button per runnable fence, in fence order. The
-    // library's markdown view carries no per-fence action slot, so the row
-    // rides under the turn, in the same transcript row — the turn itself
-    // renders exactly as before, and a turn with no runnable fence renders
-    // no row at all.
-    match (&folds.terminal_run, runnable_blocks(text)) {
-        (Some(run), blocks) if !blocks.is_empty() => {
-            v_flex().child(body).child(code_run_row(&id, &blocks, run, cx)).into_any_element()
-        }
-        _ => body,
-    }
-}
-
-/// The "Run" row under an assistant turn with runnable fences (D49): one
-/// ghost button per fence with the command's first line beside it. A press
-/// runs what [`runnable_command`] returned for that fence — for a `console`
-/// block the prompt lines, prompts stripped, not the raw fence — pasting
-/// the whole command; ⌥-click pastes without Enter.
-fn code_run_row(
-    id: &ElementId,
-    blocks: &[RunnableBlock],
-    run: &TerminalRunHandler,
-    cx: &mut App,
-) -> AnyElement {
-    use aui_tokens::{ActiveAui, AuiStyled};
-    let p = cx.aui().colors;
-    let mut row = v_flex().w_full().pt(px(4.0)).gap(px(2.0));
-    for (index, block) in blocks.iter().enumerate() {
-        let run = run.clone();
-        let command = block.command.clone();
-        let label = block.label.clone();
-        row = row.child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    button((id.clone(), SharedString::from(format!("run-{index}"))), RUN_LABEL)
-                        .xs()
-                        .ghost()
-                        .icon(IconName::Play)
-                        // The human label names the control for the
-                        // accessibility tree (V1): one Run button per
-                        // fence, each named for the command it runs.
-                        .accessibility_label(SharedString::from(format!("Run {label}")))
-                        .on_click(move |_, window, cx| {
-                            if let Some(request) = RunRequest::new(
-                                command.clone(),
-                                send_enter_for_alt(window.modifiers().alt),
-                            ) {
-                                run(request, window, cx);
-                            }
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .mono(scale::FS_12)
-                        .text_color(p.ink_3)
-                        .child(SharedString::from(label)),
-                ),
-        );
-    }
-    row.into_any_element()
+    turn.into_any_element()
 }
 
 /// The reasoning trace: a live one stays open, a finished one collapses to
@@ -2362,8 +2079,13 @@ fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> An
         return generic_card(key, id, "tool", "done", "", folds);
     };
     let mut group = tool_group(id, &data, folds.open(key, false));
-    for (index, _) in data.calls.iter().enumerate() {
-        group = group.call_open(index, folds.open(&format!("{key}:{index}"), true));
+    // Each call is a row of the one card (D4): its output opens like a lone
+    // card's would, and its "N more lines" unfolds in place.
+    for (index, call) in data.calls.iter().enumerate() {
+        let row = format!("{key}:{index}");
+        group = group
+            .call_open(index, folds.open(&row, default_open(call)))
+            .call_unfolded(index, folds.open(&unfold_key(&row), false));
     }
     if let Some(handler) = &folds.tool_group {
         let handler = handler.clone();
@@ -2371,6 +2093,23 @@ fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> An
         group = group.on_intent(move |intent, window, cx| handler(key.clone(), intent, window, cx));
     }
     group.into_any_element()
+}
+
+/// The pending approval's subtitle (docs/41 §2.6): who wants what, where —
+/// "Muse wants to run a shell command in acme-web".
+pub fn approval_subtitle(host: Option<&str>, kind: aui_protocol::ApprovalBodyKind, tool: &str, workspace_root: &str) -> String {
+    let who = host.unwrap_or("Muse");
+    let what = match kind {
+        aui_protocol::ApprovalBodyKind::Command => "run a shell command".to_owned(),
+        aui_protocol::ApprovalBodyKind::FileWrite => "write a file".to_owned(),
+        aui_protocol::ApprovalBodyKind::Other => format!("use {tool}"),
+    };
+    let project = std::path::Path::new(workspace_root).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if project.is_empty() {
+        format!("{who} wants to {what}")
+    } else {
+        format!("{who} wants to {what} in {project}")
+    }
 }
 
 /// One approval, with whatever the app has decided about it: the open
@@ -2382,8 +2121,6 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         command,
         reason,
         cwd,
-        capabilities,
-        scope,
         body_kind,
         state,
         rule,
@@ -2393,16 +2130,16 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         badges,
         feedback,
         resolved_by,
+        ..
     } = block
     else {
         return div().into_any_element();
     };
     let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
         .title(approval_title(folds.approval_host.as_deref(), tool))
+        .subtitle(approval_subtitle(folds.approval_host.as_deref(), *body_kind, tool, &folds.workspace_root))
         .reason(reason.clone())
         .cwd(cwd.clone())
-        .capabilities(capabilities.clone())
-        .scope(*scope)
         .body_kind(*body_kind)
         .rule(rule.clone().unwrap_or_default())
         .choices(choices.clone())
@@ -2462,6 +2199,17 @@ fn question_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         card = card.timeout(*total, *total);
     }
     let Some(cards) = &folds.cards else { return card.into_any_element() };
+    // D4: several questions are one card, one at a time (the owner's
+    // wizard, 2026-10-13): a pending sibling that is not the current step
+    // draws nothing; the current one carries the step, Back and Next.
+    if let Some((wizard, current)) = cards.wizard.get(question_id) {
+        if !*current {
+            return div().into_any_element();
+        }
+        let back = cards.back.clone();
+        let id = question_id.clone();
+        card = card.wizard(Some(wizard.clone())).on_back(move |_, window, cx| back(id.clone(), window, cx));
+    }
     if let Some(selected) = cards.selections.get(question_id) {
         card = card.selected(selected.clone());
     }
@@ -2592,17 +2340,14 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     let mut body = call.body.clone();
     // X2: an opened big diff is bounded — the display copy is cut to the
     // first hunk's first rows plus a count, while the stored block keeps
-    // the whole diff. No new element is added here (the count rides an
-    // existing diff row the library already draws), so no new role/label
-    // is owed; the card toggle keeps its own.
+    // the whole diff.
     if let ToolBody::Edit { diff } = &body {
         let mut cut = display_diff(diff, DIFF_DISPLAY_CAP);
         cut.path = display_path(&cut.path, &folds.workspace_root, &home_dir());
         body = ToolBody::Edit { diff: cut };
     }
     // A fetched full output replaces the truncated visible text on the
-    // server's result only (D4): the fold never changes, the card just
-    // renders what the fetch returned.
+    // server's result only: the card just renders what the fetch returned.
     if let (ToolBody::Shell { output_lines, .. }, Some(full)) = (&mut body, full) {
         if let FullOutputState::Ready { lines, capped } = &full.state {
             *output_lines = lines.clone();
@@ -2611,12 +2356,9 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
             }
         }
     }
-    // The card's own action slot: its fold row already emits Unfold,
-    // so on a truncated card that intent is "Show full output" and
-    // fetches; everywhere else every intent still just toggles, as
-    // before. The row's label stays the library's ("N more lines") —
-    // the library owns the card's text and this app does not change
-    // it.
+    // D4: the "N more lines" row expands the body in place; on a truncated
+    // card it also fetches the whole output (the fold flag flips either
+    // way, so the fetched lines show unfolded).
     let (fetchable, idle) = full
         .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
         .unwrap_or((false, false));
@@ -2624,8 +2366,7 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     // D51's terminal card: while the tab lives the body mirrors the
     // block's last lines from the frame's snapshot; once the tab is gone
     // (or under `--replay`, where the snapshot is empty) the card keeps
-    // the folded result text. The mirror flag decides the live pill —
-    // the tab still runs — while the fold's own flag covers the rest.
+    // the folded result text.
     if is_terminal_card(call) {
         if let ToolBody::Shell { output_lines, live, .. } = &mut body {
             if let Some(mirror) = folds.terminal_mirror.get(&call.id).cloned() {
@@ -2634,84 +2375,53 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
             }
         }
     }
-    // D51's "Open terminal" on terminal cards, D49's "Run in terminal" on
-    // every other shell card: a terminal command already ran in the dock,
-    // so its card opens the dock rather than offering a rerun.
-    let terminal = is_terminal_card(call);
-    let open_tab = if terminal { terminal_tab_id(&call.target) } else { None };
-    let run_command = shell_run_command(call);
-    let mut actions = Vec::new();
-    if terminal {
-        actions.push(ToolCardAction::new(OPEN_IN_TERMINAL_ACTION_ID, OPEN_IN_TERMINAL_LABEL));
-    } else if run_command.is_some() {
-        actions.push(
-            ToolCardAction::new(RUN_IN_TERMINAL_ACTION_ID, RUN_IN_TERMINAL_LABEL)
-                .icon(IconName::Play),
-        );
-    }
-    // X2: big Write/Edit cards start closed (the toggle still persists
-    // through `folds`), and a shell header names only the command's first
-    // line — the block keeps the full target, so run-in-terminal and the
-    // tab lookup below still see the whole command. Z6b: a file header
-    // names the workspace-relative path; the open/reveal below still see
-    // the whole target.
-    let mut card = tool_card(
-        id,
-        call.verb.clone(),
-        display_target(call, &folds.workspace_root, &home_dir()),
-        call.status,
-        body,
-    )
+    // D4 (docs/41 §2.5): an MCP call's verb is `server · tool`; its target
+    // is the first parameter's value when the adapter repeated the verb.
+    let (verb, target) = match (&call.kind, &call.body) {
+        (ToolKind::Mcp { server, tool }, ToolBody::Mcp { params, .. }) => {
+            let verb = format!("{server} · {tool}");
+            let target = if call.target.trim().is_empty() || call.target == verb {
+                params.first().map(|(_, value)| value.clone()).unwrap_or_default()
+            } else {
+                call.target.clone()
+            };
+            (verb, target)
+        }
+        _ => (call.verb.clone(), display_target(call, &folds.workspace_root, &home_dir())),
+    };
+    let unfold = unfold_key(key);
+    let mut card = tool_card(id, verb, target, call.status, body)
         .duration_ms(call.duration_ms)
-        .open(folds.open(key, default_open(call)));
-    if !actions.is_empty() {
-        card = card.actions(actions.clone());
+        .diff_stat(call.diff_stat)
+        .open(folds.open(key, default_open(call)))
+        .unfolded(folds.open(&unfold, false));
+    // A web result's title is the link (D4): it opens like a link in prose.
+    if let Some(on_link) = folds.link.clone() {
+        card = card.on_link(move |url, window, cx| on_link(LinkTarget::Url(url), window, cx));
     }
-    let run = folds.terminal_run.clone();
-    let open = folds.open_terminal.clone();
-    card
-        .on_intent({
-            let toggle = folds.toggle.clone();
-            let key = key.to_owned();
-            // B12: the open-in-pane fold row on search/MCP cards shows the
-            // whole text in the right pane's doc view; without wiring it
-            // keeps the toggle.
-            let pane = tool_pane_text(call).zip(folds.open_full_text.clone());
-            move |intent, window, cx| match intent {
-                ToolCardIntent::OpenInPane => match &pane {
-                    Some(((title, text), open)) => open(title.clone(), text.clone(), window, cx),
-                    None => toggle(key.clone(), window, cx),
-                },
-                ToolCardIntent::Unfold if fetchable && idle => {
+    card.on_intent({
+        let toggle = folds.toggle.clone();
+        let key = key.to_owned();
+        move |intent, window, cx| match intent {
+            ToolCardIntent::Unfold => {
+                if fetchable && idle {
                     if let Some(show) = &show {
                         show(block_id.clone(), window, cx);
-                    } else {
-                        toggle(key.clone(), window, cx);
                     }
                 }
-                // "Open terminal" opens the dock on the card's tab; a
-                // ⌥-click run pastes without Enter, a plain click sends
-                // it. Anything that is not either action still toggles.
-                ToolCardIntent::Action(index) => match (&open, &open_tab) {
-                    (Some(open), _) if action_is_open(&actions, index) => {
-                        open(open_tab.clone(), window, cx);
-                    }
-                    _ => match (&run, &run_command) {
-                        (Some(run), Some(command)) if action_is_run(&actions, index) => {
-                            if let Some(request) = RunRequest::new(
-                                command.clone(),
-                                send_enter_for_alt(window.modifiers().alt),
-                            ) {
-                                run(request, window, cx);
-                            }
-                        }
-                        _ => toggle(key.clone(), window, cx),
-                    },
-                },
-                _ => toggle(key.clone(), window, cx),
+                toggle(unfold.clone(), window, cx);
             }
-        })
-        .into_any_element()
+            ToolCardIntent::Toggle => toggle(key.clone(), window, cx),
+        }
+    })
+    .into_any_element()
+}
+
+/// The fold key of a card's "N more lines" row: the card's own key with a
+/// suffix, so expanding the output in place persists like the card's own
+/// toggle.
+pub fn unfold_key(key: &str) -> String {
+    format!("{key}:more")
 }
 
 /// The collapsed row a settled question leaves behind.
@@ -2748,13 +2458,13 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
     let p = cx.aui().colors;
     let row = marker_row(id);
     match kind {
-        MarkerKind::SessionStarted => row.glyph(IconName::Play, None).text(text.to_owned()),
-        MarkerKind::ContextCompacted => row.glyph(IconName::Layout, None).text(text.to_owned()),
+        MarkerKind::SessionStarted => row.glyph(IconName::Clock, None).text(text.to_owned()),
+        MarkerKind::ContextCompacted => row.text(text.to_owned()),
         // The fold's own text already ends in the mode's label, so the row does
         // not name it twice; the emphasis goes on the label inside the text.
         MarkerKind::PermissionModeChanged { mode } => {
             let head = text.strip_suffix(mode.label()).unwrap_or(text);
-            row.glyph(IconName::Shield, None).text(head.to_owned()).strong(mode.label())
+            row.glyph(IconName::Shield, Some(p.warning)).text(head.to_owned()).strong(mode.label())
         }
         MarkerKind::TurnCancelled => row.glyph(IconName::X, None).text("Turn interrupted").strong(text.to_owned()),
         MarkerKind::TurnRetracted => row.glyph(IconName::X, None).text("Prompt retracted"),
@@ -2781,8 +2491,13 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
         // where the session came from, with a link back to the source.
         // Without the back-link (a replayed transcript) the plain row
         // still says what happened.
-        MarkerKind::HandOff { .. } => {
-            let row = row.glyph(IconName::ArrowRight, None).text(text.to_owned());
+        MarkerKind::HandOff { from, to } => {
+            let row = row
+                .hand_off(aui::transcript::HandOff {
+                    from: (wire_mark(*from), aui::composer::provider_display_name(wire_mark(*from))),
+                    to: (wire_mark(*to), aui::composer::provider_display_name(wire_mark(*to))),
+                })
+                .text(text.to_owned());
             match &folds.handoff_back {
                 Some(back) => {
                     let (source, open) = (back.source.clone(), back.open.clone());
@@ -2797,6 +2512,20 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
     .into_any_element()
 }
 
+/// The wire provider's coloured mark.
+fn wire_mark(provider: aui_protocol::Provider) -> aui_icons::Provider {
+    use aui_protocol::Provider as W;
+    match provider {
+        W::Claude => aui_icons::Provider::Claude,
+        W::Codex => aui_icons::Provider::Codex,
+        W::Grok => aui_icons::Provider::Grok,
+        W::Gemini => aui_icons::Provider::Gemini,
+        W::Pi => aui_icons::Provider::Pi,
+        W::Cursor => aui_icons::Provider::Cursor,
+        W::Muse => aui_icons::Provider::Muse,
+    }
+}
+
 /// The first group of a uuid, which is what a session with no title is called
 /// everywhere else in this app.
 fn id_group(id: &str) -> String {
@@ -2809,75 +2538,38 @@ pub fn elapsed(ms: u64) -> SharedString {
     aui::transcript::format_duration(ms)
 }
 
-/// The empty transcript's measure: the design bounds the transcript column,
-/// composer included, and the suggestion chips sit centred inside it. Kept
-/// equal to the centre pane's `TRANSCRIPT_MEASURE` (which lives next to the
-/// rows it binds) rather than reaching across for it.
-pub(crate) const EMPTY_STATE_MEASURE: f32 = 880.0;
-
 /// The empty transcript: what a brand-new session shows before the first turn.
 ///
 /// `display` is the project's display name — a rename changes it without
 /// touching the folder, so the caller resolves it rather than this function
 /// deriving a folder name. `provider` is the session's own provider: the
 /// subtitle names whoever the session runs on, never a hardcoded Muse.
-pub fn empty_state(
-    provider: crate::providers::ProviderId,
-    display: &str,
-    hero: Option<AnyElement>,
-    on_pick: Option<PickSuggestion>,
-    cx: &mut App,
-) -> AnyElement {
+pub fn empty_state(provider: crate::providers::ProviderId, display: &str, cx: &mut App) -> AnyElement {
     use aui_tokens::{ActiveAui, AuiStyled};
     let p = cx.aui().colors;
-    let mut column = v_flex()
+    // D4 (docs/41 §2.8): the mark on a 48 px Raised tile (radius 12, the
+    // edge), the project's name as the title (600), the composer's own hint
+    // in body muted; 40 px of padding above and below; no suggestion chips.
+    v_flex()
         .size_full()
         .items_center()
         .justify_center()
-        .gap(px(scale::SP_3))
-        .children(hero)
-        .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("New session"))
-        .child(div().ui(scale::FS_12).text_color(p.ink_3).child(provider.hero_subtitle(display)));
-    // Three ways in, for a person looking at a blank page. They are prompts
-    // about the workspace itself, so none of them assumes a project this is
-    // not — and picking one only fills the composer, it never sends.
-    if let Some(on_pick) = on_pick {
-        // Under the deterministic flag the chips draw settled rather than
-        // sparkling in: a capture is a static composition.
-        let chips = aui::composer::suggestion_chips("empty-suggestions", SUGGESTIONS.iter().map(|s| (*s).into()).collect());
-        let chips = if crate::clock::deterministic() { chips.at_rest() } else { chips };
-        // Centred under the title, inside the measure: the chips element is
-        // full-width and left-aligned, so the outer row centres the capped
-        // box and the inner row centres the chips inside it.
-        let chips = chips.on_pick(move |index, window, cx| on_pick(index, window, cx));
-        let chips = div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(div().flex().justify_center().max_w(px(EMPTY_STATE_MEASURE)).child(chips));
-        column = column.child(chips);
-    }
-    column.into_any_element()
+        .py(px(40.0))
+        .child(
+            div()
+                .size(px(48.0))
+                .rounded(px(12.0))
+                .bg(p.surface_3)
+                .shadow(p.edge())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(aui_icons::provider_mark(provider.icon()).size(px(24.0))),
+        )
+        .child(div().mt(px(12.0)).ui(scale::FS_16).font_weight(gpui::FontWeight::SEMIBOLD).text_color(p.ink).child(display.to_owned()))
+        .child(div().mt(px(6.0)).ui(scale::FS_13).text_color(p.ink_2).child(provider.composer_placeholder()))
+        .into_any_element()
 }
-
-/// A suggestion chip was picked: the caller puts its text in the composer.
-pub type PickSuggestion = std::rc::Rc<dyn Fn(usize, &mut gpui::Window, &mut App)>;
-
-/// The text of the chip at `index`, for the caller that has to put it in the
-/// composer.
-pub fn suggestion(index: usize) -> Option<&'static str> {
-    SUGGESTIONS.get(index).copied()
-}
-
-/// The three chips a fresh session offers.
-///
-/// Short, about the workspace rather than about a project Baaz has not
-/// looked at, and each one is a thing a person genuinely opens a session for.
-const SUGGESTIONS: [&str; 3] = [
-    "What is in this workspace?",
-    "Explain how this project is laid out",
-    "Find the entry point and walk me through it",
-];
 
 #[cfg(test)]
 mod tests {
@@ -3351,108 +3043,6 @@ mod tests {
         assert_eq!(display_target(&read, "/ws", "/home/u"), "~/notes/todo.md");
     }
 
-    /// D49: a shell tool card carries the card's command text — Muse's
-    /// shell tool and the `!` userShell fold to the same shape, so one
-    /// wiring covers both.
-    #[test]
-    fn shell_cards_carry_their_command_text() {
-        assert_eq!(
-            shell_run_command(&shell_call("Ran", "npm test -- --watch")),
-            Some("npm test -- --watch".to_owned())
-        );
-        assert_eq!(
-            shell_run_command(&shell_call("$", "git status -sb")),
-            Some("git status -sb".to_owned())
-        );
-    }
-
-    #[test]
-    fn non_shell_cards_offer_no_run() {
-        let mut read = shell_call("Read", "src/main.rs");
-        read.kind = ToolKind::Read;
-        read.body = ToolBody::Read { lines: 3 };
-        assert_eq!(shell_run_command(&read), None);
-        // A search that fell back to a shell body is not a command: its
-        // target is a pattern, so it must not offer to run.
-        let mut search = shell_call("Searched", "pattern");
-        search.kind = ToolKind::Search;
-        assert_eq!(shell_run_command(&search), None);
-        assert_eq!(shell_run_command(&shell_call("Ran", "   ")), None);
-    }
-
-    fn run_actions() -> Vec<ToolCardAction> {
-        vec![
-            ToolCardAction::new("copy-output", "Copy output"),
-            ToolCardAction::new(RUN_IN_TERMINAL_ACTION_ID, RUN_IN_TERMINAL_LABEL),
-        ]
-    }
-
-    /// D49: the `Action(usize)` payload is an index, so the run resolves by
-    /// id at that index — a card carrying more than one action still maps
-    /// back to the right command.
-    #[test]
-    fn the_action_index_maps_back_to_the_run() {
-        let actions = run_actions();
-        assert!(!action_is_run(&actions, 0));
-        assert!(action_is_run(&actions, 1));
-        assert!(!action_is_run(&actions, 2));
-        assert!(!action_is_run(&[], 0));
-    }
-
-    /// D49: `runnable_command`'s output is what gets run — a `bash` block
-    /// whole, a `console` block's prompt lines with prompts stripped, an
-    /// untagged `$ `-prefixed block the same way.
-    #[test]
-    fn runnable_fences_run_what_runnable_command_returns() {
-        assert_eq!(
-            code_run_command(Some("bash"), "npm test -- --watch"),
-            Some("npm test -- --watch".to_owned())
-        );
-        assert_eq!(
-            code_run_command(Some("console"), "$ npm test\n42 passing\n$ npm run lint"),
-            Some("npm test\nnpm run lint".to_owned())
-        );
-        assert_eq!(
-            code_run_command(None, "$ git status\n$ git diff --stat"),
-            Some("git status\ngit diff --stat".to_owned())
-        );
-    }
-
-    /// D49: a `rust` block offers no button, and neither does an untagged
-    /// block mixing prompts with output.
-    #[test]
-    fn unrunnable_fences_offer_no_run() {
-        assert_eq!(code_run_command(Some("rust"), "let x = 1;"), None);
-        assert_eq!(code_run_command(Some("python"), "print('hi')"), None);
-        assert_eq!(code_run_command(None, "$ git status\nOn branch main"), None);
-        assert_eq!(code_run_command(None, "let x = 1;"), None);
-    }
-
-    /// D49: multi-line blocks paste whole — the shell runs the lines in
-    /// order — so the offer keeps every line.
-    #[test]
-    fn multi_line_blocks_run_whole() {
-        let command = "npm test -- --watch\nnpm run lint";
-        assert_eq!(code_run_command(Some("bash"), command), Some(command.to_owned()));
-        let blocks = runnable_blocks(&format!("Try it:\n\n```bash\n{command}\n```\n"));
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].command, command);
-        assert_eq!(blocks[0].label, "npm test -- --watch");
-    }
-
-    /// The run row offers one button per runnable fence, in fence order,
-    /// and nothing for prose or unrunnable fences.
-    #[test]
-    fn the_run_row_lists_exactly_the_runnable_fences() {
-        let text = "First:\n\n```bash\ngit status\n```\n\nThen:\n\n```rust\nlet x = 1;\n```\n\nFinally:\n\n```console\n$ npm test\nok\n```\n";
-        let blocks = runnable_blocks(text);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].command, "git status");
-        assert_eq!(blocks[1].command, "npm test");
-        assert!(runnable_blocks("Just prose, no fences.").is_empty());
-        assert!(runnable_blocks("```rust\nlet x = 1;\n```\n").is_empty());
-    }
-
     /// W7b: the pending question names the host and fits the tool. The
     /// muse lane keeps its own title; a provider session asks in the
     /// provider's name with the tool's verb. Drop a verb arm and its
@@ -3504,7 +3094,6 @@ mod tests {
         assert!(is_terminal_card(&ran));
         assert_eq!(terminal_tab_id(&ran.target), Some("t1".to_owned()));
         assert_eq!(terminal_command(&ran.target), "echo hi");
-        assert_eq!(shell_run_command(&ran), None, "no rerun on a terminal card");
         let running = shell(TERMINAL_RUNNING_VERB, "sleep 30");
         assert!(is_terminal_card(&running));
         assert_eq!(terminal_tab_id(&running.target), None, "no tab yet");
@@ -3515,8 +3104,7 @@ mod tests {
         assert_eq!(terminal_tab_id(&tricky.target), None);
         assert_eq!(terminal_command(&tricky.target), "echo · t1x");
         let plain = shell("Ran", "echo hi · t1");
-        assert!(!is_terminal_card(&plain), "an ordinary shell card keeps Run in terminal");
-        assert_eq!(shell_run_command(&plain), Some("echo hi · t1".to_owned()));
+        assert!(!is_terminal_card(&plain), "an ordinary shell card is not a terminal card");
         let read = ToolCall { kind: ToolKind::Read, ..shell(TERMINAL_RAN_VERB, "x") };
         assert!(!is_terminal_card(&read), "the verb alone never marks the card");
     }
@@ -3540,8 +3128,6 @@ mod tests {
             span_held: Rc::new(HashMap::new()),
             span_event: None,
             tool_group: None,
-            terminal_run: None,
-            open_terminal: None,
             terminal_mirror: Rc::new(HashMap::new()),
             terminal_live: false,
             skill_scopes: Rc::new(HashMap::new()),
@@ -3550,8 +3136,10 @@ mod tests {
             handoff_back: None,
             workspace_root: "/ws".to_owned(),
             fold_finished_turns: true,
-            open_full_text: None,
             open_turn_diff: None,
+            sent: Rc::new(HashMap::new()),
+            open_attachment: None,
+            scroll_to_turn: None,
             tool_starts: Rc::new(HashMap::new()),
         }
     }
@@ -3578,9 +3166,6 @@ mod tests {
         assert_eq!(skill_load_name(&read), None);
         let blank = ToolCall { target: "  ".into(), ..load.clone() };
         assert_eq!(skill_load_name(&blank), None);
-        assert_eq!(skill_load_text("plan", Some("built-in")), "Loaded skill `plan` · built-in");
-        assert_eq!(skill_load_text("plan", None), "Loaded skill `plan`");
-        assert_eq!(skill_load_text("plan", Some(" ")), "Loaded skill `plan`");
     }
 
     /// W7b: a trace with no text earns no card — redacted (signature-only)
@@ -3614,7 +3199,7 @@ mod tests {
             target: target.to_owned(),
             status: aui_protocol::ToolStatus::Success,
             duration_ms: Some(120),
-            body: ToolBody::Read { lines: 42 },
+            body: ToolBody::Read { lines: 42, output_lines: Vec::new() },
             diff_stat: None,
         }
     }
@@ -3859,28 +3444,6 @@ mod tests {
         let plan = fold_plan(&turn).expect("folds");
         assert_eq!(plan.elapsed_ms, 134_000);
         assert_eq!(aui::transcript::turn_fold_elapsed(134_000), "2m 14s");
-    }
-
-    /// B12: the open-in-pane affordance covers search hits, MCP results
-    /// and shell output — never reads or bare headers.
-    #[test]
-    fn open_in_pane_covers_search_mcp_and_shell() {
-        let mut search = shell_call("Searched", "fold");
-        search.kind = ToolKind::Search;
-        search.body = ToolBody::Search {
-            hits: vec![aui_protocol::SearchHit {
-                path: "a.rs".to_owned(),
-                line: 3,
-                snippet: "fold".to_owned(),
-            }],
-        };
-        let (title, text) = tool_pane_text(&search).expect("pane text");
-        assert!(title.contains("fold"));
-        assert!(text.contains("a.rs:3"));
-        let mut read = shell_call("Read", "a.rs");
-        read.kind = ToolKind::Read;
-        read.body = ToolBody::Read { lines: 3 };
-        assert!(tool_pane_text(&read).is_none());
     }
 
     /// B12fix: a turn ending on a tool has no separate answer — the last

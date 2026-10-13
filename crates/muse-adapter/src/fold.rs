@@ -1188,6 +1188,8 @@ impl Folded {
                     size_bytes: None,
                     meta: None,
                     state: aui_protocol::UploadState::Ready,
+                    path: None,
+                    quote_of: None,
                 })
                 .collect::<Vec<_>>()
         };
@@ -2825,7 +2827,7 @@ fn tool_presentation(
     let status = tool_status(&item.status);
     let lines = split_lines(visible);
     let body = match kind {
-        ToolKind::Read => ToolBody::Read { lines: lines.len() },
+        ToolKind::Read => ToolBody::Read { lines: lines.len(), output_lines: lines },
         ToolKind::Search => match search_hits(&lines) {
             Some(hits) => ToolBody::Search { hits },
             None => ToolBody::Shell { output_lines: lines, exit_code: item.exit_code, live: !terminal },

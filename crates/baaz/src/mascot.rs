@@ -69,16 +69,6 @@ static MASCOTS: &[MascotFile] = &[
     mascot!("error", "blocked-permission"),
 ];
 
-/// The new-session hero variants, in the order [`perch_index_for_session`]
-/// indexes them.
-pub const HERO_PATHS: [&str; 5] = [
-    "mascot/hero/welcome-idle.png",
-    "mascot/hero/greeting-wave.png",
-    "mascot/hero/chill-ambient.png",
-    "mascot/hero/thinking-planning.png",
-    "mascot/hero/searching-reading.png",
-];
-
 /// The `@3x` bytes for a mascot path, whatever its suffix.
 fn mascot_bytes(path: &str) -> Option<&'static [u8]> {
     // Compare against the stem: `mascot/hero/foo[@2x|@3x].png` all match
@@ -86,20 +76,6 @@ fn mascot_bytes(path: &str) -> Option<&'static [u8]> {
     let (stem, _) = path.rsplit_once('.')?;
     let stem = stem.strip_suffix("@3x").or_else(|| stem.strip_suffix("@2x")).unwrap_or(stem);
     MASCOTS.iter().find(|m| m.base.strip_suffix(".png") == Some(stem)).map(|m| m.bytes_3x as &'static [u8])
-}
-
-/// Which hero variant a session gets: FNV-1a over the session id, mod five.
-///
-/// Deterministic per session id, so the variant stays stable while the
-/// new-session screen is open and never reshuffles frame to frame; different
-/// sessions land on different variants.
-pub fn perch_index_for_session(session_id: &str) -> usize {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in session_id.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    (hash % HERO_PATHS.len() as u64) as usize
 }
 
 /// Which error family a critical dialog is in. Picked by error kind — the
@@ -226,15 +202,6 @@ impl AssetSource for BaazAssets {
 ///
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
 /// it appears. Under reduced motion it draws settled.
-/// The new-session hero: the same character and size as the boot hero, above
-/// the "New session" title, with the variant seeded by the session id so a
-/// person sees a different one from session to session but never a different
-/// one frame to frame.
-pub fn hero_mascot(session_id: &str, window: &mut Window, cx: &mut App) -> AnyElement {
-    let path = HERO_PATHS[perch_index_for_session(session_id)];
-    mascot_hero_element(path, "baaz-session-hero", window, cx)
-}
-
 pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
     mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", window, cx)
 }
@@ -296,20 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_is_stable_per_session_and_varies_across_sessions() {
-        assert_eq!(perch_index_for_session("s-1"), perch_index_for_session("s-1"));
-        for id in ["s-1", "s-2", "new-session", "01234567-89ab-cdef-0123-456789abcdef"] {
-            assert!(perch_index_for_session(id) < HERO_PATHS.len(), "{id} is in range");
-        }
-        let distinct: std::collections::HashSet<usize> =
-            ["s-1", "s-2", "s-3", "s-4", "s-5", "s-6", "s-7", "s-8"]
-                .iter()
-                .map(|id| perch_index_for_session(id))
-                .collect();
-        assert!(distinct.len() >= 2, "eight sessions share one variant: {distinct:?}");
-    }
-
-    #[test]
     fn the_error_families_classify_by_kind_never_at_random() {
         // Transport first: the offline family.
         for (title, detail) in [
@@ -361,8 +314,9 @@ mod tests {
         let root = BaazAssets.list("").expect("root lists");
         assert!(root.iter().any(|e| e.as_ref() == "mascot"), "mascot is listed: {root:?}");
         let hero = BaazAssets.list("mascot/hero").expect("hero lists");
-        assert_eq!(hero.len(), HERO_PATHS.len());
-        for path in HERO_PATHS {
+        let paths = ["mascot/hero/welcome-idle.png", "mascot/hero/greeting-wave.png", "mascot/hero/chill-ambient.png", "mascot/hero/thinking-planning.png", "mascot/hero/searching-reading.png"];
+        assert_eq!(hero.len(), paths.len());
+        for path in paths {
             assert!(hero.iter().any(|e| e.as_ref() == path), "{path} is listed");
         }
     }

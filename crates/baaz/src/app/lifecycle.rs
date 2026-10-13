@@ -4249,23 +4249,6 @@ impl Harness {
                     });
                 }));
             }
-            // A session with turns picked "New session on X": this session
-            // keeps the lane it was created on, and a new one starts on the
-            // pick, which also becomes the default for later sessions.
-            SessionEvent::NewSessionOnProvider { provider } => {
-                // Another navigation while a switch is pending cancels it;
-                // this new session then opens normally.
-                self.cancel_pending_switch(cx);
-                self.select_new_provider(*provider, cx);
-                // Same claim as the switch above: the new session starts on
-                // a task, and session verbs wait for it rather than acting
-                // on the session that is still open.
-                self.session_switch_pending = true;
-                self.switch_claim = Some((view.read(cx).session_id.clone(), self.switch_epoch));
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
-                }));
-            }
             // "Hand off to X…" on a session with turns: the lossy
             // re-prompt (see `crate::handoff`). The dialog (or the step
             // verb's headless flag) decides whether a confirm comes
@@ -4338,30 +4321,6 @@ impl Harness {
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
-            // A D49 play button: local-only, so no project means nowhere
-            // to run rather than an error. The focus needs a window, which
-            // the event does not carry, so this rejoins through one like
-            // the rename and palette paths do.
-            SessionEvent::RunInTerminal { command, send_enter } => {
-                let (command, send_enter) = (command.clone(), *send_enter);
-                if let Some(root) = self.current_project().map(|project| project.root.clone()) {
-                    self.tasks.push(cx.spawn(async move |this, cx| {
-                        let _ = this.update_in(cx, |this, window, cx| {
-                            this.run_in_terminal(&root, &command, send_enter, window, cx);
-                        });
-                    }));
-                }
-            }
-            // A D51 "Open terminal" press: local-only like the run above —
-            // the dock opens and the card's tab takes focus.
-            SessionEvent::OpenTerminal { tab } => {
-                let tab = tab.clone();
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.open_terminal_tab(tab, window, cx);
-                    });
-                }));
-            }
             SessionEvent::Projects => {
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.open_projects(false, window, cx));
@@ -4420,11 +4379,6 @@ impl Harness {
                         }
                     });
                 }));
-            }
-            // B12: a transcript card's "Open full text": the card's whole
-            // text in the Files pane's read-only doc view.
-            SessionEvent::OpenFullText { title, text } => {
-                self.open_text_doc_for(title.clone(), text.clone(), cx);
             }
             // B12: a turn fold's `+N −M` chip: Changes for the session.
             // Per-turn checkpoints do not exist yet, so the chip opens the

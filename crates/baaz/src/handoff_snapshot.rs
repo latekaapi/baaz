@@ -340,6 +340,8 @@ fn bound_attachment(attachment: Attachment) -> Attachment {
         size_bytes: None,
         meta: Some(attachment.name),
         state: UploadState::Ready,
+        path: None,
+        quote_of: None,
     }
 }
 
@@ -914,6 +916,8 @@ mod tests {
                 size_bytes: Some(1_000_000),
                 meta: None,
                 state: UploadState::Ready,
+                path: None,
+                quote_of: None,
             }],
             mentions: vec![],
             timestamp: None,

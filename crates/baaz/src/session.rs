@@ -38,9 +38,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aui::composer::{
-    command_menu, composer, composer_state_rows, effort_menu, mention_picker, mode_menu,
-    model_menu, plus_menu, queue_strip, CommandItem, CommandSection, ComposerChip,
-    ComposerChipAnchor, ComposerChipKind, ComposerIntent, MentionIcon, MentionItem, MentionSection,
+    command_menu, composer, composer_state_rows, effort_menu, effort_slider_menu, mention_picker, mode_menu,
+    model_menu, plus_menu, provider_menu, queue_strip, PickerSubmenu, CommandItem, CommandSection, ComposerChip,
+    ComposerChipAnchor, ComposerChipKind, ComposerChipState, ComposerIntent, MentionIcon, MentionItem, MentionSection,
     PickerRow, PlusMenuItem, QueueIntent, QueueStripRow,
 };
 use aui::data::{ContextMeterState, ContextPressure};
@@ -193,8 +193,9 @@ pub(crate) const ROW_HEIGHT_HINT: f32 = 72.0;
 /// spacer rather than as a turn.
 pub(crate) const TAIL_SPACER_ID: &str = "tail-spacer";
 /// The trailing spacer's height: room under the last block before the status
-/// row or banner.
-pub(crate) const TAIL_SPACER_H: f32 = scale::SP_7;
+/// row or banner — 8 past the last turn's own 16, so the list ends 24 above
+/// the composer (docs/41 §2.9), inside the seam's 32 px fade.
+pub(crate) const TAIL_SPACER_H: f32 = scale::SP_3;
 /// The gap the caret popovers leave above the composer, matching the
 /// library's own `.pop{margin-bottom:8px}`.
 const POPOVER_GAP: f32 = 8.0;
@@ -239,6 +240,17 @@ pub struct SessionHost {
     pub terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
 }
 
+/// One quotation in the composer (D4): the words and their source turn.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QuoteDraft {
+    /// The chip's id.
+    pub id: String,
+    /// The quoted words.
+    pub text: String,
+    /// The turn they were quoted from.
+    pub source: String,
+}
+
 /// An unsent composer's content: the text plus the images and files waiting
 /// to go out with the next turn. One project's draft moved into another's
 /// session travels as one of these.
@@ -281,16 +293,6 @@ pub enum SessionEvent {
     OpenSkill {
         /// The skill name, as the quiet row's card target carried it.
         name: String,
-    },
-    /// B12: a transcript card's "Open full text" (generic cards,
-    /// search/MCP open-in-pane rows): show the whole text in the right
-    /// pane's read-only doc view. The session cannot act on the window,
-    /// so the application opens the pane, like the skill tap above.
-    OpenFullText {
-        /// The doc view's title: the card's kind or `verb target`.
-        title: String,
-        /// The whole text, never truncated.
-        text: String,
     },
     /// B12: a turn fold's `+N −M` chip: open Changes for that turn (or
     /// the session without a per-turn checkpoint). Window-level, like
@@ -403,14 +405,6 @@ pub enum SessionEvent {
         /// The picked backend.
         provider: ProviderId,
     },
-    /// The person picked "New session on X" from the composer chip in a
-    /// session that already has turns: a live session never changes lanes,
-    /// so this session keeps running where it is and a new one starts on
-    /// the pick. The pick also becomes the default for new sessions.
-    NewSessionOnProvider {
-        /// The backend the new session starts on.
-        provider: ProviderId,
-    },
     /// The person picked "Hand off to X…" (composer provider menu, or ⌘K
     /// `/handoff`): the session's turns move to a fresh session on the
     /// pick as a lossy re-prompt (see [`crate::handoff`]). A same-provider
@@ -477,23 +471,6 @@ pub enum SessionEvent {
     TierOverride,
     /// "Check again" on the unknown-plan banner: re-probe the billing tier.
     TierRecheck,
-    /// A D49 play button was pressed: run `command` in the terminal dock.
-    /// Entirely local — the application pastes into a tab, never a turn,
-    /// never the wire — so it is honoured under `--replay` too.
-    RunInTerminal {
-        /// The exact command to paste, whole.
-        command: String,
-        /// A plain click sends Enter after the paste; an ⌥-click pastes
-        /// without it.
-        send_enter: bool,
-    },
-    /// A D51 "Open terminal" press on a terminal tool card: open the dock
-    /// and focus the card's tab. Entirely local like [`SessionEvent::RunInTerminal`].
-    OpenTerminal {
-        /// The tab to focus, when the card named one — `None` opens the
-        /// dock on its active tab.
-        tab: Option<String>,
-    },
     /// A transcript or terminal link to an `http(s)` URL (B9): the
     /// application opens the right pane on Browser and navigates there on
     /// the next render, instead of the system browser. `external` stays
@@ -878,6 +855,19 @@ pub struct SessionView {
     files: Vec<attachments::AttachedFile>,
     /// Monotonic id source for file chips.
     file_seq: u64,
+    /// Attachments that could not be read (D4): a failed chip each, the
+    /// reason as its meta, until ✕ removes it. `(chip id, name, reason)`.
+    failed_chips: Vec<(String, String, String)>,
+    /// Quotations waiting to go out with the next turn (D4): the words and
+    /// the turn they were quoted from.
+    quotes: Vec<QuoteDraft>,
+    /// A Browse annotation batch waiting to go out with the next turn.
+    annotation_draft: Option<crate::sent::SentAnnotations>,
+    /// What each sent turn carried (D4, `crate::sent`), in send order.
+    sent_items: Vec<crate::sent::SentItem>,
+    /// [`Self::sent_items`] paired with the transcript's user turns, by turn
+    /// id: refreshed with the render cache.
+    sent_pairs: Rc<HashMap<String, crate::sent::SentItem>>,
     /// A drag is over the window, so the drop overlay is up.
     dragging: bool,
     /// The `+` menu.
@@ -1036,6 +1026,7 @@ impl SessionView {
             )
         });
         let workspace_key = workspace.clone();
+        let sent_items = crate::sent::load(&session_id);
         Self {
             session_id,
             fold: MuseFold::new(),
@@ -1134,6 +1125,11 @@ impl SessionView {
             image_seq: 0,
             files: Vec::new(),
             file_seq: 0,
+            failed_chips: Vec::new(),
+            quotes: Vec::new(),
+            annotation_draft: None,
+            sent_items,
+            sent_pairs: Rc::new(HashMap::new()),
             dragging: false,
             plus_open: false,
             draft_empty: true,
@@ -1681,6 +1677,40 @@ impl SessionView {
             && !self.card_field_open()
             && (self.newest_pending_approval().is_some()
                 || !self.external_approvals.pending().is_empty())
+    }
+
+    /// ⏎ on an empty composer with an approval pending (D4, the card's
+    /// `⏎ allow` hint): the approving choice — the server's first Once /
+    /// for-the-session choice, or a provider's Accept. Returns whether it
+    /// answered one.
+    pub fn allow_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.answer_pending(true, window, cx)
+    }
+
+    /// ⎋ with an approval pending (the card's `⎋ deny` hint): the refusing
+    /// choice — the server's first Deny, or a provider's Decline.
+    pub fn deny_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.answer_pending(false, window, cx)
+    }
+
+    fn answer_pending(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use aui_protocol::ApprovalDecision as D;
+        if self.card_field_open() {
+            return false;
+        }
+        if let Some((_, choices)) = self.newest_pending_approval() {
+            let wanted = |d: &D| if allow { matches!(d, D::Once | D::ApprovedForSession) } else { matches!(d, D::Deny) };
+            let Some(index) = choices.iter().position(|c| wanted(&c.decision)) else { return false };
+            self.step_choose(&(index + 1).to_string(), window, cx);
+            return true;
+        }
+        if self.external_approvals.pending().is_empty() {
+            return false;
+        }
+        let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
+        let Some(index) = crate::providers::ApprovalChoice::all().iter().position(|c| *c == wanted) else { return false };
+        self.step_choose(&(index + 1).to_string(), window, cx);
+        true
     }
 
     /// Pick the n-th choice of the newest pending approval (`1`–`9`).

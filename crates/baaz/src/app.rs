@@ -134,6 +134,12 @@ actions!(
         MenuUp,
         /// Move the open menu's selection down.
         MenuDown,
+        /// ← in the open menu: the effort slider steps down; a model's
+        /// submenu closes (D4).
+        MenuLeft,
+        /// → in the open menu: the effort slider steps up; a model's
+        /// submenu opens (D4).
+        MenuRight,
         /// Activate the open menu's selected row.
         MenuConfirm,
         /// Walk back through this workspace's prompt history (↑).
@@ -314,15 +320,6 @@ pub(crate) const BROWSE_CONTEXT: &str = "BaazBrowse";
 /// node (pinned against `aui::keys::ROOT_CONTEXT` by a test).
 pub(crate) const BROWSE_ROOT_CONTEXT: &str = "AuiRoot BaazBrowse";
 
-/// The toast stack's own width, the library's `.toast{width:320px}`.
-pub(crate) const TOAST_W: f32 = 320.0;
-/// Where the stack hangs from: under the window header, at the right edge.
-/// The stack lays its toasts out **downward** from its own box, so it is
-/// anchored by its top; hanging it off the bottom would draw the newest toast
-/// off the end of the window.
-pub(crate) const TOAST_TOP: f32 = 56.0;
-/// How much room the fanned stack is given before it would clip.
-pub(crate) const TOAST_STACK_H: f32 = 260.0;
 /// How long the "Session hidden" toast's Undo stays honest.
 const UNDO_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
 /// How far below the window's top edge the palette hangs, and how dark the
@@ -1140,6 +1137,10 @@ pub struct Harness {
     pub(crate) overlay: Option<crate::overlay::Overlay>,
     /// An overlay being opened (its task is in flight), as (kind, bounds).
     pub(crate) overlay_pending: Option<(crate::overlay::OverlayKind, gpui::Bounds<gpui::Pixels>)>,
+    /// The corner window (Browse's corner stack), beside the overlay.
+    pub(crate) corner: Option<crate::overlay::Overlay>,
+    /// The corner window being opened, until it lands.
+    pub(crate) corner_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
@@ -1256,7 +1257,7 @@ pub struct Harness {
     /// through the scripted lane).
     pub(crate) pending_disabled_notice: Option<ProviderId>,
     /// The one `new_session` a provider switch is allowed to start while a
-    /// switch is still pending: `SwitchProvider` / `NewSessionOnProvider`
+    /// switch is still pending: `SwitchProvider`
     /// close the old view synchronously but start its replacement on a
     /// task, so they claim the next start up front — any other `new` while
     /// a switch is in flight is a duplicate and starts nothing. The claim
@@ -1660,6 +1661,8 @@ impl Harness {
             menu_dismissed: None,
             overlay: None,
             overlay_pending: None,
+            corner: None,
+            corner_pending: None,
             main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
@@ -3805,6 +3808,8 @@ impl Harness {
     /// A popover shell (B2a-H5): absolute under the toolbar, over the page
     /// (which the covering rule obscures while it stands). Downloads,
     /// extensions and ⋯ share it.
+    /// A Browse chrome popover: the menu at Floating (D4) — radius 10, the
+    /// edge and the float drop, 6 px of panel around its rows.
     fn browse_popover(&self, id: impl Into<gpui::ElementId>, aria: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
         v_flex()
@@ -3815,11 +3820,10 @@ impl Harness {
             .w(px(320.0))
             .flex_none()
             .gap(px(2.0))
-            .p(px(4.0))
-            .rounded(px(scale::R_SM))
-            .bg(p.surface_2)
-            .border_1()
-            .border_color(p.line)
+            .p(px(aui::interact::PANEL_PAD))
+            .rounded(px(10.0))
+            .bg(p.overlay)
+            .shadow(p.floating_shadow())
             .role(gpui::Role::Menu)
             .aria_label(aria.to_owned())
     }
@@ -4170,6 +4174,12 @@ impl Harness {
             cx,
         );
         menu = menu.child(all);
+        // D4: opened from the sidebar's button, the popover hangs under it
+        // (window coordinates), its left edge on the button's.
+        if let Some(anchor) = self.browser.downloads_anchor {
+            let at = gpui::point(anchor.left(), anchor.bottom() + px(6.0));
+            return Some(gpui::deferred(gpui::anchored().position(at).child(menu.relative().top(px(0.0)).right(px(0.0)))).with_priority(2).into_any_element());
+        }
         Some(menu.into_any_element())
     }
 
@@ -4434,9 +4444,8 @@ impl Harness {
     /// toggle past the window's lights, the mode switch at the sidebar's
     /// edge, the title slot (the session title; in Browse, closed only, the
     /// page's way back, back / forward / reload and the address at rest) and
-    /// the actions at the right (the toast chip and the feedback slot — the
-    /// region a native page never covers — then the session's actions, or in
-    /// Browse, closed only, Ask · the page menu · new tab). The shell draws
+    /// the actions at the right (the session's actions; the toast and the
+    /// feedback slot moved to the corner stack in D4). The shell draws
     /// every slot at the same spot in both states.
     fn render_bar_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> BarChrome {
         let lead = self.render_sidebar_toggle(cx);
@@ -4454,25 +4463,16 @@ impl Harness {
                 let _ = switch_to.update(cx, |this, cx| this.set_mode(target, window, cx));
             })
             .into_any_element();
-        let mut chips = h_flex().flex_none().items_center().gap(px(2.0));
-        if let Some(chip) = self.render_toast_chip(cx) {
-            chips = chips.child(chip);
-        }
-        if let Some(slot) = self.render_feedback_header_slot(cx) {
-            chips = chips.child(slot);
-        }
         if self.mode == layout::Mode::Browse {
             // Browse: the page controls and the address live in the sidebar's
-            // own header; the sheet is the page, so the row shows nothing. The
-            // toast chip and the feedback slot wait for a home here.
-            let _ = chips;
+            // own header; the sheet is the page, so the row shows nothing.
             BarChrome { lead, switch: Some(switch), title: None, right: None }
         } else {
             BarChrome {
                 lead,
                 switch: Some(switch),
                 title: Some(self.render_session_title(window, cx)),
-                right: Some(chips.child(self.session_header_actions(cx)).into_any_element()),
+                right: Some(self.session_header_actions(cx)),
             }
         }
     }
@@ -5440,6 +5440,26 @@ impl Harness {
                     view.clone().cached(StyleRefinement::default().flex_grow(1.)).into_any_element()
                 };
                 let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
+                // The corner stack rides the band: its bottom 8 above the
+                // composer's top edge (D4, docs/41 §2.11).
+                // The seam (docs/41 §2.9): a 32 px fade, clear to the sheet,
+                // ends at the composer's top edge so the transcript sinks
+                // into the sheet rather than stopping at a line.
+                let sheet = cx.aui().colors.surface_2;
+                let seam = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(gpui::relative(1.0))
+                    .h(px(32.0))
+                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet, 1.0)));
+                let band = div()
+                    .relative()
+                    .w_full()
+                    .child(seam)
+                    .child(band)
+                    .children(self.render_corner_stack(cx).map(Self::corner_above_band))
+                    .into_any_element();
                 let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
                 v_flex()
                     .size_full()
@@ -5472,6 +5492,14 @@ impl Harness {
             },
             }
         };
+        // A centre with no composer (no session, Skills, a pending switch)
+        // holds the corner stack 12 above the sheet's bottom; Browse's is
+        // in the corner window.
+        let in_band = !self.skills.open && pending_dest.is_none() && self.mode != layout::Mode::Browse && self.active.is_some();
+        let body = match (in_band || self.corner_in_overlay()).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
+            Some(stack) => div().relative().flex_1().min_h_0().w_full().child(body).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
+            None => body,
+        };
         let dock = self.render_terminal_dock(window, cx);
         v_flex()
             .size_full()
@@ -5487,6 +5515,8 @@ impl Harness {
             }))
             .on_action(cx.listener(|this, _: &MenuUp, _, cx| this.move_menu(-1, cx)))
             .on_action(cx.listener(|this, _: &MenuDown, _, cx| this.move_menu(1, cx)))
+            .on_action(cx.listener(|this, _: &MenuLeft, _, cx| this.step_menu(-1, cx)))
+            .on_action(cx.listener(|this, _: &MenuRight, _, cx| this.step_menu(1, cx)))
             .on_action(cx.listener(|this, _: &HistoryPrev, window, cx| {
                 this.with_session(cx, |view, cx| view.history_prev(window, cx));
             }))
@@ -5540,6 +5570,13 @@ impl Harness {
             }))
             // 1–9 on a pending approval: the n-th server-minted choice, in the
             // order the server sent them.
+            .on_action(cx.listener(|this, _: &aui::keys::Cancel, window, cx| {
+                // ⎋ on the pending approval (the library binds it in the
+                // approval context the composer names only while empty).
+                this.with_session(cx, |view, cx| {
+                    view.deny_pending(window, cx);
+                });
+            }))
             .on_action(cx.listener(|this, nth: &aui::keys::ChooseNth, window, cx| {
                 let index = nth.index;
                 this.with_session(cx, |view, cx| view.choose_nth(index, window, cx));
@@ -5925,6 +5962,7 @@ impl Harness {
         // The overlay window (Browse menus over the native page) follows
         // what is open and where.
         self.sync_overlay(window, cx);
+        self.sync_corner(window, cx);
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once
@@ -6219,7 +6257,11 @@ impl Render for Harness {
                 self.sidebar_pane.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             };
             let centre = if settings_open {
-                self.render_settings_content(window, cx)
+                let content = self.render_settings_content(window, cx);
+                match self.render_corner_stack(cx) {
+                    Some(stack) => div().relative().size_full().child(content).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
+                    None => content,
+                }
             } else {
                 self.render_centre(window, cx)
             };
@@ -6538,9 +6580,6 @@ impl Render for Harness {
         let settings = self.render_settings(cx);
         let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
-        // While capturing the window must read clean: toasts render after
-        // the feedback layers, so they would leak into the capture.
-        let toasts = if self.feedback.capturing { None } else { self.render_toasts(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
         // One overlay, not two: the two drags never run together, so it
@@ -6927,7 +6966,6 @@ impl Render for Harness {
                 .children(feedback_layer)
                 .children(feedback_slot_overlay)
                 .children(feedback_popover)
-                .children(toasts)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
                 .child(session::draw_end_marker()),

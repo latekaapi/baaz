@@ -9,16 +9,63 @@ use super::*;
 impl SessionView {
     // ------------------------------------------------------------- questions
 
-    /// A radio or checkbox on a pending question.
+    /// A radio or checkbox on a pending question. In a wizard (several
+    /// questions, one at a time) a single choice advances on its own; a
+    /// pick-all waits for Next (docs/41 §2.6).
     pub fn select_option(&mut self, block_id: String, index: usize, cx: &mut Context<Self>) {
-        let multi = self.question(&block_id).is_some_and(|q| q.multi);
-        let selected = self.selections.entry(block_id).or_default();
+        let pending = self.question(&block_id);
+        let multi = pending.as_ref().is_some_and(|q| q.multi);
+        let selected = self.selections.entry(block_id.clone()).or_default();
         match (multi, selected.iter().position(|i| *i == index)) {
             (true, Some(at)) => {
                 selected.remove(at);
             }
             (true, None) => selected.push(index),
             (false, _) => *selected = vec![index],
+        }
+        if !multi && pending.is_some_and(|q| q.questions > 1) {
+            self.answer_question(block_id, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// The wizard steps of every pending several-question prompt (D4), by
+    /// block id: which question it is, of how many, and whether it is the
+    /// one showing — the first whose answer is not yet gathered.
+    pub(super) fn wizards(&self) -> HashMap<String, (aui::transcript::Wizard, bool)> {
+        let mut out = HashMap::new();
+        let Some(side) = self.fold.side(&self.session_id) else { return out };
+        let agent = self.provider_kind().label();
+        for (input_id, request) in side.pending_inputs.iter() {
+            let total = request.questions.len();
+            if total < 2 {
+                continue;
+            }
+            let gathered = self.answers.get(input_id);
+            let current = request.questions.iter().position(|q| !gathered.is_some_and(|g| g.contains_key(&q.id)));
+            // The wire names no topic for a prompt: the first question's
+            // header stands in, and the line under it says how many.
+            let topic = request.questions.iter().find_map(|q| (!q.header.trim().is_empty()).then(|| q.header.clone())).unwrap_or_else(|| "Questions".to_owned());
+            let why = format!("{agent} needs {total} answers");
+            for (index, question) in request.questions.iter().enumerate() {
+                let wizard = aui::transcript::Wizard { topic: topic.clone().into(), why: why.clone().into(), index, total };
+                out.insert(format!("{input_id}:{}", question.id), (wizard, current == Some(index)));
+            }
+        }
+        out
+    }
+
+    /// "Back" in a wizard: the previous question's gathered answer is taken
+    /// back, so it shows again with its pick.
+    pub fn wizard_back(&mut self, block_id: String, cx: &mut Context<Self>) {
+        let Some((input_id, question_id)) = block_id.split_once(':') else { return };
+        let Some(side) = self.fold.side(&self.session_id) else { return };
+        let Some(request) = side.pending_inputs.get(input_id) else { return };
+        let Some(at) = request.questions.iter().position(|q| q.id == question_id) else { return };
+        let Some(previous) = at.checked_sub(1).and_then(|i| request.questions.get(i)).map(|q| q.id.clone()) else { return };
+        if let Some(gathered) = self.answers.get_mut(input_id) {
+            gathered.remove(&previous);
         }
         cx.notify();
     }

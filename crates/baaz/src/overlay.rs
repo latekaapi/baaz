@@ -50,6 +50,13 @@ pub(crate) enum OverlayKind {
     /// after the scrim had already dimmed the sidebar (owner recording
     /// 2026-10-11 5.23 PM); here the page stays live and dims with the rest.
     Modal,
+    /// The corner stack (D4, docs/41 §2.11) in Browse: the newest toast
+    /// over the feedback slot, 12 above the sheet's bottom and 12 from its
+    /// right, over the live page. Its own window beside the one above —
+    /// it coexists with a menu or the Field — and it never takes the
+    /// keyboard, so it never closes on a resign: it lives while it has
+    /// something to show.
+    Corner,
 }
 
 /// The site-information panel's width: FF's dropdown `w-80`, 320.
@@ -104,6 +111,11 @@ fn drop_native_chrome(window: &Window, kind: OverlayKind) {
             return;
         }
         let _: () = msg_send![ns_window, setHasShadow: false];
+        if kind == OverlayKind::Corner {
+            // The corner never closes on a resign, so it must not float
+            // over other apps: it hides with Baaz and returns with it.
+            let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
+        }
         if kind != OverlayKind::Modal {
             // Borderless (no titled bit), keeping the two bits gpui's panel
             // relies on: full-size content (its frame maths) and
@@ -180,6 +192,9 @@ impl Render for OverlayView {
             }
         }
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
+        if kind == OverlayKind::Corner {
+            return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
+        }
         let baaz = self.baaz.clone();
         div()
             .size_full()
@@ -345,6 +360,123 @@ impl Harness {
         .detach();
     }
 
+    /// Where the corner window should be, in screen space, while Browse
+    /// has a stack to show: 12 above the sheet's bottom, 12 from its right,
+    /// the window reaching the shadow margin past the pills. Wide enough
+    /// for the widest toast; the pills sit at its bottom-right and the
+    /// clear rest passes the pointer through to the page.
+    fn wanted_corner(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
+        if !self.corner_in_overlay() || self.feedback.capturing {
+            return None;
+        }
+        let toast = !self.overlays.read(cx).toasts.is_empty();
+        let slot = self.layout.feedback_mode || self.feedback.forced_on;
+        let pills = usize::from(toast) + usize::from(slot);
+        if pills == 0 {
+            return None;
+        }
+        let sheet = self.browser.centre_page_rect?;
+        let pad = gpui::px(SHADOW_PAD);
+        let pill = aui::feedback::PILL_H;
+        let height = gpui::px(pill * pills as f32 + 8.0 * (pills as f32 - 1.0)) + pad * 2.0;
+        let width = gpui::px(aui::feedback::TOAST_MAX_W) + pad * 2.0;
+        let right = sheet.right() - gpui::px(12.0) + pad;
+        let bottom = sheet.bottom() - gpui::px(12.0) + pad;
+        let origin = window.bounds().origin + gpui::point(right - width, bottom - height);
+        Some(Bounds::new(origin, gpui::size(width, height)))
+    }
+
+    /// Open, move or close the corner window to match [`Self::wanted_corner`]
+    /// — the same deferred dance as [`Self::sync_overlay`], minus the
+    /// keyboard: the panel opens unfocused and nothing it does resigns it.
+    pub(crate) fn sync_corner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.wanted_corner(window, cx);
+        if wanted.is_some() {
+            // The slot draws in this window now: the main window's record
+            // of it would silence the capture layer at a stale spot.
+            self.feedback.slot_bounds = None;
+        }
+        let current = self.corner.as_ref().map(|o| o.bounds).or(self.corner_pending);
+        if wanted == current {
+            let print = self.corner_print(cx);
+            if let Some(corner) = self.corner.as_mut().filter(|o| o.print != print) {
+                corner.print = print;
+                let handle = corner.handle;
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.refresh());
+                });
+            }
+            return;
+        }
+        if let Some(old) = self.corner.take() {
+            let handle = old.handle;
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+        self.corner_pending = wanted;
+        trace(format_args!("corner want {wanted:?} (had {current:?})"));
+        let Some(bounds) = wanted else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        never_main_panels();
+        let baaz = cx.entity().downgrade();
+        cx.spawn(async move |this, cx| {
+            let opened = cx.update(|cx| {
+                let options = WindowOptions {
+                    titlebar: None,
+                    focus: false,
+                    show: true,
+                    kind: WindowKind::PopUp,
+                    is_movable: false,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    ..Default::default()
+                };
+                cx.open_window(options, move |window, cx| {
+                    drop_native_chrome(window, OverlayKind::Corner);
+                    cx.new(|cx| OverlayView { baaz, kind: OverlayKind::Corner, focus: cx.focus_handle(), seen_active: false })
+                })
+            });
+            trace(format_args!("opened Corner: {}", if opened.is_ok() { "ok" } else { "failed" }));
+            let _ = this.update(cx, |this, cx| {
+                match opened {
+                    Ok(handle) if this.corner_pending == Some(bounds) => {
+                        this.corner_pending = None;
+                        let print = this.corner_print(cx);
+                        this.corner = Some(Overlay { handle: handle.into(), kind: OverlayKind::Corner, bounds, print });
+                    }
+                    Ok(handle) => {
+                        let handle: AnyWindowHandle = handle.into();
+                        cx.defer(move |cx| {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        });
+                    }
+                    Err(_) => this.corner_pending = None,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A fingerprint of what the corner shows: the toasts, and the
+    /// feedback slot's phase, count, arm and flash.
+    fn corner_print(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for toast in &self.overlays.read(cx).toasts {
+            toast.id.to_string().hash(&mut hasher);
+        }
+        format!("{:?}", self.feedback.phase).hash(&mut hasher);
+        self.feedback.notes_label().hash(&mut hasher);
+        self.feedback.discard_armed_live().hash(&mut hasher);
+        self.feedback.done_enabled(cx).hash(&mut hasher);
+        self.feedback.saved_flash.as_ref().is_some_and(|f| f.at.elapsed() < crate::app::feedback_ui::FEEDBACK_SAVED_FLASH).hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// A fingerprint of what the overlay content shows: the open menu and the
     /// folders it lists, or the Field's rows and highlight.
     fn overlay_print(&self, cx: &App) -> u64 {
@@ -431,6 +563,12 @@ impl Harness {
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
+            OverlayKind::Corner => {
+                self.hosting_overlay = true;
+                let stack = self.render_corner_stack(cx);
+                self.hosting_overlay = false;
+                stack
+            }
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
@@ -746,6 +884,7 @@ impl Harness {
         trace(format_args!("close {kind:?}"));
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
+            OverlayKind::Corner => {}
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {

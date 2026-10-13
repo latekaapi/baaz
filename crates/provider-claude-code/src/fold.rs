@@ -375,7 +375,11 @@ fn finish_tool_block(
             target: target.to_owned(),
             status,
             duration_ms: None,
-            body: ToolBody::Read { lines: read_line_count(result) },
+            body: ToolBody::Read {
+                lines: read_line_count(result),
+                // What the read returned, opened on the card's Well (D4).
+                output_lines: result.text.lines().map(str::to_owned).collect(),
+            },
             diff_stat: None,
         },
         ToolKind::Search => {
@@ -1561,6 +1565,8 @@ impl ClaudeFold {
                 size_bytes: Some(image.data_len as u64),
                 meta: Some(image.media_type.clone()),
                 state: UploadState::Ready,
+                path: None,
+                quote_of: None,
             })
             .collect();
         deltas.push(Delta::TurnStarted {
@@ -3172,7 +3178,7 @@ mod tests {
         }).expect("the Read card completes");
         assert!(read.0.ends_with("notes.txt"), "target: {}", read.0);
         assert!(
-            matches!(read.1, ToolBody::Read { lines: 3 }),
+            matches!(read.1, ToolBody::Read { lines: 3, .. }),
             "the wire's own line count: {read:?}"
         );
         let shell = updated.iter().find_map(|block| match block {

@@ -716,7 +716,7 @@ fn other_json_results_fold_pretty_and_reads_keep_their_line_count() {
     }
     let read = calls.iter().find(|call| call.id == "i-syn-read-1").expect("the read folded");
     match &read.body {
-        ToolBody::Read { lines } => assert_eq!(*lines, 3),
+        ToolBody::Read { lines, .. } => assert_eq!(*lines, 3),
         body => panic!("a file read folded to {body:?}"),
     }
 }

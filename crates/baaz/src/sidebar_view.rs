@@ -1058,6 +1058,11 @@ impl Harness {
             .collect();
         let current = self.browser.tabs.spaces.iter().position(|s| s.id == space).unwrap_or(0);
         let editing = self.browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
+        // D4: the downloads button exists while downloads list; its dot
+        // says one is running.
+        let downloads = self.browse_downloads(cx);
+        let downloads = (!downloads.is_empty())
+            .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
         BrowseModel {
             host: address.host,
             path: address.path,
@@ -1068,6 +1073,7 @@ impl Harness {
             folders,
             task_folders,
             spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into() }] } else { spaces },
+            downloads,
             space: current,
             hovered_today_header: self.hovered_today_header,
             editing,
@@ -1324,6 +1330,7 @@ impl Harness {
             }
             BrowseIntent::NewTab => self.new_browse_sidebar_tab(window, cx),
             BrowseIntent::PageMenu(anchor) => self.toggle_browse_page_menu(anchor, window, cx),
+            BrowseIntent::Downloads(anchor) => self.toggle_browse_downloads(anchor, cx),
             BrowseIntent::Page(action) => self.browse_page_action(action, window, cx),
             BrowseIntent::OpenPin(id) | BrowseIntent::SelectTab(id) => {
                 if let Some(id) = browse_tab_id(&id) {

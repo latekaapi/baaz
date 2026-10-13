@@ -1,7 +1,5 @@
-//! D49 play buttons' entry point: run a command in the terminal dock.
-//!
-//! One entry point; everything below calls it — the shell cards' "Run in
-//! terminal", the runnable code blocks' "Run", and the block rerun. Open the
+//! The dock's entry point for running a command (D49): the connect flow and
+//! the block rerun call it. (D4 removed the transcript's play buttons.) Open the
 //! dock, pick the tab by D43's rule, bracketed-paste the command, send Enter
 //! unless asked not to, and focus the grid. Entirely local: no turn, no
 //! wire, so it works under `--replay` too.
@@ -12,39 +10,6 @@ use gpui::{Context, Window};
 
 use super::{Pick, TabOwner};
 use crate::app::Harness;
-
-/// What a play button resolved to: a command for the terminal dock, and
-/// whether Enter follows the paste.
-///
-/// [`None`] when the command is blank — a button is a click,
-/// and a click on nothing runs nothing, so the press no-ops before it ever
-/// reaches an event.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunRequest {
-    /// The exact command to paste, whole: multi-line blocks paste whole and
-    /// the shell runs the lines in order.
-    pub command: String,
-    /// A plain click sends Enter after the paste; an ⌥-click pastes without
-    /// it.
-    pub send_enter: bool,
-}
-
-impl RunRequest {
-    /// The request for `command`, or [`None`] when it carries
-    /// nothing to run.
-    pub fn new(command: String, send_enter: bool) -> Option<Self> {
-        if command.trim().is_empty() {
-            return None;
-        }
-        Some(Self { command, send_enter })
-    }
-}
-
-/// Whether Enter follows the paste: ⌥-click pastes without Enter, a plain
-/// click sends it.
-pub fn send_enter_for_alt(alt_held: bool) -> bool {
-    !alt_held
-}
 
 impl Harness {
     /// Run `command` in the terminal dock (D49): open the dock, pick the
@@ -114,27 +79,6 @@ mod tests {
     use super::super::host::{pick_tab, TabState};
     use super::super::{deterministic_script, TerminalHost};
     use super::*;
-
-    #[test]
-    fn blank_commands_produce_no_request() {
-        assert_eq!(RunRequest::new(String::new(), true), None);
-        assert_eq!(RunRequest::new("   \n  ".to_owned(), false), None);
-    }
-
-    #[test]
-    fn multi_line_commands_paste_whole() {
-        let command = "npm test -- --watch\nnpm run lint";
-        assert_eq!(
-            RunRequest::new(command.to_owned(), true),
-            Some(RunRequest { command: command.to_owned(), send_enter: true })
-        );
-    }
-
-    #[test]
-    fn alt_click_pastes_without_enter() {
-        assert!(!send_enter_for_alt(true));
-        assert!(send_enter_for_alt(false));
-    }
 
     /// The tab choice a play-button run makes is the host's `pick_tab` rule
     /// (D43): the project's idle active tab takes the command, a busy one

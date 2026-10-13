@@ -173,6 +173,8 @@ impl SessionView {
                     self.close_menu(cx);
                 }
             }
+            // The slider sets the effort live (D4): Enter only closes.
+            MenuKind::Effort if !self.effort_levels().is_empty() => self.close_menu(cx),
             MenuKind::Effort => {
                 let listed = self.effort_options();
                 if let Some(option) =
@@ -275,11 +277,23 @@ impl SessionView {
     /// providers: changing the model re-derives the list, so the chooser
     /// follows the selection.
     pub(super) fn effort_options(&self) -> EffortOptions {
+        self.effort_options_for(None)
+    }
+
+    /// [`Self::effort_options`] for `model` instead of the session's own —
+    /// a model row's nested submenu in the model picker (D4).
+    pub(super) fn effort_options_for(&self, model: Option<&str>) -> EffortOptions {
         match self.provider_kind() {
             ProviderId::Muse => EffortOptions::Available(muse_efforts()),
-            ProviderId::ClaudeCode => self.claude_code_efforts(),
-            ProviderId::Codex => self.codex_effort_options(),
+            ProviderId::ClaudeCode => self.claude_code_efforts(model),
+            ProviderId::Codex => self.codex_effort_options(model),
         }
+    }
+
+    /// The model the effort options read: `model` when given, else the
+    /// session's active (or pending) one.
+    fn effort_model<'a>(&'a self, model: Option<&'a str>) -> Option<&'a str> {
+        model.or_else(|| self.models.iter().find(|m| m.is_active).map(|m| m.model_id.as_str())).or(self.pending_model.as_deref())
     }
 
     /// The muted note the effort menu shows when the session's model names
@@ -320,13 +334,8 @@ impl SessionView {
     /// (the level rides `turn/start` and the server validates it — a
     /// rejection banners, never silences); a model whose row names no
     /// levels explains itself instead of opening an empty menu.
-    fn codex_effort_options(&self) -> EffortOptions {
-        let current = self
-            .models
-            .iter()
-            .find(|m| m.is_active)
-            .map(|m| m.model_id.as_str())
-            .or(self.pending_model.as_deref());
+    fn codex_effort_options(&self, model: Option<&str>) -> EffortOptions {
+        let current = self.effort_model(model);
         let Some(model) = current else {
             return EffortOptions::Unavailable(
                 "No model is selected, so there is no catalog row to read reasoning levels from."
@@ -394,9 +403,54 @@ impl SessionView {
     /// to a fresh one — effort, like model, is switchable mid-session and
     /// rides the next turn — and the chip reads the pick at once.
     pub(super) fn pick_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
-        self.effort = effort;
-        cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
+        self.set_effort(effort, cx);
         self.close_menu(cx);
+    }
+
+    /// Sets the effort without closing the menu: the slider reports each
+    /// stop as it is dragged, and the chip's label follows live (D4).
+    pub(super) fn set_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
+        if self.effort != effort {
+            self.effort = effort;
+            cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
+        }
+        cx.notify();
+    }
+
+    /// The effort levels the slider walks (no Default), low to high.
+    pub(super) fn effort_levels(&self) -> Vec<ReasoningEffort> {
+        self.effort_options().options().map(|options| options.iter().filter_map(|o| o.effort).collect()).unwrap_or_default()
+    }
+
+    /// ← / → in the open menu (D4).
+    pub fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let kind = self.overlays.read(cx).menu.as_ref().map(|m| m.kind);
+        match kind {
+            Some(MenuKind::Effort) => {
+                let levels = self.effort_levels();
+                if levels.is_empty() {
+                    return;
+                }
+                let at = self.effort.and_then(|e| levels.iter().position(|l| *l == e));
+                let next = match (at, delta.signum()) {
+                    (None, 1) => Some(0),
+                    (None, _) => None,
+                    (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
+                };
+                if let Some(next) = next {
+                    self.set_effort(Some(levels[next]), cx);
+                }
+            }
+            Some(MenuKind::Model) => {
+                self.overlays.update(cx, |overlays, _| {
+                    if let Some(menu) = overlays.menu.as_mut() {
+                        menu.sub_open = delta > 0;
+                    }
+                });
+                cx.notify();
+            }
+            _ => {}
+        }
     }
 
     /// The Claude Code arm of [`SessionView::effort_options`]: the selected
@@ -409,7 +463,7 @@ impl SessionView {
     /// catalog folded yet the menu offers only `Default` with the note
     /// saying the levels load when the session starts. A level the closed
     /// enum cannot spell is skipped, never fabricated.
-    fn claude_code_efforts(&self) -> EffortOptions {
+    fn claude_code_efforts(&self, model: Option<&str>) -> EffortOptions {
         if self.claude_efforts.is_empty() {
             return EffortOptions::AvailableWithNote {
                 options: vec![EffortOption {
@@ -419,12 +473,7 @@ impl SessionView {
                 note: Self::CLAUDE_PRE_CATALOG_NOTE.to_owned(),
             };
         }
-        let current = self
-            .models
-            .iter()
-            .find(|m| m.is_active)
-            .map(|m| m.model_id.as_str())
-            .or(self.pending_model.as_deref());
+        let current = self.effort_model(model);
         if let Some(levels) = current.and_then(|model| self.claude_efforts.get(model)) {
             return Self::claude_row_options(current.unwrap_or("this model"), levels);
         }
@@ -588,7 +637,9 @@ impl SessionView {
             return;
         }
         if self.has_turns() {
-            cx.emit(SessionEvent::NewSessionOnProvider { provider: picked });
+            // A session cannot change provider in place: the hand-off
+            // confirm says what crosses over, once (D4).
+            cx.emit(SessionEvent::HandoffRequested { provider: picked, headless: false });
         } else {
             cx.emit(SessionEvent::SwitchProvider { provider: picked });
         }
@@ -651,32 +702,12 @@ impl SessionView {
             ids.push(current);
         }
         ids.sort_by_key(|id| ProviderId::all().iter().position(|all| all == id).unwrap_or(99));
+        // D4 (docs/41 §2.10; the owner, 2026-10-13): just the providers —
+        // mark and name, the current one checked. A session with turns cannot
+        // switch in place, so picking another opens the hand-off confirm.
+        let _ = has_turns;
         for id in ids {
-            if has_turns && id != current {
-                rows.push(ProviderRow {
-                    id: format!("handoff:{}", id.as_str()),
-                    label: format!("Hand off to {}…", id.label()),
-                    detail: format!(
-                        "Start a fresh {} session with a summary of this one. Tool state, pending approvals and provider memory do not carry over.",
-                        id.label()
-                    ),
-                });
-                rows.push(ProviderRow {
-                    id: id.as_str().to_owned(),
-                    label: format!("New session on {}", id.label()),
-                    detail: format!(
-                        "This session already has turns on {}, so its provider cannot be switched. Starts a new session on {}.",
-                        current.label(),
-                        id.label()
-                    ),
-                });
-            } else {
-                rows.push(ProviderRow {
-                    id: id.as_str().to_owned(),
-                    label: id.label().to_owned(),
-                    detail: id.blurb().to_owned(),
-                });
-            }
+            rows.push(ProviderRow { id: id.as_str().to_owned(), label: id.label().to_owned(), detail: String::new() });
         }
         rows
     }
@@ -899,9 +930,15 @@ impl SessionView {
                 continue;
             }
             self.file_seq += 1;
-            match attachments::from_path(format!("file-{}", self.file_seq), &path) {
+            let id = format!("file-{}", self.file_seq);
+            match attachments::from_path(id.clone(), &path) {
                 Ok(file) => self.files.push(file),
-                Err(reason) => self.banner = Some(reason),
+                // D4: a file that cannot be read stays as a failed chip, the
+                // reason as its meta, until ✕ removes it — no retry.
+                Err(reason) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.failed_chips.push((id, name, short_reason(&reason)));
+                }
             }
         }
         cx.notify();
@@ -934,11 +971,78 @@ impl SessionView {
         match decoded {
             Ok(image) => self.images[slot] = image,
             Err(reason) => {
-                self.images.remove(slot);
-                self.banner = Some(reason);
+                // D4: the chip stays, failed, with the reason as its meta.
+                let failed = self.images.remove(slot);
+                self.failed_chips.push((failed.id, failed.name, short_reason(&reason)));
             }
         }
         cx.notify();
+    }
+
+    /// D4: a Browse annotation batch is waiting in the draft; it goes out
+    /// with the next turn and draws as that turn.
+    pub(crate) fn set_annotation_draft(&mut self, batch: crate::sent::SentAnnotations, cx: &mut Context<Self>) {
+        self.annotation_draft = Some(batch);
+        cx.notify();
+    }
+
+    /// D4: remembers what this turn goes out with — pictures (copied into
+    /// the session's sent folder), files, quotations, a Browse annotation
+    /// batch — so its bubble can show them; the wire carries text only.
+    /// Clears the quotations and the batch; the caller clears the rest.
+    pub(super) fn record_sent(&mut self, text: &str) {
+        use aui_protocol::{Attachment, AttachmentKind, UploadState};
+        use base64::Engine as _;
+        let mut attachments = Vec::new();
+        let annotations = self.annotation_draft.take();
+        for image in &self.images {
+            // A batch's own screenshot is its strip, not a tile.
+            if annotations.as_ref().and_then(|a| a.screenshot.as_ref()).is_some() && image.name == crate::browser::ANNOTATION_SHOT_NAME {
+                continue;
+            }
+            let bytes = base64::engine::general_purpose::STANDARD.decode(&image.base64_data).unwrap_or_default();
+            let path = crate::sent::save_picture(&self.session_id, crate::sent::extension_for(&image.media_type), &bytes);
+            attachments.push(Attachment {
+                name: image.name.clone(),
+                kind: AttachmentKind::Image,
+                size_bytes: Some(bytes.len() as u64),
+                meta: None,
+                state: UploadState::Ready,
+                path,
+                quote_of: None,
+            });
+        }
+        for file in &self.files {
+            attachments.push(Attachment {
+                name: file.name.clone(),
+                kind: AttachmentKind::File,
+                size_bytes: Some(file.size_bytes),
+                meta: None,
+                state: UploadState::Ready,
+                path: file.path.clone(),
+                quote_of: None,
+            });
+        }
+        for quote in self.quotes.drain(..) {
+            attachments.push(Attachment {
+                name: quote.text,
+                kind: AttachmentKind::Quote,
+                size_bytes: None,
+                meta: None,
+                state: UploadState::Ready,
+                path: None,
+                quote_of: Some(quote.source),
+            });
+        }
+        self.failed_chips.clear();
+        if attachments.is_empty() && annotations.is_none() {
+            return;
+        }
+        let item = crate::sent::SentItem { text: text.to_owned(), attachments, annotations };
+        if let Err(error) = crate::sent::append(&self.session_id, item.clone()) {
+            crate::baaz_log!("sent: could not record the turn's attachments: {error}");
+        }
+        self.sent_items.push(item);
     }
 
     /// Whether an attachment is still being read and decoded, which is what
@@ -1014,4 +1118,10 @@ pub(super) struct ProviderRow {
     pub label: String,
     /// The row's detail line.
     pub detail: String,
+}
+
+/// A failure's reason short enough for a chip's meta: the last clause of a
+/// reader's message (`notes.pdf: couldn't be read` → `couldn't be read`).
+pub(super) fn short_reason(reason: &str) -> String {
+    reason.rsplit_once(": ").map(|(_, tail)| tail).unwrap_or(reason).trim().to_owned()
 }

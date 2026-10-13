@@ -124,22 +124,25 @@ pub struct Menu {
     /// group row, so the menu anchors under the crumb instead of the
     /// sidebar's content edge.
     pub project_header: bool,
+    /// The model picker: the selected row's effort submenu is open (→ opens
+    /// it, ← closes it; D4).
+    pub sub_open: bool,
 }
 
 impl Menu {
     /// A chip picker with the selection on `selected`.
     pub fn picker(kind: MenuKind, selected: usize) -> Self {
-        Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false }
+        Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false, sub_open: false }
     }
 
     /// A caret popover that started at byte `at` in the draft.
     pub fn caret(kind: MenuKind, at: usize) -> Self {
-        Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false }
+        Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false, sub_open: false }
     }
 
     /// A project menu for `project` (`None` is Unfiled).
     pub fn project(project: Option<String>, from_header: bool) -> Self {
-        Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header }
+        Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header, sub_open: false }
     }
 }
 

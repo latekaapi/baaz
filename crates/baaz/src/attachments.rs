@@ -31,6 +31,9 @@ pub struct AttachedFile {
     pub text: String,
     /// Whether the text was cut to the cap.
     pub truncated: bool,
+    /// Where it was read from, when it came from disk: a sent turn's chip
+    /// reveals it in Files (D4).
+    pub path: Option<String>,
 }
 
 impl AttachedFile {
@@ -66,7 +69,9 @@ const UNKNOWN_TEXT_SNIFF_CAP: usize = 256 * 1024;
 pub fn from_path(id: impl Into<String>, path: &Path) -> Result<AttachedFile, String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    from_bytes(id, name, path.extension().and_then(|e| e.to_str()).unwrap_or_default(), &bytes)
+    let mut file = from_bytes(id, name, path.extension().and_then(|e| e.to_str()).unwrap_or_default(), &bytes)?;
+    file.path = Some(path.to_string_lossy().into_owned());
+    Ok(file)
 }
 
 /// Turn raw bytes into an [`AttachedFile`], or say why not.
@@ -122,7 +127,7 @@ pub fn from_bytes(
         return Err(format!("{name} has no text to send"));
     }
     let (text, truncated) = cap(&content);
-    Ok(AttachedFile { id: id.into(), name, size_bytes: bytes.len() as u64, text, truncated })
+    Ok(AttachedFile { id: id.into(), name, size_bytes: bytes.len() as u64, text, truncated, path: None })
 }
 
 /// Cut `content` to [`MAX_FILE_BYTES`] on a char boundary, noting the cut.
