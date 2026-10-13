@@ -806,6 +806,9 @@ pub struct Harness {
     pub(crate) right_snap: bool,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
+    /// The `reveal` step's hold: the closed pill's title and actions shown
+    /// with no hover (captures).
+    pub(crate) pill_revealed: bool,
     /// Generation of the debounced right-pane `sessions.json` write (B7):
     /// every cheap right-state persist bumps it and arms a delayed
     /// off-thread write; only the latest generation writes, so quick
@@ -1535,6 +1538,7 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             peek_pinned: false,
+            pill_revealed: false,
             right_save_epoch: 0,
             right_save_pending: false,
             right_kind_migrate: std::collections::HashSet::new(),
@@ -3492,10 +3496,10 @@ impl Harness {
         cx.notify();
     }
 
-    /// The centre column's height: the sheet, the window less the bar and
-    /// the 6 px inset top and bottom.
+    /// The centre column's height: the sheet, the window less its 6 px
+    /// inset top and bottom.
     fn centre_height(&self, window: &Window) -> f32 {
-        f32::from(window.bounds().size.height).max(0.0) - crate::browser::BAR_H - 2.0 * aui::shell::SHEET_INSET
+        f32::from(window.bounds().size.height).max(0.0) - 2.0 * aui::shell::SHEET_INSET
     }
 
     /// The dock's height now: the stored one, clamped into `[120px, 70% of
@@ -6819,10 +6823,11 @@ impl Render for Harness {
                     )
                 };
             // One shell for every page (canvas "Baaz v3", chrome revised
-            // 2026-10-13): the bar across the top never moves; the sidebar
-            // column under it; the work area a sheet 6 px in. Settings puts its
-            // section list in the column, its breadcrumb and close button in
-            // the bar. Sessions animates (ease-out, the sheet's content laid out
+            // 2026-10-13): the sidebar column full height with the chrome row
+            // at its top; the work area a sheet 6 px in with its own title
+            // row; closed, the row is a pill that reveals the title and the
+            // actions on hover. Settings puts its section list in the column,
+            // its breadcrumb and close button in the sheet's row. Sessions animates (ease-out, the sheet's content laid out
             // once at the resting width); Browse is instant — the native page
             // cannot follow a per-frame resize without jank — and cuts a hole
             // for the peek so it shows over the page.
@@ -6848,6 +6853,7 @@ impl Render for Harness {
                 .chrome_lead(chrome.lead)
                 .chrome_right(chrome.right)
                 .peek_open(self.peek_pinned)
+                .pill_revealed(self.pill_revealed)
                 .on_overlay_bounds(move |rects, _, cx| {
                     let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
                 })
@@ -8717,14 +8723,14 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle is chrome in both states");
         assert!(vc.debug_bounds("hd-minimal-address").is_none(), "sidebar-open Browse keeps the full toolbar");
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle still renders");
         assert!(vc.debug_bounds("hd-minimal-address").is_some(), "the wide field renders");
         assert!(vc.debug_bounds("hd-minimal-site").is_some(), "the security glyph renders");
         assert!(vc.debug_bounds("hd-minimal-more").is_some(), "the ⋯ menu renders");
         assert!(vc.debug_bounds("hd-minimal-new-tab").is_some(), "the `+` renders");
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-address").is_none(), "reopening the sidebar restores the toolbar");
         assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle stays");
@@ -8768,7 +8774,7 @@ mod tests {
                 fake
             })
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-zoom").is_none(), "100% wears no pill");
         fake.borrow_mut().script_zoom(125);
@@ -8853,7 +8859,7 @@ mod tests {
                 });
             })
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("hd-minimal-chip").is_some(), "the ↩ session chip renders with no sidebar");
         restore_state(state);
@@ -8914,12 +8920,12 @@ mod tests {
             let h = baaz.read(cx);
             (h.browser.centre_page_rect.expect("the sync stores the rect"), h.resize.width)
         });
-        assert_eq!(open_page.origin, gpui::point(gpui::px(width + 6.0), gpui::px(crate::browser::BAR_H + 6.0)), "open: 6 px past the column, under the bar");
+        assert_eq!(open_page.origin, gpui::point(gpui::px(width + 6.0), gpui::px(6.0)), "open: 6 px past the column");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         let closed_page =
             vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
-        assert_eq!(closed_page.origin, gpui::point(gpui::px(6.0), gpui::px(crate::browser::BAR_H + 6.0)), "closed: 6 px from the window, under the bar");
+        assert_eq!(closed_page.origin, gpui::point(gpui::px(6.0), gpui::px(6.0)), "closed: 6 px from the window");
         assert_eq!(
             closed_page.size.width - open_page.size.width,
             gpui::px(width),

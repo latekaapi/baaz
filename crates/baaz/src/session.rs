@@ -166,10 +166,12 @@ fn reply_complete(turn: &Turn) -> bool {
     }
     saw_text
 }
-/// Top inset: the bar sits above the sheet (chrome revised 2026-10-13), so
-/// nothing draws over the transcript's top — the first turn starts 32 px
-/// below the sheet's top, under the sheet's scroll fade.
-const TRANSCRIPT_PAD_TOP: f32 = 32.0;
+/// Top inset: the first turn starts under the sheet's own 32 px title row
+/// (the transcript scrolls under it through the fade) — canvas "Baaz v3"
+/// measured: the first turn's top 80 below the sheet's top when open. One
+/// value for both states: closed (the pill, canvas 100) would re-measure the
+/// list's first item on every toggle.
+const TRANSCRIPT_PAD_TOP: f32 = 80.0;
 /// The composer's distance from the sheet's bottom edge (v3: 12, so 18 from
 /// the window — the pills' 18 from the top).
 const COMPOSER_BOTTOM: f32 = 12.0;
