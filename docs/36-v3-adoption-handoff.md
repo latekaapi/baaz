@@ -270,3 +270,14 @@ the toggle it had just pressed — the shell had no notion of "left and came bac
   downloads button, the toast chip and the feedback slot in Browse (they lived in the Browse toolbar) — next session
   should give them a place in the Browse sidebar's header or the sheet row.
 - Canvas v15: the closed boards show the frame-coloured pill alone; notes n4/n5 rewritten.
+
+## 11. Owner round 5 (2026-10-13, ~6 AM): the pill is the sidebar's top strip
+
+Owner, on a screenshot of the round-4 peek: "the pill and the sidebar should be the same width; the borders should
+match the outer frame, no top borders; the rounded corners on the bottom same as the sidebar."
+
+**Built:** the pill's ground is flush with the window's top and left, exactly the sidebar's resting width (256) and
+the row's height (44), square on top, `rounded_bl` / `rounded_br` 8, the frame's colour — the sidebar's own top strip
+left behind when the column goes (4 px rise + 80 ms fade as before; a hole over a native page). The peek card is the
+sidebar's column: flush with the window's left, top and bottom, the sidebar's width, `rounded_br` 8, Floating with
+the side drop, its rows starting under the pill. `PILL_H` is gone (the row's height is the pill's). Canvas v16.
