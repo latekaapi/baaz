@@ -6412,7 +6412,7 @@ impl Render for Harness {
                         let hidden = !this.sidebar_open && rects.is_empty();
                         if hidden != this.lights_hidden {
                             this.lights_hidden = hidden;
-                            crate::native_lights::set_traffic_lights_hidden(window, hidden);
+                            crate::native_lights::set_traffic_lights_hidden(window, hidden, cx);
                         }
                         this.set_browse_holes(rects, cx);
                     });

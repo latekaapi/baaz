@@ -811,8 +811,10 @@ impl Harness {
     /// (open) and in the peek card's row (closed).
     pub(crate) fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
-        // The label says what a click does now.
-        let label = if self.sidebar_open { "Hide sidebar" } else { "Show sidebar" };
+        // One label in both states: a state-specific one is captured when the
+        // tooltip arms and then reads wrong for a moment after the click flips
+        // the state (seen live 2026-10-13: "Show sidebar" over an open sidebar).
+        let label = "Toggle sidebar  ⌘B";
         div()
             .id("hd-minimal-sidebar")
             .debug_selector(|| "hd-minimal-sidebar".into())
