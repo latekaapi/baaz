@@ -213,3 +213,35 @@ sidebar state both ways (closed stayed closed, open stayed open); `+` in the clo
 contact shadow reads as a soft gradient. Not observable through the tool's ~0.5–1 s screenshot latency: the slide and
 the switch's indicator/row motion — the frame trace above stands for those. One note, not a defect: on a blank new tab
 the closed Browse bar shows the title "New tab" with no host, as designed for a tab without a URL.
+
+## 9. Owner round 3 (2026-10-13, ~4 AM): the bar dropped; the sidebar's row and the sheet return; closed = a pill
+
+Owner: "the header doesn't sit well with me. Drop it, revert back to the only sidebar and full right pane design. Just fix
+the header: in the collapsed state there is just a pill/rounded-bar at the top [left] with just the traffic lights and
+collapse sidebar and toggle view buttons. Title and rest can be shown when mouse is taken to the pill/bar."
+
+**Built (aui design-v2 `4335fc9`, harness feedback-mode `97043f8`, unpushed; canvas v14 shows the hovered state):**
+- Open = the v3 canvas: the sidebar column full height on the frame with the chrome row at its top (lights 12,16 ·
+  toggle x 84 · switch ending 12 px before the column's edge — the owner's "right edge of the sidebar"); the sheet
+  6 px in with its own 32 px title row (title at 16, actions at the right) on the lights' line, fade 64. Baaz's page
+  rect, centre height and `TRANSCRIPT_PAD_TOP` (80) are back to the full-height sheet.
+- Closed = the **pill**: the chrome row's ground becomes a 32-tall Floating pill with the one edge, 6 px from the
+  corner, holding exactly lights · toggle · switch at the same x and y (nothing moves); it fades in with a 4 px rise
+  (80 ms) once the column has settled and leaves (60 ms) before the column opens. The sheet's title row is gone when
+  closed; the transcript runs under the pill through the 92 px fade.
+- **Hover reveal:** resting on the pill extends it to the right (`PILL_REVEAL_W` 420 on `spring.moderate`) with the
+  title — in Browse the ↩ chip, back / forward / reload and the address at rest (`chrome_closed`) — and the actions
+  come in as a second pill at the top right (opacity + 4 px rise on the same spring). Leaving both lingers
+  `PILL_LINGER` 250 ms, then `moderate.exit` 120 ms. Hover is read by geometry (pointer vs the pills' last rects;
+  frames requested while on them). `AppShell::pill_revealed` / Baaz step `reveal` hold it for captures (instant).
+- The toggle's 150 ms peek, the ease-out column (260 / 220, content laid out once), the contact shadow and the list
+  fades carry over from round 2. The `chrome_*` builders are unchanged for hosts.
+- Motion rules applied (FF + Emil): one spring tier for the reveal (moderate, no bounce), exits as plain tweens one
+  tier quicker, nothing moves on the toggle itself, the pill's ground only fades/rises (never slides), reduced motion
+  jumps.
+
+**Gates:** tests + clippy green in both repos; captures of open / closed / closed+reveal / peek / Browse open /
+Browse closed / Browse reveal / Settings looked at (`.relay/owner-2026-10-13/`); bundle rebuilt and signed.
+
+**Open after this round:** the reveal's width is a fixed 420 px, not fitted to the title (a long title truncates,
+a short one leaves room); the pill does not show the toggle's "Show sidebar" tooltip differently from open.
