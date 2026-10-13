@@ -1,0 +1,68 @@
+[
+  {
+    "sessionId": "synthetic-reading",
+    "session": {
+      "id": "synthetic-reading",
+      "agent": "muse",
+      "model": "muse-spark-1.3",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-md-user-1",
+          "text": "Explain the v3 depth system and how every screen gets built.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-md-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "## Why these values\n\nA seven-unit RGB step between near-black greys is about 3 L*, and the eye needs four to five to see a level without a line. Fluid Functionalism's ladder therefore needed its rings to read, and the rings read as borders. The v3 ladder starts darker (Claude Desktop's sidebar is #111111) and steps nine units, so fill alone separates; the edge is only a hint.\n\nTwo to three units of blue in every grey turn a dead grey alive without ever reading as blue. Claude Desktop's side panel is #131215 and Linear's chrome sits in the same place. Only two kinds of depth exist: a surface that sits in another (fill plus a top highlight) and a surface that floats (one soft drop).\n\n> Too much dark border and shadows.\n\nThat one line, from the second round, is the whole brief: the stacked 18 % drops and black outer rings were what read as heavy. The owner answered the four tone questions \"all of the above\" and picked Claude Desktop as the composer reference.\n\n### The loop for every screen\n\n1. Capture the real app offscreen with `BAAZ_DETERMINISTIC=1`, a fresh state dir and a timeout around every capture.\n2. Mock on the v3 canvas from the captures, at the quality of the four screens. The canvas is the spec.\n3. Owner approval, as canvas comments.\n4. Build in agentic-ui (component and gallery card), then Baaz adopts.\n5. Gates in both repos, then the 18-entry probe.\n6. Drive the real app yourself before any handover.\n\n![The sidebar peeking over a live page, captured 2026-10-13](capture-peek.png)\n\n---\n\n| Level | Hex | Used for |\n| --- | --- | --- |\n| Frame | #121215 | window background, the sidebar, every gap |\n| Sheet | #1B1B1F | the work area |\n| Raised | #232328 | composer, user turn, code block, cards |\n| Floating | #2C2C32 | menus, pills, popovers, toasts |\n\nThe right pane, Settings and the command palette inherit the ladder: the right pane is a second sheet 6 px to the right, the palette sits at the dialog level, a toast floats. Light is not designed yet; when it is, the frame goes to a warm off-white, the sheet to white, and the drop shadows carry the depth the way Fluid Functionalism's light rule says.\n",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 2300,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:md:5",
+      "command_text": {},
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
+    }
+  }
+]

@@ -1,17 +1,16 @@
-//! R3 toasts under a native page: the wiring contracts the unit tests
-//! cannot see.
+//! Toasts in the corner stack (R3, moved by D4): the wiring contracts the
+//! unit tests cannot see.
 //!
 //! baaz is a binary, so this suite cannot drive its internals (the
-//! `toasts_in_header` truth table over the five layout cases is pinned by
-//! `#[gpui::test]` tests beside the predicate in `dialogs.rs`). What this
+//! `corner_in_overlay` predicate is pinned by a `#[gpui::test]` beside it
+//! in `dialogs.rs`). What this
 //! suite pins is the shipped wiring, by *executing* the artifacts rather
 //! than reading their text where it matters: the probe module loads at
 //! runtime and its entry table — the data structure a probe run actually
 //! dispatches on — drives a `toast:` window step onto a Browse page. The
-//! render hand-overs (the stack stands down, all three header variants
-//! seat the chip left of the feedback slot, the chip's contract) are
-//! pinned in source text like `browse_h5.rs`, since no headless run can
-//! show a real Chromium page covering the stack.
+//! placements (above the composer, in the corner window over the page)
+//! are pinned in source text like `browse_h5.rs`, since no headless run
+//! can show the corner window over a real Chromium page.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -122,50 +121,52 @@ fn toast_is_a_documented_window_verb() {
     assert!(steps.contains("`toast:<title>"), "toast: has its doc-table row");
 }
 
-/// While a native page is on screen the top-right stack stands down: the
-/// header chip carries the toasts instead, so nothing hides under the
-/// page. Anywhere else the stack reads exactly as before.
+/// D4 (docs/41 §2.11): the corner stack is the toasts' one home — the
+/// newest toast above the feedback slot, right-aligned, 8 apart. The
+/// top-right stack and the header chip are gone.
 #[test]
-fn the_stack_stands_down_while_the_header_carries_toasts() {
+fn the_corner_stack_holds_the_toast_above_the_slot() {
     let dialogs = source("dialogs.rs");
-    let render = fn_body(&dialogs, "render_toasts");
-    assert!(
-        render.contains("toasts_in_header"),
-        "render_toasts consults the predicate"
-    );
-    let gate = render.find("toasts_in_header").expect("the predicate gates the stack");
-    let empty = render.find("toasts.is_empty()").expect("the empty check stays");
-    assert!(gate < empty, "the header gate runs before the empty check");
-}
-
-/// All three header variants seat the chip immediately left of the
-/// feedback slot — the one header region native pages never cover.
-#[test]
-fn every_header_seats_the_chip_left_of_the_feedback_slot() {
+    let stack = fn_body(&dialogs, "render_corner_stack");
+    let toast = stack.find("render_toast_pill").expect("the stack draws the toast");
+    let slot = stack.find("render_feedback_header_slot").expect("the stack draws the feedback slot");
+    assert!(toast < slot, "the toast sits above the slot");
+    assert!(stack.contains("items_end()"), "right-aligned");
+    assert!(stack.contains("gap(px(8.0))"), "8 apart");
+    assert!(!dialogs.contains("fn render_toasts("), "the top-right stack is gone");
+    assert!(!dialogs.contains("fn render_toast_chip("), "the header chip is gone");
     let app = source("app.rs");
-    let site = "render_bar_chrome";
-    let body = fn_body(&app, site);
-    let chip = body.find("render_toast_chip").unwrap_or_else(|| panic!("{site} renders the chip"));
-    let slot = body.find("render_feedback_header_slot").unwrap_or_else(|| panic!("{site} keeps the slot"));
-    assert!(chip < slot, "{site} seats the chip left of the feedback slot");
+    let bar = fn_body(&app, "render_bar_chrome");
+    assert!(!bar.contains("render_feedback_header_slot"), "the header no longer carries the slot");
 }
 
-/// The chip's contract: a status named `<title>: <body>`, the full body
-/// on hover, a labelled action and close, newest only with `+N` for the
-/// queue — on the header-button-height surface-2 chip the spec draws.
+/// Sessions: the stack rides the composer band, its bottom 8 above the
+/// composer and 12 from the sheet's right; Browse: its own window over the
+/// page, 12 above the sheet's bottom.
 #[test]
-fn the_chip_names_itself_and_stays_one_line() {
+fn the_stack_sits_above_the_composer_and_over_the_page() {
     let dialogs = source("dialogs.rs");
-    let chip = fn_body(&dialogs, "render_toast_chip");
-    assert!(chip.contains("Role::Status"), "the chip is a status");
-    assert!(chip.contains("aria_label(tip"), "the status is labelled <title>: <body>");
-    assert!(chip.contains("ToastChipTip"), "hover shows the full body as a tooltip");
-    assert!(chip.contains("Dismiss notification"), "the close button is labelled");
-    assert!(chip.contains("toasts.last()"), "newest toast only");
-    assert!(chip.contains("\"+{queued}\""), "a muted +N while several queue");
-    assert!(chip.contains("max_w(px(480.0))"), "the chip caps at 480 px");
-    assert!(chip.contains("max_w(px(320.0))"), "the body truncates at 320 px");
-    assert!(chip.contains("h(px(24.0))"), "the chip stands at header button height");
-    assert!(chip.contains("bg(p.surface_2)"), "the chip grounds on surface-2");
-    assert!(chip.contains("rounded(px(8.0))"), "the chip rounds at 8 px");
+    let band = fn_body(&dialogs, "corner_above_band");
+    assert!(band.contains("right(px(12.0))") && band.contains("pb(px(8.0))"), "8 above the composer, 12 in");
+    let sheet = fn_body(&dialogs, "corner_at_sheet_bottom");
+    assert!(sheet.contains("bottom(px(12.0))"), "12 above the sheet's bottom without a composer");
+    let overlay = source("overlay.rs");
+    let wanted = fn_body(&overlay, "wanted_corner");
+    assert!(wanted.contains("corner_in_overlay"), "Browse hosts it in the corner window");
+    assert!(wanted.contains("centre_page_rect"), "anchored on the sheet");
+    let sync = fn_body(&overlay, "sync_corner");
+    assert!(sync.contains("focus: false"), "the corner window never takes the keyboard");
+}
+
+/// The toast's contract: newest only with `+N`, Undo as its one action,
+/// a close, settled under a deterministic capture.
+#[test]
+fn the_toast_is_the_newest_with_its_queue() {
+    let dialogs = source("dialogs.rs");
+    let pill = fn_body(&dialogs, "render_toast_pill");
+    assert!(pill.contains("toasts.last()"), "newest toast only");
+    assert!(pill.contains(".queued(queued)"), "+N while several queue");
+    assert!(pill.contains("undo_newest"), "the one action is Undo");
+    assert!(pill.contains(".on_close("), "dismissable");
+    assert!(pill.contains("at_rest(crate::clock::deterministic())"), "captures draw it settled");
 }

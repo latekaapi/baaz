@@ -107,7 +107,11 @@
                   "duration_ms": null,
                   "body": {
                     "kind": "read",
-                    "lines": 2
+                    "lines": 2,
+                    "output_lines": [
+                      "alpha",
+                      "beta"
+                    ]
                   }
                 },
                 {
@@ -121,7 +125,10 @@
                   "duration_ms": null,
                   "body": {
                     "kind": "read",
-                    "lines": 1
+                    "lines": 1,
+                    "output_lines": [
+                      "gamma"
+                    ]
                   }
                 }
               ],
