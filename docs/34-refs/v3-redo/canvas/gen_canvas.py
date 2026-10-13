@@ -276,29 +276,30 @@ def b_composers(src):
     b += composer_b(740, 40, w=620)
     return b + '</div>'
 
-boards = {
- "Main.dc.html": ("Tone", b_tone, 1440, 520, 0, 0),
- "Depth.dc.html": ("Depth", b_depth, 1440, 620, 0, 640),
- "Composers.dc.html": ("Composer", b_composers, 1440, 360, 0, 1380),
- "SessionsOpen.dc.html": ("Sessions · open", b_sessions_open, 1440, 900, 0, 2000),
- "SessionsClosed.dc.html": ("Sessions · closed", b_sessions_closed, 1440, 900, 1520, 2000),
- "BrowseOpen.dc.html": ("Browse · open", b_browse_open, 1440, 900, 0, 3020),
- "BrowseClosed.dc.html": ("Browse · closed", b_browse_closed, 1440, 900, 1520, 3020),
-}
-index = {"v": 3, "createdOnFiles": {"v": 1, "at": "2026-10-12T15:50:00Z"}, "title": "Baaz v3", "launch": {"view": "canvas"}, "pages": [], "boards": {}, "order": [], "notes": {}, "designSystems": []}
-for f, (t, fn, w, h, x, y) in boards.items():
-    page(f[:-8], t, fn, w, h, colour=(f in ("Main.dc.html","Depth.dc.html","Composers.dc.html")))
-    index["boards"][f] = {"x": x, "y": y, "w": w, "h": h, "title": t}
-    index["order"].insert(0, f)
-index["notes"] = {
- "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: titles are 600. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom. Browse open uses the same drawn chrome and account footer as Sessions."},
- "t1": {"x": 0, "y": -240, "kind": "title1", "maxW": 2960, "text": "Baaz v3 — FINAL 2026-10-12: tone, depth, composer, then the four screens"},
- "t2": {"x": 0, "y": 1760, "kind": "title1", "maxW": 2960, "text": "The four screens — Sessions and Browse, open and closed"},
- "n1": {"x": 1520, "y": 0, "w": 420, "fill": "blue", "text": "Why the previous rounds read flat: a seven-unit step between near-black greys is about 3 L* and the eye needs 4 to 5 to see a level without a line. Drawing the line back in made it look outlined. So: a darker frame, nine-unit steps, highlight on the top edge instead of a border, and a slight cool bias so the greys are not dead."},
- "n2": {"x": 1520, "y": 640, "w": 420, "fill": "blue", "text": "FINAL (owner, 2026-10-12): the cool-neutral ladder, light edge (7 % top highlight + 6 % white ring on every surface), floating drop 8/24 at 40 %, dialog drop 24/56 at 50 %. Only two kinds of depth exist: a surface that sits in another (fill + top highlight) and a surface that floats (a faint ring + one soft drop). FF's stacked small drops at 18 % are replaced by one diffuse drop; FF's structure (substrate + offset, surface-relative overlays, the springs) stays."},
- "n3": {"x": 1520, "y": 1380, "w": 420, "fill": "blue", "text": "A is used on the screens. The chips lose their borders; the composer card is the single edge at the bottom of the sheet. Provider stays visible as a mark, model and mode as text controls that light on hover."},
- "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Revised 2026-10-13 (owner round 7): the sidebar column full height on the frame with its chrome row on top — lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line over a 64 px fade, like Claude Desktop — no app-wide header in either mode. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once) and NOTHING stays — no row, no toggle, not even the traffic lights (hidden with the column). A 150 ms rest on the window's top edge (the 6 px frame band above the sheet) or its left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, rounded 8 at the bottom right with a drop to its right, its own row (lights · toggle · switch) riding in with it; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px)."},
- "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed (owner round 7): nothing sits over the page — the sheet is the whole window less the 6 px frame; the top or left edge peeks the sidebar with the address, the tabs and the controls over the page. No tab strip. The peek over the native page is a hole cut through the page window (holes add up, so an overlap never flips back)."},
-}
-json.dump(index, open(f"{P}/canvas.json", "w"), indent=1)
-print("wrote", list(boards))
+if __name__ == "__main__":
+    boards = {
+     "Main.dc.html": ("Tone", b_tone, 1440, 520, 0, 0),
+     "Depth.dc.html": ("Depth", b_depth, 1440, 620, 0, 640),
+     "Composers.dc.html": ("Composer", b_composers, 1440, 360, 0, 1380),
+     "SessionsOpen.dc.html": ("Sessions · open", b_sessions_open, 1440, 900, 0, 2000),
+     "SessionsClosed.dc.html": ("Sessions · closed", b_sessions_closed, 1440, 900, 1520, 2000),
+     "BrowseOpen.dc.html": ("Browse · open", b_browse_open, 1440, 900, 0, 3020),
+     "BrowseClosed.dc.html": ("Browse · closed", b_browse_closed, 1440, 900, 1520, 3020),
+    }
+    index = {"v": 3, "createdOnFiles": {"v": 1, "at": "2026-10-12T15:50:00Z"}, "title": "Baaz v3", "launch": {"view": "canvas"}, "pages": [], "boards": {}, "order": [], "notes": {}, "designSystems": []}
+    for f, (t, fn, w, h, x, y) in boards.items():
+        page(f[:-8], t, fn, w, h, colour=(f in ("Main.dc.html","Depth.dc.html","Composers.dc.html")))
+        index["boards"][f] = {"x": x, "y": y, "w": w, "h": h, "title": t}
+        index["order"].insert(0, f)
+    index["notes"] = {
+     "n6": {"x": 3040, "y": 2480, "w": 420, "fill": "blue", "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: titles are 600. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom. Browse open uses the same drawn chrome and account footer as Sessions."},
+     "t1": {"x": 0, "y": -240, "kind": "title1", "maxW": 2960, "text": "Baaz v3 — FINAL 2026-10-12: tone, depth, composer, then the four screens"},
+     "t2": {"x": 0, "y": 1760, "kind": "title1", "maxW": 2960, "text": "The four screens — Sessions and Browse, open and closed"},
+     "n1": {"x": 1520, "y": 0, "w": 420, "fill": "blue", "text": "Why the previous rounds read flat: a seven-unit step between near-black greys is about 3 L* and the eye needs 4 to 5 to see a level without a line. Drawing the line back in made it look outlined. So: a darker frame, nine-unit steps, highlight on the top edge instead of a border, and a slight cool bias so the greys are not dead."},
+     "n2": {"x": 1520, "y": 640, "w": 420, "fill": "blue", "text": "FINAL (owner, 2026-10-12): the cool-neutral ladder, light edge (7 % top highlight + 6 % white ring on every surface), floating drop 8/24 at 40 %, dialog drop 24/56 at 50 %. Only two kinds of depth exist: a surface that sits in another (fill + top highlight) and a surface that floats (a faint ring + one soft drop). FF's stacked small drops at 18 % are replaced by one diffuse drop; FF's structure (substrate + offset, surface-relative overlays, the springs) stays."},
+     "n3": {"x": 1520, "y": 1380, "w": 420, "fill": "blue", "text": "A is used on the screens. The chips lose their borders; the composer card is the single edge at the bottom of the sheet. Provider stays visible as a mark, model and mode as text controls that light on hover."},
+     "n4": {"x": 3040, "y": 2000, "w": 420, "fill": "blue", "text": "Revised 2026-10-13 (owner round 7): the sidebar column full height on the frame with its chrome row on top — lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line over a 64 px fade, like Claude Desktop — no app-wide header in either mode. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once) and NOTHING stays — no row, no toggle, not even the traffic lights (hidden with the column). A 150 ms rest on the window's top edge (the 6 px frame band above the sheet) or its left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, rounded 8 at the bottom right with a drop to its right, its own row (lights · toggle · switch) riding in with it; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px)."},
+     "n5": {"x": 3040, "y": 3020, "w": 420, "fill": "blue", "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed (owner round 7): nothing sits over the page — the sheet is the whole window less the 6 px frame; the top or left edge peeks the sidebar with the address, the tabs and the controls over the page. No tab strip. The peek over the native page is a hole cut through the page window (holes add up, so an overlap never flips back)."},
+    }
+    json.dump(index, open(f"{P}/canvas.json", "w"), indent=1)
+    print("wrote", list(boards))

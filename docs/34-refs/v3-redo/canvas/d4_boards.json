@@ -1,0 +1,107 @@
+{
+ "D4Blocks.dc.html": {
+  "x": 0,
+  "y": 4040,
+  "w": 1440,
+  "h": 2964,
+  "title": "D4 \u00b7 Blocks"
+ },
+ "D4Cards.dc.html": {
+  "x": 1520,
+  "y": 4040,
+  "w": 1440,
+  "h": 1923,
+  "title": "D4 \u00b7 Cards + homes"
+ },
+ "D4Answer.dc.html": {
+  "x": 0,
+  "y": 6500,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Answer"
+ },
+ "D4Work.dc.html": {
+  "x": 1520,
+  "y": 6500,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Work, fold open"
+ },
+ "D4Ask.dc.html": {
+  "x": 0,
+  "y": 7520,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Question pending"
+ },
+ "D4Progress.dc.html": {
+  "x": 1520,
+  "y": 7520,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Goal + tasks"
+ },
+ "D4HomeSessions.dc.html": {
+  "x": 0,
+  "y": 8660,
+  "w": 1440,
+  "h": 900,
+  "title": "Homes \u00b7 Sessions"
+ },
+ "D4HomeBrowse.dc.html": {
+  "x": 1520,
+  "y": 8660,
+  "w": 1440,
+  "h": 900,
+  "title": "Homes \u00b7 Browse"
+ },
+ "D4Reading.dc.html": {
+  "x": 0,
+  "y": 9800,
+  "w": 1440,
+  "h": 1494,
+  "title": "D4 \u00b7 Reading"
+ },
+ "D4Composer.dc.html": {
+  "x": 1520,
+  "y": 9800,
+  "w": 1440,
+  "h": 2137,
+  "title": "D4 \u00b7 Composer states"
+ },
+ "D4More.dc.html": {
+  "x": 3040,
+  "y": 9800,
+  "w": 1440,
+  "h": 2158,
+  "title": "D4 \u00b7 More cards"
+ },
+ "D4Approve.dc.html": {
+  "x": 0,
+  "y": 12280,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Approval pending"
+ },
+ "D4Error.dc.html": {
+  "x": 1520,
+  "y": 12280,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Error + retry"
+ },
+ "D4Grill.dc.html": {
+  "x": 3040,
+  "y": 12280,
+  "w": 1440,
+  "h": 900,
+  "title": "D4 \u00b7 Several questions"
+ },
+ "D4Pickers.dc.html": {
+  "x": 0,
+  "y": 13300,
+  "w": 1440,
+  "h": 2190,
+  "title": "D4 \u00b7 Pickers + send"
+ }
+}
