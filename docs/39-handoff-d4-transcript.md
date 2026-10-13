@@ -1,4 +1,4 @@
-# 39 — Handoff: the sidebar is signed off and on main; next is D4, the transcript
+# 39 — Handoff (SUPERSEDED by docs/40): the sidebar is signed off and on main; next is D4, the transcript
 
 Written 2026-10-13 (evening) at the end of the round-7 session. Supersedes docs/38. Read docs/36 §13–§14 for what
 round 7 changed and why; the canvas "Baaz v3" (v19) is the spec; the tracker "Baaz Two Tracks" (v12) is the plan.
