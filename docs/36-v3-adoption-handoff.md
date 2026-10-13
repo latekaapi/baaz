@@ -245,3 +245,28 @@ Browse closed / Browse reveal / Settings looked at (`.relay/owner-2026-10-13/`);
 
 **Open after this round:** the reveal's width is a fixed 420 px, not fitted to the title (a long title truncates,
 a short one leaves room); the pill does not show the toggle's "Show sidebar" tooltip differently from open.
+
+## 10. Owner round 4 (2026-10-13, ~5 AM): the pill is the frame; hover peeks the sidebar; no re-peek after a toggle
+
+Owner, on a screenshot of round 3: the pill must be the sidebar's colour, "like it's a surface underneath everything
+else"; drop the header-strip reveal on hover and show the whole sidebar (the peek) instead; and after a toggle, with
+the pointer still on or near the button, the sidebar must not come back until the pointer moves over the button again.
+
+**Diagnosis:** the pill sat on the Floating level with the float drop (the canvas v9 value for pills); the hover
+extension was my round-3 addition; the peek re-armed the instant the column settled because the pointer was still on
+the toggle it had just pressed — the shell had no notion of "left and came back".
+
+**Built (aui design-v2 + harness feedback-mode, see the commits):**
+- Pill ground = `surface_1` (the frame), no edge, no drop; still 32 tall, 6 from the corner, 80 ms fade + 4 px rise
+  once the column settles, gone before it opens; over a native page it is a hole.
+- Resting on the pill joins the toggle and the window's left strip as a peek source (one 150 ms clock); the reveal,
+  the actions pill, `chrome_closed`, `pill_revealed` and the `reveal` step are gone. Closed, nothing but the pill is
+  drawn; the peek card brings the whole sidebar (Browse: its header with the address and the controls).
+- `ShellState::wait_for_leave`: when the host's open flag flips to closed while the pointer is on the toggle, the pill
+  or the strip, the peek will not arm until all three are unhovered once.
+- Baaz: `render_browse_bar_parts`, `browse_minimal_address_field`, the Browse back/forward/reload/downloads buttons,
+  `browse_reload_or_stop`, `browse_reset_zoom`, `browse_chip_back`, the downloads badge helpers and the toolbar's
+  `AddressBadge`/`AddressView`/`zoom_pill` are deleted with their tests (all were toolbar-only). **Homeless now:** the
+  downloads button, the toast chip and the feedback slot in Browse (they lived in the Browse toolbar) — next session
+  should give them a place in the Browse sidebar's header or the sheet row.
+- Canvas v15: the closed boards show the frame-coloured pill alone; notes n4/n5 rewritten.
