@@ -75,7 +75,7 @@
    "y": 2480,
    "w": 420,
    "fill": "blue",
-   "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the bar 44 tall above the sheet. Browse open uses the same drawn chrome and account footer as Sessions."
+   "text": "Polish pass 2026-10-12 (rhythm per FF), approved: one edge on every surface, the send button and the switch segment included (no private drops; the switch track is the 5 % overlay). Weights only 400 / 600: the pill title is 600, like the open title row. The open title row is centred on the lights' line (y 22), title 16 in, mirroring the action glyphs. The composer sits on the transcript's 880 measure (flush with the code block and table), FF InputMessage padding (8 around, text at 16, 4 between field and controls), 18 from the window bottom, the pill 32 tall, 6 from the corner, end caps 14. Browse open uses the same drawn chrome and account footer as Sessions."
   },
   "t1": {
    "x": 0,
@@ -117,14 +117,14 @@
    "y": 2000,
    "w": 420,
    "fill": "blue",
-   "text": "Revised 2026-10-13 (owner round 2): one horizontal bar, 44 tall, on the frame across the window; the sidebar column and the sheet (6 px in, from y 50) sit under it. The bar never moves: lights (12,16), Hide/Show sidebar at x 84, the switch at the sidebar's right edge (ends at x 244), the title at x 278 where the sheet's text starts, the actions 16 from the right. Closed: only the column leaves; the sheet grows into the space on an ease-out tween (260 / 220 ms) with its content laid out once at the resting width. Hover on the toggle or the left edge peeks the sidebar as a Floating card from y 6, behind the lights and the bar's controls. Depth: the sheet casts one contact shadow onto the frame beside the open sidebar (black 16 % \u2192 0 over 20 px); rows fade under the bar (24 px)."
+   "text": "Revised 2026-10-13 (owner round 3): the sidebar column full height on the frame with its chrome row on top \u2014 lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) centred on the lights' line. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once); the row stays as a PILL \u2014 32 tall, 6 from the corner, Floating + the edge \u2014 holding exactly lights \u00b7 toggle \u00b7 switch at the same x and y. Hovered (this board), the pill extends right with the title on spring.moderate and the actions pill fades in at the top right; both leave 250 ms after the pointer. A 150 ms rest on the toggle or the left edge peeks the sidebar as a Floating card behind the pill. Depth: the sheet's contact shadow beside the open sidebar (black 16 % \u2192 0 over 20 px); rows fade under the row (24 px)."
   },
   "n5": {
    "x": 3040,
    "y": 3020,
    "w": 420,
    "fill": "blue",
-   "text": "Browse: the page is the sheet, white on the frame, under the bar. Open, the sidebar's own header holds the address and the page controls. Closed: the bar's title slot takes back, forward, reload and the address at rest; the actions Ask, the page menu and new tab. No tab strip: tabs are one hover away in the peek, which is a hole cut through the page window."
+   "text": "Browse: the page is the sheet, white on the frame. Open, the sidebar's own header holds the address and the page controls. Closed: the pill holds lights \u00b7 toggle \u00b7 switch; hovered (this board) it extends with back, forward, reload and the address at rest, and the actions pill brings Ask, the page menu and new tab. No tab strip: tabs are one hover away in the peek. The pills and the peek over the native page are holes cut through the page window."
   }
  },
  "designSystems": []
