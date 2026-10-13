@@ -369,3 +369,18 @@ Sessions and Browse behave the same. Canvas v19: the closed boards show nothing 
 log); renders of Sessions open / closed / peek and Browse closed / peek looked at. Not seen by anyone: the lights
 hiding and returning (native; offscreen renders cannot show them), the top-edge peek with a real pointer, the peek
 over a live page with the union mask. The agent's live run is still owed (the access prompt was denied once).
+
+### §14 addendum: driven live by Fable (computer use on BaazCheck, access approved)
+
+Owner: "the toggle and the switch don't work properly; test all the cases." Driven with a real pointer, both
+modes: **open** — switch Sessions↔Browse, toggle close, pointer over the top-left corner (nothing happens, as it
+should); **closed** — top-edge peek (lights return in the card's row), switch both ways inside the peek, toggle
+opens from the peek, ⌘B both ways, left-edge peek, peek dismissed on leaving, no re-peek with the pointer left on the
+toggle's spot. All passed over the gpui sheet. **Over a live page (Hacker News) the switch and the toggle in the peek
+did nothing** — the click lit a link's status bar instead: a hole only makes the page's pixels transparent; AppKit
+still routes every mouse event over the page window to the page. docs/36 §4 had listed exactly this as "never seen".
+Fix (aui-cef shim): one local event monitor re-sends mouse events that land inside a hole to the parent window in its
+coordinates and swallows the original (scroll stays with the page). Re-driven over the page: switch both ways, toggle
+open and close — pass. Two warts seen, not fixed: the "Show sidebar" tooltip lingers for a moment after the toggle
+opens the sidebar (gone on the next pointer move); a page's link-status readout at the bottom-left stays visible after
+switching to Sessions from the peek until the page's hover state changes.
