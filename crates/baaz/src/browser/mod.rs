@@ -1006,7 +1006,16 @@ impl Harness {
         let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
             return;
         };
+        // ⌘W on the space's last tab closes the window, as a browser does
+        // (owner 2026-10-13): the tab goes (a real page joins the closed
+        // list for ⌘⇧T; a blank one does not), a fresh blank tab stands
+        // ready for the window's return, and the window hides the way
+        // ⌘W in Sessions does.
+        let last = self.browser.tabs.person_tabs(space.as_deref()).len() <= 1;
         self.close_tab(HOME_KEY, id, window, cx);
+        if last {
+            window.dispatch_action(Box::new(crate::app::CloseWindow), cx);
+        }
     }
 
     /// ⌘⇧T in Browse: reopen the most recently closed tab, selecting it
@@ -3653,7 +3662,9 @@ impl Harness {
             .closed
             .iter()
             .rev()
-            .filter(|tab| tab.owner == Owner::Person && tab.space == space)
+            // Blank tabs recorded before 2026-10-13 are skipped the same way
+            // new ones are never recorded.
+            .filter(|tab| tab.owner == Owner::Person && tab.space == space && !tabs::is_blank_url(&tab.url))
             .take(5)
             .map(|tab| {
                 let ago = tab
@@ -4948,6 +4959,62 @@ mod tests {
         assert!(
             vc.update(|_, cx| baaz.read(cx).mode == crate::layout::Mode::Browse),
             "still in Browse, window alive"
+        );
+    }
+
+    #[gpui::test]
+    fn cmd_w_on_the_last_tab_closes_the_window_and_leaves_a_blank_tab(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            crate::app::BROWSE_ROOT_CONTEXT,
+            format!("{} {}", aui::keys::ROOT_CONTEXT, crate::app::BROWSE_CONTEXT)
+        );
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("cmdw-last");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_mode(crate::layout::Mode::Browse, window, cx);
+                harness.step_tab_new("https://www.wikipedia.org/", window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let count = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                let space = harness.browse_space();
+                harness.browser.tabs.person_tabs(space.as_deref()).len()
+            })
+        };
+        // Entering Browse made the blank tab; ⌘T made the real one. Close
+        // the real one, then the last: the window closes (CloseWindow,
+        // the same hide as ⌘W in Sessions) and one fresh blank tab stands
+        // ready for its return. Only the real page joins the closed list.
+        let before = count(vc);
+        assert_eq!(before, 2, "a blank tab and the real one: {before}");
+        vc.update(|window, cx| {
+            let root = baaz.read(cx).focus_root.clone();
+            window.focus(&root, cx);
+        });
+        vc.run_until_parked();
+        vc.simulate_keystrokes("cmd-w");
+        vc.run_until_parked();
+        assert_eq!(count(vc), 1, "⌘W closed the real tab");
+        vc.simulate_keystrokes("cmd-w");
+        vc.run_until_parked();
+        assert_eq!(count(vc), 1, "⌘W on the last tab leaves one fresh blank tab");
+        let closed: Vec<String> = vc.update(|_, cx| baaz.read(cx).browser.tabs.closed.iter().map(|tab| tab.url.clone()).collect());
+        assert_eq!(closed, vec!["https://www.wikipedia.org/".to_owned()], "the blank tabs never join the closed list");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).browser.tabs.person_tabs(baaz.read(cx).browse_space().as_deref()).iter().all(|tab| super::tabs::is_blank_url(&tab.url))),
+            "the tab left behind is blank"
         );
     }
 

@@ -128,6 +128,12 @@ pub(crate) const PERSONAL: &str = "personal";
 /// How many closed tabs [`Tabs::closed`] keeps for reopen.
 pub(crate) const CLOSED_CAP: usize = 20;
 
+/// Whether `url` is the fresh tab's page (`about:blank`, with or without the
+/// trailing slash Chromium reports it with).
+pub(crate) fn is_blank_url(url: &str) -> bool {
+    url.trim_end_matches('/') == BLANK
+}
+
 /// One row of the pane's tab strip: the snapshot `right.rs` draws for the
 /// shown owner's tabs. Pure data, so the pane never reads the model.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,9 +273,13 @@ impl Tabs {
             .collect();
         let at = siblings.iter().position(|sibling| *sibling == id);
         let tab = self.tabs.remove(index);
-        self.closed.push(tab.clone());
-        while self.closed.len() > CLOSED_CAP {
-            self.closed.remove(0);
+        // A blank tab has nothing to pick up again: it never joins the
+        // closed list (owner 2026-10-13: five "New tab · closed" rows).
+        if !is_blank_url(&tab.url) {
+            self.closed.push(tab.clone());
+            while self.closed.len() > CLOSED_CAP {
+                self.closed.remove(0);
+            }
         }
         self.bump();
         let key = active_key(&tab.owner, tab.space.as_deref());
@@ -1433,6 +1443,20 @@ mod tests {
             tab_label("", "https://www.wikipedia.org/wiki/X"),
             "wikipedia.org"
         );
+    }
+
+    #[test]
+    fn a_closed_blank_tab_is_never_offered_again() {
+        let mut model = tabs();
+        let blank = model.open(None, Owner::Person, "about:blank", None);
+        let slashed = model.open(None, Owner::Person, "about:blank/", None);
+        let real = model.open(None, Owner::Person, "https://a.example/", None);
+        model.close(blank);
+        model.close(slashed);
+        model.close(real);
+        let urls: Vec<&str> = model.closed.iter().map(|tab| tab.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://a.example/"], "only the real page joins the closed list");
+        assert!(is_blank_url("about:blank") && is_blank_url("about:blank/") && !is_blank_url("https://a.example/"));
     }
 
     #[test]
