@@ -36,34 +36,6 @@ fn fn_body<'a>(text: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// The ↩ chip round trip keeps the same entity and owner: carrying parks
-/// the session tab's id in `centre_override` without touching any page
-/// state, and the chip takes it back — no reload, no rebuild, so the same
-/// `WebviewState` entity the pane showed renders in the centre and back.
-#[test]
-fn chip_round_trip_keeps_the_same_entity_and_owner() {
-    let browser = source("browser/mod.rs");
-    let carry = fn_body(&browser, "carry_session_tab_to_browse");
-    assert!(carry.contains("centre_override = Some(id)"), "carrying parks the session tab's id");
-    assert!(carry.contains("active_of"), "carrying parks the session's active tab");
-    for banned in ["discard", "navigate", "reload", "WebviewState::new", "begin_editing"] {
-        assert!(!carry.contains(banned), "carrying touches no page state ({banned})");
-    }
-    let back = fn_body(&browser, "browse_chip_back");
-    assert!(back.contains("centre_override.take()"), "the chip takes the parked id back");
-    assert!(back.contains("Owner::Session"), "the chip only answers for session-owned tabs");
-    assert!(back.contains("self.resume(session"), "the chip hands the tab to its session's pane");
-    for banned in ["discard", "navigate", "reload", "WebviewState::new"] {
-        assert!(!back.contains(banned), "the chip never reloads ({banned})");
-    }
-    // The centre resolves the parked id to the live state by id — the same
-    // entity the pane showed, never a rebuild.
-    let shown = fn_body(&browser, "browse_centre_shown");
-    assert!(shown.contains("centre_override"), "the centre shows the parked tab");
-    let state = fn_body(&browser, "browse_centre_state");
-    assert!(state.contains("browse_centre_shown"), "the centre state follows the shown tab");
-    assert!(state.contains("states.get"), "the centre state is looked up, never built");
-}
 
 /// ⌘T in Browse lands on the new-tab page with the field focused: the
 /// NewSession action opens a blank person tab there instead of starting a
@@ -130,23 +102,13 @@ fn omnibox_and_fixture_steps_are_window_verbs_and_documented() {
     assert!(steps.contains("| `fixture-session:<name>` |"), "fixture-session: is documented");
 }
 
-/// Every toolbar button names itself, and the suggestions expose their text
-/// as list-box options.
+/// The suggestions expose their text as list-box options, and the pane's
+/// Browse button is labelled (the toolbar's own buttons moved to the
+/// sidebar's header in the library, 2026-10-13).
 #[test]
 fn toolbar_roles_and_labels() {
     let app = source("app.rs");
-    for label in [
-        "Back",
-        "Forward",
-        "Reload",
-        "Stop loading",
-        "Address and search",
-        "Address suggestions",
-    ] {
-        assert!(app.contains(label), "the toolbar names {label}");
-    }
-    assert!(app.contains("Back to {name}"), "the ↩ chip names its session");
-    assert!(app.contains("Zoom {pill}, reset"), "the zoom pill names its reset");
+    assert!(app.contains("Address suggestions"), "the suggestions name themselves");
     assert!(app.contains("gpui::Role::ListBoxOption"), "suggestions are list-box options");
     let right = source("right.rs");
     assert!(right.contains("\"Browse full width\""), "the pane's Browse button is labelled");
@@ -181,18 +143,6 @@ fn omnibox_covers_only_while_rows_render() {
     assert!(switch.contains("browse_last_holds = false"), "a mode switch resets the holds edge");
 }
 
-/// The address field shows the shown tab's URL, falling back to the tab
-/// model when the page has no live state (a discarded tab) — never empty
-/// on a loaded page.
-#[test]
-fn address_shows_the_page_with_tab_fallback() {
-    let app = source("app.rs");
-    let bar = fn_body(&app, "render_browse_bar_parts");
-    assert!(bar.contains("tab.as_ref().map(|tab| tab.url.clone())"), "the tab URL is the fallback");
-    let reload = fn_body(&app, "browse_reload_button");
-    assert!(reload.contains("state.read(cx).loading()"), "the stop button reads the engine loading state");
-    assert!(!reload.contains("loading_tabs"), "no Baaz-tracked load set feeds the button");
-}
 
 /// The Browse centre draws no library nav row: the pane leaves it out
 /// with `without_nav`, so only the page shows under Browse's own toolbar
@@ -205,15 +155,6 @@ fn browse_centre_hides_the_library_nav_row() {
     assert!(!centre.contains("top(px(-38.0))"), "no shift hack for the nav row");
 }
 
-/// The bar's address at rest reads in the UI font and carries the site
-/// button with its own label and chain.
-#[test]
-fn toolbar_icons_and_fonts() {
-    let app = source("app.rs");
-    assert!(!app.contains("🧩"), "no coloured emoji on the toolbar");
-    let field = fn_body(&app, "browse_minimal_address_field");
-    assert!(field.contains("\"Address and search\""), "the address slot is labelled");
-}
 
 /// The new-tab field carries the placeholder, and each field's dropdown
 /// anchors under it: the toolbar's under the toolbar, the new-tab's under
@@ -229,6 +170,34 @@ fn newtab_placeholder_and_dropdown_anchors() {
     let app = source("app.rs");
     assert!(app.contains("OmniAnchor::Toolbar"), "the toolbar list anchors under the toolbar");
     assert!(app.contains("OmniAnchor::Newtab"), "the new-tab list anchors under the centred field");
+}
+
+
+
+
+/// Suggestions stay in this project and out of the hidden list, and closed
+/// pick-up rows are this project's person tabs that reopen the tab they
+/// name. Rows press on mouse-down so the click lands before blur.
+#[test]
+fn suggestions_pickup_and_row_presses() {
+    let browser = source("browser/mod.rs");
+    let suggestions = fn_body(&browser, "browse_suggestions");
+    assert!(suggestions.contains("!entry.hidden"), "hidden sessions never suggest");
+    assert!(suggestions.contains("entry.project == current"), "suggestions stay in this project");
+    let pickup = fn_body(&browser, "browse_pickup_full");
+    assert!(pickup.contains("tab.owner == Owner::Person"), "closed rows are person tabs");
+    assert!(pickup.contains("PickupTarget::Closed(*id)"), "each closed row reopens its own tab");
+    let app = source("app.rs");
+    assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
+    assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
+    assert!(
+        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
+        "omnibox rows press on mouse-down"
+    );
+    assert!(app.contains(".on_click(activate)"), "omnibox rows also answer clicks");
+    let leave = fn_body(&browser, "leave_browse_address");
+    assert!(leave.contains("browse_address_page_focus"), "leaving prefers the page when it had focus");
+    assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
 }
 
 /// Ask drafts into the session that lands: `browse_ask` arms the question
@@ -272,22 +241,6 @@ fn ask_draft_lands_on_arrival_never_sent() {
     assert!(activate.contains("view.set_draft(next, window, cx)"), "the draft lands, never sent");
 }
 
-/// The back-history menu never opens while back is disabled; an empty
-/// stack draws nothing (the render never mutates state — the opener
-/// decides); picking a row steps back through the history so the stacks
-/// stay right.
-#[test]
-fn back_history_menu_guards_clears_and_steps() {
-    let app = source("app.rs");
-    let back = fn_body(&app, "browse_back_button");
-    assert!(back.contains("history.can_back()"), "the opener checks back first");
-    assert!(back.contains("open_menu(MenuKind::BackHistory, cx)"), "the opener opens the menu");
-    let dialogs = source("dialogs.rs");
-    let menu = fn_body(&dialogs, "render_back_history_menu");
-    assert!(menu.contains("overlays.menu = None"), "an empty render clears the menu");
-    assert!(menu.contains("go_back_steps(steps)"), "picking steps back through the history");
-}
-
 /// The carried tab unparks everywhere it must: sidebar and new-tab
 /// selection, pick-up and omnibox rows, project switch, and every mode
 /// switch. An omnibox session-tab row opens its session (updating the
@@ -313,49 +266,5 @@ fn centre_override_clears_everywhere() {
     assert!(
         projects.contains("note_project_changed"),
         "project adoptions unpark through the shared hook"
-    );
-}
-
-/// Suggestions stay in this project and out of the hidden list, and closed
-/// pick-up rows are this project's person tabs that reopen the tab they
-/// name. Rows press on mouse-down so the click lands before blur.
-#[test]
-fn suggestions_pickup_and_row_presses() {
-    let browser = source("browser/mod.rs");
-    let suggestions = fn_body(&browser, "browse_suggestions");
-    assert!(suggestions.contains("!entry.hidden"), "hidden sessions never suggest");
-    assert!(suggestions.contains("entry.project == current"), "suggestions stay in this project");
-    let pickup = fn_body(&browser, "browse_pickup_full");
-    assert!(pickup.contains("tab.owner == Owner::Person"), "closed rows are person tabs");
-    assert!(pickup.contains("PickupTarget::Closed(*id)"), "each closed row reopens its own tab");
-    let app = source("app.rs");
-    assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
-    assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
-    assert!(
-        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
-        "omnibox rows press on mouse-down"
-    );
-    assert!(app.contains(".on_click(activate)"), "omnibox rows also answer clicks");
-    assert!(
-        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
-        "the zoom pill presses on mouse-down"
-    );
-    assert!(app.contains(".on_click(reset)"), "the zoom pill also answers clicks");
-    let leave = fn_body(&browser, "leave_browse_address");
-    assert!(leave.contains("browse_address_page_focus"), "leaving prefers the page when it had focus");
-    assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
-}
-
-/// The stop/reload control follows the engine: `browse_reload_or_stop`
-/// stops exactly while `WebviewState::loading()` reports a load and
-/// reloads otherwise — no Baaz-tracked set anywhere, in the registry or
-/// the sync.
-#[test]
-fn loading_tracks_until_done_or_stop() {
-    let browser = source("browser/mod.rs");
-    assert!(!browser.contains("loading_tabs"), "no Baaz-tracked load set survives");
-    assert!(
-        fn_body(&browser, "browse_reload_or_stop").contains("state.read(cx).loading()"),
-        "the control reads the engine loading state"
     );
 }

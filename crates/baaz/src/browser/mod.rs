@@ -3376,39 +3376,7 @@ impl Harness {
         }
     }
 
-    /// Reload the shown tab — or stop its load while one is running (the
-    /// progress line's button). The button follows the engine's own
-    /// [`WebviewState::loading`](aui_webview::WebviewState::loading): stop
-    /// exactly while the engine reports a load, reload otherwise. The
-    /// library exposes no reload call, so a reload re-navigates the shown
-    /// URL.
-    pub(crate) fn browse_reload_or_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else {
-            return;
-        };
-        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
-        if state.read(cx).loading() {
-            state.update(cx, |state, _cx| state.stop());
-        } else {
-            let url = state.read(cx).url().to_string();
-            if !url.is_empty() {
-                state.update(cx, |state, _cx| state.navigate(&url));
-            }
-        }
-        cx.notify();
-    }
 
-    /// Reset the shown tab's zoom to 100% (the zoom pill's click).
-    pub(crate) fn browse_reset_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else {
-            return;
-        };
-        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
-        state.update(cx, |state, _cx| state.set_zoom(100));
-        cx.notify();
-    }
 
     /// The pane's "Browse" button (B2a-H4): the session's active tab shows
     /// full-width in Browse mode with the ↩ chip. The tab stays
@@ -3432,25 +3400,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// The ↩ chip (B2a-H4): the carried tab goes back to its session's pane
-    /// — Sessions mode with that session selected — with no reload: the
-    /// same `WebviewState` entity renders in the pane once its session
-    /// shows again.
-    pub(crate) fn browse_chip_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.centre_override.take() else {
-            return;
-        };
-        let session = self.browser.tabs.get(id).and_then(|tab| match &tab.owner {
-            Owner::Session(session) => Some(session.clone()),
-            Owner::Person => None,
-        });
-        let Some(session) = session else {
-            cx.notify();
-            return;
-        };
-        self.set_mode(crate::layout::Mode::Sessions, window, cx);
-        self.resume(session, window, cx);
-    }
 
     /// The session label behind the ↩ chip: the collapsed head label the
     /// Sessions header wears, falling back to the id.
