@@ -337,8 +337,10 @@ Decisions, with dates (all 2026-10-13, canvas comments unless noted):
 Proposed by design and accepted by the approval (not separately discussed): radius 8 on blocks/cards (12 on the
 bubble and composer); the 70 % status ring on cards that need you; quiet rows instead of cards for Worked / Thought
 / resolved; the corner-stack rule; text at 1.1 scale; the 32 px composer-seam fade.
-Open (ask before building): effort as list vs slider; whether a video tile should also be offered by the `+`
-menu as a capture; the exact `+` menu rows.
+Open items, answered by the owner at the start of the build session (2026-10-14): **effort = the slider**
+(2.10, as drawn on D4Pickers; Default stays a row under the separator); **no video capture row** in the `+` menu (a
+video tile is only the rendering of an attached video File); the `+` menu's rows: owner left it to the build →
+**today's rows unchanged** (contents out of scope; only the 6 px padding rule applies).
 
 ## 7. Live-check list for the build session (BaazCheck, both modes, over a live page where it applies)
 1. Replay synthetic-markdown: user bubble Raised r 12; nothing under either turn at rest; hover the user turn →
