@@ -143,7 +143,7 @@ fn the_stack_stands_down_while_the_header_carries_toasts() {
 #[test]
 fn every_header_seats_the_chip_left_of_the_feedback_slot() {
     let app = source("app.rs");
-    for site in ["render_browse_toolbar", "render_browse_pill_parts", "render_centre_header"] {
+    for site in ["render_bar_chrome"] {
         let body = fn_body(&app, site);
         let chip = body.find("render_toast_chip").unwrap_or_else(|| panic!("{site} renders the chip"));
         let slot =
