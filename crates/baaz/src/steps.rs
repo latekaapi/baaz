@@ -87,6 +87,7 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `peek` | hold the v3 peek open (or release it) while the sidebar is closed — a capture aid, no hover |
+//! | `strip` | hold the fading Browse strip shown (or release it) while the sidebar is closed — a capture aid, no pointer |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
@@ -354,6 +355,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| this.toggle_sidebar(cx) },
     WindowVerb { verb: "peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); } },
+    WindowVerb { verb: "strip", run: |this, _, _, cx| { this.strip_pinned = !this.strip_pinned; cx.notify(); } },
     WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },

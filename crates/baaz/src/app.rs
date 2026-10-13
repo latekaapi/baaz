@@ -802,6 +802,8 @@ pub struct Harness {
     pub(crate) right_snap: bool,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
+    /// The `strip` step's hold: the fading Browse strip shown (captures).
+    pub(crate) strip_pinned: bool,
     /// Generation of the debounced right-pane `sessions.json` write (B7):
     /// every cheap right-state persist bumps it and arms a delayed
     /// off-thread write; only the latest generation writes, so quick
@@ -1531,6 +1533,7 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             peek_pinned: false,
+            strip_pinned: false,
             right_save_epoch: 0,
             right_save_pending: false,
             right_kind_migrate: std::collections::HashSet::new(),
@@ -4478,12 +4481,12 @@ impl Harness {
     /// Hands the v3 shell's chrome over the sheet (the corner tabs, the peek
     /// card) to the Browse page as holes, so they show over the native page
     /// and take the clicks there; none outside Browse.
-    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
-        let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
+    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels, f32)>, cx: &mut Context<Self>) {
+        let holes: Vec<[f32; 6]> = if self.mode == layout::Mode::Browse {
             rects
                 .iter()
-                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0))).iter())
-                .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
+                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0), 1.0)).iter())
+                .map(|(b, r, cut)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r), *cut])
                 .collect()
         } else {
             Vec::new()
@@ -6395,6 +6398,10 @@ impl Render for Harness {
                 .native_lights(true)
                 .animate(!browse)
                 .page_sheet(browse)
+                // Browse closed: the strip fades (owner 2026-10-13) — a
+                // native page cannot run under it the way the transcript does.
+                .strip_fades(browse)
+                .strip_shown(self.strip_pinned)
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
