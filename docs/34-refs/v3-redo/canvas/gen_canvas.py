@@ -214,12 +214,12 @@ def b_browse_open(src):
     # one chrome for both modes: cover the captured top row and footer with the drawn ones Sessions uses
     b += f'<div style="position:absolute;left:0;top:0;width:256px;height:44px;background:{L0}"></div>{chrome("b")}'
     b += f'<div style="position:absolute;left:0;top:852px">{img("sb-footer",254,48,src)}</div><div class="contact"></div><div class="lfade"></div>'
-    b += f'<div class="sheet" style="left:262px;top:6px;right:6px;bottom:6px;background:#FAFAFA;box-shadow:0 0 0 1px rgba(0,0,0,.5)"><div style="position:absolute;left:0;top:0">{img("page",1168,881,src)}</div></div>'
+    b += f'<div class="sheet" style="left:262px;top:6px;right:6px;bottom:6px;background:#FAFAFA"><div style="position:absolute;left:0;top:0">{img("page",1168,881,src)}</div></div>'
     return b + '</div>'
 
 def b_browse_closed(src):
     b = f'<div class="w" style="width:1440px;height:900px">'
-    b += f'<div class="sheet" style="left:6px;top:6px;right:6px;bottom:6px;background:#FAFAFA;box-shadow:0 0 0 1px rgba(0,0,0,.5)"><div style="position:absolute;left:0;top:0">{img("page-closed",1424,848,src)}</div></div>'
+    b += f'<div class="sheet" style="left:6px;top:6px;right:6px;bottom:6px;background:#FAFAFA"><div style="position:absolute;left:0;top:0">{img("page-closed",1424,848,src)}</div></div>'
     return b + '</div>'
 
 # ---- Tone study: the same miniature in three ladders ----
@@ -264,7 +264,7 @@ def b_depth(src):
     rules = [("Frame", L0, LIT["l0"], "window, sidebar, the gaps"), ("Sheet", L1, LIT["l1"], "the work area; transcript and page live here"), ("Raised", L2, LIT["l2"], "composer, user turn, code block, cards in the transcript"), ("Floating", L3, LIT["l3"], "menus, pills, popovers, toasts, the peek sidebar"), ("Dialog", L4, LIT["l4"], "over a 45 % scrim"), ("Well", WELL, LIT["well"], "inputs and wells cut into a raised surface")]
     b += f'<div style="position:absolute;left:40px;top:330px;display:flex;gap:16px">' + "".join(
         f'<div style="width:216px"><div style="height:56px;border-radius:8px;background:{c};box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)"></div><div style="margin-top:8px;font-weight:600">{n} <span class="mono" style="color:{FAINT};font-weight:400;font-size:11px">{lit}</span></div><div style="font-size:12px;color:{MUTED};line-height:17px">{d}</div></div>' for n,c,lit,d in rules) + '</div>'
-    b += f'<div style="position:absolute;left:40px;top:500px;font-size:12px;color:{MUTED};line-height:18px;width:1360px">Overlays stay surface-relative: hover white 5 %, selected 9 %, pressed 12 %. Text is {FG} or {MUTED}, never an opacity. Lines inside a surface (table rules, menu separators) are white 7 %. Radii: sheet 8, raised 12 (composer, bubbles), menus and pills 10 / full, controls 6. One edge for every surface: a 7 % top highlight and a 6 % white ring. The white page sheet is the one exception: a 50 % black ring, since a white highlight cannot show on white.</div>'
+    b += f'<div style="position:absolute;left:40px;top:500px;font-size:12px;color:{MUTED};line-height:18px;width:1360px">Overlays stay surface-relative: hover white 5 %, selected 9 %, pressed 12 %. Text is {FG} or {MUTED}, never an opacity. Lines inside a surface (table rules, menu separators) are white 7 %. Radii: sheet 8, raised 12 (composer, bubbles), menus and pills 10 / full, controls 6. One edge for every surface: a 7 % top highlight and a 6 % white ring. The white page sheet is the one exception: no edge at all — the native page covers it to the corner, and a ring only showed through the page’s anti-aliased corners (removed 2026-10-13).</div>'
     return b + '</div>'
 
 def b_composers(src):

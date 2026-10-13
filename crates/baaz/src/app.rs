@@ -4477,6 +4477,20 @@ impl Harness {
         }
     }
 
+    /// Hands the shell's hover zones (the peek's corner) to the Browse page,
+    /// so a pointer resting there over the native page still reaches the
+    /// shell; none outside Browse.
+    pub(crate) fn set_browse_hover_zones(&mut self, zones: Vec<gpui::Bounds<Pixels>>, cx: &mut Context<Self>) {
+        let zones: Vec<[f32; 4]> = if self.mode == layout::Mode::Browse {
+            zones.iter().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]).collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _| state.set_hover_zones(zones));
+        }
+    }
+
     /// Hands the v3 shell's chrome over the sheet (the peek card) to the
     /// Browse page as holes, so they show over the native page
     /// and take the clicks there; none outside Browse.
@@ -6405,6 +6419,12 @@ impl Render for Harness {
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
                 .peek_open(self.peek_pinned)
+                .on_hover_zones({
+                    let zones_to = cx.entity().downgrade();
+                    move |zones, _, cx| {
+                        let _ = zones_to.update(cx, |this, cx| this.set_browse_hover_zones(zones, cx));
+                    }
+                })
                 .on_overlay_bounds(move |rects, window, cx| {
                     let _ = holes.update(cx, |this, cx| {
                         // The lights belong to the sidebar's row: gone with
