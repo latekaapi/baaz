@@ -342,6 +342,12 @@ Open items, answered by the owner at the start of the build session (2026-10-14)
 video tile is only the rendering of an attached video File); the `+` menu's rows: owner left it to the build →
 **today's rows unchanged** (contents out of scope; only the 6 px padding rule applies).
 
+Answered later the same day, during the build: **sent extras are wired in Baaz** — the wire carries text only, so
+the pictures, files, quotation and Browse annotation batch a turn went out with are kept by Baaz (`sent.rs`:
+`support/sent/<session>.json`, pictures copied beside it) and paired back to the turn by its text; **one answer
+rhythm** everywhere — line 23 (1.6), paragraphs 12, list indent 24 (the short/long split in 2.3 is dropped); the
+**skill row keeps its click** into the Skills page, with no chevron.
+
 ## 7. Live-check list for the build session (BaazCheck, both modes, over a live page where it applies)
 1. Replay synthetic-markdown: user bubble Raised r 12; nothing under either turn at rest; hover the user turn →
    edit · copy · age; hover the answer → copy + footer; code block header 32 with copy on hover only; table header

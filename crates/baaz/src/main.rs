@@ -75,6 +75,7 @@ mod providers;
 mod resize;
 mod right;
 mod search;
+mod sent;
 mod session;
 mod session_migration;
 mod sessions;

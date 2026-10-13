@@ -103,6 +103,7 @@ impl SessionView {
             }
         }
         let composer = self.render_composer(cx);
+        let jump = self.render_jump_pill(cx);
         // v3: the composer is a raised card on the transcript's measure,
         // 12 px inside the sheet's bottom (18 from the window, the pills'
         // 18 from the top); no pane-wide band or hairline.
@@ -112,8 +113,36 @@ impl SessionView {
                 .max_w(px(TRANSCRIPT_MEASURE))
                 .mx_auto()
                 .relative()
+                .children(jump)
                 .child(composer),
         ).into_any_element()
+    }
+
+    /// Jump to latest (docs/41 §2.9): Floating, centred over the measure,
+    /// 8 above the composer, while the reader has scrolled up from the
+    /// tail — unless the needs-you banner is up, which points the same way
+    /// and says why.
+    fn render_jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.list_state.is_scrolled_to_end().unwrap_or(true) || self.cached_turns.is_empty() || self.waiting_on_you().is_some() {
+            return None;
+        }
+        let jump = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.follow = true;
+            this.list_state.scroll_to_end();
+            cx.notify();
+        });
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(gpui::relative(1.0))
+                .pb(px(8.0))
+                .flex()
+                .justify_center()
+                .child(aui::transcript::jump_pill("jump-latest", "Jump to latest").on_jump(jump))
+                .into_any_element(),
+        )
     }
 
 
@@ -192,6 +221,21 @@ impl SessionView {
         element
     }
 
+    /// D4: scrolls the transcript so `turn`'s first row is at the top —
+    /// the quote's way back to its source.
+    pub(super) fn scroll_to_turn(&mut self, turn: &str, cx: &mut Context<Self>) {
+        let mut ix = 0usize;
+        for (id, rows) in &self.row_counts {
+            if id == turn {
+                self.follow = false;
+                self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+                cx.notify();
+                return;
+            }
+            ix += rows;
+        }
+    }
+
     /// The one place a frame writes the render cache.
     ///
     /// Steady-state frames share one snapshot: re-snapshot only when the fold
@@ -228,19 +272,6 @@ impl SessionView {
             return Self::loading_row();
         }
         super::note_centre_hero_paint();
-        // A replayed capture is read-only, so its empty state offers
-        // nothing to type: the chips would be three buttons that refuse.
-        let pick = (!self.replay).then(|| {
-            let pick = cx.listener(|this: &mut Self, index: &usize, window, cx| {
-                if let Some(text) = transcript::suggestion(*index) {
-                    this.set_draft(text.to_owned(), window, cx);
-                    this.focus_composer(window, cx);
-                }
-            });
-            std::rc::Rc::new(move |index: usize, window: &mut Window, cx: &mut gpui::App| {
-                pick(&index, window, cx)
-            }) as transcript::PickSuggestion
-        });
         let _ = window;
         // The project's display name, not the folder's: a rename changes one
         // without touching the other.
@@ -250,11 +281,7 @@ impl SessionView {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.workspace.clone())
         });
-        // The hero sits above the title, the way the boot screen does. It
-        // replaced a small mascot perched on the composer: at 44 pt that read
-        // as an ornament stuck to the chrome rather than part of the screen.
-        let hero = Some(crate::mascot::hero_mascot(&self.session_id, window, cx));
-        transcript::empty_state(self.provider_kind(), &display, hero, pick, cx)
+        transcript::empty_state(self.provider_kind(), &display, cx)
     }
 
     /// Every intent a card can raise, bound once per frame.
@@ -379,19 +406,6 @@ impl SessionView {
                     },
                 ))
             },
-            // D49 play buttons: the request goes to the application as an
-            // event, never a turn — honoured under `--replay` like every
-            // other local intent here.
-            terminal_run: {
-                let run = cx.listener(|this: &mut Self, request: &crate::terminal::RunRequest, _, cx| {
-                    this.handle_terminal_run(request.clone(), cx);
-                });
-                Some(Rc::new(
-                    move |request: crate::terminal::RunRequest, window: &mut Window, cx: &mut gpui::App| {
-                        run(&request, window, cx)
-                    },
-                ))
-            },
             // A skill row's tap (D63): the name goes to the application as
             // an event, and the scope beside it comes from the `/` menu's
             // own cache for this workspace — the same catalog the page
@@ -412,22 +426,9 @@ impl SessionView {
                 }))
             },
             // B12: the fold switch's per-frame backing (default on), and
-            // the two pane intents: full text and the turn diff chip, out
-            // as window-level events like the skill tap above.
+            // the turn diff chip, out as a window-level event like the
+            // skill tap above.
             fold_finished_turns: self.fold_finished_turns,
-            open_full_text: {
-                let open = cx.listener(|_: &mut Self, (title, text): &(String, String), _, cx| {
-                    cx.emit(crate::session::SessionEvent::OpenFullText {
-                        title: title.clone(),
-                        text: text.clone(),
-                    });
-                });
-                Some(Rc::new(
-                    move |title: String, text: String, window: &mut Window, cx: &mut gpui::App| {
-                        open(&(title, text), window, cx)
-                    },
-                ))
-            },
             open_turn_diff: {
                 let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
                     cx.emit(crate::session::SessionEvent::OpenTurnChanges { turn_id: id.clone() });
@@ -436,11 +437,10 @@ impl SessionView {
                     open(&id, window, cx)
                 }))
             },
-            // The handoff card's two intents ("Open the new session",
-            // "Cancel") and the destination marker's back-link: session
-            // ids out to the application as events, like the skill tap
-            // above — honoured under `--replay` too, where they navigate
-            // rather than send.
+            // The hand-off marker's "Open the new session" and the
+            // destination marker's back-link: session ids out to the
+            // application as events, like the skill tap above — honoured
+            // under `--replay` too, where they navigate rather than send.
             handoff: {
                 let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
                     cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
@@ -477,19 +477,6 @@ impl SessionView {
                         }),
                     }
                 }),
-            // D51 "Open terminal" on a terminal tool card: the tab rides
-            // out to the application, which opens the dock on it. Local,
-            // like the run above — honoured under `--replay` too.
-            open_terminal: {
-                let open = cx.listener(|this: &mut Self, tab: &Option<String>, _, cx| {
-                    this.handle_open_terminal(tab.clone(), cx);
-                });
-                Some(Rc::new(
-                    move |tab: Option<String>, window: &mut Window, cx: &mut gpui::App| {
-                        open(&tab, window, cx)
-                    },
-                ))
-            },
             // D51 live mirror, snapshotted once per frame from the window's
             // terminal host: empty in replays and tests, where there is no
             // host and cards render their folded result text.
@@ -500,6 +487,17 @@ impl SessionView {
             workspace_root: self.workspace.clone(),
             // Q1b: first-seen tool-call starts for the live run rows,
             // stamped where applied deltas materialise below.
+            sent: Rc::clone(&self.sent_pairs),
+            open_attachment: {
+                let open = cx.listener(|_: &mut Self, path: &String, _, cx| {
+                    cx.emit(SessionEvent::RevealPath { abs: PathBuf::from(path), highlight: None });
+                });
+                Some(Rc::new(move |path: String, window: &mut Window, cx: &mut gpui::App| open(&path, window, cx)))
+            },
+            scroll_to_turn: {
+                let scroll = cx.listener(|this: &mut Self, turn: &String, _, cx| this.scroll_to_turn(turn, cx));
+                Some(Rc::new(move |turn: String, window: &mut Window, cx: &mut gpui::App| scroll(&turn, window, cx)))
+            },
             tool_starts: Rc::new(self.tool_first_seen.clone()),
         }
     }
@@ -866,6 +864,8 @@ impl SessionView {
                 })
                 .collect();
             self.cached_turns = Rc::new(turns);
+            // D4: what each user turn was sent with, paired by text.
+            self.sent_pairs = Rc::new(crate::sent::pair(&self.cached_turns, &self.sent_items));
             // Q1b: first-seen wall times for tool calls, on the frame's
             // own clock — the live run rows tick from these, never from
             // summed durations.
@@ -1003,11 +1003,8 @@ impl SessionView {
         }));
     }
 
-    /// An assistant turn's bottom-row action (C6): Copy is local; Retry
-    /// resends the user input behind the turn; Fork opens the turn picker.
-    /// Pin is hidden on turns (it lives on sidebar sessions) and its arm is
-    /// unreachable; the match keeps it because the enum demands it. Wire
-    /// actions are live-only — replay answers with a toast.
+    /// An assistant turn's hover action (D4): copy, the only one — a retry
+    /// is a typed ask and fork lives in the session's ⋯ menu.
     pub(super) fn assistant_action(
         &mut self,
         turn_id: String,
@@ -1024,33 +1021,11 @@ impl SessionView {
                     self.hold_copy(turn_id, cx);
                 }
             }
-            AssistantTurnAction::Retry => {
-                if self.replay {
-                    self.toast("Replay", "Retry is not available in a replayed capture.", cx);
-                    return;
-                }
-                match self.input_before(&turn_id) {
-                    Some(text) => self.submit(text, cx),
-                    None => self.toast("Retry", "There is no remembered input behind this turn.", cx),
-                }
-            }
-            AssistantTurnAction::Fork => {
-                if self.replay {
-                    self.toast("Replay", "Fork is not available in a replayed capture.", cx);
-                    return;
-                }
-                cx.emit(SessionEvent::ForkPicker);
-            }
-            AssistantTurnAction::Pin => {
-                // Unreachable: turns hide Pin (see `transcript::block`). Kept
-                // for the exhaustive match, answering in case it ever fires.
-                self.toast("Pin", "Pin lives on sidebar sessions, not on turns.", cx);
-            }
         }
     }
 
-    /// A user turn's bottom-row action (C6): Copy is local, Edit drops the
-    /// text into the composer draft, Resend sends it again (live only).
+    /// A user turn's hover action (D4): Copy is local, Edit drops the text
+    /// into the composer draft.
     pub(super) fn user_action(
         &mut self,
         turn_id: String,
@@ -1070,19 +1045,12 @@ impl SessionView {
                 self.set_draft(text, window, cx);
                 self.focus_composer(window, cx);
             }
-            aui::transcript::UserTurnAction::Resend => {
-                if self.replay {
-                    self.toast("Replay", "Resend is not available in a replayed capture.", cx);
-                    return;
-                }
-                self.submit(text, cx);
-            }
         }
     }
 
-    /// A tool group's intents (C8): the header toggles the group, per-call
-    /// toggles flip that call's card, and OpenInPane reveals the call's
-    /// target path where it names one.
+    /// A tool group's intents (C8, D4): the header toggles the group, a
+    /// call's header toggles its row, and its "N more lines" row unfolds
+    /// that call's output in place.
     pub(super) fn tool_group_action(
         &mut self,
         key: String,
@@ -1090,96 +1058,13 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let _ = window;
         match intent {
             ToolGroupIntent::Toggle => self.toggle_fold(key, cx),
             ToolGroupIntent::Call { index, intent } => match intent {
-                ToolCardIntent::OpenInPane => self.reveal_tool_target(&key, index, cx),
-                // The library's group cards render no header actions today,
-                // so this arm waits for the slot; it resolves the same way
-                // lone cards do, so grouped shell calls behave the moment
-                // the slot exists.
-                ToolCardIntent::Action(_) => self.run_grouped_tool_call(&key, index, window, cx),
-                _ => self.toggle_fold(format!("{key}:{index}"), cx),
+                ToolCardIntent::Unfold => self.toggle_fold(crate::transcript::unfold_key(&format!("{key}:{index}")), cx),
+                ToolCardIntent::Toggle => self.toggle_fold(format!("{key}:{index}"), cx),
             },
-        }
-    }
-
-    /// A play button press (D49): emit it for the application, which pastes
-    /// the command into the terminal dock. Local-only by construction —
-    /// this is an event, not a submit, so no path here can start a turn or
-    /// reach the wire.
-    pub(super) fn handle_terminal_run(
-        &mut self,
-        request: crate::terminal::RunRequest,
-        cx: &mut Context<Self>,
-    ) {
-        cx.emit(SessionEvent::RunInTerminal {
-            command: request.command,
-            send_enter: request.send_enter,
-        });
-    }
-
-    /// An "Open terminal" press (D51): emit it for the application, which
-    /// opens the dock on the card's tab. Local-only by construction —
-    /// this is an event, not a submit, so no path here can start a turn or
-    /// reach the wire.
-    pub(super) fn handle_open_terminal(&mut self, tab: Option<String>, cx: &mut Context<Self>) {
-        cx.emit(SessionEvent::OpenTerminal { tab });
-    }
-
-    /// A grouped shell call's run action (D49): the call's command text
-    /// into the dock, like a lone card. Anything else just toggles.
-    pub(super) fn run_grouped_tool_call(
-        &mut self,
-        key: &str,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self
-            .tool_call_in_group(key, index)
-            .and_then(|call| crate::transcript::shell_run_command(&call))
-        {
-            Some(command) => {
-                if let Some(request) = crate::terminal::RunRequest::new(
-                    command,
-                    crate::terminal::send_enter_for_alt(window.modifiers().alt),
-                ) {
-                    self.handle_terminal_run(request, cx);
-                }
-            }
-            None => self.toggle_fold(format!("{key}:{index}"), cx),
-        }
-    }
-
-    /// A grouped call's header target, back to the text the lone card would
-    /// have shown. The group key is `<turn id>:<block index>`.
-    pub(super) fn tool_call_target(&self, turn_id: &str, block_index: usize, call_index: usize) -> Option<String> {
-        self.tool_call_in_group(&format!("{turn_id}:{block_index}"), call_index).map(|call| call.target)
-    }
-
-    /// A grouped call's full shape, back to the fold. The group key is
-    /// `<turn id>:<block index>`.
-    pub(super) fn tool_call_in_group(&self, key: &str, index: usize) -> Option<aui_protocol::ToolCall> {
-        let (turn_id, block_index) = key.rsplit_once(':').unwrap_or((key, ""));
-        let block_index = block_index.parse::<usize>().unwrap_or(usize::MAX);
-        let session = self.fold.session(&self.session_id)?;
-        session.turns.iter().find_map(|turn| match turn {
-            Turn::Assistant { id, blocks, .. } if id == turn_id => match blocks.get(block_index) {
-                Some(Block::ToolGroup { calls, .. }) => calls.get(index).cloned(),
-                _ => None,
-            },
-            _ => None,
-        })
-    }
-
-    /// Reveal a grouped call's target (C5 on grouped cards).
-    pub(super) fn reveal_tool_target(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
-        let (turn_id, block_index) = key.rsplit_once(':').unwrap_or((key, ""));
-        let block_index = block_index.parse::<usize>().unwrap_or(usize::MAX);
-        match self.tool_call_target(turn_id, block_index, index) {
-            Some(target) => self.reveal_workspace_path(&target, cx),
-            None => self.toast("Open", "That call has no path to reveal.", cx),
         }
     }
 
@@ -1199,21 +1084,6 @@ impl SessionView {
             }
             _ => None,
         })
-    }
-
-    /// The user input behind an assistant turn, for Retry: the nearest user
-    /// turn above it.
-    pub(super) fn input_before(&self, turn_id: &str) -> Option<String> {
-        let session = self.fold.session(&self.session_id)?;
-        let mut last_user: Option<String> = None;
-        for turn in &session.turns {
-            match turn {
-                Turn::User { text, .. } => last_user = Some(text.clone()),
-                Turn::Assistant { id, .. } if id == turn_id => return last_user,
-                _ => {}
-            }
-        }
-        None
     }
 
     /// A turn's span event (C8b): folded through the turn's drag session
@@ -1385,6 +1255,7 @@ impl SessionView {
             this.clarify_question(id.clone(), window, cx);
         });
         let retry = cx.listener(|this: &mut Self, id: &String, _, cx| this.retry_turn(id.clone(), cx));
+        let back = cx.listener(|this: &mut Self, id: &String, _, cx| this.wizard_back(id.clone(), cx));
         // The two text fields are the app's, exactly as the composer's editor
         // is: the cards are handed an element and never a character.
         let feedback_slot = self.feedback_open.is_some().then(|| {
@@ -1411,6 +1282,8 @@ impl SessionView {
             clarify_open: self.clarify_open.clone(),
             clarify_slot: std::cell::RefCell::new(clarify_slot),
             countdowns: self.countdowns(),
+            wizard: self.wizards(),
+            back: Rc::new(move |id, window, cx| back(&id, window, cx)),
             retry: Rc::new(move |id, window, cx| retry(&id, window, cx)),
             retryable_turns: self.retryable_turns(),
         }
@@ -1957,6 +1830,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             ComposerIntent::RemoveChip(id) => {
                 this.images.retain(|image| image.id != id.as_ref());
                 this.files.retain(|file| file.id != id.as_ref());
+                this.quotes.retain(|quote| quote.id != id.as_ref());
+                this.failed_chips.retain(|(chip, _, _)| chip != id.as_ref());
                 cx.notify();
             }
         });
@@ -2010,6 +1885,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         removable: true,
                         thumbnail: image.thumb.clone(),
                         detail: None,
+                        state: if image.pending { ComposerChipState::Uploading } else { ComposerChipState::Ready },
                     })
                     .chain(self.files.iter().map(|file| ComposerChip {
                         id: file.id.clone().into(),
@@ -2018,6 +1894,25 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         removable: true,
                         thumbnail: None,
                         detail: Some(file.detail().into()),
+                        state: ComposerChipState::Ready,
+                    }))
+                    .chain(self.quotes.iter().map(|quote| ComposerChip {
+                        id: quote.id.clone().into(),
+                        kind: ComposerChipKind::Quote,
+                        label: quote_chip_words(&quote.text).into(),
+                        removable: true,
+                        thumbnail: None,
+                        detail: None,
+                        state: ComposerChipState::Ready,
+                    }))
+                    .chain(self.failed_chips.iter().map(|(id, name, reason)| ComposerChip {
+                        id: id.clone().into(),
+                        kind: ComposerChipKind::File,
+                        label: name.clone().into(),
+                        removable: true,
+                        thumbnail: None,
+                        detail: None,
+                        state: ComposerChipState::Failed(reason.clone().into()),
                     }))
                     .collect(),
             )
@@ -2056,6 +1951,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_menu(cx));
         match kind {
             MenuKind::Model => {
+                let sub_open = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.sub_open);
                 let mut rows: Vec<PickerRow> = self
                     .models
                     .iter()
@@ -2075,6 +1971,21 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         }
                         if m.is_active {
                             row = row.badge("active");
+                        }
+                        // D4: a model whose levels the provider lists opens
+                        // them as a nested submenu (Default first).
+                        if let Some(options) = self.effort_options_for(Some(&m.model_id)).options() {
+                            if options.len() > 1 {
+                                let current = if m.is_active { options.iter().position(|o| o.effort == self.effort) } else { None };
+                                row = row.submenu(PickerSubmenu {
+                                    title: format!("Reasoning effort · {}", m.display_label).into(),
+                                    rows: options
+                                        .iter()
+                                        .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
+                                        .collect(),
+                                    selected: current,
+                                });
+                            }
                         }
                         row
                     })
@@ -2102,11 +2013,54 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     let id = id.to_string();
                     this.pick_model(&id, cx);
                 });
+                // A nested pick: the model and its level, in one press.
+                let pick_nested = cx.listener(|this: &mut Self, (model, level): &(SharedString, SharedString), _, cx| {
+                    let effort = this
+                        .effort_options_for(Some(model.as_ref()))
+                        .options()
+                        .and_then(|options| options.iter().find(|o| crate::overlays::effort_row_id(o.effort) == level.as_ref()).map(|o| o.effort));
+                    let model = model.to_string();
+                    this.pick_model(&model, cx);
+                    if let Some(effort) = effort {
+                        this.pick_effort(effort, cx);
+                    }
+                });
                 let menu = model_menu("model-menu", rows, selected, true)
+                    .open_submenu(sub_open.then_some(selected))
                     .on_pick(move |id, window, cx| pick(id, window, cx))
+                    .on_pick_nested(move |model, level, window, cx| pick_nested(&(model.clone(), level.clone()), window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Model, menu.into_any_element())]
+            }
+            MenuKind::Effort if !self.effort_levels().is_empty() => {
+                // D4 (docs/41 §2.10; the owner chose the slider, 2026-10-14):
+                // the levels as stops, Default a row under the separator.
+                let listed = self.effort_options();
+                let options = listed.options().unwrap_or_default();
+                let levels: Vec<PickerRow> = options
+                    .iter()
+                    .filter(|o| o.effort.is_some())
+                    .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
+                    .collect();
+                let default_detail = match listed.note() {
+                    Some(note) => format!("{} — {note}", crate::overlays::effort_detail(None)),
+                    None => crate::overlays::effort_detail(None).to_owned(),
+                };
+                let default_row = PickerRow::new(crate::overlays::effort_row_id(None), crate::overlays::effort_label(None), default_detail);
+                let current = self.effort.and_then(|e| self.effort_levels().iter().position(|l| *l == e));
+                let change = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+                    if let Some(effort) = this.effort_levels().into_iter().find(|e| crate::overlays::effort_row_id(Some(*e)) == id.as_ref()) {
+                        this.set_effort(Some(effort), cx);
+                    }
+                });
+                let pick_default = cx.listener(|this: &mut Self, _: &SharedString, _, cx| this.pick_effort(None, cx));
+                let menu = effort_slider_menu("effort-menu", levels, current, default_row, true)
+                    .on_change(move |id, window, cx| change(id, window, cx))
+                    .on_pick(move |id, window, cx| pick_default(id, window, cx))
+                    .on_close(move |window, cx| close(&(), window, cx));
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                vec![(ComposerChipAnchor::Effort, menu.into_any_element())]
             }
             MenuKind::Effort => {
                 // The rows come from the provider for the selected model,
@@ -2199,10 +2153,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     this.pick_provider(id.as_ref(), cx);
                 });
-                // The same picker component the model menu uses, retitled:
-                // one mechanism for every chip menu, not one per chip.
-                let menu = model_menu("provider-menu", rows, selected, true)
-                    .title("Provider")
+                // D4: the provider picker — marks and names only, 240 wide.
+                let menu = provider_menu("provider-menu", rows, selected, true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
@@ -2233,7 +2185,10 @@ fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> 
         &crate::settings_providers::live_visible_provider_ids(),
     )
     .into_iter()
-    .map(|row| PickerRow::new(row.id, row.label, row.detail))
+    .map(|row| {
+        let mark = ProviderId::parse(&row.id).icon();
+        PickerRow::new(row.id, row.label, row.detail).mark(mark)
+    })
     .collect()
 }
 
@@ -2851,79 +2806,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Item 4: a missing path toasts quietly — inside the workspace, outside
-    /// it, and with a `:line` hint — instead of opening. (Existing paths
-    /// open through the platform dispatch, which the headless platform does
-    /// not implement; the resolver tests above pin that outside paths reach
-    /// the existence check rather than a workspace rejection.)
-    #[gpui::test]
-    /// D49: a play button press emits `RunInTerminal` — an event for the
-    /// application's terminal dock — and does nothing else. In particular
-    /// it never submits: the composer draft is untouched, no toast fires,
-    /// and the view holds no client, so no path here can start a turn or
-    /// reach the wire. `handle_terminal_run`'s only effect is the emit
-    /// below, which is what this pins.
-    #[gpui::test]
-    fn play_buttons_emit_a_run_never_a_turn(cx: &mut gpui::TestAppContext) {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let root = std::env::temp_dir().join(format!("baaz-run-probe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("probe dir");
-        let vc = cx.add_empty_window();
-        let seen: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
-        // Emitted events flush when the update that raised them ends, so
-        // the presses run in one update and the assertions read in the
-        // next; the subscription outlives both.
-        let (view, overlays, _sub) = vc.update(|window, cx| {
-            let overlays = cx.new(|_| crate::overlays::Overlays::default());
-            let host = crate::session::SessionHost {
-                provider_id: "echo".to_owned(),
-                workspace: root.to_string_lossy().into_owned(),
-                overlays: overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
-                terminal_host: None,
-            };
-            let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
-            let record = seen.clone();
-            let sub = cx.subscribe(&view, move |_, event: &crate::session::SessionEvent, _| {
-                match event {
-                    crate::session::SessionEvent::RunInTerminal { command, send_enter } => {
-                        record.borrow_mut().push((command.clone(), *send_enter));
-                    }
-                    _ => record.borrow_mut().push((String::from("unexpected event"), false)),
-                }
-            });
-            view.update(cx, |view, cx| {
-                view.handle_terminal_run(
-                    crate::terminal::RunRequest { command: "npm test".to_owned(), send_enter: true },
-                    cx,
-                );
-                // ⌥-click pastes without Enter: the same press with the
-                // modifier held resolves before the emit, above this seam.
-                view.handle_terminal_run(
-                    crate::terminal::RunRequest { command: "git status".to_owned(), send_enter: false },
-                    cx,
-                );
-            });
-            (view, overlays, sub)
-        });
-        vc.update(|_, cx| {
-            assert_eq!(
-                *seen.borrow(),
-                vec![
-                    ("npm test".to_owned(), true),
-                    ("git status".to_owned(), false),
-                ],
-                "two presses, two local run events, in order"
-            );
-            assert!(view.read(cx).draft_text(cx).is_empty(), "no turn was drafted, let alone sent");
-            assert!(overlays.read(cx).toasts.is_empty(), "no toast, no banner, no wire");
-        });
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     #[gpui::test]
     fn missing_linked_paths_toast_quietly(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -2973,32 +2855,18 @@ mod tests {
         }
     }
 
+    /// D4 (docs/41 §2.10): the provider picker is the providers only —
+    /// three rows, each its own name and mark, whether or not the session
+    /// has turns. Picking another one with turns is the hand-off (the
+    /// pick, not a row of its own).
     #[test]
-    fn a_session_with_turns_offers_handoff_then_new_session() {
+    fn a_session_with_turns_still_lists_providers_only() {
         let rows = provider_picker_rows(ProviderId::Muse, true);
-        assert_eq!(rows.len(), 5);
-        // The session's own provider stays a plain row: clicking it just
-        // closes the menu.
-        assert_eq!(rows[0].label.as_ref(), "Muse");
-        // Every other backend reads as "Hand off to X…" first, then "New
-        // session on X" with the reason — never a switch.
-        assert_eq!(rows[1].label.as_ref(), "Hand off to Claude Code…");
-        assert_eq!(rows[2].label.as_ref(), "New session on Claude Code");
-        assert_eq!(rows[3].label.as_ref(), "Hand off to Codex…");
-        assert_eq!(rows[4].label.as_ref(), "New session on Codex");
-        assert_eq!(
-            rows[2].detail.as_ref(),
-            "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Claude Code."
-        );
-        assert_eq!(
-            rows[4].detail.as_ref(),
-            "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Codex."
-        );
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
-        assert_eq!(
-            ids,
-            vec!["muse", "handoff:claude-code", "claude-code", "handoff:codex", "codex"]
-        );
+        assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
+        for (row, id) in rows.iter().zip(ProviderId::all()) {
+            assert_eq!(row.label.as_ref(), id.label());
+        }
     }
 
     /// §8's transcript half, against the real render cache: fold the
@@ -3593,4 +3461,24 @@ fn open_externally(path: &std::path::Path, cx: &mut gpui::App) {
 thread_local! {
     /// Paths a test asked the OS to open (see [`open_externally`]).
     pub(crate) static OPENED_EXTERNALLY: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A quote chip's words: the first ones, cut at a word boundary near 40
+/// characters with an ellipsis (`the provider closed the stream before…`).
+pub(super) fn quote_chip_words(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 40 {
+        return flat;
+    }
+    let mut out = String::new();
+    for word in flat.split(' ') {
+        if out.chars().count() + word.chars().count() + 1 > 40 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    format!("{out}…")
 }

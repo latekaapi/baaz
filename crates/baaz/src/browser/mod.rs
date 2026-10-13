@@ -319,6 +319,37 @@ fn recency_ms(updated: &chrono::DateTime<chrono::Local>) -> u64 {
 /// The draft text a `SendAnnotations` intent appends: the URL plus one line
 /// per pin (`<index>. <element path> — <note>`). Never auto-sent; the person
 /// reviews the draft first.
+/// The name an annotation batch's screenshot chip carries, so the sent
+/// turn draws it as the batch's strip rather than a tile (D4).
+pub(crate) const ANNOTATION_SHOT_NAME: &str = "annotated page.png";
+
+/// The batch a sent annotation turn draws (D4, docs/41 §2.2): the page's
+/// `host/path`, the screenshot, each note with its pin's place.
+pub(crate) fn annotation_batch(
+    annotations: &[Annotation],
+    url: &str,
+    pins: &[Option<(f32, f32)>],
+    page_size: (f32, f32),
+    screenshot: Option<String>,
+) -> crate::sent::SentAnnotations {
+    let address = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url).trim_end_matches('/').to_owned();
+    crate::sent::SentAnnotations {
+        screenshot,
+        size: page_size,
+        address,
+        notes: annotations
+            .iter()
+            .enumerate()
+            .map(|(i, a)| crate::sent::SentNote {
+                index: a.index,
+                at: pins.get(i).copied().flatten().unwrap_or((-100.0, -100.0)),
+                selector: a.selector.to_string(),
+                note: a.note.to_string(),
+            })
+            .collect(),
+    }
+}
+
 pub(crate) fn annotations_draft_block(annotations: &[Annotation], url: &str) -> String {
     let mut out = format!("Browser annotations — {url}");
     for annotation in annotations {
@@ -1878,11 +1909,16 @@ impl Harness {
     /// draft as an image chip, keeping a durable copy under temp/attachments.
     /// No active session: a toast, never a lossy drop into the void.
     fn attach_browser_screenshot(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.attach_browser_shot_named("browser-screenshot", bytes, cx);
+    }
+
+    /// [`Self::attach_browser_screenshot`] with the chip's name.
+    fn attach_browser_shot_named(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let _path = write_screenshot_temp(&bytes);
         match self.active.clone() {
             Some(view) => {
                 view.update(cx, |view, cx| {
-                    view.attach_screenshot("browser-screenshot".to_owned(), bytes, cx);
+                    view.attach_screenshot(name.to_owned(), bytes, cx);
                 });
                 cx.notify();
             }
@@ -1933,15 +1969,27 @@ impl Harness {
                 annotations,
                 screenshot,
                 url,
+                pins,
+                page_size,
             } => {
+                // The screenshot still rides as an image the agent can see;
+                // the batch (D4) remembers it, the pins and the notes so the
+                // sent turn draws as one annotation turn.
+                let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+                let shot_path = match (&screenshot, &session) {
+                    (Some(bytes), Some(session)) => crate::sent::save_picture(session, "png", bytes),
+                    _ => None,
+                };
                 if let Some(bytes) = screenshot {
-                    self.attach_browser_screenshot(bytes, cx);
+                    self.attach_browser_shot_named(ANNOTATION_SHOT_NAME, bytes, cx);
                 }
+                let batch = annotation_batch(&annotations, &url, &pins, page_size, shot_path);
                 let block = annotations_draft_block(&annotations, &url);
                 match self.active.clone() {
                     Some(view) => {
                         view.update(cx, |view, cx| {
                             view.append_draft_block(block, window, cx);
+                            view.set_annotation_draft(batch, cx);
                         });
                         cx.notify();
                     }
@@ -3123,6 +3171,16 @@ impl Harness {
     /// Dismiss every Browse chrome popover (downloads, extensions, ⋯):
     /// row activation, the toggle press, click-outside, Escape and tab
     /// switches all land here. Answers whether one stood open.
+    /// The sidebar's downloads button (D4): opens the downloads popover
+    /// under it, or closes it.
+    pub(crate) fn toggle_browse_downloads(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
+        let open = !self.browser.downloads_open;
+        self.dismiss_browse_popovers(cx);
+        self.browser.downloads_open = open;
+        self.browser.downloads_anchor = anchor;
+        cx.notify();
+    }
+
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
         let open = self.browser.downloads_open
             || self.browser.extensions_open
@@ -4113,6 +4171,9 @@ pub(crate) struct BrowserRegistry {
     /// toolbar button exists only while downloads list), extensions, ⋯.
     /// They drop over the page; see [`BrowserVisibility`].
     pub downloads_open: bool,
+    /// Where the sidebar's downloads button is (D4), in window
+    /// coordinates: the popover opens under it.
+    pub downloads_anchor: Option<gpui::Bounds<gpui::Pixels>>,
     /// The extensions popover stands open.
     pub extensions_open: bool,
     /// Whether the downloads popover has rendered since it opened: an
@@ -4165,6 +4226,7 @@ impl BrowserRegistry {
             visit_allows: chrome::VisitAllows::default(),
             permission_origins: HashMap::new(),
             downloads_open: false,
+            downloads_anchor: None,
             extensions_open: false,
             downloads_rendered: false,
             more_open: false,

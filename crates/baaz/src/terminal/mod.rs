@@ -14,5 +14,4 @@ pub mod service;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub use host::{Pick, TabOwner, TerminalHost, deterministic_script, title_from_command};
-pub use run::{RunRequest, send_enter_for_alt};
 pub use service::TerminalService;

@@ -1835,8 +1835,12 @@ impl CodexFold {
                                     name: attachment.name.clone(),
                                     kind: AttachmentKind::Image,
                                     size_bytes: None,
-                                    meta: Some(attachment.path.clone()),
+                                    meta: None,
                                     state: UploadState::Ready,
+                                    // The image the person sent, for the
+                                    // turn's 64 px tile (D4).
+                                    path: Some(attachment.path.clone()),
+                                    quote_of: None,
                                 })
                                 .collect(),
                             mentions: Vec::new(),

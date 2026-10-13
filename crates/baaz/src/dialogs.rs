@@ -14,7 +14,7 @@
 //! draws the dialog and the toast stack settled rather than rising in: an
 //! enter presence never lands on the same frame twice.
 
-use aui::data::{button, icon_button, ButtonSize};
+use aui::data::{button, ButtonSize};
 use aui::feedback::ToastKind;
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
@@ -32,8 +32,7 @@ use gpui::{
 use gpui_kit::base::h_flex;
 use gpui_kit::component::input::Textarea;
 
-use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP, TOAST_STACK_H, TOAST_TOP, TOAST_W};
-use crate::browser::Owner;
+use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP};
 use crate::layout::{self, RightKind};
 use crate::login::Auth;
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Palette, PaletteKind};
@@ -793,6 +792,15 @@ impl Harness {
     }
 
     /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
+    /// ← / → in the open composer menu (D4): the effort slider steps a
+    /// level; on the model picker → opens the selected row's effort submenu
+    /// and ← closes it.
+    pub(crate) fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        view.update(cx, |view, cx| view.step_menu(delta, cx));
+        cx.notify();
+    }
+
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         let rows = view.read(cx).menu_rows(cx);
@@ -1379,200 +1387,80 @@ impl Harness {
         );
     }
 
-    /// The toast stack, bottom right. Toasts here are informational — a
-    /// compaction that did nothing, a command a later phase brings — so they
-    /// carry no action, only a close.
-    pub(crate) fn render_toasts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // R3: while a native page is on screen the stack would paint under
-        // it — the header chip carries the toasts instead, so the stack
-        // stands down. Anywhere else this reads exactly as before.
-        if self.toasts_in_header(cx) {
-            return None;
-        }
-        let toasts = self.overlays.read(cx).toasts.clone();
-        if toasts.is_empty() {
-            return None;
-        }
-        let newest = toasts.last().map(|t| t.id.to_string()).unwrap_or_default();
-        let dismissed = newest.clone();
-        let close = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismissed));
-            cx.notify();
-        });
-        // One action exists, and it is Undo — one hidden row, one "Clear
-        // empty" batch, or one archived session, whichever the newest toast
-        // was for.
-        let act = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.undo_newest(cx);
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));
-            cx.notify();
-        });
-        // A deterministic capture draws the stack settled: toasts slide in,
-        // which never lands on the same frame twice.
-        let stack = aui::feedback::toast_stack("toasts", toasts);
-        let stack = if crate::clock::deterministic() { stack.at_rest() } else { stack };
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .right(px(scale::SP_5))
-                    .top(px(TOAST_TOP))
-                    .w(px(TOAST_W))
-                    .h(px(TOAST_STACK_H))
-                    .child(
-                        stack
-                            .on_action(move |_, window, cx| act(&(), window, cx))
-                            .on_close(move |window, cx| close(&(), window, cx)),
-                    ),
-            )
-            .into_any_element(),
-        )
-    }
-
-    /// Whether toasts ride the header chip instead of the top-right stack:
-    /// a native page rect is showing, and the stack would paint under it
-    /// (the native-overlay rule — a Chromium page composites above
-    /// everything gpui draws). In practice that is Browse with a centre
-    /// page, or the right pane open on the Browser kind with its page;
-    /// everywhere else — Sessions with no pane, a blank new-tab page (no
-    /// native page yet), Settings open — the stack stays where it was.
-    /// Covering overlays (palette, menus, dialogs) are deliberately not
-    /// inputs: the header is never covered, so the chip stays visible
-    /// either way. Backend-agnostic: the fake capture backend counts as a
-    /// page exactly like a real one — only the shown tab's URL decides.
-    pub(crate) fn toasts_in_header(&self, cx: &gpui::App) -> bool {
-        if self.settings_page.open {
-            return false;
-        }
-        if self.mode == layout::Mode::Browse {
-            return self
-                .browse_centre_shown()
-                .and_then(|id| self.browser.tabs.get(id))
-                .is_some_and(|tab| toast_page_live(&tab.url));
-        }
-        if !self.layout.right_open || layout::right_kind(&self.layout) != RightKind::Browser {
-            return false;
-        }
-        let owner = self.shown_tab_owner(cx);
-        let space = match &owner {
-            Owner::Person => self.browse_space(),
-            Owner::Session(_) => None,
-        };
-        self.browser
-            .tabs
-            .active_of(&owner, space.as_deref())
-            .and_then(|id| self.browser.tabs.get(id))
-            .is_some_and(|tab| toast_page_live(&tab.url))
-    }
-
-    /// The header toast chip (R3): one line in the header row immediately
-    /// left of the feedback slot, shown while [`Self::toasts_in_header`]
-    /// where the top-right stack would hide under a native page. Newest
-    /// toast only, with a muted `+N` while several queue; the same
-    /// [`ToastData`](aui::feedback::ToastData), so the same timing —
-    /// toasts wait for a press, never a clock, on both surfaces.
-    pub(crate) fn render_toast_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The corner stack (D4, docs/41 §2.11): the newest toast above the
+    /// feedback slot, 8 apart, right-aligned. The host places it — in
+    /// Sessions 12 from the sheet's right with its bottom 8 above the
+    /// composer ([`Self::corner_above_band`]), with no composer 12 above
+    /// the sheet's bottom ([`Self::corner_at_sheet_bottom`]); in Browse in
+    /// the corner window over the page ([`Self::corner_in_overlay`]).
+    /// Nothing while a capture reads the window, which must read clean.
+    pub(crate) fn render_corner_stack(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.feedback.capturing {
             return None;
         }
-        if !self.toasts_in_header(cx) {
+        let toast = self.render_toast_pill(cx);
+        let slot = self.render_feedback_header_slot(cx);
+        if toast.is_none() && slot.is_none() {
             return None;
         }
+        Some(gpui_kit::base::v_flex().flex_none().items_end().gap(px(8.0)).children(toast).children(slot).into_any_element())
+    }
+
+    /// The stack over the composer band: its bottom 8 above the band's top
+    /// (the composer's top edge), 12 from the sheet's right.
+    pub(crate) fn corner_above_band(stack: AnyElement) -> AnyElement {
+        div().absolute().right(px(12.0)).bottom(gpui::relative(1.0)).pb(px(8.0)).child(stack).into_any_element()
+    }
+
+    /// The stack where the sheet has no composer: 12 above its bottom, 12
+    /// from its right.
+    pub(crate) fn corner_at_sheet_bottom(stack: AnyElement) -> AnyElement {
+        div().absolute().right(px(12.0)).bottom(px(12.0)).child(stack).into_any_element()
+    }
+
+    /// Whether the stack lives in the corner window: Browse, where the
+    /// native page draws above everything the main window paints (memory
+    /// `feedback-native-page-above-gpui`) — always in Browse, page or not,
+    /// so a page loading under a toast never moves it. Settings hides the
+    /// page, so the stack draws in the window there.
+    pub(crate) fn corner_in_overlay(&self) -> bool {
+        self.mode == layout::Mode::Browse && !self.settings_page.open
+    }
+
+    /// The newest toast as the stack's chip, with `+n` while more wait. The
+    /// same [`ToastData`](aui::feedback::ToastData) as ever: toasts wait for
+    /// a press, never a clock. One action exists, and it is Undo — one
+    /// hidden row, one "Clear empty" batch, or one archived session,
+    /// whichever the newest toast was for.
+    fn render_toast_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toasts = self.overlays.read(cx).toasts.clone();
         let newest = toasts.last()?.clone();
         let queued = toasts.len().saturating_sub(1);
-        let p = cx.aui().colors;
-        let dot = match newest.kind {
-            ToastKind::Ok => p.success,
-            ToastKind::Warn => p.warning,
-            ToastKind::Neutral => p.ink_3,
+        let tone = match newest.kind {
+            ToastKind::Ok => aui::feedback::ToastTone::Success,
+            ToastKind::Warn => aui::feedback::ToastTone::Warning,
+            ToastKind::Neutral => aui::feedback::ToastTone::Neutral,
         };
         let newest_id = newest.id.to_string();
         let dismiss = newest_id.clone();
-        let close = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+        let close = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismiss));
             cx.notify();
         });
-        let action = newest_id.clone();
-        let act = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.undo_newest(cx);
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&action));
-            cx.notify();
-        });
-        let title: SharedString = newest.title.clone();
-        let body: SharedString = newest.body.clone();
-        let tip = format!("{title}: {body}");
-        let mut chip = h_flex()
-            .id("toast-chip")
-            .flex_none()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(24.0))
-            .px(px(10.0))
-            .max_w(px(480.0))
-            .overflow_hidden()
-            .rounded(px(8.0))
-            .bg(p.surface_2)
-            .border_1()
-            .border_color(p.line)
-            .role(gpui::Role::Status)
-            .aria_label(tip.clone())
-            .tooltip(move |_, cx| cx.new(|_| ToastChipTip { text: tip.clone() }).into())
-            .child(div().flex_none().size(px(8.0)).rounded_full().bg(dot))
-            // Title and body shrink (truncating) so the action and the
-            // close button always stay inside the 480 px chip: a long
-            // body once pushed ✕ out of reach (found in a capture).
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(220.0))
-                    .truncate()
-                    .text_size(aui_tokens::scaled(12.5))
-                    .semibold()
-                    .text_color(p.ink)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .flex_shrink(1.0)
-                    .min_w(px(0.0))
-                    .max_w(px(320.0))
-                    .truncate()
-                    .ui(scale::FS_12)
-                    .text_color(p.ink_2)
-                    .child(body),
-            );
-        if queued > 0 {
-            chip = chip.child(
-                div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child(format!("+{queued}")),
-            );
-        }
+        // Keyed by the toast, so a new one plays its own enter.
+        let mut chip = aui::feedback::toast_chip(gpui::ElementId::Name(format!("toast-chip-{newest_id}").into()), tone, newest.title.clone(), newest.body.clone())
+            .queued(queued)
+            .at_rest(crate::clock::deterministic())
+            .on_close(close);
         if let Some(first) = newest.actions.first() {
-            let label = first.label.clone();
-            chip = chip.child(
-                div().flex_none().child(
-                    button("toast-chip-action", label.clone())
-                        .ghost()
-                        .sm()
-                        .accessibility_label(label)
-                        .on_click(act),
-                ),
-            );
+            let action = newest_id;
+            let act = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.undo_newest(cx);
+                this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&action));
+                cx.notify();
+            });
+            chip = chip.action(first.label.clone(), act);
         }
-        // One labelled button (the icon button), never a nested pair.
-        chip = chip.child(
-            div()
-                .id("toast-chip-close")
-                .flex_none()
-                .child(
-                    icon_button("toast-chip-close-button", IconName::X)
-                        .ghost()
-                        .muted()
-                        .size(ButtonSize::Sm)
-                        .accessibility_label("Dismiss notification")
-                        .on_click(close),
-                ),
-        );
         Some(chip.into_any_element())
     }
 
@@ -1596,42 +1484,11 @@ impl Harness {
     }
 }
 
-/// Whether `url` has a native page behind it: anything but the blank
-/// new-tab page (`about:blank`, see `browser::BLANK`) and the
-/// pre-navigation empty. The fake capture backend reports the same URLs
-/// a real page would, so it counts as a page here too.
-fn toast_page_live(url: &str) -> bool {
-    !url.is_empty() && url != "about:blank"
-}
-
-/// The header toast chip's hover bubble: the full body, untruncated, in
-/// the same overlay bubble the header tips use.
-struct ToastChipTip {
-    text: String,
-}
-
-impl gpui::Render for ToastChipTip {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let p = cx.aui().colors;
-        div()
-            .px(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .rounded(px(scale::R_SM))
-            .border_1()
-            .border_color(p.line_strong)
-            .bg(p.overlay)
-            .text_color(p.ink)
-            .ui(scale::FS_12)
-            .child(self.text.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{filter_commands, tilde_root};
     use crate::app::Harness;
-    use crate::browser::Owner;
-    use crate::layout::{Mode, RightKind};
+        use crate::layout::{Mode, RightKind};
     use crate::overlays::{Command, DialogAction, MenuKind, PaletteKind};
     use crate::session::{SessionHost, SessionView};
     // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
@@ -2264,9 +2121,8 @@ mod tests {
         restore_state(state);
     }
 
-    /// R3: a toast shell with no session — the predicate tests need no
-    /// lane, only the window, so they boot the plain harness the `app.rs`
-    /// tests boot.
+    /// A shell with no session: the predicate tests need no lane, only the
+    /// window, so they boot the plain harness the `app.rs` tests boot.
     fn header_harness(
         vc: &mut gpui::VisualTestContext,
         state_dir: &std::path::Path,
@@ -2276,122 +2132,19 @@ mod tests {
         })
     }
 
-    /// R3: Sessions with the pane shut shows the top-right stack — no
-    /// native page is on screen for it to hide under.
+    /// D4: the corner stack draws in the corner window only in Browse, and
+    /// in the main window again while Settings hides the page.
     #[gpui::test]
-    fn toasts_stay_stacked_with_no_pane(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("toast-no-pane");
+    fn the_corner_stack_moves_to_its_window_only_in_browse(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("corner-host");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
-        assert!(vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)), "no pane, no header chip");
-        restore_state(state);
-    }
-
-    /// R3: the right pane open on the Browser kind with its page moves
-    /// toasts to the header — the stack would paint under the page. The
-    /// fake capture backend counts as a page exactly like a real one:
-    /// only the tab's URL decides.
-    #[gpui::test]
-    fn toasts_move_to_the_header_over_the_pane_page(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("toast-pane-page");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = header_harness(vc, &state.2);
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.browser.fake = true;
-                h.browser.tabs_loaded = true;
-                let space = h.browse_space();
-                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
-                h.layout.right_open = true;
-                h.layout.right_kind = Some(RightKind::Browser);
-            })
-        });
-        assert!(
-            vc.update(|_, cx| baaz.read(cx).toasts_in_header(cx)),
-            "the pane page hides the stack, fake backend included"
-        );
-        restore_state(state);
-    }
-
-    /// R3: Browse with a centre page moves toasts to the header — the
-    /// centre page fills the window under the header, stack included.
-    #[gpui::test]
-    fn toasts_move_to_the_header_over_the_browse_centre(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("toast-browse-page");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = header_harness(vc, &state.2);
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = Mode::Browse;
-                h.browser.tabs_loaded = true;
-                let space = h.browse_space();
-                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
-            })
-        });
-        assert!(
-            vc.update(|_, cx| baaz.read(cx).toasts_in_header(cx)),
-            "the centre page hides the stack"
-        );
-        restore_state(state);
-    }
-
-    /// R3: Browse on a blank new tab keeps the stack — `about:blank`
-    /// (and the pre-navigation empty) has no native page yet.
-    #[gpui::test]
-    fn toasts_stay_stacked_on_a_blank_new_tab(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("toast-blank-tab");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = header_harness(vc, &state.2);
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = Mode::Browse;
-                h.browser.tabs_loaded = true;
-                let space = h.browse_space();
-                h.browser.tabs.open(space, Owner::Person, "about:blank", None);
-            })
-        });
-        assert!(
-            vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)),
-            "a blank tab draws no native page"
-        );
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                let space = h.browse_space();
-                h.browser.tabs.open(space, Owner::Person, "", None);
-            })
-        });
-        assert!(
-            vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)),
-            "a pre-navigation tab draws no native page either"
-        );
-        restore_state(state);
-    }
-
-    /// R3: Settings open keeps the stack — the page hides under the
-    /// settings surface, so nothing covers the top-right corner.
-    #[gpui::test]
-    fn toasts_stay_stacked_while_settings_open(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("toast-settings");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = header_harness(vc, &state.2);
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = Mode::Browse;
-                h.browser.tabs_loaded = true;
-                let space = h.browse_space();
-                h.browser.tabs.open(space, Owner::Person, "https://example.com", None);
-                h.settings_page.open = true;
-            })
-        });
-        assert!(
-            vc.update(|_, cx| !baaz.read(cx).toasts_in_header(cx)),
-            "settings obscure the page, so the stack is visible"
-        );
+        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay()), "Sessions draws it in the window");
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = Mode::Browse));
+        assert!(vc.update(|_, cx| baaz.read(cx).corner_in_overlay()), "Browse draws it over the page");
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.settings_page.open = true));
+        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay()), "Settings hides the page");
         restore_state(state);
     }
 

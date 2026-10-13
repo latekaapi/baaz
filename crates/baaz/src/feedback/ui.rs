@@ -20,11 +20,11 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use aui::data::{button, icon_content_button, ButtonSize};
+use aui::data::button;
 use aui::overlay::popover_layer;
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
 use gpui_kit::base::input::TextareaState;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::Textarea;
@@ -2241,6 +2241,12 @@ impl crate::app::Harness {
     /// the Done and Discard icons follow it; a fresh Done flash replaces
     /// the count and the actions for its ~4 s.
     pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Browse: the slot draws in the corner window over the page
+        // ([`crate::app::Harness::corner_in_overlay`]), never here — its
+        // clicks land in that window, so there is nothing to record.
+        if self.corner_in_overlay() {
+            return self.feedback_slot_row(cx, false);
+        }
         // While Active the floating copy (above the capture layer) is the
         // one that shows and clicks; this copy only holds the space and the
         // bounds — as a non-accessible placeholder, so the tree names each
@@ -2287,7 +2293,7 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.feedback.phase != FeedbackPhase::Active {
+        if self.feedback.phase != FeedbackPhase::Active || self.corner_in_overlay() {
             return None;
         }
         let bounds = self.feedback.slot_bounds?;
@@ -2335,85 +2341,96 @@ impl crate::app::Harness {
                 .as_ref()
                 .is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH);
         // The decorative copy gets its own id (ids must be unique) and none
-        // of the occlusion, role or label the live copy carries.
-        let mut row = h_flex()
-            .id(if decorative { "feedback-header-ghost" } else { "feedback-header" })
-            .flex_none()
-            .items_center()
-            .gap(px(8.0))
+        // of the occlusion, role or label the live copy carries. The row is
+        // the corner stack's floating pill (D4, docs/41 §2.11): padding
+        // 0 / 4, the toggle, then the count, Done and Discard while active.
+        let mut row = aui::feedback::floating_pill(if decorative { "feedback-header-ghost" } else { "feedback-header" }, cx)
+            .px(px(4.0))
+            .gap(px(6.0))
             .when(!decorative, |row| row.occlude());
         row = row.child(self.render_feedback_toggle(cx, active, decorative));
         if flashing {
-            row = row.child(self.render_feedback_flash(cx, decorative));
+            row = row.child(self.render_feedback_flash(cx, decorative)).pr(px(10.0));
         } else if active || !self.feedback.draft.is_empty() {
             let count = self.feedback.notes_label();
             let count_row = div()
                 .id(if decorative { "feedback-count-ghost" } else { "feedback-count" })
                 .flex_none()
-                .mono(11.5)
-                .text_color(cx.aui().colors.ink_3)
+                .pl(px(2.0))
+                .mono(scale::FS_11)
+                .text_color(cx.aui().colors.ink_4)
                 .whitespace_nowrap()
                 .child(count.clone())
                 .when(!decorative, |row| row.role(gpui::Role::Status).aria_label(count));
             row = row
                 .child(count_row)
                 .child(self.render_feedback_done(cx, decorative))
-                .child(self.render_feedback_discard(cx, decorative));
+                .child(self.render_feedback_discard(cx, decorative))
+                .pr(px(6.0));
         }
         Some(row.into_any_element())
     }
 
-    /// A decorative stand-in for a square small header icon button: the
-    /// same box at the same size, but a plain glyph with no id, no role or
-    /// label, no handler and no bounds recorder.
-    fn decorative_slot_icon(content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let box_side = cx.aui().metrics.control_sm;
-        div()
+    /// One 24 px text control in the slot's pill — Done (the primary: the
+    /// foreground fill) or Discard (text; danger ink while armed). Both
+    /// copies build it here, so the decorative one is the same size: it
+    /// only drops the id, role, label and handler.
+    fn slot_text(id: Option<&'static str>, label: &'static str, primary: bool, danger: bool, enabled: bool, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let p = cx.aui().colors;
+        let control = h_flex()
+            .id(id.unwrap_or(label))
             .flex_none()
-            .size(box_side)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(content)
-            .into_any_element()
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .ui(scale::FS_12)
+            .whitespace_nowrap()
+            .child(label);
+        let control = if primary {
+            control.bg(p.ink).text_color(p.bg).semibold().when(!enabled, |c| c.opacity(0.4))
+        } else if danger {
+            control.text_color(p.danger).bg(gpui::Hsla { a: 0.12, ..p.danger })
+        } else {
+            control.text_color(p.ink_2).when(!enabled, |c| c.opacity(0.4))
+        };
+        match id {
+            Some(_) if enabled => control.cursor_pointer().hover(move |d| if primary { d.opacity(0.9) } else { d.text_color(p.ink).bg(p.hover_overlay()) }),
+            _ => control,
+        }
     }
 
-    /// The header's feedback icon: the same ghost small icon button as the
-    /// neighbouring header buttons, toggling exactly like ⌃⌥⌘F (Off or
-    /// Paused → Active, Active → Paused). While Active the glyph reads
-    /// tinted on an accent-soft wash, and the toggled state names it for
-    /// the accessibility tree. Decorative: the same layout with none of
-    /// that — no id, role, label, handler or recorder.
+    /// The pill's toggle: 28, the message-plus glyph; lit (9 % and the
+    /// foreground) while Active. Toggles exactly like ⌃⌥⌘F (Off or Paused
+    /// → Active, Active → Paused), and the toggled state names it for the
+    /// accessibility tree. Decorative: the same box with none of that — no
+    /// id, role, label, handler or recorder.
     fn render_feedback_toggle(
         &self,
         cx: &mut Context<Self>,
         active: bool,
         decorative: bool,
     ) -> AnyElement {
-        let accent = feedback_accent(cx);
-        let glyph = if active {
-            icon(IconName::MessagePlus).size(px(14.0)).color(accent)
-        } else {
-            icon(IconName::MessagePlus).size(px(14.0))
-        };
+        let p = cx.aui().colors;
+        let side = cx.aui().metrics.control_md;
+        let glyph = icon(IconName::MessagePlus).size(px(14.0)).lit(active);
+        let shell = div()
+            .flex_none()
+            .size(side)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .text_color(if active { p.ink } else { p.ink_2 })
+            .when(active, |d| d.bg(p.selected_overlay()));
         if decorative {
-            return div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(scale::R_SM))
-                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
-                .into_any_element();
+            return shell.child(glyph).into_any_element();
         }
-        let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.toggle_feedback(window, cx);
+        let toggle = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            if !this.feedback.saving {
+                this.toggle_feedback(window, cx);
+            }
         });
         let toggled = if active { gpui::Toggled::True } else { gpui::Toggled::False };
-        // One named element for the control: the wrapper owns the role, the
-        // label and the toggled state (the button has no toggled builder),
-        // and names itself for the label probe the way interactive divs do —
-        // the inner button stays silent, so the tree never nests two buttons.
         aui::data::record_ax_label("Feedback mode");
         let report = cx.entity().downgrade();
         div()
@@ -2425,46 +2442,35 @@ impl crate::app::Harness {
                     });
                 }
             })
-            .id("feedback-toggle")
             .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(scale::R_SM))
-            .when(active, |this| this.bg(gpui::Hsla { a: 0.14, ..accent }))
-            .role(gpui::Role::Button)
-            .aria_label("Feedback mode")
-            .aria_toggled(toggled)
-            .tooltip(|_, cx| cx.new(|_| FeedbackTip::toggle()).into())
             .child(
-                icon_content_button("feedback-toggle-button", glyph)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .disabled(self.feedback.saving)
-                    .on_click(toggle),
+                shell
+                    .id("feedback-toggle")
+                    .cursor_pointer()
+                    .when(!active, |d| d.hover(|d| d.bg(p.hover_overlay()).text_color(p.ink)))
+                    .role(gpui::Role::Button)
+                    .aria_label("Feedback mode")
+                    .aria_toggled(toggled)
+                    .tooltip(|_, cx| cx.new(|_| FeedbackTip::toggle()).into())
+                    .on_click(toggle)
+                    .child(glyph),
             )
             .into_any_element()
     }
 
-    /// The header's Done icon: accent ink, dimmed while there is nothing
-    /// to save, writing the report and copying its path like the old Done
-    /// button did. Decorative: the same layout with none of that.
+    /// Done: the pill's primary, dimmed while there is nothing to save;
+    /// writes the report and copies its path. Decorative: the same box.
     fn render_feedback_done(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
-        let accent = feedback_accent(cx);
-        let glyph = icon(IconName::Check).size(px(14.0)).color(accent);
+        let enabled = self.feedback.done_enabled(cx);
         if decorative {
-            return div()
-                .flex_none()
-                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
-                .into_any_element();
+            return Self::slot_text(None, "Done", true, false, enabled, cx).into_any_element();
         }
-        let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.finish_feedback(window, cx);
+        let done = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            if this.feedback.done_enabled(cx) {
+                this.finish_feedback(window, cx);
+            }
         });
-        // Flipped from the toggle: the button itself owns the role and the
-        // label (it already renders both), so the wrapper is a plain box —
-        // and the named element is the widget that actually disables while
-        // there is nothing to save.
+        aui::data::record_ax_label("Done — save feedback report");
         let report = cx.entity().downgrade();
         div()
             .on_children_prepainted(move |bounds, _, cx| {
@@ -2475,33 +2481,26 @@ impl crate::app::Harness {
                     });
                 }
             })
-            .id("feedback-done")
             .flex_none()
-            .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
             .child(
-                icon_content_button("feedback-done-button", glyph)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label("Done — save feedback report")
-                    .disabled(!self.feedback.done_enabled(cx))
+                Self::slot_text(Some("feedback-done"), "Done", true, false, enabled, cx)
+                    .role(gpui::Role::Button)
+                    .aria_label("Done — save feedback report")
+                    .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
                     .on_click(done),
             )
             .into_any_element()
     }
 
-    /// The header's Discard icon: the first click arms it (danger ink,
-    /// naming the notes the second click drops) for 4 s; the second click
-    /// inside the window clears the draft, staying in phase. Decorative:
-    /// the same layout with none of that.
+    /// Discard: text; the first click arms it (danger ink, the label names
+    /// the confirm), a second within the arm window discards. Decorative:
+    /// the same box.
     fn render_feedback_discard(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
-        let glyph = icon(IconName::Trash).size(px(14.0));
-        if decorative {
-            return div()
-                .flex_none()
-                .child(Self::decorative_slot_icon(glyph.into_any_element(), cx))
-                .into_any_element();
-        }
         let armed = self.feedback.discard_armed_live();
+        let enabled = self.feedback.discard_enabled();
+        if decorative {
+            return Self::slot_text(None, "Discard", false, armed, enabled, cx).into_any_element();
+        }
         let label = if armed {
             format!("Confirm: discard {}", self.feedback.notes_label())
         } else {
@@ -2512,20 +2511,12 @@ impl crate::app::Harness {
         } else {
             "Discard feedback notes".to_owned()
         };
-        let discard = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.discard_feedback(window, cx);
+        let discard = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            if this.feedback.discard_enabled() {
+                this.discard_feedback(window, cx);
+            }
         });
-        let mut button = icon_content_button("feedback-discard-button", glyph)
-            .ghost()
-            .size(ButtonSize::Sm)
-            .accessibility_label(label)
-            .disabled(!self.feedback.discard_enabled())
-            .on_click(discard);
-        if armed {
-            button = button.danger();
-        }
-        // Like Done: the button owns the role and the label, the wrapper is
-        // a plain box — while armed the label names the confirm.
+        aui::data::record_ax_label(&label);
         let report = cx.entity().downgrade();
         div()
             .on_children_prepainted(move |bounds, _, cx| {
@@ -2536,40 +2527,37 @@ impl crate::app::Harness {
                     });
                 }
             })
-            .id("feedback-discard")
             .flex_none()
-            .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
-            .child(button)
+            .child(
+                Self::slot_text(Some("feedback-discard"), "Discard", false, armed, enabled, cx)
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
+                    .on_click(discard),
+            )
             .into_any_element()
     }
 
-    /// After Done lands: `Saved · N notes — path copied` for ~4 s, so the
-    /// save is visible even when a page covers the toast area. Replaces
-    /// the count and the action icons for its show. Decorative: the same
+    /// After Done lands: `Saved · N notes — path copied` for ~4 s inside
+    /// the pill, replacing the count and the actions. Decorative: the same
     /// layout with no id, role or label.
     fn render_feedback_flash(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
         let flash = self.feedback.saved_flash.as_ref().expect("flash checked");
         let unit = if flash.notes == 1 { "note" } else { "notes" };
         let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
         let label = format!("Feedback saved to {}", flash.path);
-        let row = h_flex()
+        h_flex()
             .id(if decorative { "feedback-saved-ghost" } else { "feedback-saved" })
             .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .h(px(28.0))
-            .px(px(10.0))
-            .rounded(px(scale::R_SM))
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
-            .when(!decorative, |row| row.occlude().role(gpui::Role::Group).aria_label(label));
-        row.child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
+            .gap(px(8.0))
+            .pl(px(2.0))
+            .when(!decorative, |row| row.role(gpui::Role::Group).aria_label(label))
+            .child(div().flex_none().size(px(8.0)).rounded_full().bg(p.success))
             .child(
                 div()
                     .flex_none()
-                    .mono(scale::FS_12)
+                    .ui(scale::FS_12)
                     .text_color(p.ink_2)
                     .whitespace_nowrap()
                     .child(format!("Saved · {} {unit} — path copied", flash.notes)),

@@ -93,26 +93,10 @@ impl ProviderId {
         }
     }
 
-    /// One honest line per entry, for the switcher subtitle.
-    pub fn blurb(self) -> &'static str {
-        match self {
-            ProviderId::Muse => "The existing backend, full capability set.",
-            ProviderId::ClaudeCode => "Steering and interruption are unverified; questions arrive as prose.",
-            ProviderId::Codex => "Native steering and interruption; approvals carry the model's reason.",
-        }
-    }
-
     /// The composer placeholder for a session on this provider: the person
     /// is asking this provider, so the empty composer names it.
     pub fn composer_placeholder(self) -> String {
         format!("Ask {}, or type / for commands", self.label())
-    }
-
-    /// The hero subtitle for a session on this provider in a workspace
-    /// called `display`: the session runs on this provider, so the empty
-    /// state names it rather than assuming Muse.
-    pub fn hero_subtitle(self, display: &str) -> String {
-        format!("{} runs in {display}.", self.label())
     }
 
     /// The mark beside the composer model chip: each provider's own badge,
@@ -1254,12 +1238,11 @@ mod tests {
 
     #[test]
     fn session_chrome_names_the_session_provider() {
-        // The hero subtitle, composer placeholder, chip badge and
+        // The composer placeholder (also the empty session's hint), chip badge and
         // needs-you headline all derive from the session's provider: a
         // future hardcode of any one of them fails here, on every provider.
         for id in ProviderId::all() {
             let label = id.label();
-            assert_eq!(id.hero_subtitle("harness"), format!("{label} runs in harness."));
             assert_eq!(
                 id.composer_placeholder(),
                 format!("Ask {label}, or type / for commands")

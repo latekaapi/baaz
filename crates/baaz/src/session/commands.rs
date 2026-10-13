@@ -24,6 +24,8 @@ impl SessionView {
         }
         let text = self.composer.read(cx).value().to_string();
         if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
+            // ⏎ on an empty composer answers a pending approval (its hint).
+            self.allow_pending(window, cx);
             return;
         }
         // An image still being read has no bytes to send (finding
@@ -135,6 +137,7 @@ impl SessionView {
             reasoning_effort: self.effort.map(effort_wire),
             ..Default::default()
         };
+        self.record_sent(&text);
         self.images.clear();
         self.files.clear();
         let Some(client) = self.wire_client(cx) else { return };
@@ -178,6 +181,7 @@ impl SessionView {
             display_text: Some(text.clone()),
             effort: crate::projects::effort_string(self.effort),
         };
+        self.record_sent(&text);
         self.images.clear();
         self.files.clear();
         // The first frame after send already shows the turn (X1): fold an
@@ -1989,7 +1993,7 @@ mod tests {
             let (swaps, new_on) = (swaps.clone(), new_on.clone());
             cx.subscribe(&view, move |_, event: &SessionEvent, _| match event {
                 SessionEvent::SwitchProvider { provider } => swaps.borrow_mut().push(*provider),
-                SessionEvent::NewSessionOnProvider { provider } => new_on.borrow_mut().push(*provider),
+                SessionEvent::HandoffRequested { provider, .. } => new_on.borrow_mut().push(*provider),
                 _ => {}
             })
         });
