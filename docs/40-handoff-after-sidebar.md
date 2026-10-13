@@ -105,18 +105,56 @@ Tracker **"Baaz Two Tracks"** https://claude.ai/artifact/Fr965AKBn8toZ7BcUk7wCP 
   and `incremental` when disk runs low; `~/Projects/cockpit/target` is the owner's — never touch.
 - One test flakes under concurrent builds: `terminal::service::tests::unknown_sessions_are_refused`; passes alone.
 
-## 6. Prompt for the next session
-```
-Continue the Baaz plan. Read, in order: harness docs/40-handoff-after-sidebar.md, docs/35 (the v3 values), memory
-project-v3-surfaces-2026-10-12 and feedback-verify-visually-first, and the canvas "Baaz v3"
-(https://claude.ai/artifact/7SwC39oc2nEakd4TpCdp8e, project/canvas.json then the boards). The tracker is "Baaz Two
-Tracks" (https://claude.ai/artifact/Fr965AKBn8toZ7BcUk7wCP).
+## 6. Who does what: Fable designs, Opus builds (owner, 2026-10-13)
 
-State: the sidebar is COMPLETE. Both repos are on main only, pushed (agentic-ui v0.4.2, Baaz pinned to it). Never
-push without asking.
+Every screen is two sessions with a hard handoff between them.
 
-Start D4 (the transcript) with the loop in docs/40 §4: capture → mock on the v3 canvas → my approval → agentic-ui →
-Baaz → gates → build BaazCheck and drive it yourself with computer use (I approve the access prompt) → me. Give the
-three homeless controls their homes in the same pass, then sweep the sidebar's dead code. Commit per step. If R2 (the
-agent core, library only) can run in parallel via relay without slowing D4, propose it.
+**Design session — Fable 5.1** (`/model claude-fable-5-1`). Owns the look and the tone: steps 1–3 of §4. Captures
+the real screens, mocks them on the "Baaz v3" canvas, iterates with the owner until approved, then writes the spec.
+It writes no product code.
+
+**Build session — Opus 5.5** (`/model claude-opus-5-5`). Owns everything else: steps 4–7 of §4. Builds from the
+approved canvas and the spec, runs the gates, drives BaazCheck, hands to the owner. **Any design question the spec
+does not answer goes back to the owner — never invented in the build session.** Taste feedback after the live check
+("feels heavy") goes back to a Fable session; defects ("doesn't match the mock") stay with Opus.
+
+**The handoff is a spec doc**, `docs/4N-<screen>-spec.md` (D4 → `docs/41-d4-spec.md`), written by Fable after
+approval. It must contain:
+1. The approved canvas version and the board for each state (default, hover, open/closed, empty, error, loading).
+2. Every measured value: sizes, paddings, gaps, radii, type roles and weights, colours by ladder level (docs/35),
+   edges and shadows — numbers, not adjectives.
+3. Motion: what moves, duration, easing (Emil's rules), and what must not move.
+4. Behaviour: every interaction and state change, in both modes and over a native page where it applies.
+5. What the existing code already has (component names in agentic-ui / Baaz) and what is new.
+6. Out of scope, and the owner's explicit decisions with dates.
+7. The live-check list Opus must drive before handing over.
+
+## 7. Prompts
+
+**Design session (Fable 5.1):**
 ```
+You are the designer for Baaz. Read, in order: harness docs/40-handoff-after-sidebar.md (§4 and §6 especially),
+docs/35 (the v3 values), memory project-v3-surfaces-2026-10-12, feedback-design-taste, feedback-ff-is-the-spec and
+feedback-mock-first-then-muse, and the canvas "Baaz v3" (https://claude.ai/artifact/7SwC39oc2nEakd4TpCdp8e,
+project/canvas.json then the boards).
+
+Your job is D4, the transcript, plus homes for the three homeless controls (docs/40 §3). Design only — write no
+product code. Capture the real screens from the fixtures in docs/40 §3, mock them on the v3 canvas at the quality of
+the four existing screens, and bring them to me. Iterate until I approve. Then write docs/41-d4-spec.md to the
+format in docs/40 §6 and commit it. Never push without asking.
+```
+
+**Build session (Opus 5.5):**
+```
+You are the builder for Baaz. Read, in order: harness docs/40-handoff-after-sidebar.md, docs/41-d4-spec.md (the
+approved spec — it is the source of truth), docs/35, memory feedback-verify-visually-first, and the approved boards
+on the canvas "Baaz v3" (https://claude.ai/artifact/7SwC39oc2nEakd4TpCdp8e).
+
+Implement D4 exactly as specified, steps 4–7 of docs/40 §4: agentic-ui component + gallery card → Baaz adopts →
+gates (both repos, the 18-entry probe) → build BaazCheck and drive every case in the spec's live-check list yourself
+with computer use (I approve the access prompt) → me. Then sweep the sidebar's dead code (docs/40 §3). Any design
+question the spec does not answer comes back to me; do not invent. Commit per step. Never push without asking.
+```
+
+**Repeat per screen:** D4 → D5 Settings → D6 Right pane → D7 → D8, the spec number increasing each time
+(`docs/42-d5-spec.md`, …). R2 (agent core, library only) has no design step: it can go straight to an Opus session.
