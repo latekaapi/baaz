@@ -157,21 +157,18 @@ const BROWSER_NAV_PX: f32 = 38.0;
 /// The Browse page card's inset — v3's sheet inset: 6 px from the window,
 /// the sidebar column and the right sheet (canvas "Baaz v3").
 pub(crate) const PAGE_CARD_INSET: f32 = aui::shell::SHEET_INSET;
-/// The shell's bar above the sheet (the standard density's header height).
-pub(crate) const BAR_H: f32 = aui_tokens::scale::BAR_DEFAULT;
 
 /// v3: the page's rect on the sheet for the window's `content` box, a
 /// `sidebar` column (0 when closed), a `right` column including its own 6 px
 /// gap (0 when closed) and the open dock under the page. Pure, for tests.
 pub(crate) fn sheet_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: Pixels, dock: Pixels) -> Bounds<Pixels> {
     let inset = gpui::px(PAGE_CARD_INSET);
-    let bar = gpui::px(BAR_H);
     let right_gap = if right > gpui::px(0.0) { right } else { inset };
     Bounds {
-        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + bar + inset },
+        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + inset },
         size: gpui::size(
             (content.size.width - sidebar - inset - right_gap).max(gpui::px(0.0)),
-            (content.size.height - bar - inset * 2.0 - dock).max(gpui::px(0.0)),
+            (content.size.height - inset * 2.0 - dock).max(gpui::px(0.0)),
         ),
     }
 }
@@ -791,9 +788,9 @@ impl Harness {
         if !self.layout.terminal_open {
             return gpui::px(0.0);
         }
-        // The centre column is the sheet: the window less the bar and the
-        // 6 px inset top and bottom.
-        let centre_height = f32::from(window.bounds().size.height).max(0.0) - BAR_H - 2.0 * PAGE_CARD_INSET;
+        // The centre column is the sheet: the window less the 6 px inset
+        // top and bottom.
+        let centre_height = f32::from(window.bounds().size.height).max(0.0) - 2.0 * PAGE_CARD_INSET;
         let want =
             self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
         gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
