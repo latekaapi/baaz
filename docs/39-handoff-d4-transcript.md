@@ -6,14 +6,21 @@ round 7 changed and why; the canvas "Baaz v3" (v19) is the spec; the tracker "Ba
 ## Where the code is (merged and PUSHED)
 | Repo | Branch | State |
 |---|---|---|
-| agentic-ui | `main` = `design-v2` | **v0.4.0** tagged and pushed (14b0c47) |
-| harness (Baaz) | `main` = `feedback-mode` | pinned to agentic-ui v0.4.0 (461cf50), probe baselines regenerated on main (the commit after it) |
+| agentic-ui | `main` (the only branch) | **v0.4.1** tagged and pushed (563fd2a) |
+| harness (Baaz) | `main` (the only branch) | pinned to agentic-ui v0.4.1 (c0c1908), probe baselines regenerated on main (cb3dd32), pushed |
+
+**Git is clean (2026-10-13 evening):** both repos have only `main`, no stashes, no worktrees. Every unmerged branch
+and the old stash were tagged `archive/<branch>` (dashes for slashes) and the tags pushed — 7 in agentic-ui
+(orch/screens, the orch-R1..R4 lanes, D2, AUI-A11Y-2), 9 in Baaz (the muse-crates pins, MUSE-DISPLAYTEXT,
+W8-TOOLJSON, Y1, `stash-relay-B8`). Restore one with `git switch -c <name> archive/<name>`. Merged remote branches
+were deleted; `agentic-ui-relay-A1/` is gone.
 
 Developing both at once: `.cargo/config.toml` (git-ignored) patches the eight aui crates to `../agentic-ui`; a build
 with the patch rewrites `Cargo.lock` to the path form — **never commit the lock while patched** (`git checkout
 Cargo.lock` before committing). Shipping a library change is two steps: tag agentic-ui, bump the tag in Baaz.
 
-Test bundle: **BaazCheck is removed** (`target/bundle-check` deleted, the owner asked). Rebuild when a live drive is
+Test bundle: **BaazCheck is removed** (`target/bundle-check` deleted, the owner asked). `target/bundle/Baaz.app` is
+the real app, rebuilt from the final main. Rebuild when a live drive is
 due: copy `scripts/bundle.sh` with `ROOT`/`OUT` set to harness and `target/bundle-check` (keep the copy in the
 scratchpad), run it, then `PlistBuddy -c "Set :CFBundleIdentifier sh.baaz.check"` + `"Set :CFBundleName BaazCheck"`,
 `codesign -s - --force --deep`. Gate on the script's exit status. Launch with `env -i … BAAZ_STATE_DIR=$(mktemp -d
@@ -41,16 +48,29 @@ scratchpad), run it, then `PlistBuddy -c "Set :CFBundleIdentifier sh.baaz.check"
 3. AppKit re-lays the standard window buttons out at (9, 9) whenever one's hidden state changes: place the lights
    after hiding/showing them. `BAAZ_LIGHTS_TRACE=1` prints the close light's real centre.
 
+## Closed after the first write of this handoff (same evening, owner round 8)
+- **Peek trigger enlarged:** the whole top-left corner (sidebar width × row height) arms the peek, not only the 6 px
+  top band; over a native page the corner is a *hover zone* whose pointer moves are forwarded to Baaz
+  (`AppShell::on_hover_zones` → `WebviewState::set_hover_zones` → shim). Driven live over a page.
+- **Corners:** gpui's `overflow_hidden` clips to a rectangle, so square children painted the sheet's rounded corners
+  back in — the Sessions fade (now `rounded_tl/tr`) and the webview's native ground (now rounded to the page radius);
+  the page sheet's 1 px black ring is gone. Measured live: the pixels outside the page curve now read the frame.
+- **Browse dark at launch** (pre-existing, 3 of 4 cold launches on v0.4.0): Baaz covers a page while its address is
+  blank, and the webview only notified the host for visible pages, so a page that committed while covered stayed
+  dark until any pointer move. A moved address now always notifies (test `a_moved_address_is_reported_to_the_host`);
+  6 of 6 cold launches paint.
+- Canvas v23: the page sheet has no ring. Baselines regenerated with the pointer parked (an old baseline had caught
+  a hover state).
+
 ## Open items to carry
 1. **Homeless controls** (owner's call, not built): the Browse downloads button → the Browse sidebar's control row
    beside ✦ · ⋯; the toast chip and the feedback slot → the sheet's bottom-right in both modes (an overlay window
-   above a native page).
-2. The wider dead-code sweep across the sidebar's seven rounds (the painted-lights gallery path, Browse's
-   instant-only animate path, `render_toast_chip`/`render_feedback_header_slot` callers) — half a day, after D4's
-   mock is approved or in a quiet slot.
-3. Old relay worktree `agentic-ui-relay-A1/` (lane merged) — remove. Disk: `cockpit/target` 22 GB is the owner's.
-4. One flaky test under concurrent builds: `terminal::service::tests::unknown_sessions_are_refused` (entity-map
-   panic); passes alone and in a clean run.
+   above a native page). Do it with D4.
+2. A dead-code sweep across the sidebar's rounds (the painted-lights gallery path, Browse's instant-only animate
+   path, `render_toast_chip`/`render_feedback_header_slot` callers) — fold into the homeless-controls work, since
+   those callers are exactly what moves.
+3. Flaky under concurrent builds: `terminal::service::tests::unknown_sessions_are_refused` (entity-map panic);
+   passes alone and in a clean run. Disk: `cockpit/target` (22 GB) is the owner's project — not touched.
 
 ## D4 — the transcript: how to start (the agreed loop)
 1. Captures of the richer fixtures are already rendered: `fixtures/msp/{synthetic-toolshapes, synthetic-reasoning-text,
@@ -72,7 +92,7 @@ docs/35, memory project-v3-surfaces-2026-10-12 and feedback-verify-visually-firs
 (https://claude.ai/artifact/7SwC39oc2nEakd4TpCdp8e, project/canvas.json then the boards). The tracker is "Baaz Two
 Tracks" (https://claude.ai/artifact/Fr965AKBn8toZ7BcUk7wCP).
 
-State: both repos on main, pushed (agentic-ui v0.4.0, Baaz pinned to it). Never push without asking.
+State: both repos on main only, pushed (agentic-ui v0.4.1, Baaz pinned to it); old branches are archive/* tags. Never push without asking.
 
 Start D4 (the transcript): capture → mock on the v3 canvas → my approval → agentic-ui → Baaz → gates → rebuild
 BaazCheck and drive it yourself with computer use (I approve the access prompt) → me. Give the three homeless
