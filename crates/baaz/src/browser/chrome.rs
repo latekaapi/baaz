@@ -356,51 +356,8 @@ pub(crate) fn download_line(state: &DownloadState, elapsed_secs: u64) -> String 
     }
 }
 
-/// How many downloads are still moving.
-pub(crate) fn downloads_active_count(states: &[DownloadState]) -> usize {
-    states.iter().filter(|state| state.state == DownloadStatus::Downloading).count()
-}
 
-/// The toolbar badge behind the downloads button: the overall percent
-/// across active downloads with a known total, an indeterminate mark
-/// while any active total is unknown, the tray mark when idle. The
-/// percent sums only known totals and never reads past 100.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DownloadsBadge {
-    /// What the ring reads (`"42%"`, `"…"`, `"↓"`).
-    pub label: String,
-    /// Whether any download is still moving (the accent ring).
-    pub active: bool,
-    /// Whether an active total is unknown (the indeterminate ring).
-    pub indeterminate: bool,
-}
 
-pub(crate) fn downloads_badge(states: &[DownloadState]) -> DownloadsBadge {
-    let mut active = false;
-    let mut unknown = false;
-    let (mut received, mut total) = (0u64, 0u64);
-    for state in states {
-        if state.state != DownloadStatus::Downloading {
-            continue;
-        }
-        active = true;
-        match state.total {
-            Some(known) => {
-                received = received.saturating_add(state.received);
-                total = total.saturating_add(known);
-            }
-            None => unknown = true,
-        }
-    }
-    if !active {
-        return DownloadsBadge { label: "↓".to_owned(), active: false, indeterminate: false };
-    }
-    if unknown || total == 0 {
-        return DownloadsBadge { label: "…".to_owned(), active: true, indeterminate: true };
-    }
-    let pct = received.checked_mul(100).and_then(|scaled| scaled.checked_div(total)).unwrap_or(100).min(100);
-    DownloadsBadge { label: format!("{pct}%"), active: true, indeterminate: false }
-}
 
 /// Whether a popup (or open request) may take the centre: only the shown
 /// tab's own popups may — a foreground ask from a background opener lands
@@ -429,10 +386,6 @@ pub(crate) fn strip_stack_px(find_open: bool, permission_open: bool) -> f32 {
     (if find_open { FIND_STRIP_PX } else { 0.0 }) + (if permission_open { PERMISSION_STRIP_PX } else { 0.0 })
 }
 
-/// The toolbar button's label: "Downloads, 1 active".
-pub(crate) fn downloads_label(states: &[DownloadState]) -> String {
-    format!("Downloads, {} active", downloads_active_count(states))
-}
 
 /// The agent credit for a download on a session-owned tab: "saved by Fix
 /// ledger chart". Person tabs carry none.
@@ -681,33 +634,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn downloads_badge_reads_known_totals_only() {
-        fn downloading(received: u64, total: Option<u64>) -> DownloadState {
-            DownloadState {
-                id: 1,
-                url: "https://cdn.example/big.zip".to_owned(),
-                file_name: "big.zip".to_owned(),
-                path: "/tmp/big.zip".to_owned(),
-                received,
-                total,
-                state: DownloadStatus::Downloading,
-            }
-        }
-        let idle = downloads_badge(&[]);
-        assert_eq!(idle, DownloadsBadge { label: "↓".to_owned(), active: false, indeterminate: false });
-        let half = downloads_badge(&[downloading(5_000, Some(10_000))]);
-        assert_eq!(half.label, "50%", "known totals percent: {}", half.label);
-        assert!(half.active && !half.indeterminate);
-        let mixed = downloads_badge(&[downloading(5_000, Some(10_000)), downloading(9_000, None)]);
-        assert!(mixed.indeterminate, "an unknown active total reads indeterminate, not a percent");
-        assert_eq!(mixed.label, "…");
-        let over = downloads_badge(&[downloading(12_000, Some(10_000))]);
-        assert_eq!(over.label, "100%", "the badge never reads past 100: {}", over.label);
-        let done = DownloadState { state: DownloadStatus::Complete, ..downloading(10_000, Some(10_000)) };
-        let quiet = downloads_badge(&[done]);
-        assert!(!quiet.active, "landed downloads wear no ring");
-    }
 
     #[test]
     fn downloads_flag_clears_only_honestly() {
@@ -766,26 +692,6 @@ mod tests {
         assert!(!strips.any_open(), "the last close drops the input");
     }
 
-    #[test]
-    fn download_lines_read_size_and_state() {
-        let active = DownloadState {
-            id: 1,
-            url: "https://cdn.example/big.zip".to_owned(),
-            file_name: "big.zip".to_owned(),
-            path: "/Users/test/Downloads/big.zip".to_owned(),
-            received: 4_400_000,
-            total: Some(10_200_000),
-            state: DownloadStatus::Downloading,
-        };
-        let line = download_line(&active, 8);
-        assert_eq!(line, "4.2 of 9.7 MB · 10 s left", "sizes humanise with an estimate: {line}");
-        let done = DownloadState { state: DownloadStatus::Complete, received: 215_040, ..active.clone() };
-        assert_eq!(download_line(&done, 0), "Done · 210.0 KB");
-        let unknown = DownloadState { total: None, ..active.clone() };
-        assert_eq!(download_line(&unknown, 0), "4.2 MB · downloading");
-        assert_eq!(downloads_active_count(&[active.clone(), done.clone()]), 1);
-        assert_eq!(downloads_label(&[active, done]), "Downloads, 1 active");
-    }
 
     #[test]
     fn download_owner_label_credits_session_downloads() {

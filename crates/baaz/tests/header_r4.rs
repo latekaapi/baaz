@@ -36,7 +36,7 @@ fn no_project_picker_in_either_centre_header() {
     for banned in ["hd-project", "Open project menu", "project_crumb", "crumb_bounds"] {
         assert!(!app.contains(banned), "app.rs carries no {banned}");
     }
-    for site in ["render_browse_bar_parts", "render_session_title", "render_bar_chrome"] {
+    for site in ["render_session_title", "render_bar_chrome"] {
         let body = fn_body(&app, site);
         for banned in ["hd-project", "Open project menu", "project_crumb", "crumb_bounds"] {
             assert!(!body.contains(banned), "{site} renders no picker ({banned})");
@@ -53,16 +53,6 @@ fn the_session_title_leads_the_centre_header() {
     assert!(header.contains("renaming_project_here"), "a project rename still swaps the lead");
     assert!(header.contains("self.rename_field(window, cx)"), "the rename field still renders");
     assert!(header.contains(".truncate().child(label)"), "the session label still renders");
-}
-
-/// The Browse bar parts keep the chip, nav and address with no crumb ahead
-/// of them.
-#[test]
-fn the_browse_toolbar_opens_with_no_crumb() {
-    let app = source("app.rs");
-    let toolbar = fn_body(&app, "render_browse_bar_parts");
-    assert!(toolbar.contains("browse_minimal_address_field"), "the address at rest stays");
-    assert!(toolbar.contains("browse_back_button"), "the nav buttons stay");
 }
 
 /// The menu itself survives: still defined, seated at the group row, and

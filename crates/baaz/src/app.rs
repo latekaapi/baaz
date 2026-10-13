@@ -71,7 +71,7 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme, Density, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, MouseButton, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _,
+    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, ListState, SharedString, Subscription, Task, Window,
 };
@@ -268,12 +268,8 @@ pub(crate) struct BarChrome {
     pub(crate) lead: AnyElement,
     pub(crate) switch: Option<AnyElement>,
     pub(crate) title: Option<AnyElement>,
-    pub(crate) closed_only: Option<AnyElement>,
-    pub(crate) right: AnyElement,
+    pub(crate) right: Option<AnyElement>,
 }
-/// The closed Browse pill's address at rest (v3): wide enough for a page
-/// title and its host; the field truncates past it.
-const BROWSE_PILL_ADDRESS_W: f32 = 360.0;
 
 /// The context the composer holder wears, so Enter reaches [`SendTurn`] instead
 /// of the textarea. Shift+Enter matches no binding and falls through to the
@@ -806,9 +802,6 @@ pub struct Harness {
     pub(crate) right_snap: bool,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
-    /// The `reveal` step's hold: the closed pill's title and actions shown
-    /// with no hover (captures).
-    pub(crate) pill_revealed: bool,
     /// Generation of the debounced right-pane `sessions.json` write (B7):
     /// every cheap right-state persist bumps it and arms a delayed
     /// off-thread write; only the latest generation writes, so quick
@@ -1538,7 +1531,6 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             peek_pinned: false,
-            pill_revealed: false,
             right_save_epoch: 0,
             right_save_pending: false,
             right_kind_migrate: std::collections::HashSet::new(),
@@ -3711,104 +3703,8 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Back ‹, with the tab's back history on right-click — never opened
-    /// while back is disabled. Shared by the full toolbar and the
-    /// sidebar-hidden one-row chrome.
-    fn browse_back_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_back = self
-            .browse_centre_shown()
-            .and_then(|id| self.browser.histories.get(&id).map(|history| history.can_back()))
-            .unwrap_or(false);
-        let go_back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.browse_go_back(window, cx);
-        });
-        let back_menu = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            let open = this
-                .browse_centre_shown()
-                .and_then(|id| this.browser.histories.get(&id).map(|history| history.can_back()))
-                .unwrap_or(false);
-            if open {
-                this.open_menu(MenuKind::BackHistory, cx);
-            }
-        });
-        let back_report = cx.entity().downgrade();
-        div()
-            .flex_none()
-            .on_children_prepainted(move |bounds, _, cx| {
-                if let Some(first) = bounds.first() {
-                    let bounds = *first;
-                    let _ = back_report.update(cx, |this, cx| {
-                        Harness::note_trigger_bounds(&mut this.back_bounds, bounds, cx);
-                    });
-                }
-            })
-            .on_mouse_down(MouseButton::Right, back_menu)
-            .child(
-                div()
-                    .id("hd-browse-back-tip")
-                    .role(gpui::Role::Button)
-                    .aria_label("Back")
-                    .child(
-                        icon_button("hd-browse-back", IconName::ArrowLeft)
-                            .ghost()
-                            .size(ButtonSize::Sm)
-                            .disabled(!can_back)
-                            .accessibility_label("Back")
-                            .on_click(go_back),
-                    ),
-            )
-            .into_any_element()
-    }
 
-    /// Forward ›. Shared like [`Self::browse_back_button`].
-    fn browse_forward_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_forward = self
-            .browse_centre_shown()
-            .and_then(|id| self.browser.histories.get(&id).map(|history| history.can_forward()))
-            .unwrap_or(false);
-        let go_forward = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.browse_go_forward(window, cx);
-        });
-        div()
-            .id("hd-browse-forward-tip")
-            .role(gpui::Role::Button)
-            .aria_label("Forward")
-            .child(
-                icon_button("hd-browse-forward", IconName::ArrowRight)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .disabled(!can_forward)
-                    .accessibility_label("Forward")
-                    .on_click(go_forward),
-            )
-            .into_any_element()
-    }
 
-    /// Reload ⟳, becoming stop × while loading. The control follows the
-    /// engine's own loading state — never a Baaz-tracked set, and never
-    /// progress alone (a stalled load below 1.0 still reads as stop while
-    /// the engine runs it). Shared like [`Self::browse_back_button`].
-    fn browse_reload_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let loading =
-            self.browse_centre_state().as_ref().is_some_and(|state| state.read(cx).loading());
-        let reload_stop = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.browse_reload_or_stop(window, cx);
-        });
-        let reload_label = if loading { "Stop loading" } else { "Reload" };
-        let reload_icon = if loading { IconName::Stop } else { IconName::Refresh };
-        div()
-            .id("hd-browse-reload-tip")
-            .role(gpui::Role::Button)
-            .aria_label(reload_label)
-            .child(
-                icon_button("hd-browse-reload", reload_icon)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label(reload_label)
-                    .on_click(reload_stop),
-            )
-            .into_any_element()
-    }
 
     /// The address field's live input with its omnibox keys (B2a-H4):
     /// the one element the toolbar and the new-tab field share — only one
@@ -3926,57 +3822,6 @@ impl Harness {
             .aria_label(aria.to_owned())
     }
 
-    /// The downloads toolbar button (B2a-H5): `None` with no downloads
-    /// this session. A % badge ringed in accent while any is active, the
-    /// plain tray mark otherwise; it opens the popover.
-    fn browse_downloads_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::browser::chrome::{downloads_badge, downloads_label};
-        let downloads = self.browse_downloads(cx);
-        if downloads.is_empty() {
-            return None;
-        }
-        let states: Vec<aui_webview::DownloadState> =
-            downloads.iter().map(|(_, _, download)| download.clone()).collect();
-        let spoken = downloads_label(&states);
-        let badge = downloads_badge(&states);
-        let p = cx.aui().colors;
-        let active = badge.active;
-        let label = badge.label.clone();
-        let ring = if badge.indeterminate { p.ink_2 } else if active { p.accent } else { p.line };
-        Some(
-            div()
-                .id("hd-browse-downloads")
-                .flex_none()
-                .role(gpui::Role::Button)
-                .aria_label(spoken)
-                .cursor_pointer()
-                .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.browser.downloads_open = !this.browser.downloads_open;
-                    // A fresh open renders before any honesty check runs, so
-                    // an emptied list never closes its own first frame.
-                    if this.browser.downloads_open {
-                        this.browser.downloads_rendered = false;
-                    }
-                    this.browser.extensions_open = false;
-                    this.browser.more_open = false;
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(ring)
-                        .ui(scale::FS_11)
-                        .text_color(if active { p.accent } else { p.ink_2 })
-                        .child(label),
-                )
-                .into_any_element(),
-        )
-    }
 
     /// The find strip (B2a-H5): a row above the page — a styled query
     /// field, "3 / 12", ↑/↓, a Match case chip, Done. Only the shown
@@ -4592,7 +4437,6 @@ impl Harness {
     /// Browse, closed only, Ask · the page menu · new tab). The shell draws
     /// every slot at the same spot in both states.
     fn render_bar_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> BarChrome {
-        let p = cx.aui().colors;
         let lead = self.render_sidebar_toggle(cx);
         let switch_to = cx.entity().downgrade();
         let shown = match self.mode {
@@ -4616,27 +4460,17 @@ impl Harness {
             chips = chips.child(slot);
         }
         if self.mode == layout::Mode::Browse {
-            // Browse is instant, so the host's own flag is the column's state.
-            let closed = !self.sidebar_open;
-            if let Some(downloads) = self.browse_downloads_button(cx) {
-                chips = chips.child(downloads);
-            }
-            let (left, right) = self.render_browse_bar_parts(closed, window, cx);
-            let sep = div().flex_none().w(px(1.0)).h(px(16.0)).mr(px(6.0)).bg(p.line);
-            BarChrome {
-                lead,
-                switch: Some(switch),
-                title: None,
-                closed_only: Some(h_flex().items_center().child(sep).child(left).into_any_element()),
-                right: chips.child(right).into_any_element(),
-            }
+            // Browse: the page controls and the address live in the sidebar's
+            // own header; the sheet is the page, so the row shows nothing. The
+            // toast chip and the feedback slot wait for a home here.
+            let _ = chips;
+            BarChrome { lead, switch: Some(switch), title: None, right: None }
         } else {
             BarChrome {
                 lead,
                 switch: Some(switch),
                 title: Some(self.render_session_title(window, cx)),
-                closed_only: None,
-                right: chips.child(self.session_header_actions(cx)).into_any_element(),
+                right: Some(chips.child(self.session_header_actions(cx)).into_any_element()),
             }
         }
     }
@@ -4668,288 +4502,6 @@ impl Harness {
             state.update(cx, |state, _| state.set_holes(holes));
             self.browser.holes_on = Some(state.downgrade());
         }
-    }
-
-    /// The sidebar-hidden one-row chrome (B2a-H6): the sidebar toggle,
-    /// the ↩ session chip when the shown tab came from a session, back,
-    /// forward, reload/stop, a wide address field (security glyph, zoom
-    /// pill, title-centred resting state), the ⋯ menu and `+` new tab at
-    /// the right. The sidebar header cell collapses to the lights
-    /// reservation, so this row is the whole chrome and its first control
-    /// still clears the traffic lights. Tabs stay a ⌘1–9 / omnibox away.
-    /// Extensions stays out, like the board.
-    fn render_browse_bar_parts(&self, closed: bool, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
-        let p = cx.aui().colors;
-        let state = self.browse_centre_state();
-        let tab = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).cloned());
-        // The live page's URL, falling back to the tab's — the same read
-        // the full toolbar does, so the two never disagree.
-        let live_url = state.as_ref().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
-        let url = if live_url.is_empty() { tab.as_ref().map(|tab| tab.url.clone()).unwrap_or_default() } else { live_url };
-        let security =
-            state.as_ref().map(|state| state.read(cx).security()).unwrap_or(aui_webview::PageSecurity::Unknown);
-        let zoom = state.as_ref().map(|state| state.read(cx).zoom()).unwrap_or(100);
-        let blank = url.is_empty() || url == crate::browser::tabs::BLANK;
-        // The resting title: the live page's, else the tab's (the URL
-        // until the page reports one).
-        let live_title = state.as_ref().map(|state| state.read(cx).title().to_string()).unwrap_or_default();
-        let title = if !live_title.is_empty() {
-            live_title
-        } else {
-            tab.as_ref().map(|tab| tab.title.clone()).unwrap_or_default()
-        };
-        let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.new_browse_sidebar_tab(window, cx);
-        });
-        // The ↩ chip, when the shown tab came from a session's pane: the
-        // same chip the full toolbar wears, so the way back stays reachable
-        // with no sidebar.
-        let chip = match tab.as_ref().and_then(|tab| match &tab.owner {
-            crate::browser::Owner::Session(session) => Some(session.clone()),
-            crate::browser::Owner::Person => None,
-        }) {
-            Some(session) => {
-                let name = self.browse_chip_session_name(&session, cx);
-                let back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                    this.browse_chip_back(window, cx);
-                });
-                Some(
-                    div()
-                    .id("hd-minimal-chip")
-                    .debug_selector(|| "hd-minimal-chip".into())
-                    .flex_none()
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Back to {name}"))
-                    .cursor_pointer()
-                    .on_click(back)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .px(px(8.0))
-                            .h(px(24.0))
-                            .rounded(px(scale::R_SM))
-                            .bg(p.surface_2)
-                            .text_color(p.ink_2)
-                            .ui(scale::FS_12)
-                            .child("↩")
-                            .child(div().truncate().child(name)),
-                    )
-                    .into_any_element(),
-                )
-            }
-            None => None,
-        };
-        // The page menu, as the sidebar's ⋯ opens it: Annotate, Screenshot
-        // and DevTools stay one press away with no sidebar. It was a
-        // placeholder that only repainted (found 2026-10-12).
-        use gpui_kit::base::ElementExt as _;
-        let anchor: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = std::rc::Rc::new(std::cell::Cell::new(None));
-        let at = anchor.clone();
-        let page_menu_open =
-            self.browse_menu.as_ref().is_some_and(|m| matches!(m.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }));
-        let more = div()
-            .id("hd-minimal-more")
-            .debug_selector(|| "hd-minimal-more".into())
-            .flex_none()
-            .on_prepaint(move |bounds, _, _| anchor.set(Some(bounds)))
-            .child(
-                icon_button("hd-minimal-more-button", IconName::Dots)
-                    .ghost()
-                    .muted()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label("Page menu")
-                    .menu_open(page_menu_open)
-                    .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                        this.toggle_browse_page_menu(at.get(), window, cx);
-                    })),
-            );
-        // v3 (canvas "Baaz v3", Browse · closed): the left pill carries the
-        // page's way back, back / forward / reload and the address at rest;
-        // the right pill Ask, the page menu and new tab.
-        let address = div()
-            .flex_none()
-            .w(px(BROWSE_PILL_ADDRESS_W))
-            .flex()
-            .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx));
-        let left = h_flex()
-            .flex_none()
-            .items_center()
-            .gap(px(2.0))
-            .children(chip)
-            .child(self.browse_back_button(cx))
-            .child(self.browse_forward_button(cx))
-            .child(self.browse_reload_button(cx))
-            .child(address)
-            .into_any_element();
-        let ask = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.browse_ask_page(window, cx));
-        // Open, the sidebar's own header carries Ask, the page menu and new
-        // tab; closed, the bar does.
-        let right = if closed {
-            h_flex()
-                .flex_none()
-                .items_center()
-                .gap(px(2.0))
-                .child(
-                    icon_button("hd-minimal-ask", IconName::Sparkle)
-                        .ghost()
-                        .muted()
-                        .size(ButtonSize::Sm)
-                        .accessibility_label("Ask about this page")
-                        .on_click(ask),
-                )
-                .child(more)
-                .child(
-                    div()
-                        .id("hd-minimal-new-tab")
-                        .debug_selector(|| "hd-minimal-new-tab".into())
-                        .flex_none()
-                        .role(gpui::Role::Button)
-                        .aria_label("New tab")
-                        .child(
-                            icon_button("hd-minimal-new-tab-button", IconName::Plus)
-                                .ghost()
-                                .size(ButtonSize::Sm)
-                                .accessibility_label("New tab")
-                                .on_click(new),
-                        ),
-                )
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        };
-        (left, right)
-    }
-
-    /// The one-row chrome's address field: the live input while editing
-    /// (except on a blank tab, where the new-tab field owns the input),
-    /// else the security glyph, the page title centred with `· host` quiet
-    /// after it, and the zoom pill when off 100% — the full toolbar's
-    /// resting state, centred. A click — or ⌘L — edits the full URL,
-    /// exactly like the full toolbar. The clickable slot owns the only
-    /// "Address and search" role and label; the wrapper is a plain box, so
-    /// the field never nests two identical buttons.
-    #[allow(clippy::too_many_arguments)] // one call site; the inputs are the toolbar's live state
-    fn browse_minimal_address_field(
-        &self,
-        url: String,
-        title: String,
-        blank: bool,
-        security: aui_webview::PageSecurity,
-        zoom: u16,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        use crate::browser::toolbar::{AddressBadge, address_view, zoom_pill};
-        let p = cx.aui().colors;
-        let mut slot = h_flex()
-            .id("hd-minimal-address")
-            .debug_selector(|| "hd-minimal-address".into())
-            .flex_1()
-            .min_w(px(0.0))
-            .items_center()
-            .h(px(28.0))
-            .px(px(8.0))
-            .gap(px(8.0))
-            .rounded(px(scale::R_MD))
-            // v3: the address at rest in the pill — no field box; the
-            // surface-relative hover tint says it is pressable.
-            .hover(|d| d.bg(p.hover_overlay()))
-            .ui(scale::FS_13)
-            .overflow_hidden();
-        if self.browse_address.is_some() && !blank {
-            return slot.child(self.browse_address_input(window, cx)).into_any_element();
-        }
-        // Clicking the resting field edits the full URL.
-        let prefill = if blank { String::new() } else { url.clone() };
-        let focus = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.focus_browse_address_with(&prefill, window, cx);
-        });
-        slot = slot.cursor_pointer().role(gpui::Role::Button).aria_label("Address and search").on_click(focus);
-        if blank {
-            slot = slot.child(div().flex_none().text_color(p.ink_3).child("New tab"));
-        } else {
-            // The site button: the same "Site information" button the full
-            // toolbar wears — the tune glyph on secure, words otherwise.
-            let view = address_view(&url, security, false);
-            let badge: AnyElement = match view.badge {
-                Some(AddressBadge::Tune) => {
-                    icon(IconName::Sliders).size(px(13.0)).color(p.ink_2).into_any_element()
-                }
-                Some(AddressBadge::Dev) => {
-                    div().flex_none().mono(scale::FS_12).text_color(p.accent).child(view.label).into_any_element()
-                }
-                Some(AddressBadge::Warn) => {
-                    div().flex_none().text_color(p.warning).child(view.label).into_any_element()
-                }
-                Some(AddressBadge::File) => {
-                    div().flex_none().text_color(p.ink_2).child(view.label).into_any_element()
-                }
-                Some(AddressBadge::Baaz) => {
-                    div().flex_none().text_color(p.ink_2).child(view.label).into_any_element()
-                }
-                None => div().into_any_element(),
-            };
-            slot = slot.child(
-                div()
-                    .id("hd-minimal-site")
-                    .debug_selector(|| "hd-minimal-site".into())
-                    .flex_none()
-                    .role(gpui::Role::Button)
-                    .aria_label("Site information")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.notify()))
-                    .child(badge),
-            );
-            let host = view.host;
-            let mut pair = h_flex().flex_none().min_w(px(0.0)).items_center().overflow_hidden();
-            pair = pair.child(
-                div().min_w(px(0.0)).truncate().text_color(p.ink).semibold().child(title),
-            );
-            if !host.is_empty() {
-                pair = pair.child(div().flex_none().pl(px(8.0)).text_color(p.ink_2).child(host));
-            }
-            slot = slot.child(pair);
-            // A non-default zoom wears its pill; pressing it resets to
-            // 100 — like the full toolbar's, on mouse-down (pointer timing:
-            // before the address input's blur drops the field) and on
-            // click, so accessibility presses reach it.
-            if let Some(pill) = zoom_pill(zoom) {
-                let press = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
-                    this.browse_reset_zoom(window, cx);
-                });
-                let reset = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                    this.browse_reset_zoom(window, cx);
-                });
-                slot = slot.child(
-                    div()
-                        .id("hd-minimal-zoom")
-                        .debug_selector(|| "hd-minimal-zoom".into())
-                        .flex_none()
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("Zoom {pill}, reset"))
-                        .cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, press)
-                        .on_click(reset)
-                        .child(
-                            div()
-                                .px(px(6.0))
-                                .h(px(18.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(scale::R_XS))
-                                .border_1()
-                                .border_color(p.line_strong)
-                                .text_color(p.ink_2)
-                                .child(pill),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
-        // A plain wrapper: the slot (resting) or the input (editing) owns
-        // the field's only role and label.
-        div().id("hd-minimal-address-tip").flex_1().min_w(px(0.0)).child(slot).into_any_element()
     }
 
     /// The bar's title slot in Sessions: the active session's label (or the
@@ -6851,9 +6403,7 @@ impl Render for Harness {
                 .header_right(header_right_el)
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
-                .chrome_right(chrome.right)
                 .peek_open(self.peek_pinned)
-                .pill_revealed(self.pill_revealed)
                 .on_overlay_bounds(move |rects, _, cx| {
                     let _ = holes.update(cx, |this, cx| this.set_browse_holes(rects, cx));
                 })
@@ -6865,8 +6415,8 @@ impl Render for Harness {
             if let Some(title) = chrome.title {
                 shell = shell.chrome_title(title);
             }
-            if let Some(closed_only) = chrome.closed_only {
-                shell = shell.chrome_closed(closed_only);
+            if let Some(right) = chrome.right {
+                shell = shell.chrome_right(right);
             }
             if !settings_open {
                 shell = shell.peek(self.sidebar_pane.clone().into_any_element());
@@ -8225,47 +7775,6 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H4: the ↩ chip round trip keeps the same entity and owner. The
-    /// pane's Browse button carries the session's active tab into Browse —
-    /// the centre renders the same `WebviewState` entity, still
-    /// session-owned — and the chip hands it back to the session's pane
-    /// with no reload: the entity in the pane afterwards is the same one.
-    #[gpui::test]
-    fn browse_chip_round_trip_keeps_the_same_entity_and_owner(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("browse-chip-round-trip");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
-        let before = vc.update(|_, cx| baaz.read(cx).session_page("s-1").expect("the session has a page"));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.carry_session_tab_to_browse(window, cx)));
-        let carried = vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.browse_centre_page(window, cx).expect("the centre shows the carried tab"))
-        });
-        assert_eq!(before, carried, "the same WebviewState moves into Browse: no reload");
-        let owner = vc.update(|_, cx| {
-            let harness = baaz.read(cx);
-            let id = harness.browser.centre_override.expect("a tab is carried");
-            harness.browser.tabs.get(id).expect("the tab exists").owner.clone()
-        });
-        assert!(
-            matches!(owner, crate::browser::Owner::Session(_)),
-            "the carried tab stays session-owned"
-        );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_chip_back(window, cx)));
-        let back = vc.update(|_, cx| baaz.read(cx).session_page("s-1").expect("the session keeps its page"));
-        assert_eq!(before, back, "the chip hands the same entity back: no reload");
-        restore_state(state);
-    }
 
     /// Adopt the hermetic dir as a project and point at it, so `new`
     /// opens a local draft there — what the Ask tests start sessions on.
@@ -8386,106 +7895,7 @@ mod tests {
         restore_state(state);
     }
 
-    /// A scriptable fake backend for the stop/reload test: the harness
-    /// holds the shared fake while the state owns this delegate, so the
-    /// test scripts engine `Loading` edges the state then drains.
-    struct SharedFake(std::rc::Rc<std::cell::RefCell<aui_webview::FakeWebBackend>>);
 
-    impl aui_webview::WebBackend for SharedFake {
-        fn navigate(&mut self, url: &str) {
-            self.0.borrow_mut().navigate(url);
-        }
-
-        fn stop(&mut self) {
-            self.0.borrow_mut().stop();
-        }
-
-        fn back(&mut self) {
-            self.0.borrow_mut().back();
-        }
-
-        fn forward(&mut self) {
-            self.0.borrow_mut().forward();
-        }
-
-        fn reload(&mut self) {
-            self.0.borrow_mut().reload();
-        }
-
-        fn eval(&mut self, js: &str) {
-            self.0.borrow_mut().eval(js);
-        }
-
-        fn set_annotate(&mut self, on: bool) {
-            self.0.borrow_mut().set_annotate(on);
-        }
-
-        fn set_zoom(&mut self, percent: u16) {
-            self.0.borrow_mut().set_zoom(percent);
-        }
-
-        fn poll_events(&mut self) -> Vec<aui_webview::WebEvent> {
-            self.0.borrow_mut().poll_events()
-        }
-    }
-
-    /// B2a-H4d(3): the stop/reload control follows the engine's `loading`,
-    /// never progress and never a Baaz-tracked set. A load the engine
-    /// reports — even at progress 0.0 — stops; progress without a load
-    /// reloads instead of sticking on Stop.
-    #[gpui::test]
-    fn stop_follows_the_engine_loading_state(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = hermetic_state("stop-engine");
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        let fake = vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.ensure_tabs_loaded(cx);
-                let space = h.browse_space();
-                let id = h.browser.tabs.open(
-                    space,
-                    crate::browser::Owner::Person,
-                    "https://example.com",
-                    None,
-                );
-                h.schedule_tabs_write(cx);
-                let fake =
-                    std::rc::Rc::new(std::cell::RefCell::new(aui_webview::FakeWebBackend::new()));
-                let page = cx.new(|cx| {
-                    aui_webview::WebviewState::new(Box::new(SharedFake(fake.clone())), cx)
-                });
-                h.browser.states.insert(id, page);
-                fake
-            })
-        });
-        // The engine reports a load at progress 0.0: the control stops it.
-        fake.borrow_mut().script_loading(true);
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-        vc.run_until_parked();
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                assert!(
-                    h.browse_centre_state().expect("a page shows").read(cx).loading(),
-                    "the scripted load edge drains into the state"
-                );
-                h.browse_reload_or_stop(window, cx);
-            })
-        });
-        assert_eq!(fake.borrow().stop_calls(), 1, "an engine load stops, even at progress 0.0");
-        // The load ends with progress alone left mid-way: the control
-        // reloads instead of sticking on Stop.
-        fake.borrow_mut().script_loading(false);
-        fake.borrow_mut().script_progress(0.5);
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-        vc.run_until_parked();
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_reload_or_stop(window, cx)));
-        assert_eq!(fake.borrow().stop_calls(), 1, "progress without a load never reads as stop");
-        restore_state(state);
-    }
 
     /// B2a-H4d(4): the back-history render is pure. With the menu open but
     /// nothing to show it draws nothing and leaves the menu state alone —
@@ -8698,172 +8108,8 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H6 (v3 chrome, 2026-10-12): the sidebar toggle is the shell's
-    /// chrome row and renders in both states; sidebar-hidden in Browse adds
-    /// the one-row chrome — the wide field, ⋯ and `+` — to the corner tabs,
-    /// and reopening the sidebar takes that back down.
-    #[gpui::test]
-    fn browse_minimal_chrome_renders_when_sidebar_hidden(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("browse-minimal-chrome");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle is chrome in both states");
-        assert!(vc.debug_bounds("hd-minimal-address").is_none(), "sidebar-open Browse keeps the full toolbar");
-        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle still renders");
-        assert!(vc.debug_bounds("hd-minimal-address").is_some(), "the wide field renders");
-        assert!(vc.debug_bounds("hd-minimal-site").is_some(), "the security glyph renders");
-        assert!(vc.debug_bounds("hd-minimal-more").is_some(), "the ⋯ menu renders");
-        assert!(vc.debug_bounds("hd-minimal-new-tab").is_some(), "the `+` renders");
-        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-address").is_none(), "reopening the sidebar restores the toolbar");
-        assert!(vc.debug_bounds("hd-minimal-sidebar").is_some(), "the toggle stays");
-        restore_state(state);
-    }
 
-    /// B2a-H6b: the one-row chrome keeps the zoom pill while off 100% —
-    /// and only then. An engine zoom draws it; resetting calls the engine
-    /// and its echo clears it.
-    #[gpui::test]
-    fn minimal_chrome_keeps_zoom_pill_off_default(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("browse-minimal-zoom");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
-        // A scriptable page on the shown tab, like the stop/reload test's:
-        // the harness holds the shared fake while the state owns this
-        // delegate, so the test scripts the engine zoom edges the state
-        // then drains.
-        let fake = vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                let id = h.browse_centre_shown().expect("a tab shows");
-                let fake =
-                    std::rc::Rc::new(std::cell::RefCell::new(aui_webview::FakeWebBackend::new()));
-                let page = cx.new(|cx| {
-                    aui_webview::WebviewState::new(Box::new(SharedFake(fake.clone())), cx)
-                });
-                h.browser.states.insert(id, page);
-                fake
-            })
-        });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-zoom").is_none(), "100% wears no pill");
-        fake.borrow_mut().script_zoom(125);
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-        vc.run_until_parked();
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-zoom").is_some(), "125% wears the pill");
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.browse_reset_zoom(window, cx));
-        });
-        assert_eq!(fake.borrow().zoom_calls(), &[100], "the pill resets through the engine");
-        fake.borrow_mut().script_zoom(100);
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-        vc.run_until_parked();
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-zoom").is_none(), "the engine echo clears the pill");
-        restore_state(state);
-    }
 
-    /// B2a-H6b: the one-row chrome keeps the ↩ session chip when the shown
-    /// tab came from a session — a session-owned tab with no sidebar.
-    #[gpui::test]
-    fn minimal_chrome_keeps_session_chip(cx: &mut gpui::TestAppContext) {
-        use chrono::Local;
-        let state = hermetic_state("browse-minimal-chip");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.ensure_tabs_loaded(cx);
-                let space = h.browse_space();
-                let id = h.browser.tabs.open(
-                    space,
-                    crate::browser::Owner::Session("s-9".to_owned()),
-                    "https://example.com/",
-                    None,
-                );
-                h.browser.centre_override = Some(id);
-                h.sessions.push(crate::sidebar::SessionEntry {
-                    id: "s-9".to_owned(),
-                    label: "x".into(),
-                    updated: Local::now(),
-                    created: Local::now(),
-                    running: true,
-                    turns: 1,
-                    hidden: false,
-                    pinned: false,
-                    archived: false,
-                    description: String::new(),
-                    replayed: false,
-                    provider: None,
-                    named: false,
-                    needs_title: false,
-                    side_marker: false,
-                    title_pending: false,
-                    last_ask: None,
-                    branch: None,
-                    terminals_running: 0,
-                    local: false,
-                    provisional: false,
-                    workspace: None,
-                    project: None,
-                    project_name: None,
-                    attention: Vec::new(),
-                    approval_command: None,
-                    pending_question: None,
-                    turn_started: None,
-                    last_error: None,
-                });
-            })
-        });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| { h.toggle_sidebar(cx); h.pill_revealed = !h.sidebar_open; }));
-        draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("hd-minimal-chip").is_some(), "the ↩ session chip renders with no sidebar");
-        restore_state(state);
-    }
 
     /// B2a-H6: vertical tabs list down the sidebar — no strip above the
     /// page. Each drawn test boots its own window because a test draw
@@ -9156,87 +8402,6 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H4d(8): the mouse-down/click pair's second call is a no-op.
-    /// Selecting the same tab, reopening an already-reopened tab and
-    /// resetting an already-reset zoom all settle on the first call.
-    #[gpui::test]
-    fn paired_row_presses_are_idempotent(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = hermetic_state("paired-presses");
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        let (first, second) = vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.ensure_tabs_loaded(cx);
-                let space = h.browse_space();
-                let first = h.browser.tabs.open(
-                    space.clone(),
-                    crate::browser::Owner::Person,
-                    "https://first.example/",
-                    None,
-                );
-                let second = h.browser.tabs.open(
-                    space,
-                    crate::browser::Owner::Person,
-                    "https://second.example/",
-                    None,
-                );
-                h.schedule_tabs_write(cx);
-                (first, second)
-            })
-        });
-        // Selecting the same tab twice settles once.
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.select_browse_sidebar_tab(first, window, cx);
-                h.select_browse_sidebar_tab(first, window, cx);
-            })
-        });
-        vc.update(|_, cx| {
-            assert_eq!(
-                baaz.read(cx).browse_centre_shown(),
-                Some(first),
-                "the tab stays selected"
-            );
-        });
-        // Reopening a closed tab twice reopens exactly it, once.
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let key = h.browser_key(cx);
-                h.close_tab(&key, second, window, cx);
-                h.reopen_browse_closed_tab(second, window, cx);
-                h.reopen_browse_closed_tab(second, window, cx);
-            })
-        });
-        vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            assert_eq!(h.browse_centre_shown(), Some(second), "the reopened tab shows");
-            assert_eq!(
-                h.browser.tabs.tabs.iter().filter(|tab| tab.id == second).count(),
-                1,
-                "the tab reopens exactly once"
-            );
-        });
-        // Resetting the zoom twice lands on 100%.
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.browse_centre_page(window, cx).expect("the centre builds its page");
-                let page = h.browse_centre_state().expect("a page shows");
-                page.update(cx, |page, _| page.set_zoom(125));
-                h.browse_reset_zoom(window, cx);
-                h.browse_reset_zoom(window, cx);
-                assert_eq!(
-                    h.browse_centre_state().expect("a page shows").read(cx).zoom(),
-                    100,
-                    "the zoom settles on 100%"
-                );
-            })
-        });
-        restore_state(state);
-    }
 
     /// B7fix2: a rename inside the debounce window survives on disk.
     /// Newest wins: the debounced write serialises the CURRENT overrides

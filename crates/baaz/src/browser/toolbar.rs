@@ -10,7 +10,6 @@
 //! NotSecure, File and Internal correctly. A real engine's verdict is never
 //! overridden: only `Unknown` falls back.
 
-use aui_webview::PageSecurity;
 
 /// The engine an address commit searches with (B2a-H6): what the
 /// Settings → Browser page owns, carried on
@@ -239,48 +238,8 @@ pub(crate) fn classify_address_input_with(text: &str, engine: SearchEngine) -> N
     search(typed)
 }
 
-/// The address badge: secure gets the tune glyph (never a padlock), Local
-/// the `>_ dev` tag, the rest their words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AddressBadge {
-    /// Secure: the tune/sliders glyph, no label.
-    Tune,
-    /// `PageSecurity::Local`: `>_ dev`.
-    Dev,
-    /// `PageSecurity::NotSecure`: `⚠ Not secure`.
-    Warn,
-    /// `PageSecurity::File`: `File`.
-    File,
-    /// Internal/Baaz pages: `✦ Baaz`.
-    Baaz,
-}
 
-/// The resting address view: badge, host and path in their voices.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AddressView {
-    /// Which badge leads, if any.
-    pub badge: Option<AddressBadge>,
-    /// The badge's words (`""` for the glyph-only Tune, `"New tab"` needs none).
-    pub label: String,
-    /// The quiet userinfo (`"user@"` without the `@` here), or `""`.
-    /// Never bright: `https://google.com@evil.com/` reads `evil.com`.
-    pub userinfo: String,
-    /// The bright run: the host, or the file path, or the Baaz page name.
-    pub host: String,
-    /// The quiet run: the path after the host (`""` when none).
-    pub path: String,
-}
 
-/// The security the badge reads: the backend's verdict, except `Unknown` —
-/// "the backend said nothing" — which classifies the URL itself so the
-/// scripted page still badges correctly. Never overrides a real verdict.
-pub(crate) fn effective_security(url: &str, reported: PageSecurity) -> PageSecurity {
-    if reported == PageSecurity::Unknown {
-        PageSecurity::classify(url, None)
-    } else {
-        reported
-    }
-}
 
 /// Split `after` (the text after `://`) into authority and path: the
 /// authority ends at the first `/`, `\`, `?` or `#` — the WHATWG rule the
@@ -315,42 +274,7 @@ pub(crate) fn split_host_path(url: &str) -> (String, String, String) {
     (userinfo, host.to_ascii_lowercase(), path.to_owned())
 }
 
-/// The pure address state for `url` under `security`: badge, host and path.
-/// `editing` renders the full-URL input instead, so the view carries the URL
-/// through untouched and no badge.
-pub(crate) fn address_view(url: &str, security: PageSecurity, editing: bool) -> AddressView {
-    if editing {
-        return AddressView { badge: None, label: String::new(), userinfo: String::new(), host: url.to_owned(), path: String::new() };
-    }
-    match effective_security(url, security) {
-        PageSecurity::Secure => {
-            let (userinfo, host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Tune), label: String::new(), userinfo, host, path }
-        }
-        PageSecurity::Local => {
-            let (userinfo, host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Dev), label: ">_ dev".to_owned(), userinfo, host, path }
-        }
-        PageSecurity::NotSecure => {
-            let (userinfo, host, path) = split_host_path(url);
-            AddressView { badge: Some(AddressBadge::Warn), label: "⚠ Not secure".to_owned(), userinfo, host, path }
-        }
-        PageSecurity::File => {
-            let path = url.strip_prefix("file://").unwrap_or(url).to_owned();
-            AddressView { badge: Some(AddressBadge::File), label: "File".to_owned(), userinfo: String::new(), host: String::new(), path }
-        }
-        PageSecurity::Internal => {
-            let name = if url == "about:blank" { "New tab".to_owned() } else { url.split_once(':').map(|(_, rest)| rest.trim_start_matches('/').to_owned()).unwrap_or_else(|| url.to_owned()) };
-            AddressView { badge: Some(AddressBadge::Baaz), label: "✦ Baaz".to_owned(), userinfo: String::new(), host: name, path: String::new() }
-        }
-        PageSecurity::Unknown => AddressView { badge: None, label: String::new(), userinfo: String::new(), host: url.to_owned(), path: String::new() },
-    }
-}
 
-/// The zoom pill's text, or `None` at 100%: only a non-default zoom wears one.
-pub(crate) fn zoom_pill(zoom: u16) -> Option<String> {
-    if zoom == 100 { None } else { Some(format!("{zoom}%")) }
-}
 
 /// Chrome's zoom ladder: the ⋯ menu's –/+ steps snap along it, never by
 /// fixed points. The library (`aui_cef`) exposes no snapping of its own,
@@ -736,45 +660,8 @@ pub(crate) fn ask_draft_text(existing: &str, query: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn address_states_badge_host_and_path() {
-        type Case<'a> = (&'a str, PageSecurity, Option<AddressBadge>, &'a str, &'a str, &'a str);
-        let cases: &[Case] = &[
-            ("https://example.com/docs/a", PageSecurity::Secure, Some(AddressBadge::Tune), "", "example.com", "/docs/a"),
-            ("https://example.com", PageSecurity::Secure, Some(AddressBadge::Tune), "", "example.com", ""),
-            ("https://example.com/docs/a", PageSecurity::Unknown, Some(AddressBadge::Tune), "", "example.com", "/docs/a"),
-            ("http://localhost:5173/overview", PageSecurity::Unknown, Some(AddressBadge::Dev), ">_ dev", "localhost:5173", "/overview"),
-            ("http://example.com/", PageSecurity::NotSecure, Some(AddressBadge::Warn), "⚠ Not secure", "example.com", "/"),
-            ("file:///tmp/a.html", PageSecurity::Unknown, Some(AddressBadge::File), "File", "", "/tmp/a.html"),
-            ("about:blank", PageSecurity::Internal, Some(AddressBadge::Baaz), "✦ Baaz", "New tab", ""),
-            ("chrome://version", PageSecurity::Unknown, Some(AddressBadge::Baaz), "✦ Baaz", "version", ""),
-        ];
-        for (url, security, badge, label, host, path) in cases {
-            let view = address_view(url, *security, false);
-            assert_eq!(view.badge, *badge, "badge for {url}");
-            assert_eq!(view.label, label.to_owned(), "label for {url}");
-            assert_eq!(view.host, host.to_owned(), "host for {url}");
-            assert_eq!(view.path, path.to_owned(), "path for {url}");
-        }
-    }
 
-    #[test]
-    fn editing_carries_the_url_with_no_badge() {
-        let view = address_view("https://example.com/a", PageSecurity::Secure, true);
-        assert_eq!(view.badge, None, "editing shows the input, never a badge");
-        assert_eq!(view.host, "https://example.com/a");
-    }
 
-    #[test]
-    fn reported_security_wins_over_classification() {
-        // A real engine's NotSecure (a certificate error) survives even on
-        // an https URL that would otherwise classify Secure.
-        let view = address_view("https://example.com/", PageSecurity::NotSecure, false);
-        assert_eq!(view.badge, Some(AddressBadge::Warn));
-        // And a reported Secure stands on any URL.
-        let view = address_view("http://example.com/", PageSecurity::Secure, false);
-        assert_eq!(view.badge, Some(AddressBadge::Tune));
-    }
 
     #[test]
     fn enter_decides_url_vs_search() {
@@ -910,11 +797,6 @@ mod tests {
         assert_eq!(history.go_back(), None, "the start goes nowhere");
     }
 
-    #[test]
-    fn zoom_pill_only_off_default() {
-        assert_eq!(zoom_pill(100), None);
-        assert_eq!(zoom_pill(125).as_deref(), Some("125%"));
-    }
 
     #[test]
     fn zoom_steps_follow_chromes_ladder() {
@@ -969,21 +851,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn address_view_strips_userinfo_spoofing() {
-        let view = address_view("https://google.com@evil.com/", PageSecurity::Secure, false);
-        assert_eq!(view.host, "evil.com", "the phish host reads bright");
-        assert_eq!(view.userinfo, "google.com", "the spoof reads quiet");
-        assert_eq!(view.path, "/");
-        let view = address_view("https://evil.com\\@google.com/", PageSecurity::Secure, false);
-        assert_eq!(view.host, "evil.com", "a backslash ends the authority");
-        assert_eq!(view.userinfo, "", "no userinfo past the backslash");
-        let view = address_view("https://example.com/a?b#c", PageSecurity::Secure, false);
-        assert_eq!(view.host, "example.com");
-        assert_eq!(view.path, "/a?b#c");
-        let plain = address_view("https://example.com/a", PageSecurity::Secure, false);
-        assert_eq!(plain.userinfo, "", "no userinfo without an @");
-    }
 
     #[test]
     fn omnibox_tiers_prefix_wordstart_substring_then_recency() {
@@ -1081,12 +948,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn address_view_lowercases_the_host() {
-        let view = address_view("https://EXAMPLE.COM/Docs", PageSecurity::Secure, false);
-        assert_eq!(view.host, "example.com", "the bright host reads lowercased");
-        assert_eq!(view.path, "/Docs", "the quiet path keeps its case");
-    }
 
     /// B2a-H6: every engine builds its own search URL — names, slugs
     /// and parse round-trip, and queries encode the same everywhere.

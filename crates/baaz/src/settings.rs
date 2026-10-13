@@ -886,13 +886,14 @@ impl Harness {
             lead: self.render_sidebar_toggle(cx),
             switch: None,
             title: Some(trail.into_any_element()),
-            closed_only: None,
-            right: icon_button("settings-close", IconName::X)
-                .ghost()
-                .size(ButtonSize::Sm)
-                .accessibility_label("Close settings")
-                .on_click(move |_, window, cx| close(&(), window, cx))
-                .into_any_element(),
+            right: Some(
+                icon_button("settings-close", IconName::X)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("Close settings")
+                    .on_click(move |_, window, cx| close(&(), window, cx))
+                    .into_any_element(),
+            ),
         }
     }
 
