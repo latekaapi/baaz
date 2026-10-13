@@ -299,3 +299,42 @@ sidebar so it merges with the strip. **Built:** the pill/strip is a plain rectan
 the peek card is `surface_1` (the frame) with no edge ring, rounded 8 at the bottom right only, the side drop as its
 only separation from the sheet, its rows rendered on the frame like the open column (no Floating ambient scope).
 Canvas v17. The sidebar is finished as far as the owner's notes go; the next session starts the original plan (D4).
+
+## 13. Owner round 7 (2026-10-13, afternoon): four annotated screenshots before sign-off
+
+Owner, on the sidebar as of round 6: (1) a page's first rows hidden under the strip in Browse closed, "how can we
+fix this?"; (2) ⌘W on a lone new tab opened another new tab and listed the closed blank one under "Pick up where
+you left off" (five "New tab · closed a while ago" rows); (3) the Browse peek "completely broken": the live page
+showed through the strip's rect at the top of the peek column; (4) Browse closed "not designed properly — a gap at
+the top, the rounded corners on the wrong plane".
+
+**Diagnosed and fixed (aui design-v2 `4d13a41` + `821b6e2`, harness feedback-mode `cfa1dfe` + `3acbad4`):**
+- (3) The shim cut every hole with ONE even-odd path: where the strip's hole sat inside the peek card's hole the
+  parity flipped back to filled, so the page showed through exactly the strip's rect. Now one even-odd mask layer per
+  hole, chained through each layer's own `mask`, so the cut is the union (`aui_cef_set_holes`).
+- (2) `Tabs::close` recorded every tab; the B2a-H2b rule reopened a blank one on the last close. Now a blank tab
+  (`about:blank`, with or without the slash) never joins the closed list — nor is offered from rows recorded before —
+  and ⌘W on the space's last tab closes the window the way ⌘W in Sessions does (`CloseWindow` → hide), leaving one
+  fresh blank tab for the window's return. Tests: `a_closed_blank_tab_is_never_offered_again`,
+  `cmd_w_on_the_last_tab_closes_the_window_and_leaves_a_blank_tab`. The × on the last tab keeps B2a-H2b.
+- (1)+(4) are one decision. A native page cannot run under the strip the way the transcript does; a page sheet
+  pushed below the strip (built, offered, rejected: "will a strip show up always at the top? Is there no way around
+  it?") leaves a 44 px band. The owner chose **the strip that fades** over "nothing at the top, lights stay"
+  (recommended), "lights hidden too" and the band. Built: in Browse (`AppShell::strip_fades`) the closed strip is not
+  there by default; it fades in (80 ms) when the pointer reaches the window's **top edge** — the 6 px frame band
+  above the page is the only place a pointer near the top reaches the app, since the page window takes every event
+  over itself — right after the sidebar closes, and while the sidebar peeks; it fades out (200 ms) `STRIP_LINGER`
+  = 2 s after the pointer last left it (pure `strip_due`, unit-tested). The controls fade with the ground. Holes are
+  now `(x, y, w, h, r, cut)` and the strip's hole carries the strip's opacity, so the page cross-fades under it
+  instead of popping (a sublayer on the mask link gives back 1 − cut of the page). Sessions keeps the strip as it
+  was (nothing is hidden there). Capture aid: step `strip` / `AppShell::strip_shown`. Canvas v18: note n5
+  rewritten; the BrowseClosed board shows the revealed state.
+
+**Gates:** tests + clippy green in both repos (baaz 1372 + suites; aui, aui-webview, aui-cef clippy); offscreen
+renders: Browse closed faded (page alone), pinned strip, peek, Sessions closed unchanged. **Not yet seen by anyone:**
+the fade itself, the cross-fade of the hole, the top-edge reveal with a real pointer, ⌘W closing the window, the
+peek over a live page — the Sonnet agent's live run on BaazCheck is next (owner approves the access prompt).
+
+**Answers to the three questions:** (a) sidebar signed off once the live check passes; (b) downloads → the Browse
+sidebar's control row beside ✦ · ⋯; toast chip + feedback slot → the sheet's bottom-right in both modes (an overlay
+window above a native page); (c) checkpoint merge after the live check.
