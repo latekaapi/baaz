@@ -281,3 +281,13 @@ the row's height (44), square on top, `rounded_bl` / `rounded_br` 8, the frame's
 left behind when the column goes (4 px rise + 80 ms fade as before; a hole over a native page). The peek card is the
 sidebar's column: flush with the window's left, top and bottom, the sidebar's width, `rounded_br` 8, Floating with
 the side drop, its rows starting under the pill. `PILL_H` is gone (the row's height is the pill's). Canvas v16.
+
+**Agent QA (round 5, Sonnet with computer use, access approved):** positions static across ⌘B (toggle, switch,
+lights at the same screen px); the closed pill is a flush frame-coloured strip with only lights · toggle · switch,
+square top, rounded bottom, nothing else at the top; the peek slides in from the pill and from the toggle, behind the
+pill, rows under it, dismisses on leaving, and a click on the toggle opens cleanly; ⌘B with the pointer on the toggle
+closes with NO card, and leaving then re-entering peeks again; Browse closed shows only the pill over the page, the
+peek brings the Browse sidebar (address, tabs), and switching to Sessions from the peek keeps the sidebar closed; the
+contact shadow reads as a soft gradient. One note the agent raised — the pill looking ~5 px narrower than the
+column — is its 8 px bottom-right rounding measured near the bottom: in the capture the pill's right edge at y 20 is
+x 256, the column's width exactly. Still only measurable by trace, not by screenshots: the slide itself.
