@@ -64,7 +64,13 @@
               "duration_ms": null,
               "body": {
                 "kind": "read",
-                "lines": 4
+                "lines": 4,
+                "output_lines": [
+                  "Read text file `README.md`.",
+                  "1|# checkout-flow-v2",
+                  "2|",
+                  "3|Address validation for the acme checkout."
+                ]
               }
             },
             {
