@@ -143,13 +143,11 @@ fn the_stack_stands_down_while_the_header_carries_toasts() {
 #[test]
 fn every_header_seats_the_chip_left_of_the_feedback_slot() {
     let app = source("app.rs");
-    for site in ["render_bar_chrome"] {
-        let body = fn_body(&app, site);
-        let chip = body.find("render_toast_chip").unwrap_or_else(|| panic!("{site} renders the chip"));
-        let slot =
-            body.find("render_feedback_header_slot").unwrap_or_else(|| panic!("{site} keeps the slot"));
-        assert!(chip < slot, "{site} seats the chip left of the feedback slot");
-    }
+    let site = "render_bar_chrome";
+    let body = fn_body(&app, site);
+    let chip = body.find("render_toast_chip").unwrap_or_else(|| panic!("{site} renders the chip"));
+    let slot = body.find("render_feedback_header_slot").unwrap_or_else(|| panic!("{site} keeps the slot"));
+    assert!(chip < slot, "{site} seats the chip left of the feedback slot");
 }
 
 /// The chip's contract: a status named `<title>: <body>`, the full body
