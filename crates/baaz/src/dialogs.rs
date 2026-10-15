@@ -1720,6 +1720,37 @@ mod tests {
         restore_state(state);
     }
 
+    /// ↑/↓ reach the composer's `/` menu past the composer's own field —
+    /// the palette's bug again, in the composer (owner, 2026-10-14). The
+    /// keys are real keystrokes through the focused textarea, never a
+    /// dispatched action: dispatching was how the miss stayed hidden.
+    #[gpui::test]
+    fn composer_menu_arrows_move_the_selection_from_the_field(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-arrows");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let mut args = test_args(&state.2);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        vc.simulate_input("/");
+        vc.run_until_parked();
+        let selected = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.as_ref().map(|m| m.selected))
+        };
+        assert_eq!(selected(vc), Some(0), "typing / opens the command menu");
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(1), "down did not move the selection");
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(2));
+        vc.simulate_keystrokes("up");
+        assert_eq!(selected(vc), Some(1), "up did not move back");
+        restore_state(state);
+    }
+
     /// ↑/↓ reach the palette list past its query field.
     ///
     /// The query palettes (Search, Commands, Projects) focus a `gpui_kit`

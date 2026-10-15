@@ -32,8 +32,8 @@ use aui_protocol::{
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
-use gpui::{div, prelude::*, px, relative, AnyElement, App, ElementId, SharedString, Window};
-use gpui_kit::base::{h_flex, v_flex};
+use gpui::{div, prelude::*, px, AnyElement, App, ElementId, SharedString, Window};
+use gpui_kit::base::v_flex;
 
 /// The title the pending approval card asks its question with.
 ///
@@ -1222,8 +1222,6 @@ pub enum TurnSlot {
     LiveRun(Vec<usize>),
     /// One block's own row.
     Block(usize),
-    /// The silent-reasoning footer row.
-    SilentFooter,
 }
 
 /// B12fix: the block indices of a turn that take rows: every block but
@@ -1264,17 +1262,16 @@ pub fn turn_mapped_rows(
     fold_enabled: bool,
 ) -> usize {
     let Turn::Assistant { id, blocks, .. } = turn else { return turn_rows(turn) };
-    let silent = usize::from(silent_reasoning(turn).is_some());
     let shown = shown_indices(blocks).len();
     if settled && fold_enabled {
         if let Some(plan) = fold_plan_cached(turn, settled, toggled) {
             let open = toggled.contains(&fold_key(id));
             if open {
-                return 1 + shown + silent;
+                return 1 + shown;
             }
-            return 1 + plan.visible.len() + usize::from(plan.answer.is_some()) + silent;
+            return 1 + plan.visible.len() + usize::from(plan.answer.is_some());
         }
-        return shown + silent;
+        return shown;
     }
     if !settled {
         // Q1b: the live mapping hides covered calls outright, so it
@@ -1282,9 +1279,9 @@ pub fn turn_mapped_rows(
         let live_shown = live_shown_indices(blocks).len();
         let runs = live_runs(turn, 0, &HashMap::new());
         if runs.is_empty() {
-            return live_shown + silent;
+            return live_shown;
         }
-        let mut rows = live_shown + silent;
+        let mut rows = live_shown;
         for run in &runs {
             let open = toggled.contains(&live_key(id, run.blocks[0]));
             rows -= run.blocks.len();
@@ -1292,7 +1289,7 @@ pub fn turn_mapped_rows(
         }
         return rows;
     }
-    shown + silent
+    shown
 }
 
 /// B12: which slot row `row` of a mapped turn is: the single mapping the
@@ -1309,7 +1306,6 @@ pub fn turn_slot_at(
     let Turn::Assistant { id, blocks, .. } = turn else {
         return (row == 0).then_some(TurnSlot::Block(0));
     };
-    let silent_here = silent_reasoning(turn).is_some();
     // B12fix: rows only ever address shown blocks — an empty Thinking
     // block is skipped in every walk below, live or settled.
     let shown = shown_indices(blocks);
@@ -1324,7 +1320,7 @@ pub fn turn_slot_at(
                 if inner < shown.len() {
                     return Some(TurnSlot::Block(shown[inner]));
                 }
-                return silent_here.then_some(TurnSlot::SilentFooter);
+                return None;
             }
             if row == 0 {
                 return Some(TurnSlot::FoldHeader);
@@ -1343,12 +1339,12 @@ pub fn turn_slot_at(
             if row - 1 < slots.len() {
                 return Some(TurnSlot::Block(slots[row - 1]));
             }
-            return silent_here.then_some(TurnSlot::SilentFooter);
+            return None;
         }
         if row < shown.len() {
             return Some(TurnSlot::Block(shown[row]));
         }
-        return (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter);
+        return None;
     }
     if !settled {
         // Q1b: covered calls take no row — the walk below is over the
@@ -1387,12 +1383,12 @@ pub fn turn_slot_at(
                     shown_at += 1;
                 }
             }
-            return (silent_here && at == row).then_some(TurnSlot::SilentFooter);
+            return None;
         }
         if row < live_shown.len() {
             return Some(TurnSlot::Block(live_shown[row]));
         }
-        return (silent_here && row == live_shown.len()).then_some(TurnSlot::SilentFooter);
+        return None;
     }
     // Q1c: settled with folding off — one row per shown block, no
     // header. Covered calls take no row here either (see
@@ -1401,46 +1397,9 @@ pub fn turn_slot_at(
     if row < shown.len() {
         return Some(TurnSlot::Block(shown[row]));
     }
-    (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter)
+    None
 }
 
-/// The reasoning tokens a finished turn billed without showing any work, if any.
-///
-/// A turn can bill a reasoning budget and emit no `reasoning` item at all —
-/// the fold records the count on [`TurnMeta::reasoning_tokens`] either way.
-/// Returns the count when the turn is an assistant turn with
-/// `reasoning_tokens > 0` and no [`Block::Thinking`], and `None` otherwise
-/// (user turns, no billed reasoning, or a visible trace that speaks for
-/// itself).
-pub fn silent_reasoning(turn: &Turn) -> Option<u64> {
-    let Turn::Assistant { blocks, meta, .. } = turn else { return None };
-    if meta.reasoning_tokens == 0 {
-        return None;
-    }
-    if blocks.iter().any(|block| matches!(block, Block::Thinking { .. })) {
-        return None;
-    }
-    Some(meta.reasoning_tokens)
-}
-
-/// The footer's reasoning cell for a turn [`silent_reasoning`] fired on.
-///
-/// The library footer draws `"419 reasoning"`, and a silent turn's cell
-/// reads the same — the count with no thinking card behind it, on the same
-/// line in the same style. Turns with a visible thinking card keep the
-/// library's cell unchanged.
-pub fn silent_reasoning_text(count: u64) -> String {
-    format!("{count} reasoning")
-}
-
-/// The library footer's cells for a silent turn: a mirror of the library's
-/// private `footer_items` (`aui/src/transcript/turns.rs`) with the reasoning
-/// cell replaced by [`silent_reasoning_text`].
-///
-/// The library draws the footer from `TurnMeta` with no per-cell hook, so a
-/// silent turn carries no `assistant_turn(..).meta(..)` and gets this row
-/// instead — same cells, same order, same separators, same style. Keep in
-/// sync with the library.
 /// The footer model cell: a Claude Code wire id reads humanised
 /// (`claude-haiku-4-5-20251001` → `Haiku 4.5`), never raw. Only
 /// `claude-`-prefixed ids map — every other lane's model cells pass
@@ -1451,58 +1410,6 @@ fn footer_model_label(model: &str) -> String {
     } else {
         model.to_owned()
     }
-}
-
-fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
-    let tokens = meta.tokens_in + meta.tokens_out;
-    // Zero is "the wire did not say", not "this turn was free" — dropped
-    // here exactly as the library's `footer_items` drops it, and as the cost
-    // cell below is dropped when the catalog reports no price. `items.retain`
-    // takes the empty string out (audit 2026-09-13).
-    let tokens = match tokens {
-        0 => String::new(),
-        n if n >= 1000 => format!("{:.1}k tokens", n as f64 / 1000.0),
-        n => format!("{n} tokens"),
-    };
-    let mut items = vec![
-        footer_model_label(&meta.model),
-        if meta.duration_ms == 0 { String::new() } else { format!("{:.1} s", meta.duration_ms as f64 / 1000.0) },
-        tokens,
-    ];
-    items.retain(|item| !item.is_empty());
-    items.push(silent_reasoning_text(count));
-    if meta.cost_usd > 0.0 {
-        items.push(format!("${:.2}", meta.cost_usd));
-    }
-    items
-}
-
-/// The single footer line for a silent turn: the library footer's own row
-/// (mono, `FS_11`, `ink_4`, `·` separators) with the silent reasoning cell,
-/// plus the turn's age when the wire timed it.
-fn silent_footer_row(meta: &TurnMeta, count: u64, age: Option<String>, cx: &mut App) -> AnyElement {
-    use aui_tokens::{ActiveAui, AuiStyled};
-    let p = cx.aui().colors;
-    let mut footer = h_flex()
-        .w_full()
-        .mt(px(10.0))
-        .gap(px(10.0))
-        .font_family(scale::FONT_MONO)
-        .text_px(scale::FS_11)
-        .line_height(relative(1.0))
-        .medium()
-        .text_color(p.ink_4);
-    let mut items = silent_footer_items(meta, count);
-    if let Some(age) = age {
-        items.push(age);
-    }
-    for (i, item) in items.into_iter().enumerate() {
-        if i > 0 {
-            footer = footer.child("·");
-        }
-        footer = footer.child(item);
-    }
-    footer.into_any_element()
 }
 
 /// The clock a frame formats turn ages against: wall time, except under
@@ -1588,7 +1495,7 @@ fn turn_age(timestamp: Option<u64>, now_ms: u64) -> Option<String> {
 pub fn turn_rows(turn: &Turn) -> usize {
     match turn {
         Turn::User { .. } => 1,
-        Turn::Assistant { blocks, .. } => blocks.len() + usize::from(silent_reasoning(turn).is_some()),
+        Turn::Assistant { blocks, .. } => blocks.len(),
     }
 }
 
@@ -1599,12 +1506,6 @@ pub fn turn_rows(turn: &Turn) -> usize {
 /// past [`turn_rows`] renders nothing, so a list that is one frame ahead of
 /// its cache never panics.
 pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &mut Window, cx: &mut App) -> AnyElement {
-    // A turn can bill reasoning tokens and emit no reasoning item at all
-    // (improvement candidate 3 in docs/09-handoff-improvements.md §8). On a
-    // silent turn this row *is* the footer — the library's cells with the
-    // reasoning cell saying what the count meant — so the library must not
-    // draw its own underneath.
-    let silent = silent_reasoning(turn);
     match turn {
         Turn::User { id, text, timestamp, attachments, .. } => {
             if row != 0 {
@@ -1674,9 +1575,10 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             // settled. A stale row past the mapping renders nothing, like
             // the old past-`turn_rows` guard.
             let answer = fold_plan_cached(turn, settled, &folds.toggled).and_then(|plan| plan.answer);
-            // A silent turn gets Baaz's own footer row, so its blocks
-            // carry no library footer.
-            let library_meta = if silent.is_some() { None } else { Some(meta) };
+            // Every answer's footer is the library's hover rail — a turn
+            // that billed reasoning without showing any says so there
+            // (`N reasoning`), never in an always-on row of its own.
+            let library_meta = Some(meta);
             let render_block = |index: usize, window: &mut Window, cx: &mut App| {
                 let Some(b) = blocks.get(index) else {
                     return div().into_any_element();
@@ -1702,15 +1604,11 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                         .into_iter()
                         .find(|run| run.blocks.first() == Some(&start))
                     {
-                        Some(run) => live_run_row(id, &run, open, folds),
+                        Some(run) => live_run_row(id, &run, run_tail(blocks, &run), open, folds),
                         None => render_block(start, window, cx),
                     }
                 }
                 Some(TurnSlot::Block(index)) => render_block(index, window, cx),
-                Some(TurnSlot::SilentFooter) => match silent {
-                    Some(count) => silent_footer_row(meta, count, turn_age(*timestamp, folds.now_ms), cx),
-                    None => div().into_any_element(),
-                },
                 None => div().into_any_element(),
             }
         }
@@ -1751,12 +1649,26 @@ fn fold_header_row(turn_id: &str, plan: &FoldPlan, open: bool, folds: &Folds) ->
 /// B12: one live run's collapsed row: the current call's verb and target
 /// with "+N earlier" and the run's elapsed. Clicking expands to the run's
 /// cards, which the row mapping then hosts as following rows.
-fn live_run_row(turn_id: &str, run: &LiveRun, open: bool, folds: &Folds) -> AnyElement {
+/// The running shell call's newest non-empty output line, for the live
+/// row's tail: the run's last block, while it is a shell call still going.
+fn run_tail(blocks: &[Block], run: &LiveRun) -> Option<String> {
+    if !run.running {
+        return None;
+    }
+    let last = run.blocks.last().and_then(|index| blocks.get(*index))?;
+    let Block::ToolCall { status: aui_protocol::ToolStatus::Running | aui_protocol::ToolStatus::Pending, body: ToolBody::Shell { output_lines, .. }, .. } = last else {
+        return None;
+    };
+    output_lines.iter().rev().find(|line| !line.trim().is_empty()).map(|line| line.trim_end().to_owned())
+}
+
+fn live_run_row(turn_id: &str, run: &LiveRun, tail: Option<String>, open: bool, folds: &Folds) -> AnyElement {
     let start = run.blocks.first().copied().unwrap_or(0);
     let id = ElementId::from(SharedString::from(format!("{turn_id}:live:{start}")));
     let toggle = folds.toggle.clone();
     let key = live_key(turn_id, start);
     live_activity_row(id, run.verb.clone(), run.target.clone(), run.earlier, run.elapsed_ms).running(run.running)
+        .tail(tail.map(SharedString::from))
         .open(open)
         .on_toggle(move |_, window, cx| toggle(key.clone(), window, cx))
         .into_any_element()
@@ -2613,50 +2525,16 @@ mod tests {
         assert_eq!(display_path("/etc/hosts", "", "/Users/ada"), "/etc/hosts");
     }
 
+    /// One list row per block, plus the bubble: the virtual list's item
+    /// count is the sum of these over the cached turns. Billed reasoning
+    /// with no reasoning block adds no row of its own (owner 2026-10-14):
+    /// the count rides the library's hover footer.
     #[test]
-    fn billed_reasoning_with_no_thinking_card_is_silent() {
-        assert_eq!(silent_reasoning(&assistant(vec![text_block()], 419)), Some(419));
-    }
-
-    #[test]
-    fn no_billed_reasoning_is_not_silent() {
-        assert_eq!(silent_reasoning(&assistant(vec![text_block()], 0)), None);
-    }
-
-    #[test]
-    fn a_visible_thinking_card_speaks_for_itself() {
-        assert_eq!(
-            silent_reasoning(&assistant(vec![thinking_block(), text_block()], 419)),
-            None
-        );
-    }
-
-    /// One list row per block, plus the silent footer, plus the bubble: the
-    /// virtual list's item count is the sum of these over the cached turns.
-    #[test]
-    fn rows_are_blocks_and_the_silent_footer() {
+    fn rows_are_blocks_only() {
         let user = Turn::User { id: "u".to_owned(), text: "hi".to_owned(), attachments: vec![], mentions: vec![], timestamp: None };
         assert_eq!(turn_rows(&user), 1);
         assert_eq!(turn_rows(&assistant(vec![text_block(), text_block(), text_block()], 0)), 3);
-        // Reasoning tokens with no reasoning block: the footer row is added.
-        assert_eq!(turn_rows(&assistant(vec![text_block()], 419)), 2);
-    }
-
-    #[test]
-    fn a_user_turn_never_thinks_silently() {
-        let turn = Turn::User {
-            id: "user-1".to_owned(),
-            text: "hi".to_owned(),
-            attachments: Vec::new(),
-            mentions: Vec::new(),
-            timestamp: None,
-        };
-        assert_eq!(silent_reasoning(&turn), None);
-    }
-
-    #[test]
-    fn the_silent_cell_names_the_footer_count() {
-        assert_eq!(silent_reasoning_text(419), "419 reasoning");
+        assert_eq!(turn_rows(&assistant(vec![text_block()], 419)), 1);
     }
 
     #[test]
@@ -2704,22 +2582,6 @@ mod tests {
         assert_eq!(turn_age(Some(1_800_000_000_000), 1_800_000_000_000).as_deref(), Some("just now"));
     }
 
-    #[test]
-    fn the_silent_footer_keeps_the_library_cells() {
-        let Turn::Assistant { meta, .. } = assistant(vec![text_block()], 419) else {
-            unreachable!("test helper builds an assistant turn")
-        };
-        assert_eq!(
-            silent_footer_items(&meta, 419),
-            vec![
-                "muse-spark-1.3-contributor".to_owned(),
-                "17.3 s".to_owned(),
-                "59.2k tokens".to_owned(),
-                "419 reasoning".to_owned(),
-            ]
-        );
-    }
-
     /// Q2 (Q2b: renamed so the gate filter `transcript` matches the test
     /// name as well as its module): a Claude Code wire id never reaches
     /// the footer raw — the footer reads the humanised label, while other
@@ -2731,15 +2593,6 @@ mod tests {
         assert_eq!(
             footer_model_label("muse-spark-1.3-contributor"),
             "muse-spark-1.3-contributor"
-        );
-        let meta = TurnMeta {
-            model: "claude-haiku-4-5-20251001".to_owned(),
-            ..TurnMeta::default()
-        };
-        assert!(
-            silent_footer_items(&meta, 0).contains(&"Haiku 4.5".to_owned()),
-            "the silent footer reads the label, drew {:?}",
-            silent_footer_items(&meta, 0)
         );
     }
 

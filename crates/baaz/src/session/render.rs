@@ -62,7 +62,7 @@ impl SessionView {
         let banner = self.render_banner(cx);
         let tier_banner = self.render_tier_banner(cx);
         let queue = self.render_queue(cx);
-        let caret_menu = self.render_caret_menu(cx);
+        let caret_menu = self.render_caret_menu(window, cx);
         v_flex()
             .size_full()
             .child(transcript)
@@ -668,6 +668,10 @@ impl SessionView {
 
     /// The virtualised list itself, built from the cache and nothing else.
     pub(super) fn transcript_list(&mut self, folds: Folds, cx: &mut Context<Self>) -> AnyElement {
+        // The turn's progress, inline under the last message (owner
+        // 2026-10-14, after Claude Desktop): it scrolls with the transcript
+        // instead of standing pinned over the composer.
+        let progress = self.inline_progress();
         let counts = std::mem::take(&mut self.row_counts);
         self.sync_virtual_list(&counts);
         self.row_counts = counts;
@@ -772,15 +776,16 @@ impl SessionView {
                                 // else unresolvable is an empty row, as
                                 // before.
                                 if turn_ix == turns.len() {
-                                    return div()
-                                        .w_full()
-                                        .h(px(super::TAIL_SPACER_H))
-                                        .into_any_element();
+                                    let tail = div().w_full().pb(px(super::TAIL_SPACER_H));
+                                    return match &progress {
+                                        Some(progress) => tail.child(progress.row()).into_any_element(),
+                                        None => tail.into_any_element(),
+                                    };
                                 }
                                 return div().into_any_element();
                             };
                             let last_of_turn = ix == last_row || rows.get(ix + 1).is_some_and(|(t, _)| *t != turn_ix);
-                            let mut item = div().w_full().pb(px(if last_of_turn { scale::SP_5 } else { scale::SP_3 }));
+                            let mut item = div().w_full().pb(px(if last_of_turn { TURN_GAP } else { BLOCK_GAP }));
                             if ix == 0 {
                                 item = item.pt(px(TRANSCRIPT_PAD_TOP));
                             }
@@ -1346,18 +1351,41 @@ impl SessionView {
         }
         let row = if self.loading_history {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
-        } else if self.busy() {
+        } else {
+            // A running turn reports inline, in the transcript
+            // ([`Self::inline_progress`]); nothing stands over the composer.
+            return None;
+        };
+        Some(
+            h_flex()
+                .w_full()
+                .px(px(TRANSCRIPT_PAD_X))
+                .pb(px(scale::SP_4))
+                .child(centred(row))
+                .into_any_element(),
+        )
+    }
+
+    /// What the running turn is doing, for the inline progress row under the
+    /// last message — `None` while something else already says it: a tool
+    /// in flight has its own live row (verb, target, timer, newest output
+    /// line) and streaming text has its caret. Otherwise the phase off the
+    /// fold (`Thinking…`, `Waiting for approval…`, `Finishing up…`,
+    /// `Working…`), the turn's elapsed time and what is queued.
+    pub(super) fn inline_progress(&self) -> Option<InlineProgress> {
+        if self.loading_history || !self.busy() || self.retry_countdown().is_some() {
+            return None;
+        }
+        let phase = self.status_phase();
+        if phase.starts_with("Running ") || self.running_text_streams() {
+            return None;
+        }
+        {
             let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
             // The reply arrived whole but the turn is still open: Muse is on
             // the `reminderChild` tail (memory reminders), not stuck.
             let finishing = self.reply_complete_for_running_turn();
-            let mut row = status_row("status", self.status_phase())
-                .lead(StatusLead::Braille)
-                .shimmer(true)
-                .key_hint("esc", "to interrupt");
-            if elapsed > 0 {
-                row = row.elapsed(transcript::elapsed(elapsed));
-            }
+            let elapsed = (elapsed > 0).then(|| transcript::elapsed(elapsed));
             let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
             // Blocked on the person, the tail is not memory reminders: the
             // turn waits for an approval or an answer, and saying otherwise
@@ -1369,21 +1397,18 @@ impl SessionView {
                 (false, 0) => None,
                 (false, queued) => Some(format!("{queued} queued")),
             };
-            if let Some(note) = note {
-                row = row.note(note);
-            }
-            row
-        } else {
-            return None;
-        };
-        Some(
-            h_flex()
-                .w_full()
-                .px(px(TRANSCRIPT_PAD_X))
-                .pb(px(scale::SP_4))
-                .child(centred(row))
-                .into_any_element(),
-        )
+            Some(InlineProgress { phase, elapsed, note })
+        }
+    }
+
+    /// Whether the running turn's newest block is text still arriving: the
+    /// caret is then the progress, and the inline row stands down.
+    fn running_text_streams(&self) -> bool {
+        let Some(running) = self.running.as_ref() else { return false };
+        self.cached_turns.iter().find(|turn| turn.id() == running.turn_id).is_some_and(|turn| match turn.as_ref() {
+            Turn::Assistant { blocks, .. } => matches!(blocks.last(), Some(Block::Text { streaming: true, .. })),
+            Turn::User { .. } => false,
+        })
     }
 
 /// The specific phase for a running turn's blocks, when one reads truthfully
@@ -1613,10 +1638,18 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     }
 
     /// The `/` menu and the `@` picker, floating above the composer.
-    pub(super) fn render_caret_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_caret_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let overlays = self.overlays.read(cx);
         let menu = overlays.menu.as_ref()?;
         let (kind, selected, filter) = (menu.kind, menu.selected, menu.filter.clone());
+        // The rows' cap: the room above the composer, under the sheet's
+        // title row, less the panel's padding and footer — so the whole
+        // panel, footer and bottom corners included, always fits. The
+        // panel is never clipped from outside (owner 2026-10-14: an outer
+        // 560 px clip around a 560 px row column cut the footer and the
+        // bottom corners off a long `/` menu).
+        let room = f32::from(window.viewport_size().height) - CARET_MENU_CHROME;
+        let max_rows = room.min(POPOVER_MAX_H);
         let element = match kind {
             MenuKind::Command => {
                 let (commands, skill_rows) = self.command_rows(&filter, cx);
@@ -1658,7 +1691,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
                     this.select_command(id, window, cx);
                 });
-                let menu = command_menu("command-menu", format!("/{filter}"), sections, selected);
+                let menu = command_menu("command-menu", format!("/{filter}"), sections, selected).max_rows_height(max_rows);
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
                 menu.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
             }
@@ -1680,7 +1713,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     let insertion = format!("@{id} ");
                     this.replace_token(&insertion, window, cx);
                 });
-                let picker = mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected);
+                let picker = mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected).max_rows_height(max_rows);
                 let picker = if crate::clock::deterministic() { picker.at_rest() } else { picker };
                 picker.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
             }
@@ -1701,8 +1734,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .bottom(px(POPOVER_GAP))
                     .left(px(0.0))
                     .right(px(0.0))
-                    .max_h(px(POPOVER_MAX_H))
-                    .overflow_y_scroll()
                     .child(element),
             )
             .into_any_element(),
@@ -2478,6 +2509,30 @@ impl SessionView {
         .into_any_element()
     }
 }
+
+/// The inline progress row's words (see [`SessionView::inline_progress`]).
+#[derive(Clone)]
+pub(super) struct InlineProgress {
+    phase: String,
+    elapsed: Option<SharedString>,
+    note: Option<String>,
+}
+
+impl InlineProgress {
+    /// The row: the braille lead and the shimmering phase, then the elapsed
+    /// time and what is queued, faint. No key hint — Esc still interrupts.
+    fn row(&self) -> AnyElement {
+        let mut row = status_row("progress", self.phase.clone()).lead(StatusLead::Braille).shimmer(true);
+        if let Some(elapsed) = self.elapsed.clone() {
+            row = row.elapsed(elapsed);
+        }
+        if let Some(note) = self.note.clone() {
+            row = row.note(note);
+        }
+        row.into_any_element()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
