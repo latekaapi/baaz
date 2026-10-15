@@ -46,17 +46,17 @@ gpui-kit = "0.6.0"
 # To build against a local checkout instead (developing both at once), add a
 # patch to `.cargo/config.toml` or the workspace root rather than editing
 # these lines; `CONTRIBUTING.md` has the snippet.
-aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
-aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
-aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
-aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
-aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
-aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2", features = ["pty", "tui"] }
-aui-webview = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2", features = ["wry"] }
+aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
+aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
+aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
+aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
+aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
+aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0", features = ["pty", "tui"] }
+aui-webview = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0", features = ["wry"] }
 # The Chromium backend (docs/25-browser-design.md). Optional in `baaz` behind
 # the `cef` feature: building it downloads CEF and runs cmake, which tests
 # and CI never need. `scripts/bundle.sh` turns it on.
-aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.4.2" }
+aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.5.0" }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }
