@@ -960,7 +960,10 @@ impl Harness {
                     .max_w(px(680.0))
                     .h_full()
                     .overflow_y_scroll()
-                    .pt(px(32.0))
+                    // Below the sheet's title row and its fade, so the page
+                    // heading sits on clear ground at rest (the fade dimmed
+                    // it when this was the row's 32).
+                    .pt(px(aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW))
                     .px(px(scale::SP_5))
                     .pb(px(scale::SP_5))
                     .gap(px(scale::SP_4))
