@@ -104,8 +104,7 @@ impl SessionView {
                     .on_children_prepainted(move |bounds, _, cx| {
                         let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
                         if (stack_h.get() - height).abs() > 0.5 {
-                            stack_h.set(height);
-                            let _ = view.update(cx, |_, cx| cx.notify());
+                            let _ = view.update(cx, |view, cx| view.note_stack_height(height, cx));
                         }
                     })
                     .child(stack),
@@ -691,12 +690,27 @@ impl SessionView {
         self.list_width = Some(width);
     }
 
+    /// The list's viewport height, reported with its width: a change under
+    /// a list that stood at its end keeps it there.
+    pub(super) fn note_list_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        let changed = self.list_height.is_some_and(|last| (last - height).abs() > 0.5);
+        self.list_height = Some(height);
+        if changed && self.at_end_before {
+            self.follow = true;
+            self.list_state.scroll_to_end();
+            cx.notify();
+        }
+    }
+
     /// The virtualised list itself, built from the cache and nothing else.
     pub(super) fn transcript_list(&mut self, folds: Folds, cx: &mut Context<Self>) -> AnyElement {
         // The turn's progress, inline under the last message (owner
         // 2026-10-14, after Claude Desktop): it scrolls with the transcript
         // instead of standing pinned over the composer.
         let progress = self.inline_progress();
+        // Whether the list stood at its end as this frame began (see
+        // `note_list_height`).
+        self.at_end_before = self.list_state.is_scrolled_to_end().unwrap_or(true);
         // The list's end clears the floating band and the stack above it.
         let tail_h = super::TAIL_SPACER_H + self.bottom_inset + self.stack_h.get();
         let counts = std::mem::take(&mut self.row_counts);
@@ -730,6 +744,12 @@ impl SessionView {
             // No bottom padding: the list runs to the sheet's edge, under
             // the floating composer; its tail row carries the inset.
             .key_context(TRANSCRIPT_CONTEXT)
+            // The wheel is taken over the whole sheet, margins included —
+            // on the 880 px measure alone, a wheel beside the text scrolled
+            // nothing (owner 2026-10-15). Positioned, so the capture's
+            // absolute canvas spans this box.
+            .relative()
+            .child(wheel_capture(cx))
             .child(
                 div()
                     .w_full()
@@ -737,7 +757,12 @@ impl SessionView {
                     .min_h(px(0.0))
                     .flex()
                     .flex_col()
-                    .max_w(px(TRANSCRIPT_MEASURE))
+                    // The measure plus the quiet rows' bleed on each side:
+                    // the list clips its rows to this box, and on the bare
+                    // measure it cut the rows' rounded hover ends off square
+                    // (owner 2026-10-15). Every row pads back in by the bleed,
+                    // so text sits on the measure exactly as before.
+                    .max_w(px(TRANSCRIPT_MEASURE + 2.0 * aui::transcript::QUIET_ROW_BLEED))
                     .mx_auto()
                     // `relative` is load-bearing for `wheel_capture` below:
                     // its canvas is absolute and `size_full`, and an absolute
@@ -751,7 +776,11 @@ impl SessionView {
                     .on_children_prepainted(move |bounds, _, cx| {
                         if let Some(first) = bounds.first() {
                             let width = f32::from(first.size.width);
-                            let _ = width_report.update(cx, |view, _| view.note_list_width(width));
+                            let height = f32::from(first.size.height);
+                            let _ = width_report.update(cx, |view, cx| {
+                                view.note_list_width(width);
+                                view.note_list_height(height, cx);
+                            });
                         }
                     })
                     // D7. The wheel accumulates on the view here, in the
@@ -785,7 +814,6 @@ impl SessionView {
                     // hardcoded 20 px; and a gesture that is more horizontal
                     // than vertical is left alone, so a wide markdown table
                     // still scrolls sideways.
-                    .child(wheel_capture(cx))
                     .child(
                         list(self.list_state.clone(), move |ix, window, cx| {
                             // One item per row of a turn: only visible rows are
@@ -804,7 +832,7 @@ impl SessionView {
                                 // else unresolvable is an empty row, as
                                 // before.
                                 if turn_ix == turns.len() {
-                                    let tail = div().w_full().pb(px(tail_h));
+                                    let tail = div().w_full().px(px(aui::transcript::QUIET_ROW_BLEED)).pb(px(tail_h));
                                     return match &progress {
                                         Some(progress) => tail.child(progress.row()).into_any_element(),
                                         None => tail.into_any_element(),
@@ -813,7 +841,7 @@ impl SessionView {
                                 return div().into_any_element();
                             };
                             let last_of_turn = ix == last_row || rows.get(ix + 1).is_some_and(|(t, _)| *t != turn_ix);
-                            let mut item = div().w_full().pb(px(if last_of_turn { TURN_GAP } else { BLOCK_GAP }));
+                            let mut item = div().w_full().px(px(aui::transcript::QUIET_ROW_BLEED)).pb(px(if last_of_turn { TURN_GAP } else { BLOCK_GAP }));
                             if ix == 0 {
                                 item = item.pt(px(TRANSCRIPT_PAD_TOP));
                             }

@@ -1748,6 +1748,10 @@ mod tests {
         assert_eq!(selected(vc), Some(2));
         vc.simulate_keystrokes("up");
         assert_eq!(selected(vc), Some(1), "up did not move back");
+        // ⎋ closes it (owner 2026-10-15: the approval's ⎋ handler swallowed
+        // the key and the menu stayed open).
+        vc.simulate_keystrokes("escape");
+        assert_eq!(selected(vc), None, "escape closes the menu");
         restore_state(state);
     }
 
