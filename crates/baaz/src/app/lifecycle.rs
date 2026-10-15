@@ -830,34 +830,41 @@ impl Harness {
         let before = self.sidebar_list_top();
         let size = window.bounds().size;
         let at = point(px(100.0), size.height * 0.4);
-        for _ in 0..n {
-            window.dispatch_event(
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
-                    position: at,
-                    delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
-                    ..Default::default()
-                }),
-                cx,
-            );
-        }
-        let after = self.sidebar_list_top();
-        // The flattened row count (heads + folds + sessions), not the
-        // session count `visible_sessions(cx).len()` used to log here
-        //: `item_ix` walks the
-        // flattened model, so a probe comparing it against `rows=` needs
-        // the same count or its bound is off by the header/fold rows.
-        let rows = self.prev_sidebar_rows.len();
-        let centre = crate::session::take_centre_renders();
-        // The list walks down as `item_ix` grows; a click that moves
-        // nothing reads the same index twice, an outside open the minimum
-        // travel to its row — the probe semantics the div offset had.
-        crate::baaz_log!(
-            "sbwheel dy={dy} n={n} sidebar_ix={bix}+{boff:.1}->{aix}+{aoff:.1} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
-            bix = before.item_ix,
-            boff = f32::from(before.offset_in_item),
-            aix = after.item_ix,
-            aoff = f32::from(after.offset_in_item),
-        );
+        // Dispatched after this update returns: the sidebar's own wheel
+        // handler updates `Harness`, and dispatching from inside the
+        // step's update re-entered it (a double-lease abort, found when a
+        // seeded sidebar was tall enough to take the wheel).
+        let handle = window.window_handle();
+        let this = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                for _ in 0..n {
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }
+            });
+            let _ = this.update(cx, |this, _| {
+                let after = this.sidebar_list_top();
+                // The flattened row count (heads + folds + sessions): `item_ix`
+                // walks the flattened model, so a probe comparing it against
+                // `rows=` needs the same count.
+                let rows = this.prev_sidebar_rows.len();
+                let centre = crate::session::take_centre_renders();
+                crate::baaz_log!(
+                    "sbwheel dy={dy} n={n} sidebar_ix={bix}+{boff:.1}->{aix}+{aoff:.1} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
+                    bix = before.item_ix,
+                    boff = f32::from(before.offset_in_item),
+                    aix = after.item_ix,
+                    aoff = f32::from(after.offset_in_item),
+                );
+            });
+        });
     }
 
     /// `resize-begin:<x>` / `resize-move:<x>` / `resize-end`: the scripted

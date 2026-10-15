@@ -348,6 +348,21 @@ the pictures, files, quotation and Browse annotation batch a turn went out with 
 rhythm** everywhere — line 23 (1.6), paragraphs 12, list indent 24 (the short/long split in 2.3 is dropped); the
 **skill row keeps its click** into the Skills page, with no chevron.
 
+Owner review of the live build, 2026-10-14 (annotated screenshots, Claude Desktop as the reference) — these
+supersede the matching values above:
+- **Reading scale 16 / 26**: body 16 px on 26 (rendered), paragraphs 16, list items 4 apart, h1 24 · h2 20 · h3 17
+  (h2 28 above / 10 below, h3 22 / 8, rules 22), blocks of a turn 14 apart, turns 28 apart; the user bubble and
+  the composer field at the same 16.
+- **Composer in Claude's shape**: the field is its own Raised box (r 12, 1 px edge at ink 8 %, ink 22 % while it
+  holds the keyboard), chips above the text, send inside at the right; the controls row (+ · provider · meter ·
+  model · mode · effort) stands outside it, 6 below; 20 px under the controls to the sheet's edge.
+- **Progress inline and informative**: no row pinned over the composer. Under the last message, scrolling with it:
+  a running tool keeps its own live row (verb, target, timer) plus its newest output line; otherwise one status
+  row (`Thinking…`, `Waiting for approval…`, `Finishing up…`, `Working…`, elapsed, queued); streaming text shows only
+  its caret. Esc still interrupts; the hint is not printed.
+- **The sheet's title row stays when the sidebar is closed** (Sessions only; Browse unchanged), opaque under the row
+  with a 24 px fade below it; the sidebar list fades at its scroll edges.
+
 ## 7. Live-check list for the build session (BaazCheck, both modes, over a live page where it applies)
 1. Replay synthetic-markdown: user bubble Raised r 12; nothing under either turn at rest; hover the user turn →
    edit · copy · age; hover the answer → copy + footer; code block header 32 with copy on hover only; table header

@@ -172,9 +172,14 @@ fn reply_complete(turn: &Turn) -> bool {
 /// value for both states: closed (the pill, canvas 100) would re-measure the
 /// list's first item on every toggle.
 const TRANSCRIPT_PAD_TOP: f32 = 80.0;
-/// The composer's distance from the sheet's bottom edge (v3: 12, so 18 from
-/// the window — the pills' 18 from the top).
-const COMPOSER_BOTTOM: f32 = 12.0;
+/// Between blocks of one turn, and between turns: the 16 / 26 reading
+/// scale's rhythm (owner 2026-10-14; were 8 and 16).
+const BLOCK_GAP: f32 = 14.0;
+const TURN_GAP: f32 = 28.0;
+/// The space under the composer's controls row to the sheet's bottom edge:
+/// 20 (owner 2026-10-14, Claude's shape: the field, its controls under it,
+/// then air).
+const COMPOSER_BOTTOM: f32 = 20.0;
 /// The key context the transcript list wears, so ⌘C reaches the selection
 /// copy without ever matching inside the composer or a card field.
 pub const TRANSCRIPT_CONTEXT: &str = "BaazTranscript";
@@ -203,6 +208,11 @@ const POPOVER_GAP: f32 = 8.0;
 /// every client command **and** every installed skill, and a workspace with
 /// twenty skills would otherwise reach past the top of the window.
 const POPOVER_MAX_H: f32 = 560.0;
+/// What a caret menu's rows cannot have of the window's height: the sheet's
+/// insets and title row with a margin (6 + 6 + 32 + 12), the composer band
+/// (a two-line composer, 12 under it, status row: ~140), the popover gap and
+/// the panel's padding and footer (8 + 12 + 30).
+const CARET_MENU_CHROME: f32 = 56.0 + 140.0 + 50.0;
 /// How many skill rows the `/` menu offers at once.
 const SKILL_ROWS: usize = 8;
 

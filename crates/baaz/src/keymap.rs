@@ -178,6 +178,13 @@ pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
                 .unwrap_or_else(|| panic!("keymap table names an unknown action: {}", entry.action))
         })
         .collect();
+    // The composer arrows' field-depth twins ride after the table rows
+    // (still after the libraries, so they still win the tie).
+    for entry in KEYMAP {
+        if let Some(twin) = field_twin(entry.context, entry.keystroke) {
+            bindings.extend(binding_for_action(entry.action, entry.keystroke, Some(&twin)));
+        }
+    }
     let feedback = crate::app::feedback_ui::FEEDBACK_CONTEXT;
     let mut seen: Vec<&str> = Vec::new();
     let mut swallow = |keystroke: &'static str| {
@@ -205,6 +212,26 @@ pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
     swallow("tab");
     swallow("shift-tab");
     bindings
+}
+
+/// The composer's arrow keys, again at the text field's own depth.
+///
+/// The composer's textarea wears the input layer's `Input` context, whose
+/// own `up` / `down` / `left` / `right` bindings (caret moves) match deeper
+/// than anything bound on `BaazComposer`, an ancestor — and a caret move on
+/// the first or last line consumes the key without moving. So the `@` and
+/// `/` menus, the chip pickers' arrows and prompt history never received an
+/// arrow while the field held focus (owner, 2026-10-14: "arrow keys are not
+/// working in the dropdown"). The palette met the same wall and binds
+/// `AuiMenu > Input` ([`crate::app::PALETTE_QUERY_CONTEXT`]); this is that
+/// fix for every composer arrow: a descendant predicate matches at the
+/// field's full depth, ties the textarea's binding, and wins by
+/// registration order (Baaz binds after the libraries). The plain binding
+/// stays for when focus is elsewhere in the composer (a chip clicked).
+fn field_twin(context: Option<&str>, keystroke: &str) -> Option<String> {
+    let context = context?;
+    let arrow = matches!(keystroke, "up" | "down" | "left" | "right");
+    (arrow && context.starts_with(crate::app::COMPOSER_CONTEXT)).then(|| format!("({context}) > Input"))
 }
 
 /// One [`gpui::KeyBinding`] for a table action name, or `None` when the name
@@ -688,8 +715,16 @@ pub(crate) fn load_from_path(path: &std::path::Path, ignore_user: bool) -> Loade
             // for the same keystroke and context, wins the tie by order, and
             // consumes the keystroke — the same mechanism the `BaazTerminal`
             // rows use to hand keys to the grid.
-            None => bindings.push(gpui::KeyBinding::new(&entry.keystroke, gpui::NoAction {}, context)),
+            None => {
+                bindings.push(gpui::KeyBinding::new(&entry.keystroke, gpui::NoAction {}, context));
+                if let Some(twin) = field_twin(context, &entry.keystroke) {
+                    bindings.push(gpui::KeyBinding::new(&entry.keystroke, gpui::NoAction {}, Some(&twin)));
+                }
+            }
             Some(action) => {
+                if let Some(twin) = field_twin(context, &entry.keystroke) {
+                    bindings.extend(binding_for_action(&action, &entry.keystroke, Some(&twin)));
+                }
                 // `resolve_user_blocks` only accepts known actions with valid
                 // keystrokes, so this cannot fail; a failure would be a
                 // validation hole, and losing the binding loudly beats
@@ -1194,7 +1229,15 @@ mod tests {
                 expected.push(keystroke);
             }
         }
-        let tail = &bindings[KEYMAP.len()..];
+        // Then the composer arrows' field-depth twins (`field_twin`), one
+        // per composer arrow row, each matching inside the text field.
+        let twins: Vec<_> = KEYMAP.iter().filter_map(|row| super::field_twin(row.context, row.keystroke)).collect();
+        assert_eq!(twins.len(), 6, "menu up/down/left/right and history prev/next");
+        for (binding, twin) in bindings[KEYMAP.len()..KEYMAP.len() + twins.len()].iter().zip(twins.iter()) {
+            assert!(twin.ends_with("> Input"), "{twin} matches at the field's depth");
+            assert!(binding.predicate().is_some(), "a twin carries its predicate");
+        }
+        let tail = &bindings[KEYMAP.len() + twins.len()..];
         assert_eq!(
             tail.len(),
             expected.len(),
