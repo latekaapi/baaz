@@ -645,6 +645,12 @@ pub struct SessionView {
     /// included, when the width changes; the frame after a change re-hints
     /// (`note_list_width`).
     list_width: Option<f32>,
+    /// The list's viewport height last frame, and whether the list stood at
+    /// its end when this frame began: a viewport that shrinks under a list at
+    /// its end (the terminal dock opening, the window resizing) keeps it at
+    /// the end instead of leaving "Jump to latest" up (owner 2026-10-15).
+    list_height: Option<f32>,
+    at_end_before: bool,
     /// Set when the width changed: the next sync re-hints the rows.
     rehint: bool,
     /// The `(turn id, row count)` list the virtual list was last synced to.
@@ -1096,6 +1102,8 @@ impl SessionView {
             cached_session_edits_key: None,
             follow: true,
             bottom_inset: 0.0,
+            list_height: None,
+            at_end_before: true,
             stack_h: Rc::new(std::cell::Cell::new(0.0)),
             span_held: Rc::new(HashMap::new()),
             span_sessions: HashMap::new(),
@@ -1773,9 +1781,29 @@ impl SessionView {
     /// The floating composer band's painted height (see `bottom_inset`).
     pub fn set_bottom_inset(&mut self, height: f32, cx: &mut Context<Self>) {
         if (self.bottom_inset - height).abs() > 0.5 {
-            self.bottom_inset = height;
-            cx.notify();
+            self.keep_end_through(cx, |view| view.bottom_inset = height);
         }
+    }
+
+    /// The floating stack's measured height (see `stack_h`).
+    pub(crate) fn note_stack_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if (self.stack_h.get() - height).abs() > 0.5 {
+            self.keep_end_through(cx, |view| view.stack_h.set(height));
+        }
+    }
+
+    /// Changes the list's end inset without losing the end: a list that was
+    /// at its end stays there. The inset arrives a frame after the first
+    /// layout, so a transcript opened at its end used to sit one inset short
+    /// of it, with "Jump to latest" up (owner 2026-10-15).
+    fn keep_end_through(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Self)) {
+        let at_end = self.list_state.is_scrolled_to_end().unwrap_or(true);
+        change(self);
+        if at_end {
+            self.follow = true;
+            self.list_state.scroll_to_end();
+        }
+        cx.notify();
     }
 
     /// Draw the cards settled, for a `--screenshot` run.

@@ -3624,6 +3624,7 @@ impl Harness {
                 TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
             });
         let dock = terminal_dock("terminal-dock", header, body)
+            .surface(true)
             .hint(self.terminal_hint_name(hint_provider))
             .maximized(maximised)
             .on_action(dock_action);
@@ -5468,11 +5469,19 @@ impl Harness {
                             .h(px(32.0))
                             .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet.alpha(0.55), 1.0))),
                     )
-                    .on_children_prepainted(move |bounds, _, cx| {
-                        let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
-                        let _ = inset_to.update(cx, |view, cx| view.set_bottom_inset(height, cx));
-                    })
-                    .child(band)
+                    // Measured on the composer itself: the band's first child is
+                    // the lead-in fade, and reporting *its* 32 px left the list's
+                    // end, the status stack and the caret menus under the
+                    // composer (owner 2026-10-15).
+                    .child(
+                        div()
+                            .w_full()
+                            .on_children_prepainted(move |bounds, _, cx| {
+                                let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
+                                let _ = inset_to.update(cx, |view, cx| view.set_bottom_inset(height, cx));
+                            })
+                            .child(band),
+                    )
                     .children(self.render_corner_stack(cx).map(Self::corner_above_band))
                     .into_any_element();
                 let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
@@ -5586,11 +5595,16 @@ impl Harness {
             // 1–9 on a pending approval: the n-th server-minted choice, in the
             // order the server sent them.
             .on_action(cx.listener(|this, _: &aui::keys::Cancel, window, cx| {
-                // ⎋ on the pending approval (the library binds it in the
-                // approval context the composer names only while empty).
-                this.with_session(cx, |view, cx| {
-                    view.deny_pending(window, cx);
-                });
+                // ⎋ denies a pending approval while the composer is empty;
+                // otherwise the key belongs to whoever is above us — an open
+                // menu closing, the palette, settings. Swallowing it here
+                // broke Esc on every caret menu (owner 2026-10-15).
+                let menu_open = this.overlays.read(cx).menu.is_some();
+                let denied = !menu_open
+                    && this.active.clone().is_some_and(|view| view.update(cx, |view, cx| view.card_has_keys(cx) && view.deny_pending(window, cx)));
+                if !denied {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, nth: &aui::keys::ChooseNth, window, cx| {
                 let index = nth.index;
