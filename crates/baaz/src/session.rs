@@ -708,6 +708,15 @@ pub struct SessionView {
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
+    /// The floating composer band's height, reported by the window each
+    /// frame it paints: the band sits over the list's bottom, so the list
+    /// ends this far up (plus [`Self::stack_h`]) for its last line to
+    /// scroll clear (owner 2026-10-15: the composer floats over the
+    /// transcript).
+    bottom_inset: f32,
+    /// The bottom stack's measured height (status, banners, queue) — it
+    /// floats over the list just above the band.
+    stack_h: Rc<std::cell::Cell<f32>>,
     /// The transcript's cross-block spans (library span model), keyed by
     /// turn id: `(markdown source, span)`, plus one drag session per turn.
     /// One span at a time — a hover or pick that commits in one turn clears
@@ -1086,6 +1095,8 @@ impl SessionView {
             cached_session_edits: Vec::new(),
             cached_session_edits_key: None,
             follow: true,
+            bottom_inset: 0.0,
+            stack_h: Rc::new(std::cell::Cell::new(0.0)),
             span_held: Rc::new(HashMap::new()),
             span_sessions: HashMap::new(),
             copied_turn: None,
@@ -1755,6 +1766,14 @@ impl SessionView {
         }
         if self.tier_banner != banner {
             self.tier_banner = banner;
+            cx.notify();
+        }
+    }
+
+    /// The floating composer band's painted height (see `bottom_inset`).
+    pub fn set_bottom_inset(&mut self, height: f32, cx: &mut Context<Self>) {
+        if (self.bottom_inset - height).abs() > 0.5 {
+            self.bottom_inset = height;
             cx.notify();
         }
     }

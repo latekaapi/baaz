@@ -5437,31 +5437,46 @@ impl Harness {
                 let transcript = if window.is_a11y_active() {
                     view.clone().into_any_element()
                 } else {
-                    view.clone().cached(StyleRefinement::default().flex_grow(1.)).into_any_element()
+                    view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
                 };
                 let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
-                // The corner stack rides the band: its bottom 8 above the
-                // composer's top edge (D4, docs/41 §2.11).
-                // The seam (docs/41 §2.9): a 32 px fade, clear to the sheet,
-                // ends at the composer's top edge so the transcript sinks
-                // into the sheet rather than stopping at a line.
+                // The composer floats over the transcript (owner 2026-10-15:
+                // "it's not floating on top of the transcript"): the band is
+                // absolute at the sheet's bottom and the list runs under it.
+                // Its ground fades from clear at the field's top edge to the
+                // sheet by the controls row, so the transcript stays visible
+                // beside the field; the band's painted height goes to the
+                // session view, whose list ends that far up. The corner
+                // stack rides the band: its bottom 8 above the composer.
                 let sheet = cx.aui().colors.surface_2;
-                let seam = div()
+                let inset_to = view.downgrade();
+                let band = div()
                     .absolute()
                     .left_0()
                     .right_0()
-                    .bottom(gpui::relative(1.0))
-                    .h(px(32.0))
-                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet, 1.0)));
-                let band = div()
-                    .relative()
-                    .w_full()
-                    .child(seam)
+                    .bottom_0()
+                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.55), 0.0), gpui::linear_color_stop(sheet, 0.5)))
+                    // The lead-in: 32 px above the field, clear to half the
+                    // sheet, so the text dissolves into the composer instead
+                    // of meeting its edge.
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(gpui::relative(1.0))
+                            .h(px(32.0))
+                            .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet.alpha(0.55), 1.0))),
+                    )
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
+                        let _ = inset_to.update(cx, |view, cx| view.set_bottom_inset(height, cx));
+                    })
                     .child(band)
                     .children(self.render_corner_stack(cx).map(Self::corner_above_band))
                     .into_any_element();
                 let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
-                v_flex()
+                div()
                     .size_full()
                     .relative()
                     .child(transcript)

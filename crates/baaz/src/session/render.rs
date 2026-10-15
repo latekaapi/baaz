@@ -63,9 +63,14 @@ impl SessionView {
         let tier_banner = self.render_tier_banner(cx);
         let queue = self.render_queue(cx);
         let caret_menu = self.render_caret_menu(window, cx);
-        v_flex()
-            .size_full()
-            .child(transcript)
+        // The composer floats over the transcript (owner 2026-10-15): the
+        // list fills the whole centre and scrolls under the band, and this
+        // stack — status, approvals, banners, queue, the caret menus'
+        // anchor — floats just above the band, reporting its height so
+        // the list's end clears both.
+        let stack_h = self.stack_h.clone();
+        let stack = v_flex()
+            .w_full()
             .children(status)
             .children(external)
             .children(needs_you)
@@ -84,6 +89,26 @@ impl SessionView {
                         .relative()
                         .children(caret_menu),
                 ),
+            );
+        let view = cx.entity().downgrade();
+        div()
+            .size_full()
+            .relative()
+            .child(div().absolute().inset_0().flex().flex_col().child(transcript))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(self.bottom_inset))
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
+                        if (stack_h.get() - height).abs() > 0.5 {
+                            stack_h.set(height);
+                            let _ = view.update(cx, |_, cx| cx.notify());
+                        }
+                    })
+                    .child(stack),
             )
             .into_any_element()
     }
@@ -672,6 +697,8 @@ impl SessionView {
         // 2026-10-14, after Claude Desktop): it scrolls with the transcript
         // instead of standing pinned over the composer.
         let progress = self.inline_progress();
+        // The list's end clears the floating band and the stack above it.
+        let tail_h = super::TAIL_SPACER_H + self.bottom_inset + self.stack_h.get();
         let counts = std::mem::take(&mut self.row_counts);
         self.sync_virtual_list(&counts);
         self.row_counts = counts;
@@ -700,7 +727,8 @@ impl SessionView {
             .flex()
             .flex_col()
             .px(px(TRANSCRIPT_PAD_X))
-            .pb(px(scale::SP_4))
+            // No bottom padding: the list runs to the sheet's edge, under
+            // the floating composer; its tail row carries the inset.
             .key_context(TRANSCRIPT_CONTEXT)
             .child(
                 div()
@@ -776,7 +804,7 @@ impl SessionView {
                                 // else unresolvable is an empty row, as
                                 // before.
                                 if turn_ix == turns.len() {
-                                    let tail = div().w_full().pb(px(super::TAIL_SPACER_H));
+                                    let tail = div().w_full().pb(px(tail_h));
                                     return match &progress {
                                         Some(progress) => tail.child(progress.row()).into_any_element(),
                                         None => tail.into_any_element(),
@@ -2057,6 +2085,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     }
                 });
                 let menu = model_menu("model-menu", rows, selected, true)
+                    .align_end(true)
                     .open_submenu(sub_open.then_some(selected))
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_pick_nested(move |model, level, window, cx| pick_nested(&(model.clone(), level.clone()), window, cx))
@@ -2087,6 +2116,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 });
                 let pick_default = cx.listener(|this: &mut Self, _: &SharedString, _, cx| this.pick_effort(None, cx));
                 let menu = effort_slider_menu("effort-menu", levels, current, default_row, true)
+                    .align_end(true)
                     .on_change(move |id, window, cx| change(id, window, cx))
                     .on_pick(move |id, window, cx| pick_default(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
@@ -2158,6 +2188,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     }
                 });
                 let menu = effort_menu("effort-menu", rows, selected, true)
+                    .align_end(true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
@@ -2174,6 +2205,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     }
                 });
                 let menu = mode_menu("mode-menu", rows, selected, true)
+                    .align_end(true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
