@@ -189,9 +189,11 @@ pub fn dispatch(
                     command_id: request_id,
                     config,
                     model_id: model,
+                    permission_profile: None,
                     provider_id: model_provider,
                     session_id,
                     workspace_root: workspace,
+                    workspace_roots: None,
                 })
                 .map_err(transport_error)?;
             Ok(Ack::Session {
@@ -210,6 +212,7 @@ pub fn dispatch(
                     cursor,
                     exclude_items: metadata_only.then_some(true),
                     history: None,
+                    permission_profile: None,
                     session_id,
                 })
                 .map_err(transport_error)?;
@@ -321,6 +324,8 @@ pub fn dispatch(
                     input: parts.into_iter().map(input_part).collect(),
                     reasoning_effort: reasoning_effort(effort.as_deref()),
                     session_id,
+                    user_shell: None,
+                    workspace_roots: None,
                 })
                 .map_err(transport_error)?;
             Ok(Ack::TurnAccepted { turn_id: result.turn_id })

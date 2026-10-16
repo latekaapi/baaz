@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 /// One transcript item at one revision (tdd SS4.4.1 common fields plus the per-kind fields of
-/// SS4.5.2–4.5.10, all optional and owned by the kind their doc names). `item/started`,
+/// SS4.5.2–4.5.14, all optional and owned by the kind their doc names). `item/started`,
 /// `item/updated`, and `item/completed` carry the full object; `item/delta` appends to it by field
 /// path. One flat struct, exactly as the schema declares it — never an enum.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,9 +34,17 @@ pub struct Item {
     /// `toolCall`: who backgrounded the task; absent on pre-split records — never inferred.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_initiator: Option<BackgroundInitiator>,
+    /// `reminderChild`: `true` when this child is a blocking reminder; absent otherwise, never
+    /// `false` (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<bool>,
     /// `toolCall`: the provider call id (`call_...`), opaque.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    /// `workflow`: one stored-output link per recorded child spawn with an objective, fetched via
+    /// `item/readOutput` (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_prompt_refs: Option<Vec<OutputRef>>,
     /// `subagent`/`reminderChild`: the child's own session id, readable via `session/read` /
     /// `view/page`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,9 +66,19 @@ pub struct Item {
     /// `subagent`: camelCased `SubagentControlStatus`; `status` stays the generic item vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_status: Option<SubagentControlStatus>,
+    /// `agentMessage`: `true` when the provider stream died mid-reply and the run failed with this
+    /// partial text committed (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_off: Option<bool>,
+    /// `workflow`: the run-level declared-phase label; terminal-only (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_phase: Option<String>,
     /// `subagent`: nesting depth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<u32>,
+    /// `toolCall`: the tool's own words for this call; absent = none (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<ToolDisplayLabel>,
     /// `userMessage`: presentation form; absent when the client sent none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_text: Option<String>,
@@ -70,6 +88,9 @@ pub struct Item {
     /// `workflow`: launched entry identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_id: Option<String>,
+    /// `hookRun`: the hook event (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<HookEventName>,
     /// `userShell`: the process exit code, when it exited by code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -87,20 +108,39 @@ pub struct Item {
     /// client does not recognize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_text: Option<String>,
+    /// `workflow`: the human terminal summary; terminal-only (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_summary: Option<String>,
     /// `reminderChild`: the reminder generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<u64>,
+    /// `hookRun`: the durable `hook_key` (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_key: Option<String>,
     /// Bare UUIDv7; the item's identity across its whole lifecycle. Opaque to clients.
     pub item_id: String,
     /// The item kind: clients MUST render unknown kinds generically — kind name plus `status` plus
     /// `fallbackText`.
     pub kind: ItemKind,
+    /// `hookRun`: capped display label (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// `workflow`: the reconciled terminal message, set on completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// `agentMessage`: the phase the model declared on the commit, set on the completed item only.
+    /// Absent or unknown reads as `finalAnswer` (muse 1.4.9). Not a turn-done signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_phase: Option<MessagePhase>,
     /// `toolCall`: rich content the model saw beyond text; base64 is not inlined on the view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_visible_content: Option<Vec<ModelVisibleContent>>,
+    /// `monitorFeed`: the monitor's arm-time description (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_description: Option<String>,
+    /// `monitorFeed`: the monitor task id — the monitor's `toolCall` `itemId` (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_id: Option<String>,
     /// `subagent`: objective as spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective: Option<String>,
@@ -120,6 +160,10 @@ pub struct Item {
     /// absent = no diff available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_summary: Option<PatchSummary>,
+    /// `workflow`: `true` only while a durable pause is in force; absent otherwise, never `false`
+    /// (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
     /// `reasoning`: provider reasoning item id (e.g. `rs_...`), for provider-side correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_item_id: Option<String>,
@@ -148,16 +192,52 @@ pub struct Item {
     /// `subagent`: role as spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// `hookRun`: terminal-only durable outcome (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_status: Option<HookRunStatus>,
     /// `workflow`: launched script identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_id: Option<String>,
+    /// `sideChat`: the side's own session id, readable via `session/read`/`view/page` (muse
+    /// 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_session_id: Option<String>,
     /// Terminal = anything other than `"inProgress"`. Unknown values MUST be treated as
     /// terminal-unknown and rendered generically.
     pub status: ItemStatus,
+    /// `toolCall`: the latest external-attempt facet. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_attempt: Option<Map<String, Value>>,
+    /// `toolCall`: the latest child-summary facet. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_children: Option<Map<String, Value>>,
+    /// `toolCall`: the latest health facet. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_health: Option<Map<String, Value>>,
+    /// `toolCall`: the task's visible latest-status line (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_line: Option<String>,
+    /// `toolCall`: the latest detail's phase row, verbatim (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_phase: Option<String>,
+    /// `toolCall`: the latest progress facet. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_progress: Option<Map<String, Value>>,
+    /// `toolCall`: the latest active-step facet. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_step: Option<Map<String, Value>>,
     /// `userMessage`: `true` when injected mid-turn via `turn/steer` or `ifBusy: "steer"`; absent
     /// otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steered: Option<bool>,
+    /// `workflow`: display-only stop affordance — `true` while the run is open (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_available: Option<bool>,
     /// `compaction`: summarizer strategy (installed only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_id: Option<String>,
@@ -180,6 +260,9 @@ pub struct Item {
     /// provider exposes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `workflow`: the run's launch token budget (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<WorkflowTokenBudget>,
     /// `compaction`: token budget snapshot after, when measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_after: Option<u64>,
@@ -189,6 +272,11 @@ pub struct Item {
     /// `toolCall`: tool name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    /// `toolCall`: the shared semantic receipt — what the operation did, as machine-readable
+    /// fact. Carried verbatim, not yet typed
+    /// (muse 1.4.9; Baaz does not read it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_receipt: Option<Map<String, Value>>,
     /// `compaction`: what initiated the compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<CompactionTrigger>,
@@ -274,7 +362,75 @@ pub struct ItemDeltaParams {
 }
 
 open_enum! {
-    /// The nine v1 item kinds (tdd SS4.5.2–4.5.10). A new kind is additive evolution, and clients
+    /// Hook event names (tdd SS3.26.1, muse 1.4.9), the `hookRun` item's `event`.
+    HookEventName {
+        SessionStart = "sessionStart",
+        UserPromptSubmit = "userPromptSubmit",
+        PreToolUse = "preToolUse",
+        PermissionRequest = "permissionRequest",
+        PostToolUse = "postToolUse",
+        PreCompact = "preCompact",
+        PostCompact = "postCompact",
+        SubagentStart = "subagentStart",
+        SubagentStop = "subagentStop",
+        Stop = "stop",
+        SessionEnd = "sessionEnd",
+        Notification = "notification",
+        PostToolUseFailure = "postToolUseFailure",
+        StopFailure = "stopFailure",
+        PostToolBatch = "postToolBatch",
+        Interrupt = "interrupt",
+        SessionFork = "sessionFork",
+        ToolUseStart = "toolUseStart",
+        PreLlmCall = "preLLMCall",
+        PostLlmCall = "postLLMCall",
+    }
+}
+
+open_enum! {
+    /// The `hookRun` item's durable outcome (tdd SS4.5.11, muse 1.4.9).
+    HookRunStatus {
+        Completed = "completed",
+        Blocked = "blocked",
+        Failed = "failed",
+        TimedOut = "timedOut",
+        Cancelled = "cancelled",
+    }
+}
+
+open_enum! {
+    /// `agentMessage.messagePhase` (tdd SS4.5.3, muse 1.4.9): the phase the model declared on the
+    /// commit. An absent or unknown value on a completed item reads as `finalAnswer`.
+    MessagePhase {
+        Commentary = "commentary",
+        FinalAnswer = "finalAnswer",
+    }
+}
+
+/// `toolCall.displayLabel` (tdd SS4.5.5, muse 1.4.9): the call's words in three one-line forms,
+/// always present together; the item's `status` picks the form.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDisplayLabel {
+    /// Shown while the call runs (`inProgress`).
+    pub active: String,
+    /// Shown after the call succeeds (`completed`).
+    pub done: String,
+    /// Shown for every other status, beside that status; never implies success.
+    pub neutral: String,
+}
+
+/// `workflow`: the run's launch token budget (tdd SS4.5.8, muse 1.4.9).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTokenBudget {
+    /// The effective launch budget in tokens, verbatim from the launch fact.
+    pub total: u64,
+}
+
+open_enum! {
+    /// The v1 item kinds (tdd SS4.5.2–4.5.13) plus post-v1 kinds; muse 1.4.9 adds `hookRun`,
+    /// `sideChat`, `webSearch` and `monitorFeed`. A new kind is additive evolution, and clients
     /// MUST render unknown kinds generically.
     ItemKind {
         UserMessage = "userMessage",
@@ -286,6 +442,10 @@ open_enum! {
         Workflow = "workflow",
         ReminderChild = "reminderChild",
         Compaction = "compaction",
+        HookRun = "hookRun",
+        SideChat = "sideChat",
+        WebSearch = "webSearch",
+        MonitorFeed = "monitorFeed",
     }
 }
 
@@ -569,6 +729,12 @@ pub struct WorkflowChild {
     /// The child's observed duration, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// The attempt's machine failure class, verbatim when recorded (muse 1.4.9; open vocabulary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    /// The attempt's failure reason text, cut to at most 2,048 UTF-8 bytes (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     /// The child's display label, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,

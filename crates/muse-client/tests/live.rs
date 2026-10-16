@@ -237,6 +237,7 @@ fn live_backfill_parity() {
             cursor: None,
             history: None,
             config: None,
+            permission_profile: None,
         })
         .expect("session/resume");
 

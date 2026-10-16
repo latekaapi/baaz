@@ -53,6 +53,50 @@ const RESULTS_NOT_MODELLED: &[&str] = &[
     "subagent/readResult",
 ];
 
+/// The muse 1.4.9 surfaces that have no types yet — methods and notifications
+/// alike.
+///
+/// The 1.3.0 re-mirror typed every new definition. 1.4.9 adds 121, almost all
+/// of them for lanes Baaz neither calls nor renders (computer use, plugins and
+/// marketplaces, hooks, feedback, recaps, media upload, side chats, the
+/// session-list stream), so only the members of types Baaz already decodes
+/// were mirrored. Everything named here still reaches the fold, untyped, and
+/// falls through its unhandled-method arm. Typing one means deleting it here
+/// and adding its arm below.
+const NOT_TYPED_1_4_9: &[&str] = &[
+    "session/sideChat",
+    "skill/setActivation",
+    "skill/import",
+    "hook/list",
+    "plugin/list",
+    "plugin/install",
+    "plugin/marketplaceAdd",
+    "plugin/marketplaceUpdate",
+    "plugin/marketplaceRemove",
+    "task/list",
+    "workflow/pause",
+    "workflow/resume",
+    "media/upload",
+    "userInput/interrupt",
+    "feedback/submit",
+    "recap/request",
+    "recap/cancel",
+    "computerUseSettings/read",
+    "computerUseSettings/update",
+    "computerUseSetup/read",
+    "computerUseSetup/start",
+    "computerUseSetup/check",
+    "session/closed",
+    "turn/foregroundCompleted",
+    "approval/reviewing",
+    "userInput/engaged",
+    "recap/completed",
+    "session/listChanged",
+    "computerUseSetup/changed",
+    "plugin/changed",
+    "plugin/marketplaceChanged",
+];
+
 fn fixture_files() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(FIXTURE_DIR)
         .expect("fixture directory")
@@ -194,6 +238,7 @@ fn roundtrip_server_params(method: &str, params: Option<&Value>) -> bool {
         "turn/completed" => roundtrip::<TurnCompletedParams>(w, params),
         "turn/retracted" => roundtrip::<TurnRetractedParams>(w, params),
         "turn/retryScheduled" => roundtrip::<TurnRetryScheduledParams>(w, params),
+        "turn/modelRetryScheduled" => roundtrip::<TurnModelRetryScheduledParams>(w, params),
         "turn/unqueued" => roundtrip::<TurnUnqueuedParams>(w, params),
         "item/started" => roundtrip::<ItemStartedParams>(w, params),
         "item/updated" => roundtrip::<ItemUpdatedParams>(w, params),
@@ -528,13 +573,13 @@ fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
 
 #[test]
 fn index_constants_match_the_published_schema() {
-    assert_eq!(MSP_METHODS.len(), 47);
-    assert_eq!(MSP_NOTIFICATIONS.len(), 30);
+    assert_eq!(MSP_METHODS.len(), 69);
+    assert_eq!(MSP_NOTIFICATIONS.len(), 41);
     assert_eq!(MSP_SERVER_REQUESTS, &["approval/request", "userInput/request"]);
-    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 38);
+    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 44);
     assert!(SCHEMA_FINGERPRINT.starts_with("sha256:"));
-    // `session/started` is emitted by the binary but absent from the published index.
-    assert!(!MSP_NOTIFICATIONS.contains(&"session/started"));
+    // `session/started` was emitted but unindexed until muse 1.4.9, which indexes it.
+    assert!(MSP_NOTIFICATIONS.contains(&"session/started"));
 }
 
 /// One inventory, three tables: every published method and notification must
@@ -548,12 +593,16 @@ fn index_constants_match_the_published_schema() {
 /// which is exactly what the captures cannot prove for a method they do not
 /// happen to contain.
 ///
-/// [`UNTYPED_METHODS`] and [`RESULTS_NOT_MODELLED`] are the two deliberate
-/// exception lists, and the three server→client frames are named here because
-/// the published index does not carry them (see [`muse_client::schema`]).
+/// [`UNTYPED_METHODS`], [`RESULTS_NOT_MODELLED`] and [`NOT_TYPED_1_4_9`] are the
+/// three deliberate exception lists, and the three server→client frames are
+/// named here because the published index did not carry them before muse 1.4.9
+/// (see [`muse_client::schema`]).
 #[test]
 fn every_published_method_has_a_dispatch_arm() {
     for method in MSP_METHODS {
+        if NOT_TYPED_1_4_9.contains(method) {
+            continue;
+        }
         if !UNTYPED_METHODS.contains(method) {
             assert!(
                 roundtrip_request_params(method, None),
@@ -565,7 +614,7 @@ fn every_published_method_has_a_dispatch_arm() {
         }
     }
     for method in MSP_NOTIFICATIONS {
-        if UNTYPED_METHODS.contains(method) {
+        if UNTYPED_METHODS.contains(method) || NOT_TYPED_1_4_9.contains(method) {
             continue;
         }
         assert!(
@@ -680,4 +729,95 @@ fn new_1_2_1_shapes_round_trip() {
             "patchSummary": {"added": 10, "files": 2, "removed": 3},
         })),
     );
+}
+
+/// **muse 1.4.9 members**, shaped from `fixtures/msp/msp/msp.schema.json` (no
+/// 1.4.9 capture is checked in): the new members of the types Baaz decodes
+/// round-trip byte-exact, a new item kind is named rather than `Unknown`, and
+/// the 1.3.0 shapes without them still decode — the bump is additive both ways.
+#[test]
+fn new_1_4_9_shapes_round_trip() {
+    let range = serde_json::json!({"stream": {"kind": "session", "id": "s1"},
+                                   "first": {"id": "e1", "sequence": 1},
+                                   "last": {"id": "e1", "sequence": 1}});
+    roundtrip::<Session>(
+        "session with 1.4.9 members",
+        Some(&serde_json::json!({
+            "sessionId": "s1", "path": "", "createdAt": "t", "updatedAt": "t",
+            "status": "idle", "turnCount": 0, "activeTurnId": null, "forkedFrom": null,
+            "modelId": null, "providerId": null, "workspaceRoot": null,
+            "createdByClient": {"name": "baaz", "version": "0.1.0"},
+            "generatedName": "Tidy otter", "kind": "subagent", "nameOrigin": "automatic",
+            "parentSessionId": "s0", "sideFrom": null,
+        })),
+    );
+    roundtrip::<Item>(
+        "hookRun item outside a turn",
+        Some(&serde_json::json!({
+            "itemId": "i1", "kind": "hookRun", "revision": 1, "status": "completed",
+            "turnId": null, "event": "sessionStart", "hookKey": "h1", "label": "lint",
+            "runStatus": "timedOut",
+        })),
+    );
+    let kind: ItemKind = serde_json::from_value(serde_json::json!("monitorFeed")).unwrap();
+    assert_eq!(kind, ItemKind::MonitorFeed);
+    roundtrip::<Item>(
+        "toolCall with displayLabel, messagePhase and an untyped receipt",
+        Some(&serde_json::json!({
+            "itemId": "i2", "kind": "toolCall", "revision": 3, "status": "completed",
+            "turnId": "t1", "tool": "cron",
+            "displayLabel": {"active": "Scheduling", "done": "Scheduled", "neutral": "Schedule"},
+            "statusLine": "waiting", "statusAttempt": {"attempt": 1, "operation": "x", "system": "meta"},
+            "toolReceipt": {"family": "cron", "operation": "create", "outcome": "succeeded"},
+        })),
+    );
+    roundtrip::<TurnCompletedParams>(
+        "quota-exhausted failure",
+        Some(&serde_json::json!({
+            "sessionId": "s1", "turnId": "t1", "terminal": "failed", "sourceRange": range,
+            "viewCursor": "v:s1:2",
+            "error": {"kind": "mcpLinkError", "message": "m", "retryable": false,
+                      "quota": {"limitKind": "tierLimit", "resetsAtMs": 1760000000000_u64}},
+        })),
+    );
+    roundtrip::<SessionTokenUsageParams>(
+        "token usage with cache splits and cost",
+        Some(&serde_json::json!({
+            "sessionId": "s1", "turnId": "t1", "modelId": null, "promptTokens": 10,
+            "totalTokens": 12, "sourceRange": range, "viewCursor": "v:s1:3",
+            "usage": {"cachedTokens": 0, "inputTokens": 10, "outputTokens": 2,
+                      "reasoningTokens": 0},
+            "cumulative": {"outputTokens": 2, "promptTokens": 10, "totalTokens": 12,
+                           "cacheReadTokens": 4, "cacheWriteTokens": 1,
+                           "cost": {"partial": true, "usd": 0.0125}},
+        })),
+    );
+    // `decidedAt` is required-nullable in 1.4.9 and absent before it: both decode, and
+    // each re-serializes as it came.
+    let settled = |decided_at: Option<Value>| {
+        let mut v = serde_json::json!({
+            "answers": [], "clarification": null, "decidedByCommandId": null,
+            "outcome": "cancelled", "reason": null, "sessionId": "s1", "sourceRange": range,
+            "userInputId": "u1", "viewCursor": "v:s1:4",
+        });
+        if let Some(at) = decided_at {
+            v["decidedAt"] = at;
+        }
+        v
+    };
+    roundtrip::<UserInputSettledParams>("settled, 1.3.0", Some(&settled(None)));
+    roundtrip::<UserInputSettledParams>("settled, 1.4.9 null", Some(&settled(Some(Value::Null))));
+    roundtrip::<UserInputSettledParams>("settled, 1.4.9", Some(&settled(Some("t".into()))));
+    roundtrip::<InitializeResult>(
+        "initialize with sandbox availability",
+        Some(&serde_json::json!({
+            "experimentalApi": true, "grantedCapabilities": ["sessionMcp", "sessionRename"],
+            "museHome": "/h", "platformFamily": "unix", "platformOs": "macos",
+            "sandboxAvailability": "available",
+            "schema": {"fingerprint": SCHEMA_FINGERPRINT, "version": 1},
+            "serverInfo": {"name": "muse", "version": "1.4.9"}, "userAgent": "ua",
+        })),
+    );
+    let part: TurnInputPartType = serde_json::from_value(serde_json::json!("video")).unwrap();
+    assert_eq!(part, TurnInputPartType::Video);
 }

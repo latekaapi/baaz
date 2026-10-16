@@ -242,6 +242,10 @@ pub struct ApprovalRequestParams {
     pub source_range: SourceRange,
     /// What is being approved.
     pub subject: ApprovalSubject,
+    /// Child (native subagent) provenance when this approval is a child's, projected onto the
+    /// parent session's plane (muse 1.4.9); the parent's own approvals omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_origin: Option<ApprovalSubagentOrigin>,
     /// The gated task.
     pub task_id: String,
     /// The gated provider tool-call id.
@@ -252,6 +256,19 @@ pub struct ApprovalRequestParams {
     pub turn_id: String,
     /// Opaque, strictly monotonic view cursor — relay it, never parse it.
     pub view_cursor: String,
+}
+
+/// Child (native subagent) provenance of an approval projected onto the PARENT session's approval
+/// plane (ADR 36182, muse 1.4.9), so a client can attribute the prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalSubagentOrigin {
+    /// The child run that parked on this approval.
+    pub child_run_id: String,
+    /// The child session stream id whose records carry this approval.
+    pub child_session_id: String,
+    /// The originating child's subagent id.
+    pub subagent_id: String,
 }
 
 /// Approval-stage token carried in SS5 params and stale-requirement errors.
@@ -294,6 +311,9 @@ pub struct ApprovalResolvedParams {
     pub amendment: Option<ApprovalAmendment>,
     /// The resolved approval.
     pub approval_id: String,
+    /// The decision time as RFC3339 (muse 1.4.9). Optional on the wire: older hosts omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
     /// The `approval/decide` that won, when a command decided it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_by_command_id: Option<String>,
@@ -311,6 +331,10 @@ pub struct ApprovalResolvedParams {
     pub source_range: SourceRange,
     /// One entry per satisfied stage.
     pub stage_evidence: Vec<ApprovalStageEvidence>,
+    /// Child (native subagent) provenance when this approval is a child's, projected onto the
+    /// parent session's plane (muse 1.4.9); the parent's own approvals omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_origin: Option<ApprovalSubagentOrigin>,
     /// The owning turn.
     pub turn_id: String,
     /// Opaque, strictly monotonic view cursor.
@@ -439,6 +463,10 @@ pub struct ApprovalUpdatedParams {
     pub source_range: SourceRange,
     /// The refreshed subject.
     pub subject: ApprovalSubject,
+    /// Child (native subagent) provenance when this approval is a child's, projected onto the
+    /// parent session's plane (muse 1.4.9); the parent's own approvals omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_origin: Option<ApprovalSubagentOrigin>,
     /// Opaque, strictly monotonic view cursor.
     pub view_cursor: String,
 }

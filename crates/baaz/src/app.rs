@@ -2434,6 +2434,7 @@ impl Harness {
             exclude_items: Some(true),
             history: None,
             config: None,
+            permission_profile: None,
         };
         // The terminal relay's route, as on every resume: re-registered
         // and carried, grant-gated.

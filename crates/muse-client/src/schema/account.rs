@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountState {
+    /// Display-only HTTPS avatar URL for the account-login identity (muse 1.4.9's experimental
+    /// surface); omitted for every other lane and on absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     /// `false` exactly when the effective provider endpoint needs no caller
     /// credential (keyless/gateway deployments), so those clients never nag
     /// the user to sign in.

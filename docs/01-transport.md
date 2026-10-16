@@ -284,6 +284,26 @@ the schema and a capture disagree, the capture wins and it is written down.
     binary no longer logs `FingerprintMismatch`, and `--session <id>` opens a
     session's full transcript unchanged.
 
+17. **muse 1.4.9's schema is additive over 1.3.0** (1.3.0–1.4.8 all published
+    `sha256:ab69549a…`). `SCHEMA_FINGERPRINT` moved to `sha256:5d3b43e5…`,
+    re-exported the same way. No method, notification, definition or enum
+    value was removed or renamed; `ApprovalMode` and `ReasoningEffort` are
+    unchanged. Of the 121 new definitions only the members of types Baaz
+    already decodes were mirrored (`Session` kind/name origin/generated name/
+    side provenance, `Item`'s hookRun/sideChat/webSearch/monitorFeed members,
+    cache splits and `cost` on `CumulativeTokenUsage`, `TurnError.quota`,
+    `lastTurn` on read/resume, `decidedAt`, `subagentOrigin`, sandbox
+    availability on `initialize`, `turn/modelRetryScheduled`), plus every new
+    open-enum value and the closed `TurnInputPartType::Video`. The lanes Baaz
+    does not touch (computer use, plugins, hooks, feedback, recaps, media
+    upload, side chats, the session-list stream) are listed untyped in
+    `schema_roundtrip.rs` (`NOT_TYPED_1_4_9`). `ModelCatalogEntry`'s new
+    `variants`/`defaultReasoningEffort`/`reasoningEffortVariants` are not yet
+    typed: they decode by being ignored. Verified against the real binary
+    without a turn: `initialize` reports no mismatch, and `account/read`,
+    `session/list`, `usage/read` and 50 full `session/read`s re-serialize
+    byte-exact.
+
 ---
 
 ## 5. What the fold does with the shape mismatch
