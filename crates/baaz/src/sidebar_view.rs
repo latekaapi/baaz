@@ -915,16 +915,37 @@ impl Harness {
     /// placeholder), the tier's plan label, and — only while the menu is
     /// open — one usage card per enabled provider from `usage_rows`.
     fn sidebar_account(&self, menu_open: bool) -> Account {
-        let (name, email, initial) = match &self.auth {
-            Auth::SignedIn(identity) => (identity.display_name(), identity.email.clone(), identity.initial()),
-            Auth::Probing => ("Signing in…".to_owned(), String::new(), "·".to_owned()),
-            Auth::SignedOut => ("Not signed in".to_owned(), String::new(), "?".to_owned()),
+        // Muse's account when Muse is signed in; otherwise the first
+        // connected provider's — a Claude Code or Codex person is signed in
+        // even with Muse off (docs/50 P1).
+        let other = || {
+            crate::provider_status::live_statuses().into_iter().find_map(|status| {
+                if status.provider == crate::providers::ProviderId::Muse || !status.enabled {
+                    return None;
+                }
+                match status.auth {
+                    crate::provider_status::Auth::SignedIn { email, plan, .. } => {
+                        let label = email.clone().unwrap_or_else(|| status.provider.label().to_owned());
+                        let initial = label.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+                        Some((label, email.unwrap_or_default(), initial, plan.unwrap_or_default()))
+                    }
+                    _ => None,
+                }
+            })
+        };
+        let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
+        let (name, email, initial, plan) = match &self.auth {
+            Auth::SignedIn(identity) => (identity.display_name(), identity.email.clone(), identity.initial(), muse_plan()),
+            Auth::Probing if crate::provider_status::muse_wanted() && !matches!(self.wire, crate::app::Wire::Ready) => {
+                other().unwrap_or_else(|| ("Signing in…".to_owned(), String::new(), "·".to_owned(), String::new()))
+            }
+            _ => other().unwrap_or_else(|| ("Not signed in".to_owned(), String::new(), "?".to_owned(), String::new())),
         };
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),
             email: email.into(),
-            plan: muse_plan_label(self.tier.as_ref()).unwrap_or_default().into(),
+            plan: plan.into(),
             initial: initial.into(),
             tint: 0,
             menu_open,

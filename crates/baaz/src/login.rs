@@ -246,9 +246,7 @@ impl Harness {
                 // already show it; in the shell the sessions wait on the
                 // connection and a quiet banner names the way back.
                 if self.show_connect {
-                    self.active = None;
-                    self.sessions.clear();
-                    self.invalidate_list();
+                    self.forget_muse_rows(cx);
                 } else if was_in {
                     self.seen_connected.insert(crate::providers::ProviderId::Muse);
                     self.provider_banners.insert(
@@ -441,11 +439,20 @@ impl Harness {
     /// dialog. An `envKey` lane survives this (the environment still holds
     /// the key), so that case keeps the shell and explains itself in a toast
     /// (D28).
+    /// A Muse sign-out takes Muse's rows with it — and the open session
+    /// only when it is a Muse one. Claude Code and Codex rows are not
+    /// Muse's to clear (docs/50 P1).
+    pub(crate) fn forget_muse_rows(&mut self, cx: &mut Context<Self>) {
+        if self.active.as_ref().is_some_and(|view| !view.read(cx).is_provider_lane()) {
+            self.active = None;
+        }
+        self.sessions.retain(|entry| entry.provider.is_some());
+        self.invalidate_list();
+    }
+
     pub(crate) fn logout(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
-            self.active = None;
-            self.sessions.clear();
-            self.invalidate_list();
+            self.forget_muse_rows(cx);
             self.auth = Auth::SignedOut;
             self.login.reset_to_choose();
             cx.notify();
@@ -469,9 +476,7 @@ impl Harness {
                 None => {
                     crate::tier::forget();
                     this.tier = None;
-                    this.active = None;
-                    this.sessions.clear();
-                    this.invalidate_list();
+                    this.forget_muse_rows(cx);
                     this.auth = Auth::SignedOut;
                     this.login.reset_to_choose();
                     // A deliberate sign-out still clears, but outside the

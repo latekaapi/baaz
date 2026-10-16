@@ -596,6 +596,15 @@ impl Harness {
         self.show_connect = false;
         self.muse_sheet = false;
         self.connect_notes.clear();
+        // New sessions start on a provider that can run: the stored pick
+        // while it still can, else the first connected one (docs/50 P1).
+        let statuses = crate::provider_status::live_statuses();
+        let current = ProviderId::parse(&self.new_provider);
+        if !crate::settings_providers::usable_provider(&statuses, current) {
+            let id = crate::settings_providers::live_default_new_provider();
+            self.new_provider = id.as_str().to_owned();
+            crate::providers::write_last_provider(id);
+        }
     }
 
     /// Reopen the connect screen over the shell (Settings → Providers →
