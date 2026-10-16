@@ -495,15 +495,13 @@ pub(crate) fn read_snapshot_for_cached(
             files_truncated,
         };
     }
-    let git = read_git_status(root);
-    let diffs = match &git {
-        Some(status) if !status.files.is_empty() => {
-            let raw = run_git(
-                root,
-                &["diff", "--no-color", "--no-ext-diff", "--unified=3"],
-            )
-            .unwrap_or_default();
-            parse_unified_diff(&raw)
+    let read = read_git_and_diff(root, true);
+    let git = read.as_ref().map(|(status, _)| status.clone());
+    let diffs = match read {
+        Some((status, Some((raw, cut)))) if !status.files.is_empty() => {
+            let mut parsed = parse_unified_diff(&raw);
+            parsed.truncated |= cut;
+            parsed
         }
         _ => ParsedDiffs {
             diffs: Vec::new(),
@@ -1204,25 +1202,110 @@ fn toggle_changes_commit(harness: &WeakEntity<Harness>, root: &Path, cx: &mut Ap
 /// Run one read-only git command in `root`, giving up after [`GIT_TIMEOUT`].
 /// `None` covers everything that can go wrong: no git binary, not a repo,
 /// a hung subprocess. The pane degrades to an empty state instead.
+#[cfg(test)]
 fn run_git(root: &Path, args: &[&str]) -> Option<String> {
+    spawn_git(root, args, GIT_OUTPUT_CAP)?.finish(std::time::Instant::now() + GIT_TIMEOUT).map(|(text, _)| text)
+}
+
+/// The most of one git command's output the pane reads: a diff past it is
+/// shown truncated instead of read whole (a large lockfile diff used to be
+/// re-read on every refresh, and one that missed the timeout vanished).
+const GIT_OUTPUT_CAP: usize = 4 * 1024 * 1024;
+
+/// One git command started in the background (see [`spawn_git`]).
+struct GitJob {
+    child: std::process::Child,
+    output: std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
+}
+
+/// Start a read-only git command without waiting for it, so several run at
+/// once. `--no-optional-locks`: a read never takes `.git/index.lock`, so the
+/// pane never contends with the agent's own git commands.
+fn spawn_git(root: &Path, args: &[&str], cap: usize) -> Option<GitJob> {
     note_io();
-    let root = root.to_path_buf();
-    let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let mut child = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, output) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
-        let _ = tx.send(output);
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        let read = (&mut stdout).take(cap as u64 + 1).read_to_end(&mut bytes);
+        let truncated = bytes.len() > cap;
+        bytes.truncate(cap);
+        // Past the cap, keep draining so the child can exit.
+        if truncated {
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
+        }
+        let _ = tx.send(if read.is_ok() { (bytes, truncated) } else { (Vec::new(), false) });
     });
-    match rx.recv_timeout(GIT_TIMEOUT) {
-        Ok(Ok(output)) if output.status.success() => String::from_utf8(output.stdout).ok(),
-        _ => None,
+    Some(GitJob { child, output })
+}
+
+impl GitJob {
+    /// The output (and whether it was cut at the cap) once the command
+    /// succeeds before `deadline`; on timeout the child is killed, never
+    /// left running.
+    fn finish(mut self, deadline: std::time::Instant) -> Option<(String, bool)> {
+        let wait = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok((bytes, truncated)) = self.output.recv_timeout(wait) else {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            return None;
+        };
+        let status = self.child.wait().ok()?;
+        if !status.success() {
+            return None;
+        }
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            // A cut at the cap can split a character: keep what is whole.
+            Err(error) if truncated => {
+                let valid = error.utf8_error().valid_up_to();
+                let mut bytes = error.into_bytes();
+                bytes.truncate(valid);
+                String::from_utf8(bytes).ok()?
+            }
+            Err(_) => return None,
+        };
+        Some((text, truncated))
     }
+}
+
+/// The branch and ahead/behind from `git status --branch`'s `## …` header:
+/// `## main...origin/main [ahead 1, behind 2]`, `## main`, `## HEAD (no
+/// branch)`, `## No commits yet on main`.
+fn parse_branch_header(line: &str) -> Option<(String, u32, u32)> {
+    let rest = line.strip_prefix("## ")?;
+    if let Some(name) = rest.strip_prefix("No commits yet on ") {
+        return Some((name.trim().to_string(), 0, 0));
+    }
+    let (head, tracking) = match rest.split_once(' ') {
+        Some((head, tracking)) => (head, tracking),
+        None => (rest, ""),
+    };
+    let branch = head.split("...").next().unwrap_or(head);
+    let branch = if branch == "HEAD" || head.starts_with("HEAD") { "HEAD" } else { branch };
+    let mut ahead = 0;
+    let mut behind = 0;
+    if let Some(inner) = tracking.strip_prefix('[').and_then(|t| t.split(']').next()) {
+        for part in inner.split(',') {
+            let part = part.trim();
+            if let Some(n) = part.strip_prefix("ahead ") {
+                ahead = n.trim().parse().unwrap_or(0);
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                behind = n.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    Some((branch.to_string(), ahead, behind))
 }
 
 /// Strip one layer of C-style quoting from a git pathname.
@@ -1292,6 +1375,7 @@ fn parse_numstat(text: &str) -> HashMap<String, (u32, u32)> {
 /// Parse `rev-list --count --left-right upstream...HEAD`: the left count is
 /// behind, the right count is ahead. `None` when there is no upstream, which
 /// the caller falls back to `(0, 0)`.
+#[cfg(test)]
 fn parse_ahead_behind(text: &str) -> Option<(u32, u32)> {
     let mut fields = text.split_whitespace();
     let behind: u32 = fields.next()?.parse().ok()?;
@@ -1414,32 +1498,47 @@ fn fixture_diff() -> Diff {
     }
 }
 
+#[cfg(test)]
 fn read_git_status(root: &Path) -> Option<GitStatus> {
+    read_git_and_diff(root, false).map(|(status, _)| status)
+}
+
+/// The status (branch and ahead/behind included) and, when `with_diff`, the
+/// full worktree diff: four git commands started together rather than six
+/// one after another (perf audit 2026-10-16). `None` when `root` is not a
+/// repo.
+fn read_git_and_diff(root: &Path, with_diff: bool) -> Option<(GitStatus, Option<(String, bool)>)> {
     if crate::clock::deterministic() {
-        return Some(fixture_git_status());
+        return Some((fixture_git_status(), None));
     }
-    let porcelain = run_git(
-        root,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
-    )?;
-    let branch = run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    let (ahead, behind) = run_git(
-        root,
-        &["rev-list", "--count", "--left-right", "@{upstream}...HEAD"],
-    )
-    .and_then(|out| parse_ahead_behind(&out))
-    .unwrap_or((0, 0));
-    let unstaged = run_git(root, &["diff", "--numstat"])
-        .map(|out| parse_numstat(&out))
-        .unwrap_or_default();
-    let staged = run_git(root, &["diff", "--cached", "--numstat"])
-        .map(|out| parse_numstat(&out))
-        .unwrap_or_default();
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    let status = spawn_git(root, &["status", "--porcelain=v1", "--branch", "--untracked-files=normal"], GIT_OUTPUT_CAP);
+    let unstaged = spawn_git(root, &["diff", "--numstat"], GIT_OUTPUT_CAP);
+    let staged = spawn_git(root, &["diff", "--cached", "--numstat"], GIT_OUTPUT_CAP);
+    let diff = if with_diff {
+        spawn_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"], GIT_OUTPUT_CAP)
+    } else {
+        None
+    };
+    let porcelain = status?.finish(deadline).map(|(text, _)| text);
+    let unstaged = unstaged.and_then(|job| job.finish(deadline)).map(|(out, _)| parse_numstat(&out)).unwrap_or_default();
+    let staged = staged.and_then(|job| job.finish(deadline)).map(|(out, _)| parse_numstat(&out)).unwrap_or_default();
+    let diff = diff.and_then(|job| job.finish(deadline));
+    let porcelain = porcelain?;
+    let mut branch = "unknown".to_string();
+    let (mut ahead, mut behind) = (0, 0);
     let mut files = Vec::new();
     for line in porcelain.lines() {
+        if line.starts_with("## ") {
+            if let Some((name, a, b)) = parse_branch_header(line) {
+                if !name.is_empty() {
+                    branch = name;
+                }
+                ahead = a;
+                behind = b;
+            }
+            continue;
+        }
         let Some((path, is_staged, kind)) = parse_porcelain_line(line) else {
             continue;
         };
@@ -1460,12 +1559,7 @@ fn read_git_status(root: &Path) -> Option<GitStatus> {
         ));
     }
     files.sort_by(|a, b| a.0.path.cmp(&b.0.path));
-    Some(GitStatus {
-        files,
-        branch,
-        ahead,
-        behind,
-    })
+    Some((GitStatus { files, branch, ahead, behind }, diff))
 }
 
 // ── the file walk ────────────────────────────────────────────────────────
@@ -4233,5 +4327,60 @@ mod tests {
         assert_eq!(preview.content, PreviewContent::Loading);
         assert_eq!(preview.size, 0);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_branch_header_carries_branch_and_ahead_behind() {
+        assert_eq!(parse_branch_header("## main...origin/main [ahead 1, behind 2]"), Some(("main".into(), 1, 2)));
+        assert_eq!(parse_branch_header("## main...origin/main [behind 3]"), Some(("main".into(), 0, 3)));
+        assert_eq!(parse_branch_header("## feature/x"), Some(("feature/x".into(), 0, 0)));
+        assert_eq!(parse_branch_header("## HEAD (no branch)"), Some(("HEAD".into(), 0, 0)));
+        assert_eq!(parse_branch_header("## No commits yet on main"), Some(("main".into(), 0, 0)));
+        assert_eq!(parse_branch_header(" M src/lib.rs"), None);
+    }
+
+    /// The parallel read against a real repo: branch, staged and unstaged
+    /// counts, an untracked file, and the worktree diff, in one pass.
+    #[test]
+    fn a_real_repo_reads_status_counts_and_diff_in_one_pass() {
+        let dir = std::env::temp_dir().join(format!("baaz-git-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("repo dir");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("a");
+        std::fs::write(dir.join("b.txt"), "keep\n").expect("b");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").expect("edit a");
+        std::fs::write(dir.join("b.txt"), "keep\nstaged\n").expect("edit b");
+        git(&["add", "b.txt"]);
+        std::fs::write(dir.join("new.txt"), "fresh\n").expect("new");
+        let (status, diff) = read_git_and_diff(&dir, true).expect("a repo reads");
+        assert_eq!(status.branch, "main");
+        let find = |path: &str| status.files.iter().find(|(f, _)| f.path == path).cloned();
+        let (a, a_staged) = find("a.txt").expect("a listed");
+        assert!(!a_staged);
+        assert_eq!((a.added, a.removed), (2, 1));
+        let (b, b_staged) = find("b.txt").expect("b listed");
+        assert!(b_staged, "an added hunk in the index is staged");
+        assert_eq!((b.added, b.removed), (1, 0));
+        let (new, _) = find("new.txt").expect("untracked listed");
+        assert!(matches!(new.change, ChangeKind::Added));
+        let (raw, cut) = diff.expect("the worktree diff came back");
+        assert!(!cut);
+        assert!(raw.contains("+three"), "the unstaged edit is in the diff");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

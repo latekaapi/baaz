@@ -74,6 +74,7 @@ mod provider_status;
 mod providers;
 mod resize;
 mod right;
+mod right_watch;
 mod search;
 mod sent;
 mod session;
