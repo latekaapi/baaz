@@ -148,11 +148,44 @@ impl SessionView {
             exclude_items: Some(true),
             session_id: self.session_id.clone(),
         };
-        self.wire_call(cx, move || client.session_fork(&params), |this, result, cx| match result {
-            Ok(forked) => cx.emit(SessionEvent::Forked {
-                session_id: forked.session.session_id.clone(),
-                session: serde_json::to_value(&forked.session).unwrap_or_default(),
-            }),
+        // A fork inherits its parent's profile but not its approval mode
+        // (the host starts it in its startup mode — Full access, probed
+        // live 2026-10-16), so the parent's mode is re-picked on the fork
+        // with the same ordered two steps as a chip pick; the chip then
+        // reads what the fork actually runs under.
+        let parent_mode = self.mode();
+        let work = move || {
+            let mut forked = client.session_fork(&params)?;
+            let reported = forked.session.approval_mode.as_ref().map(|state| muse_adapter::permission_mode(&state.mode));
+            let outcome = (reported != Some(parent_mode)).then(|| {
+                let from = reported.unwrap_or_default();
+                let outcome = super::commands::apply_muse_mode_pick(&client, &forked.session.session_id, from, parent_mode);
+                let landed = match &outcome {
+                    super::commands::MusePickOutcome::Applied
+                    | super::commands::MusePickOutcome::ProfileRefused { restored: false, .. } => parent_mode,
+                    _ => from,
+                };
+                if let Some(state) = forked.session.approval_mode.as_mut() {
+                    state.mode = wire_mode(landed);
+                }
+                outcome
+            });
+            Ok::<_, MuseError>((forked, outcome))
+        };
+        self.wire_call(cx, work, move |this, result, cx| match result {
+            Ok((forked, outcome)) => {
+                if !matches!(outcome, None | Some(super::commands::MusePickOutcome::Applied)) {
+                    this.toast(
+                        "Fork opened in another mode",
+                        format!("{} could not be carried over to the fork; check its mode chip.", parent_mode.label()),
+                        cx,
+                    );
+                }
+                cx.emit(SessionEvent::Forked {
+                    session_id: forked.session.session_id.clone(),
+                    session: serde_json::to_value(&forked.session).unwrap_or_default(),
+                })
+            }
             Err(error) if error.kind() == Some(&ErrorKind::ForkBoundaryInvalid) => {
                 this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
             }

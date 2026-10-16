@@ -596,6 +596,13 @@ pub fn resume_ids(result: &Value) -> Option<(String, String, String)> {
     ))
 }
 
+/// The reasoning level a resumed thread runs at (`result.reasoningEffort`,
+/// carried by every `thread/resume` answer captured in
+/// `fixtures/codex/resume.jsonl`), when the server says it.
+pub fn resume_effort(result: &Value) -> Option<String> {
+    result.get("reasoningEffort").and_then(Value::as_str).filter(|level| !level.is_empty()).map(str::to_owned)
+}
+
 /// The resumed thread's working directory (`result.thread.cwd`), when the
 /// server says it: the gated MCP tools run there, and their elicitation
 /// approvals name it.

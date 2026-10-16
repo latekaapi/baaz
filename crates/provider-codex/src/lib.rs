@@ -24,6 +24,7 @@ pub mod home;
 pub mod probe;
 pub mod terminal;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -70,6 +71,12 @@ pub struct CodexAdapter {
     /// than omit the key (see [`child::turn_effort`]). Cleared on every
     /// open and resume, and by a reset that lands.
     sent_effort: Mutex<Option<String>>,
+    /// Each catalog model's `defaultReasoningEffort`, resolved once per
+    /// child: the level a Default turn resets to. A model the catalog does
+    /// not list (an alias) maps to `None`, so a reset with no known level
+    /// never refetches `model/list` on every turn. Cleared with each new
+    /// child.
+    model_defaults: Mutex<Option<HashMap<String, Option<String>>>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
@@ -124,6 +131,7 @@ impl CodexAdapter {
             model: Mutex::new(None),
             pending_turn_mode: Mutex::new(None),
             sent_effort: Mutex::new(None),
+            model_defaults: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
@@ -307,6 +315,7 @@ impl CodexAdapter {
                 reason: format!("the session child is unreachable: {error}"),
             })?;
         let rows = Self::fetch_catalog(&running).map_err(Self::unavailable)?;
+        *self.model_defaults.lock().expect("defaults mutex") = Some(Self::defaults_of(&rows));
         // A requested model is taken as named even when the catalog does not
         // list it (aliases travel here — `gpt-6-*` runs while `model/list`
         // names no such row); only an absent request falls back to the
@@ -383,6 +392,31 @@ impl CodexAdapter {
     /// concatenated in provider order (see [`child::model_list_request`]
     /// and [`child::next_cursor`]). A repeated cursor ends the walk rather
     /// than looping — the server names each successor once.
+    /// Every catalog row's default level, by model id.
+    fn defaults_of(rows: &[child::ModelInfo]) -> HashMap<String, Option<String>> {
+        rows.iter().map(|row| (row.id.clone(), row.default_effort.clone())).collect()
+    }
+
+    /// `model`'s default level, from the catalog resolved once per child
+    /// (see [`Self::model_defaults`]). A fetch that fails resolves to an
+    /// empty catalog — no known default, said on the chip — rather than a
+    /// refetch on every turn.
+    fn model_default(&self, model: &str) -> Result<Option<String>, ProviderError> {
+        if let Some(defaults) = self.model_defaults.lock().expect("defaults mutex").as_ref() {
+            return Ok(defaults.get(model).cloned().flatten());
+        }
+        let rows = self.with_child(Self::fetch_catalog)?.unwrap_or_default();
+        let defaults = Self::defaults_of(&rows);
+        let found = defaults.get(model).cloned().flatten();
+        *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
+        Ok(found)
+    }
+
+    /// Tell the chip the level `session_id` actually runs at.
+    fn announce_effort(&self, session_id: &str, effort: Option<String>) {
+        let _ = self.tx.send(ProviderEvent::EffortInForce { session_id: session_id.to_owned(), effort });
+    }
+
     fn fetch_catalog(running: &RunningChild) -> Result<Vec<child::ModelInfo>, child::RequestError> {
         let mut rows = Vec::new();
         let mut cursor: Option<String> = None;
@@ -471,11 +505,24 @@ impl CodexAdapter {
         self.announce_mode(&resumed_session, child::reported_mode(&answer).or(mode));
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.sent_effort.lock().expect("effort mutex") = None;
-        *self.model.lock().expect("model mutex") = Some(model);
+        *self.model.lock().expect("model mutex") = Some(model.clone());
+        *self.model_defaults.lock().expect("defaults mutex") = None;
         // A resumed lane reconnects its server: re-read the limits the
         // same way an open does, best-effort.
         self.refresh_rate_limits(&running);
         *self.child.lock().expect("child mutex") = Some(running);
+        // The level the thread runs at, which an earlier session's pick may
+        // have left above or below the model's default: it stands until a
+        // turn changes it, so the chip reads it and a Default turn resets
+        // from it — never a Default chip over another level.
+        let in_force = child::resume_effort(&answer);
+        if let Some(level) = in_force {
+            let default = self.model_default(&model).unwrap_or(None);
+            if default.as_deref() != Some(level.as_str()) {
+                *self.sent_effort.lock().expect("effort mutex") = Some(level.clone());
+                self.announce_effort(&resumed_session, Some(level));
+            }
+        }
         if !deltas.is_empty() {
             let _ = self.tx.send(provider::ProviderEvent::Deltas {
                 session_id: Some(resumed_session.clone()),
@@ -536,15 +583,9 @@ impl CodexAdapter {
         let (thread_id, model) = self.thread_and_model()?;
         let sticky = self.sent_effort.lock().expect("effort mutex").clone();
         let picked = effort.filter(|level| !level.is_empty());
-        // Only a reset reads the catalog: the model's own default level.
-        let model_default = if picked.is_none() && sticky.is_some() {
-            self.with_child(Self::fetch_catalog)?
-                .ok()
-                .and_then(|rows| rows.into_iter().find(|row| row.id == model))
-                .and_then(|row| row.default_effort)
-        } else {
-            None
-        };
+        // Only a reset reads the catalog — once per child: the model's own
+        // default level.
+        let model_default = if picked.is_none() && sticky.is_some() { self.model_default(&model)? } else { None };
         let wire_effort = child::turn_effort(picked, sticky.as_deref(), model_default.as_deref());
         let mode = self.pending_turn_mode.lock().expect("mode mutex").take();
         let turn = self
@@ -583,6 +624,10 @@ impl CodexAdapter {
         // it; a reset with no known default leaves it for the next turn.
         if picked.is_some() || wire_effort.is_some() {
             *self.sent_effort.lock().expect("effort mutex") = picked.map(str::to_owned);
+        } else if let Some(level) = sticky {
+            // Default with no level to reset to: the earlier level still
+            // runs, so the chip says so rather than Default.
+            self.announce_effort(session_id, Some(level));
         }
         // The ack carries the submission handle; the turn's true identity is
         // the server-minted id, never derived locally. The full text goes
@@ -971,6 +1016,7 @@ impl ProviderAdapter for CodexAdapter {
                 let rows = self
                     .with_child(Self::fetch_catalog)?
                     .map_err(Self::unavailable)?;
+                *self.model_defaults.lock().expect("defaults mutex") = Some(Self::defaults_of(&rows));
                 // Human labels ride `label`; the wire id stays in `id`.
                 // A row without a `displayName` falls back to its id rather
                 // than vanishing: an empty menu is a failure, not a state.
@@ -1203,6 +1249,136 @@ with open(log, "w") as handle:
             std::fs::set_permissions(&script, perms).expect("fake executable");
         }
         (script, log)
+    }
+
+    /// A scripted `codex app-server` for the effort tests: a catalog whose
+    /// one model (`gpt-test`) defaults to `medium`, a `thread/resume` whose
+    /// answer reports `FAKE_CODEX_RESUME_EFFORT` on `FAKE_CODEX_MODEL`,
+    /// and `turn/start`. Every client frame is logged as it arrives.
+    fn scripted_effort_server() -> (std::path::PathBuf, std::path::PathBuf) {
+        let (dir, _) = seed_executable("effort", "unused", "");
+        let log = dir.join("frames.log");
+        let body = r#"#!/usr/bin/env python3
+import json, os, sys
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    print("codex-cli 0.200.0")
+    sys.exit(0)
+log = open(os.environ["FAKE_CODEX_LOG"], "a", buffering=1)
+def result_for(method):
+    if method == "model/list":
+        return {"data": [{"id": "gpt-test", "displayName": "GPT Test", "isDefault": True,
+                          "defaultReasoningEffort": "medium"}], "nextCursor": None}
+    if method == "thread/resume":
+        return {"thread": {"id": "thread-1", "sessionId": "sess-1", "turns": []},
+                "model": os.environ["FAKE_CODEX_MODEL"],
+                "reasoningEffort": os.environ["FAKE_CODEX_RESUME_EFFORT"]}
+    if method == "turn/start":
+        return {"turn": {"id": "turn-%d" % frame["id"]}}
+    return {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        frame = json.loads(line)
+    except ValueError:
+        continue
+    log.write(line + "\n")
+    method = frame.get("method")
+    if "id" in frame and method:
+        sys.stdout.write(json.dumps({"id": frame["id"], "result": result_for(method)}) + "\n")
+        sys.stdout.flush()
+"#;
+        let script = seed_executable_in(&dir, "fake-codex", body);
+        (script, log)
+    }
+
+    /// Resume against [`scripted_effort_server`], then two Default turns:
+    /// the frames the fake saw, and the levels the chip was told.
+    fn resume_then_default_turns(model: &str, resume_effort: &str) -> (Vec<serde_json::Value>, Vec<Option<String>>) {
+        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let (script, log) = scripted_effort_server();
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        std::env::set_var("FAKE_CODEX_MODEL", model);
+        std::env::set_var("FAKE_CODEX_RESUME_EFFORT", resume_effort);
+        let scratch = script.parent().expect("temp dir").join("homes");
+        let owner_home = scratch.join("owner-home");
+        std::fs::create_dir_all(owner_home.join(".codex")).expect("temp owner home");
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home);
+        adapter.set_state_dir(scratch.join("state"));
+        adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        adapter
+            .dispatch(Command::ResumeSession {
+                request_id: "r-resume".into(),
+                session_id: "sess-1".into(),
+                cursor: None,
+                metadata_only: false,
+                mode: None,
+            })
+            .expect("resumes");
+        for turn in ["t-1", "t-2"] {
+            adapter
+                .dispatch(Command::SubmitInput {
+                    request_id: turn.into(),
+                    session_id: "sess-1".into(),
+                    parts: vec![SubmissionPart::Text("hi".into())],
+                    display_text: None,
+                    effort: None,
+                })
+                .expect("turn starts");
+        }
+        let events = adapter.events();
+        let mut told = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ProviderEvent::EffortInForce { effort, .. } = event {
+                told.push(effort);
+            }
+        }
+        drop(adapter);
+        let frames = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        (frames, told)
+    }
+
+    fn method_frames<'a>(frames: &'a [serde_json::Value], method: &str) -> Vec<&'a serde_json::Value> {
+        frames.iter().filter(|frame| frame["method"] == method).collect()
+    }
+
+    /// A resumed thread still at an earlier session's level reads that
+    /// level on the chip, and a Default turn resets it to the model's
+    /// default — once; the catalog is read once.
+    #[test]
+    fn a_resumed_thread_at_another_level_shows_it_and_resets_on_default() {
+        let (frames, told) = resume_then_default_turns("gpt-test", "high");
+        assert_eq!(told, vec![Some("high".to_owned())], "the chip reads the standing level");
+        let turns = method_frames(&frames, "turn/start");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0]["params"]["effort"], "medium", "Default resets to the model's default");
+        assert!(turns[1]["params"].get("effort").is_none(), "nothing stands after the reset");
+        assert_eq!(method_frames(&frames, "model/list").len(), 1, "resolved once");
+    }
+
+    /// A model the catalog does not list (an alias) has no level to reset
+    /// to: the catalog is still read once, never per turn, and the chip
+    /// reads the level actually in force instead of Default.
+    #[test]
+    fn an_alias_with_no_default_shows_the_level_in_force_and_never_refetches() {
+        let (frames, told) = resume_then_default_turns("gpt-alias", "high");
+        assert_eq!(told, vec![Some("high".to_owned()); 3], "on resume, then each Default turn");
+        let turns = method_frames(&frames, "turn/start");
+        assert!(turns.iter().all(|turn| turn["params"].get("effort").is_none()), "never a guessed level");
+        assert_eq!(method_frames(&frames, "model/list").len(), 1, "resolved once, not per turn");
+    }
+
+    /// A resumed thread at its model's default needs nothing said.
+    #[test]
+    fn a_resumed_thread_at_the_default_level_says_nothing() {
+        let (frames, told) = resume_then_default_turns("gpt-test", "medium");
+        assert!(told.is_empty(), "{told:?}");
+        assert!(method_frames(&frames, "turn/start").iter().all(|turn| turn["params"].get("effort").is_none()));
     }
 
     /// The fake finds its method log through one process-global variable,

@@ -885,24 +885,121 @@ impl SessionView {
             cx.notify();
             return;
         }
-        let params = SessionSetApprovalModeParams {
-            command_id: new_command_id(),
-            session_id: self.session_id.clone(),
-            mode: wire_mode(mode),
+        self.pick_muse_mode(mode, None, cx);
+    }
+
+    /// Bring a resumed muse session's sandbox in line with its approval
+    /// mode. The host retains the profile per session across a restart
+    /// (probed live 2026-10-16), but a session started before Baaz picked
+    /// profiles, or one whose pick half-applied, can run under a profile
+    /// that grants more than its chip reads. `session` is the resume
+    /// answer's; a pick on the wire already re-selects the profile, so
+    /// this stands down for it.
+    pub(crate) fn reconcile_profile(&mut self, session: &muse_client::schema::Session, cx: &mut Context<Self>) {
+        if self.is_provider_lane() || self.mode_pick_in_flight || session.session_id != self.session_id {
+            return;
+        }
+        let Some(mode) = profile_mismatch(session) else { return };
+        let Some(client) = self.wire_client(cx) else { return };
+        let session_id = self.session_id.clone();
+        let held = session.permission_state.as_ref().and_then(|state| state.profile_id.clone());
+        self.mode_pick_in_flight = true;
+        let work = move || {
+            let pick = |mode: PermissionMode| {
+                let params = profile_resume_params(&session_id, mode);
+                client.request("session/resume", serde_json::to_value(&params).ok()).map(|_| ())
+            };
+            match pick(mode) {
+                Ok(()) => Ok(()),
+                // Fail toward less access: the chip must not read less than
+                // the session has, so a refused match falls back to the
+                // read-only sandbox.
+                Err(error) => Err((error, mode != PermissionMode::DenyUnmatched && pick(PermissionMode::DenyUnmatched).is_ok())),
+            }
         };
+        self.wire_call(cx, work, move |this, result, cx| {
+            this.mode_pick_in_flight = false;
+            if let Err((error, read_only)) = result {
+                let held = held.unwrap_or_else(|| "the host's default".to_owned());
+                let message = if read_only {
+                    format!(
+                        "This session's sandbox ({held}) could not be matched to {} ({error}), so it now runs read-only. Pick a mode to try again.",
+                        mode.label()
+                    )
+                } else {
+                    format!(
+                        "This session's sandbox ({held}) could not be matched to {} ({error}). Pick a mode to try again.",
+                        mode.label()
+                    )
+                };
+                this.set_banner(&message, None, cx);
+            }
+            if let Some(next) = this.mode_pick_queued.take() {
+                this.pick_muse_mode(next, None, cx);
+            }
+        });
+    }
+
+    /// The muse half of [`Self::set_mode`]. `from` is where the previous
+    /// pick left the mode when this one waited behind it (its
+    /// `approvalModeChanged` may not have folded yet); `None` reads the
+    /// server's.
+    fn pick_muse_mode(&mut self, mode: PermissionMode, from: Option<PermissionMode>, cx: &mut Context<Self>) {
+        // One pick on the wire at a time: two picks on separate background
+        // calls could land mode-of-one, profile-of-the-other. The latest
+        // pick made meanwhile waits and goes out when this one settles.
+        if self.mode_pick_in_flight {
+            self.mode_pick_queued = Some(mode);
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.wire_client(cx) else { return };
+        let from = from.unwrap_or_else(|| self.mode());
+        let session_id = self.session_id.clone();
+        self.mode_pick_in_flight = true;
         // The posture follows the mode: the profile is re-selected on the
         // loaded session by `session/resume` (the one wire that admits it
-        // after start), or Full access stays sandboxed and Ask stays with
-        // the LLM judge (live 2026-10-16).
-        let profile = profile_resume_params(&self.session_id, mode);
-        let Some(client) = self.wire_client(cx) else { return };
-        let work = move || {
-            client.session_set_approval_mode(&params)?;
-            client.session_resume(&profile).map(|_| ())
-        };
-        self.wire_call(cx, work, |this, result, cx| {
-            if let Err(error) = result {
-                this.report(&error, cx);
+        // after start, and it does while a turn runs — probed live
+        // 2026-10-16, committed mid-turn), or Full access stays sandboxed
+        // and Ask stays with the LLM judge.
+        let work = move || apply_muse_mode_pick(&client, &session_id, from, mode);
+        self.wire_call(cx, work, move |this, outcome, cx| {
+            this.mode_pick_in_flight = false;
+            // Where the approval mode now stands, for a pick waiting behind.
+            let landed = match &outcome {
+                MusePickOutcome::Applied | MusePickOutcome::ProfileRefused { restored: false, .. } => mode,
+                _ => from,
+            };
+            match outcome {
+                MusePickOutcome::Applied => {}
+                MusePickOutcome::Refused(error) => this.report(&error, cx),
+                MusePickOutcome::ProfileRefused { error, restored } => {
+                    let message = if restored {
+                        format!(
+                            "{} could not be applied: the sandbox profile was refused ({error}). The session stays in {}.",
+                            mode.label(),
+                            from.label()
+                        )
+                    } else {
+                        format!(
+                            "{} could not be applied: the sandbox profile was refused ({error}), and the mode could not be put back. The session still runs under the {} sandbox — pick a mode again.",
+                            mode.label(),
+                            from.label()
+                        )
+                    };
+                    this.set_banner(&message, None, cx);
+                }
+                MusePickOutcome::ModeRefused(error) => {
+                    let message = format!(
+                        "The {} sandbox is on, but the approval mode could not change ({error}), so the chip still reads {}.",
+                        mode.label(),
+                        from.label()
+                    );
+                    this.set_banner(&message, None, cx);
+                }
+            }
+            if let Some(next) = this.mode_pick_queued.take() {
+                this.pick_muse_mode(next, Some(landed), cx);
             }
         });
     }
@@ -1282,6 +1379,87 @@ fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
         }
         _ => false,
     }
+}
+
+/// The chip mode whose profile a resumed session should be under, when the
+/// profile it reports is another one — or none at all. `None` when they
+/// agree, or when the session reports no approval mode to match.
+pub(crate) fn profile_mismatch(session: &muse_client::schema::Session) -> Option<PermissionMode> {
+    let mode = muse_adapter::permission_mode(&session.approval_mode.as_ref()?.mode);
+    let held = session.permission_state.as_ref().and_then(|state| state.profile_id.as_deref());
+    (held != Some(muse_adapter::permission_profile(mode))).then_some(mode)
+}
+
+/// How a muse mode pick landed. Each failure says which step held, so the
+/// banner can say what the session is actually running under.
+pub(crate) enum MusePickOutcome {
+    /// Mode and profile both moved.
+    Applied,
+    /// The first step was refused; nothing changed.
+    Refused(MuseError),
+    /// Raising access: the mode moved, the profile was refused, and the
+    /// mode was put back (`restored`) — or could not be, in which case the
+    /// chip reads more access than the sandbox grants, never less.
+    ProfileRefused { error: MuseError, restored: bool },
+    /// Lowering access: the tighter profile is on, but the mode could not
+    /// follow — the chip reads more access than the session has, never less.
+    ModeRefused(MuseError),
+}
+
+/// How much a chip mode lets through, for ordering a pick's two steps.
+fn access_rank(mode: PermissionMode) -> u8 {
+    match mode {
+        PermissionMode::DenyUnmatched => 0,
+        PermissionMode::PromptUnmatched => 1,
+        PermissionMode::OnRequest => 2,
+        PermissionMode::AllowAll => 3,
+    }
+}
+
+/// A muse mode pick's two wire steps, ordered so a half-applied pick never
+/// leaves the chip reading less access than the session has: the chip
+/// reads the approval mode, so a pick that raises access moves the mode
+/// first and the profile second (and puts the mode back if the profile is
+/// refused); any other pick tightens the profile first and moves the mode
+/// second. Blocking: runs on the background executor.
+pub(super) fn apply_muse_mode_pick(
+    client: &MuseClient,
+    session_id: &str,
+    from: PermissionMode,
+    to: PermissionMode,
+) -> MusePickOutcome {
+    let set_mode = |mode: PermissionMode| {
+        client
+            .session_set_approval_mode(&SessionSetApprovalModeParams {
+                command_id: new_command_id(),
+                session_id: session_id.to_owned(),
+                mode: wire_mode(mode),
+            })
+            .map(|_| ())
+    };
+    // The raw call: the answer is not read, so a resume envelope that
+    // fails to decode is not mistaken for a refused profile.
+    let set_profile = || {
+        let params = profile_resume_params(session_id, to);
+        client.request("session/resume", serde_json::to_value(&params).ok()).map(|_| ())
+    };
+    if access_rank(to) > access_rank(from) {
+        if let Err(error) = set_mode(to) {
+            return MusePickOutcome::Refused(error);
+        }
+        if let Err(error) = set_profile() {
+            let restored = set_mode(from).is_ok();
+            return MusePickOutcome::ProfileRefused { error, restored };
+        }
+    } else {
+        if let Err(error) = set_profile() {
+            return MusePickOutcome::Refused(error);
+        }
+        if let Err(error) = set_mode(to) {
+            return MusePickOutcome::ModeRefused(error);
+        }
+    }
+    MusePickOutcome::Applied
 }
 
 #[cfg(test)]

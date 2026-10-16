@@ -284,6 +284,17 @@ impl SessionView {
                     cx.notify();
                 }
             }
+            // The level the session actually runs at (Codex: a resumed
+            // thread's standing level, or a Default the backend could not
+            // reset): the chip reads it, and nothing is recorded as a new
+            // pick — no project default moves.
+            provider::ProviderEvent::EffortInForce { session_id, effort } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                let effort = effort.as_deref().and_then(crate::projects::parse_effort);
+                self.set_initial_effort(effort, cx);
+            }
             // The turn an ack named now has its streamed id (Claude Code
             // acks before the CLI names the turn): keep the alias, and
             // re-key the one thing recorded under the ack's id — the plan
@@ -3104,6 +3115,25 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
+        });
+    }
+
+    /// The effort chip reads the level the adapter says is in force (a
+    /// resumed Codex thread's standing level) — and another session's
+    /// report changes nothing here.
+    #[gpui::test]
+    fn the_effort_chip_follows_the_level_in_force(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        tx.unbounded_send(provider::ProviderEvent::EffortInForce { session_id: "s-1".into(), effort: Some("high".into()) })
+            .expect("lane open");
+        tx.unbounded_send(provider::ProviderEvent::EffortInForce { session_id: "s-other".into(), effort: Some("low".into()) })
+            .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(crate::overlays::effort_label(view.read(cx).effort), "High");
         });
     }
 

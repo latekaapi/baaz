@@ -2583,6 +2583,7 @@ mod tests {
             name_origin: None,
             parent_session_id: None,
             path: String::new(),
+            permission_state: None,
             provider_id: None,
             session_id: "s1".into(),
             side_from: None,

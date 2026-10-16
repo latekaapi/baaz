@@ -872,6 +872,14 @@ pub struct ClaudeFold {
     /// submission waits is that submission's turn, and each `result`
     /// frame closes the oldest one (stdin is processed in order).
     submissions: std::collections::VecDeque<Submission>,
+    /// The line uuid of the submission (or steer) whose
+    /// `--replay-user-messages` echo arrived last: the line the CLI is
+    /// answering now. The CLI echoes the uuid a stdin line carries (probed
+    /// live 2026-10-16, claude 2.1.276: two lines, two echoes with their
+    /// own uuids, each followed by its own turn and `result`), so pairing
+    /// follows the echo and a steer — which the CLI answers with a turn of
+    /// its own — can never claim a queued submit's turn or `result`.
+    answering: Option<String>,
     /// `(acknowledged, streamed)` pairs found since the last
     /// [`ClaudeFold::take_turn_aliases`], announced as
     /// `ProviderEvent::TurnIdentified`.
@@ -881,8 +889,11 @@ pub struct ClaudeFold {
 /// One acknowledged submission waiting on (or running) its turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Submission {
-    /// The turn id the submit acknowledgement carried.
-    accepted: String,
+    /// The turn id the submit acknowledgement carried; `None` for a steer,
+    /// which takes its place in line but names no turn.
+    accepted: Option<String>,
+    /// The uuid its stdin line carried, which the CLI's echo repeats.
+    uuid: Option<String>,
     /// Whether its turn opened (and so was aliased).
     opened: bool,
 }
@@ -995,12 +1006,79 @@ impl ClaudeFold {
     /// Record an acknowledged submission: the next turn to open is the
     /// one `accepted` named (see [`ClaudeFold::take_turn_aliases`]).
     pub fn note_submission(&mut self, accepted: &str) {
-        self.submissions.push_back(Submission { accepted: accepted.to_owned(), opened: false });
+        self.submissions.push_back(Submission { accepted: Some(accepted.to_owned()), uuid: None, opened: false });
+    }
+
+    /// [`Self::note_submission`] for a line carrying `uuid`: its turn is
+    /// the one that opens after the CLI echoes that uuid.
+    pub fn note_submission_line(&mut self, accepted: &str, uuid: &str) {
+        self.submissions.push_back(Submission {
+            accepted: Some(accepted.to_owned()),
+            uuid: Some(uuid.to_owned()),
+            opened: false,
+        });
+    }
+
+    /// Record a steer line carrying `uuid`: the CLI may answer it with a
+    /// turn and a `result` of its own, which must close the steer, never a
+    /// queued submission.
+    pub fn note_steer(&mut self, uuid: &str) {
+        self.submissions.push_back(Submission { accepted: None, uuid: Some(uuid.to_owned()), opened: false });
     }
 
     /// Forget a submission whose line never reached the child.
     pub fn forget_submission(&mut self, accepted: &str) {
-        self.submissions.retain(|submission| submission.accepted != accepted);
+        self.submissions.retain(|submission| submission.accepted.as_deref() != Some(accepted));
+    }
+
+    /// Forget the line carrying `uuid` (a steer or a submission) that never
+    /// reached the child.
+    pub fn forget_line(&mut self, uuid: &str) {
+        self.submissions.retain(|submission| submission.uuid.as_deref() != Some(uuid));
+    }
+
+    /// Forget every waiting submission: the child that would have answered
+    /// them is gone (a relaunch replaced it), and a stale entry would pair
+    /// the new child's next turn with an old ack.
+    pub fn forget_submissions(&mut self) {
+        self.submissions.clear();
+        self.answering = None;
+    }
+
+    /// Whether any submission or steer waits on the child.
+    pub fn has_submissions(&self) -> bool {
+        !self.submissions.is_empty()
+    }
+
+    /// A user echo: when it repeats a waiting line's uuid, that line is
+    /// the one the CLI answers now.
+    fn note_echo(&mut self, uuid: &str) {
+        if self.submissions.iter().any(|submission| submission.uuid.as_deref() == Some(uuid)) {
+            self.answering = Some(uuid.to_owned());
+        }
+    }
+
+    /// A `result` frame closes the line being answered — and any opened
+    /// line ahead of it, whose turn the CLI folded into this one — or,
+    /// with no echo to go by, the oldest line.
+    fn close_answered(&mut self) {
+        match self.answering.take() {
+            Some(uuid) => {
+                if let Some(at) =
+                    self.submissions.iter().position(|submission| submission.uuid.as_deref() == Some(uuid.as_str()))
+                {
+                    let mut index = 0;
+                    self.submissions.retain(|submission| {
+                        let keep = index > at || (index < at && !submission.opened);
+                        index += 1;
+                        keep
+                    });
+                }
+            }
+            None => {
+                self.submissions.pop_front();
+            }
+        }
     }
 
     /// The acknowledged turn ids whose turns have since opened, each with
@@ -1199,7 +1277,10 @@ impl ClaudeFold {
                     Vec::new()
                 }
             }
-            Frame::UserText { uuid, text, images, .. } => self.apply_user_text(uuid, text, images),
+            Frame::UserText { uuid, text, images, .. } => {
+                self.note_echo(uuid);
+                self.apply_user_text(uuid, text, images)
+            }
             Frame::TurnResult {
                 input_tokens,
                 output_tokens,
@@ -1324,7 +1405,7 @@ impl ClaudeFold {
                 // This result answers the oldest submission, spoken or
                 // not: one that never opened a turn (an error before any
                 // message) must not claim the next submission's turn.
-                self.submissions.pop_front();
+                self.close_answered();
                 let finishing = std::mem::take(&mut self.open);
                 let owner = self
                     .assistant_turn
@@ -1400,10 +1481,22 @@ impl ClaudeFold {
         self.started.insert(message_id.to_owned(), ());
         self.open.push(message_id.to_owned());
         self.assistant_turn = Some(message_id.to_owned());
-        // The oldest acknowledged submission still waiting is this turn's.
-        if let Some(waiting) = self.submissions.iter_mut().find(|submission| !submission.opened) {
+        // The line the CLI last echoed is this turn's; with no echo to go
+        // by, the oldest line still waiting is.
+        let answering = self.answering.clone();
+        let waiting = match answering {
+            Some(uuid) => self
+                .submissions
+                .iter_mut()
+                .find(|submission| !submission.opened && submission.uuid.as_deref() == Some(uuid.as_str())),
+            None => self.submissions.iter_mut().find(|submission| !submission.opened),
+        };
+        if let Some(waiting) = waiting {
             waiting.opened = true;
-            self.turn_aliases.push((waiting.accepted.clone(), message_id.to_owned()));
+            // A steer's turn names no ack.
+            if let Some(accepted) = waiting.accepted.clone() {
+                self.turn_aliases.push((accepted, message_id.to_owned()));
+            }
         }
         // A live turn starts now (its rows tick from here); a replayed
         // turn keeps its filed `None`.
@@ -1584,7 +1677,7 @@ impl ClaudeFold {
     pub fn abandon_live_turns(&mut self, reason: &str) -> Vec<Delta> {
         // The child that would have answered the waiting submissions is
         // gone: none of them will ever open a turn on it.
-        self.submissions.clear();
+        self.forget_submissions();
         let mut deltas = Vec::new();
         if self.open.is_empty() {
             return deltas;
@@ -5280,6 +5373,86 @@ mod tests {
         // The turn ids themselves stay the message ids: the ledger key a
         // reopen's replay reproduces.
         assert!(starts.iter().all(|id| id.starts_with("msg")), "{starts:?}");
+    }
+
+    fn echo(uuid: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "user", "isReplay": true, "session_id": "s", "uuid": uuid, "parent_tool_use_id": null,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        })
+        .to_string()
+    }
+
+    fn reply(message_id: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "session_id": "s", "uuid": format!("a-{message_id}"), "parent_tool_use_id": null,
+            "message": {"id": message_id, "content": [{"type": "text", "text": "ok"}]},
+        })
+        .to_string()
+    }
+
+    fn result_line() -> String {
+        serde_json::json!({
+            "type": "result", "session_id": "s", "result": "ok",
+            "usage": {"input_tokens": 1, "output_tokens": 1}, "duration_ms": 1,
+        })
+        .to_string()
+    }
+
+    fn pair_lines(fold: &mut ClaudeFold, lines: &[String]) -> Vec<(String, String)> {
+        let mut aliases = Vec::new();
+        for line in lines {
+            fold.apply(&decode_line(line).expect("decodes"));
+            aliases.extend(fold.take_turn_aliases());
+        }
+        aliases
+    }
+
+    /// A steer the CLI answers with a turn and a `result` of its own (the
+    /// shape probed live 2026-10-16) closes the steer: the queued submit
+    /// behind it still names its own turn, by the uuid its echo repeats.
+    #[test]
+    fn a_steer_answered_on_its_own_never_claims_a_queued_submit() {
+        let mut fold = ClaudeFold::new();
+        fold.note_submission_line("t-1", "u-1");
+        let mut aliases = pair_lines(&mut fold, &[echo("u-1", "first"), reply("msg-1")]);
+        // Mid-turn: a steer, then a queued submit.
+        fold.note_steer("u-steer");
+        fold.note_submission_line("t-2", "u-2");
+        aliases.extend(pair_lines(
+            &mut fold,
+            &[
+                result_line(),
+                echo("u-steer", "steer"),
+                reply("msg-steer"),
+                result_line(),
+                echo("u-2", "second"),
+                reply("msg-2"),
+                result_line(),
+            ],
+        ));
+        assert_eq!(
+            aliases,
+            [("t-1".to_owned(), "msg-1".to_owned()), ("t-2".to_owned(), "msg-2".to_owned())],
+            "the steer's turn names no ack"
+        );
+        assert!(!fold.has_submissions(), "every line closed");
+    }
+
+    /// A steer the CLI folds into the running turn (echoed mid-turn, no
+    /// turn of its own) closes with that turn's `result`, so the next
+    /// submit pairs with the next turn.
+    #[test]
+    fn a_steer_folded_into_the_running_turn_closes_with_it() {
+        let mut fold = ClaudeFold::new();
+        fold.note_submission_line("t-1", "u-1");
+        let mut aliases = pair_lines(&mut fold, &[echo("u-1", "first"), reply("msg-1")]);
+        fold.note_steer("u-steer");
+        aliases.extend(pair_lines(&mut fold, &[echo("u-steer", "steer"), reply("msg-1"), result_line()]));
+        assert!(!fold.has_submissions(), "the turn and the steer it absorbed both closed");
+        fold.note_submission_line("t-2", "u-2");
+        aliases.extend(pair_lines(&mut fold, &[echo("u-2", "second"), reply("msg-2"), result_line()]));
+        assert_eq!(aliases, [("t-1".to_owned(), "msg-1".to_owned()), ("t-2".to_owned(), "msg-2".to_owned())]);
     }
 
     /// `step_line` announces the alias before the deltas that carry the

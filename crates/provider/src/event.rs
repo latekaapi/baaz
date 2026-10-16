@@ -70,6 +70,19 @@ pub enum ProviderEvent {
         /// The id the turn streams under.
         turn_id: String,
     },
+    /// The reasoning effort a session actually runs at, when the adapter
+    /// knows it differs from what the chip would otherwise read: a resumed
+    /// thread still carrying an earlier level, or a Default pick the
+    /// backend has no reset for. `None` is the model's default. Sent only
+    /// by an adapter that can see the level in force (Codex: the
+    /// `thread/resume` answer's `reasoningEffort`); the chip follows it
+    /// without recording a new pick.
+    EffortInForce {
+        /// The owning session.
+        session_id: String,
+        /// The level in force, as the backend spells it.
+        effort: Option<String>,
+    },
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.
     ConnectionLost {

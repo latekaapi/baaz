@@ -129,6 +129,8 @@ impl Lane<'_> {
                     turn.started.push(streamed);
                 }
             }
+            // The effort chip's word; the mode matrix reads none of it.
+            ProviderEvent::EffortInForce { .. } => {}
         }
     }
 
