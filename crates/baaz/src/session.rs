@@ -573,6 +573,30 @@ struct PendingUnqueue {
 /// collide with a catalog row.
 const MODEL_UNAVAILABLE_ROW: &str = "__models_unavailable";
 
+/// Where a view's own `session/start` stands (see [`SessionView::begin_start`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartState {
+    /// The server knows the session: every view but a fresh one.
+    Started,
+    /// The start is on the wire; what the person did meanwhile waits here.
+    Starting(StartQueue),
+    /// The start failed, so no session stands behind the view.
+    Failed,
+}
+
+/// What the person did while the view's `session/start` was on the wire,
+/// applied in order when it lands (`start_landed`): the latest pick per
+/// setting, the catalog fetch an open picker asked for, then each send
+/// exactly as it stood at its Enter. The server knows no session yet, so
+/// none of these can leave earlier — and none may be dropped silently.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StartQueue {
+    model: Option<String>,
+    mode: Option<PermissionMode>,
+    models: bool,
+    sends: Vec<String>,
+}
+
 /// One open Muse session.
 pub struct SessionView {
     /// The Muse session id this view follows.
@@ -952,6 +976,11 @@ pub struct SessionView {
     /// A provider switch is replacing this view (Y2b): sends are refused
     /// while the replacement opens, keeping the old view drawable.
     input_locked: bool,
+    /// Where this view's own `session/start` stands. A new muse session
+    /// opens its view on the click, before the server answers, so sends
+    /// made meanwhile wait for the start instead of reaching a session the
+    /// server does not know yet.
+    start: StartState,
     /// The switch's pick, for the composer chip while this view is still
     /// drawn: the lane itself never changes, only the displayed mark.
     switching_to: Option<ProviderId>,
@@ -1180,6 +1209,7 @@ impl SessionView {
             handoff_card: None,
             handed_off_to: None,
             input_locked: false,
+            start: StartState::Started,
             switching_to: None,
             handoff_origin: None,
             handoff_prefix: Rc::new(Vec::new()),
@@ -1577,8 +1607,12 @@ impl SessionView {
         self.mode().label()
     }
 
-    /// The approval mode the server says the session is in.
+    /// The approval mode the server says the session is in — or, while the
+    /// start is on the wire, the pick waiting to be applied when it lands.
     fn mode(&self) -> PermissionMode {
+        if let StartState::Starting(StartQueue { mode: Some(mode), .. }) = &self.start {
+            return *mode;
+        }
         self.session().map(|s| s.mode).unwrap_or_default()
     }
 
@@ -1880,6 +1914,18 @@ impl SessionView {
     /// is said once and refused once, instead of each call site quietly doing
     /// nothing and leaving the person to wonder.
     fn wire_client(&mut self, cx: &mut Context<Self>) -> Option<Arc<MuseClient>> {
+        // A session the server does not know yet (or never will) takes no
+        // command: the start's own landing releases the first case.
+        match self.start {
+            StartState::Started => {}
+            StartState::Starting(_) => return None,
+            StartState::Failed => {
+                self.banner = Some("This session did not start — open a new one.".to_owned());
+                self.banner_action = None;
+                cx.notify();
+                return None;
+            }
+        }
         if let Some(client) = self.client.clone() {
             return Some(client);
         }
@@ -2079,6 +2125,69 @@ impl SessionView {
     #[cfg(test)]
     pub(crate) fn composer_focus_handle(&self, cx: &mut Context<Self>) -> FocusHandle {
         self.composer.focus_handle(cx).clone()
+    }
+
+    /// The view opened ahead of its `session/start`: sends and picks wait
+    /// for it (see [`StartQueue`]).
+    pub(crate) fn begin_start(&mut self) {
+        self.start = StartState::Starting(StartQueue::default());
+    }
+
+    /// Whether this view's `session/start` is still on the wire.
+    #[cfg(test)]
+    pub(crate) fn is_starting(&self) -> bool {
+        matches!(self.start, StartState::Starting(_))
+    }
+
+    /// The start's queue, while it is on the wire.
+    fn start_queue(&mut self) -> Option<&mut StartQueue> {
+        match &mut self.start {
+            StartState::Starting(queue) => Some(queue),
+            _ => None,
+        }
+    }
+
+    /// The start landed: the session is real, and whatever the person did
+    /// while it was on the wire goes now, in order — the picks first, so
+    /// the sends run under them, then each send exactly as typed.
+    pub(crate) fn start_landed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let StartState::Starting(queue) = std::mem::replace(&mut self.start, StartState::Started) else {
+            cx.notify();
+            return;
+        };
+        if let Some(model) = queue.model {
+            self.set_model(&model, cx);
+        }
+        if let Some(mode) = queue.mode {
+            self.set_mode(mode, cx);
+        }
+        if queue.models {
+            self.load_models(cx);
+        }
+        // The busy state the queued sends held is theirs to set again:
+        // a send refused on landing (the billing guard) must not leave it.
+        if !queue.sends.is_empty() {
+            self.submitting = false;
+        }
+        for text in queue.sends {
+            self.dispatch_text(text, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The start failed: there is no session behind this view, so it
+    /// refuses every command from here on and says why. The draft stays,
+    /// and the sends that waited go back into it.
+    pub(crate) fn start_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        if let StartState::Starting(queue) = std::mem::replace(&mut self.start, StartState::Failed) {
+            if !queue.sends.is_empty() {
+                self.submitting = false;
+                self.restore_prompt(queue.sends.join("\n\n"), cx);
+            }
+        }
+        self.banner = Some(format!("This session did not start: {message}"));
+        self.banner_action = None;
+        cx.notify();
     }
 
     /// Lock the composer while a provider switch replaces this view (Y2b).

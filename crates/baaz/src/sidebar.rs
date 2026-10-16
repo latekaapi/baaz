@@ -588,8 +588,17 @@ impl SessionEntry {
     /// first send still works without the exemption: [`local_started_row`]
     /// marks its row `running: true`, which already fails this check on its
     /// own.
+    ///
+    /// A row with a recorded ask has been sent to, and is never noise even
+    /// at zero turns: a first turn that never settled (a dead permission
+    /// channel, a crash) leaves `turns` at 0 once `running` reads false,
+    /// and the row used to vanish under the person's feet (live,
+    /// 2026-10-16). [`sent_to`] reads the same evidence off the stores.
     pub fn is_empty(&self) -> bool {
-        self.turns == 0 && !self.running && !self.named
+        self.turns == 0
+            && !self.running
+            && !self.named
+            && self.last_ask.as_deref().map(str::trim).is_none_or(str::is_empty)
     }
 
     /// The row's state dot: running sessions pulse, sessions waiting on a
@@ -938,6 +947,37 @@ pub fn local_started_row(
         branch: None,
         terminals_running: 0,
     }
+}
+
+/// Whether `session_id` has ever been sent to, by the stores' own
+/// record: a byline ask in the overrides, or the first prompt a provider
+/// lane noted on admission. Either means a person typed into it, so the
+/// empty filter keeps its row even while `turns` still reads 0 — the
+/// admission writes the first prompt before any turn settles.
+pub fn sent_to(
+    session_id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> bool {
+    let said = |value: Option<&str>| value.map(str::trim).is_some_and(|s| !s.is_empty());
+    said(overrides.get(session_id).and_then(|m| m.last_ask.as_deref()))
+        || said(provider_sessions.get(session_id).and_then(|r| r.first_prompt.as_deref()))
+}
+
+/// The prompt a send may title `session_id`'s row from: none once a
+/// generated title stands. [`first_send_update`] titles any zero-turn row
+/// from its send, and a first turn that never settled keeps the row at
+/// zero turns — so a retry (which resends the first prompt) put the raw
+/// prompt back over the generated title, in the row and in the header that
+/// reads it (live, 2026-10-16). The store's ladder ranks the generated
+/// title above the prompt; a send must not reorder it.
+pub fn send_title<'a>(session_id: &str, prompt: Option<&'a str>, overrides: &crate::sessions::Overrides) -> Option<&'a str> {
+    let generated = overrides
+        .get(session_id)
+        .and_then(|m| m.generated_title.as_deref())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    prompt.filter(|_| !generated)
 }
 
 /// What `turn/started` does to a session's row that already existed with no
@@ -1776,18 +1816,30 @@ pub fn describe(
 /// a Muse index title that is the whole prompt, and a derived title elided
 /// from it — all three read as the same words twice when the prompt follows.
 fn echoes_prompt(label: &str, prompt: &str) -> bool {
+    // Only the first 40 characters are compared, so a whole-word prefix
+    // comfortably past that is all either side needs (see
+    // [`flattened_prefix`]); lowercasing a prefix cut at a word boundary
+    // reads the same as lowercasing the whole. The label's trailing
+    // elision trim reaches the first 40 only when everything past the
+    // prefix is trimmable, so a cut label takes the full path exactly then.
     fn norm(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
     }
-    let label: String = norm(label)
-        .trim_end_matches(['\u{2026}', '.', ' '])
-        .chars()
-        .take(40)
-        .collect();
+    fn first_40(text: &str) -> String {
+        text.chars().take(40).collect()
+    }
+    let label: String = match flattened_prefix(label, 64) {
+        (prefix, Some(end))
+            if !label[end..].chars().all(|c| c.is_whitespace() || matches!(c, '\u{2026}' | '.')) =>
+        {
+            first_40(&prefix.to_lowercase())
+        }
+        _ => first_40(norm(label).trim_end_matches(['\u{2026}', '.', ' '])),
+    };
     if label.is_empty() {
         return false;
     }
-    let prompt: String = norm(prompt).chars().take(40).collect();
+    let prompt = first_40(&flattened_prefix(prompt, 64).0.to_lowercase());
     prompt.starts_with(&label)
 }
 
@@ -1803,11 +1855,37 @@ fn parse_time(rfc3339: &str) -> DateTime<Local> {
 /// one is cut where the row would truncate it anyway. The one truncation
 /// convention: derived titles reuse it rather than cutting their own way.
 pub(crate) fn one_line(text: &str) -> String {
-    let flattened: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flattened.chars().count() <= 80 {
+    let (flattened, cut) = flattened_prefix(text, 80);
+    if cut.is_none() {
         return flattened;
     }
     flattened.chars().take(79).collect::<String>() + "\u{2026}"
+}
+
+/// `text` with its whitespace runs collapsed to single spaces, built a word
+/// at a time and stopped once it holds more than `chars` characters; the
+/// byte offset where the unread remainder starts comes back when it
+/// stopped early. The prefix is exactly the start of the fully flattened
+/// text, so callers that only read the first few dozen characters never
+/// flatten a whole transcript-sized prompt: every list join and rejoin
+/// runs this per row, and flattening ~2,600 whole prompts was most of a
+/// 600–800 ms frozen window per `session/list` reply.
+fn flattened_prefix(text: &str, chars: usize) -> (String, Option<usize>) {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for word in text.split_whitespace() {
+        if count > 0 {
+            out.push(' ');
+            count += 1;
+        }
+        out.push_str(word);
+        count += word.chars().count();
+        if count > chars {
+            let end = word.as_ptr() as usize - text.as_ptr() as usize + word.len();
+            return (out, Some(end));
+        }
+    }
+    (out, None)
 }
 
 /// The hover card's title budget: the card clamps to three laid-out lines
@@ -1908,6 +1986,55 @@ pub(crate) fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::Sessio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prefix-only flattening reads exactly what flattening the whole
+    /// text read: `one_line` and the echo check agree with their old
+    /// whole-text forms on short, long, cut-at-the-edge and elided input.
+    #[test]
+    fn prefix_flattening_matches_the_whole_text() {
+        fn one_line_whole(text: &str) -> String {
+            let flattened: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flattened.chars().count() <= 80 {
+                return flattened;
+            }
+            flattened.chars().take(79).collect::<String>() + "\u{2026}"
+        }
+        fn echoes_whole(label: &str, prompt: &str) -> bool {
+            fn norm(text: &str) -> String {
+                text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+            }
+            let label: String =
+                norm(label).trim_end_matches(['\u{2026}', '.', ' ']).chars().take(40).collect();
+            if label.is_empty() {
+                return false;
+            }
+            let prompt: String = norm(prompt).chars().take(40).collect();
+            prompt.starts_with(&label)
+        }
+        let long = "Fix   the header\n\nso it aligns ".repeat(400);
+        let texts = [
+            String::new(),
+            "   ".to_owned(),
+            "Short prompt".to_owned(),
+            "x".repeat(80),
+            "x".repeat(81),
+            format!("{} tail", "word ".repeat(16)),
+            long.clone(),
+            format!("{}{}", "Fix the header so it aligns with the rail ", ". ".repeat(200)),
+            format!("{}…", &long[..120]),
+            "ΣΊΣΥΦΟΣ ΚΑΙ ΟΔΥΣΣΕΑΣ ".repeat(10),
+        ];
+        for text in &texts {
+            assert_eq!(one_line(text), one_line_whole(text), "one_line on {text:?}");
+            for prompt in &texts {
+                assert_eq!(
+                    echoes_prompt(text, prompt),
+                    echoes_whole(text, prompt),
+                    "echoes_prompt on {text:?} / {prompt:?}"
+                );
+            }
+        }
+    }
 
     fn at(days_ago: i64) -> DateTime<Local> {
         Local::now() - chrono::Duration::days(days_ago)
@@ -2911,6 +3038,29 @@ mod tests {
         // Titling is not naming: the empty filter's `named` exemption still
         // reads this as a first send, not a person's own choice.
         assert!(!row.named);
+    }
+
+    /// A send titles a zero-turn row only while no generated title stands,
+    /// and a recorded send makes a zero-turn row non-empty.
+    #[test]
+    fn a_send_never_retitles_over_a_generated_title_and_a_sent_row_is_not_empty() {
+        let mut overrides = crate::sessions::Overrides::new();
+        assert_eq!(send_title("s-1", Some("raw prompt"), &overrides), Some("raw prompt"));
+        overrides.entry("s-1".into()).or_default().generated_title = Some("Generated".into());
+        assert_eq!(send_title("s-1", Some("raw prompt"), &overrides), None);
+        let mut row = entry("s-1");
+        row.label = "Generated".into();
+        first_send_update(&mut row, send_title("s-1", Some("raw prompt"), &overrides), Local::now(), false);
+        assert_eq!(row.label, "Generated", "the retry keeps the generated title");
+        let mut sent = entry("s-2");
+        assert!(sent.is_empty());
+        sent.last_ask = Some("Explain the schema".into());
+        assert!(!sent.is_empty(), "a recorded ask is a send");
+        let mut store = crate::provider_sessions::ProviderSessionStore::new();
+        assert!(!sent_to("s-3", &store, &overrides));
+        crate::provider_sessions::upsert_open(&mut store, "codex", "s-3", None, None, None);
+        crate::provider_sessions::note_first_prompt(&mut store, "s-3", "Draw the db");
+        assert!(sent_to("s-3", &store, &overrides), "an admitted first prompt is a send");
     }
 
     /// The pre-1.3.0 shape still works the same way: a `local` placeholder

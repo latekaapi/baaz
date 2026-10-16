@@ -28,6 +28,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aui_protocol::PermissionMode;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::ProviderEvent;
 use serde_json::{json, Value};
@@ -221,35 +222,119 @@ pub fn initialized_notification() -> Value {
     json!({"method": "initialized", "params": {}})
 }
 
+/// The `approvalPolicy` (`AskForApproval`) and `sandbox` (`SandboxMode`)
+/// spellings each neutral approval mode opens a thread with, per
+/// `ThreadStartParams.json` / `ThreadResumeParams.json` (codex-cli
+/// 0.144.6 schema, generated 2026-10-16). A live `thread/start` handshake
+/// (no turn) answered each pair back as sent, the sandbox as its tagged
+/// `SandboxPolicy` object. The per-turn override was never executed live:
+/// that needs a turn.
+pub fn codex_thread_mode(mode: PermissionMode) -> (&'static str, &'static str) {
+    match mode {
+        PermissionMode::AllowAll => ("never", "danger-full-access"),
+        PermissionMode::OnRequest => ("on-request", "workspace-write"),
+        PermissionMode::PromptUnmatched => ("untrusted", "workspace-write"),
+        PermissionMode::DenyUnmatched => ("never", "read-only"),
+    }
+}
+
+/// The same mode as a per-turn override: `turn/start` takes the policy
+/// spelled as above but the sandbox as a tagged `SandboxPolicy` object
+/// (`TurnStartParams.json`: "for this turn and subsequent turns").
+pub fn codex_turn_sandbox_policy(mode: PermissionMode) -> Value {
+    let kind = match codex_thread_mode(mode).1 {
+        "danger-full-access" => "dangerFullAccess",
+        "read-only" => "readOnly",
+        _ => "workspaceWrite",
+    };
+    json!({"type": kind})
+}
+
+/// The neutral mode behind what the server reports a thread runs under:
+/// `approvalPolicy` plus the sandbox, either as a `SandboxMode` string or a
+/// tagged `SandboxPolicy` object (`thread/start` and `thread/resume`
+/// answers carry `sandbox`, `thread/settings/updated` carries
+/// `sandboxPolicy`). `untrusted` asks for anything unmatched;
+/// `on-request` lets the model ask; `never` with full access runs
+/// everything, and `never` inside the read-only sandbox refuses what the
+/// sandbox does. `never` inside `workspace-write` matches no chip: Read-only
+/// would understate what the thread may write and Full access would claim
+/// more than it has, so it folds to nothing — the chip never shows less
+/// access than the thread holds. A granular policy has no neutral spelling
+/// and folds to nothing too.
+pub fn permission_mode_from_codex(approval: &Value, sandbox: Option<&Value>) -> Option<PermissionMode> {
+    let sandbox = sandbox.and_then(|sandbox| {
+        sandbox.as_str().or_else(|| sandbox.get("type").and_then(Value::as_str))
+    });
+    match approval.as_str()? {
+        "untrusted" => Some(PermissionMode::PromptUnmatched),
+        "on-request" => Some(PermissionMode::OnRequest),
+        "never" => match sandbox {
+            Some("dangerFullAccess" | "danger-full-access" | "externalSandbox") => {
+                Some(PermissionMode::AllowAll)
+            }
+            Some("readOnly" | "read-only") => Some(PermissionMode::DenyUnmatched),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The mode a `thread/start` or `thread/resume` answer reports (see
+/// [`permission_mode_from_codex`]).
+pub fn reported_mode(result: &Value) -> Option<PermissionMode> {
+    permission_mode_from_codex(result.get("approvalPolicy")?, result.get("sandbox"))
+}
+
+/// Add `approvalPolicy` and `sandbox` to thread params when a mode was
+/// asked for; `None` leaves the shape as it was and the server decides.
+fn with_thread_mode(params: &mut serde_json::Map<String, Value>, mode: Option<PermissionMode>) {
+    if let Some(mode) = mode {
+        let (approval, sandbox) = codex_thread_mode(mode);
+        params.insert("approvalPolicy".to_owned(), Value::String(approval.to_owned()));
+        params.insert("sandbox".to_owned(), Value::String(sandbox.to_owned()));
+    }
+}
+
 /// The `thread/start` call. `model` is always explicit: an account that
 /// rejects the owner's configured default fails the turn otherwise, so there
 /// is no "server default" lane. Baaz cannot choose the thread id — the
-/// server mints it and returns it (see [`thread_ids`]).
-pub fn thread_start_request(id: u64, cwd: &str, model: &str) -> Value {
-    json!({
-        "id": id,
-        "method": "thread/start",
-        "params": {"cwd": cwd, "model": model}
-    })
+/// server mints it and returns it (see [`thread_ids`]). `mode` opens the
+/// thread under that approval policy and sandbox (see
+/// [`codex_thread_mode`]); `None` omits both keys.
+pub fn thread_start_request(id: u64, cwd: &str, model: &str, mode: Option<PermissionMode>) -> Value {
+    let mut params = serde_json::Map::with_capacity(4);
+    params.insert("cwd".to_owned(), Value::String(cwd.to_owned()));
+    params.insert("model".to_owned(), Value::String(model.to_owned()));
+    with_thread_mode(&mut params, mode);
+    json!({"id": id, "method": "thread/start", "params": Value::Object(params)})
 }
 
 /// The `turn/start` call carrying one text input. `effort` overrides the
 /// reasoning effort for this turn and subsequent ones (per
 /// `TurnStartParams.json`); `None` omits the key and the server decides —
-/// the Default chip, byte-identical to the old shape.
+/// the Default chip, byte-identical to the old shape. `mode` overrides the
+/// approval policy and sandbox the same way — a mid-session pick — and
+/// `None` omits both.
 pub fn turn_start_request(
     id: u64,
     thread_id: &str,
     model: &str,
     text: &str,
     effort: Option<&str>,
+    mode: Option<PermissionMode>,
 ) -> Value {
-    let mut params = serde_json::Map::with_capacity(4);
+    let mut params = serde_json::Map::with_capacity(6);
     params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
     params.insert("model".to_owned(), Value::String(model.to_owned()));
     params.insert("input".to_owned(), json!([{"type": "text", "text": text}]));
     if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
         params.insert("effort".to_owned(), Value::String(effort.to_owned()));
+    }
+    if let Some(mode) = mode {
+        let (approval, _) = codex_thread_mode(mode);
+        params.insert("approvalPolicy".to_owned(), Value::String(approval.to_owned()));
+        params.insert("sandboxPolicy".to_owned(), codex_turn_sandbox_policy(mode));
     }
     json!({"id": id, "method": "turn/start", "params": Value::Object(params)})
 }
@@ -258,13 +343,13 @@ pub fn turn_start_request(
 /// `ThreadResumeParams` only `threadId` is required; the response carries
 /// the thread (with its `turns[]` history, per the `Thread.turns`
 /// description) plus the effective `model` (see [`resume_ids`]).
-/// Captured live 2026-09-26 in `fixtures/codex/resume.jsonl`.
-pub fn thread_resume_request(id: u64, thread_id: &str) -> Value {
-    json!({
-        "id": id,
-        "method": "thread/resume",
-        "params": {"threadId": thread_id}
-    })
+/// Captured live 2026-09-26 in `fixtures/codex/resume.jsonl`. `mode`
+/// rejoins under that approval policy and sandbox, as on `thread/start`.
+pub fn thread_resume_request(id: u64, thread_id: &str, mode: Option<PermissionMode>) -> Value {
+    let mut params = serde_json::Map::with_capacity(3);
+    params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
+    with_thread_mode(&mut params, mode);
+    json!({"id": id, "method": "thread/resume", "params": Value::Object(params)})
 }
 
 /// The `turn/steer` call injecting input into the running turn.
@@ -1404,7 +1489,7 @@ mod tests {
         // The schema shape (`TurnStartParams` admits `effort`): a set level
         // rides `turn/start` for that turn, and Default omits the key —
         // byte-identical to the pre-effort frame the fixture recorded.
-        let with = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", Some("high"));
+        let with = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", Some("high"), None);
         let params = with.get("params").expect("turn/start has params");
         assert_eq!(
             params.get("effort").and_then(Value::as_str),
@@ -1420,7 +1505,7 @@ mod tests {
                 "effort": "high",
             }))
         );
-        let without = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None);
+        let without = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None, None);
         let params = without.get("params").expect("turn/start has params");
         assert!(
             params.get("effort").is_none(),
@@ -1477,7 +1562,7 @@ mod tests {
         assert_eq!(model, "gpt-5.6-sol", "thread/start carries an explicit model");
         let cwd = params.get("cwd").and_then(Value::as_str).expect("cwd");
         assert_eq!(
-            thread_start_request(2, cwd, model).get("params"),
+            thread_start_request(2, cwd, model, None).get("params"),
             Some(&json!({"cwd": cwd, "model": model}))
         );
 
@@ -1499,7 +1584,7 @@ mod tests {
         assert_eq!(text, "Reply with exactly the word READY. Do not use any tools.");
         let thread_id = params.get("threadId").and_then(Value::as_str).expect("threadId");
         assert_eq!(
-            turn_start_request(3, thread_id, "gpt-5.6-sol", text, None).get("params"),
+            turn_start_request(3, thread_id, "gpt-5.6-sol", text, None, None).get("params"),
             Some(&json!({
                 "threadId": thread_id,
                 "model": "gpt-5.6-sol",
@@ -2137,6 +2222,85 @@ mod tests {
         assert!(
             shared.lock().expect("mutex").waiters.is_empty(),
             "failed waiters are forgotten, never re-failed"
+        );
+    }
+
+    #[test]
+    fn each_mode_rides_thread_start_resume_and_turn_start() {
+        // Spellings per the generated 0.144.6 schema: `AskForApproval` and
+        // `SandboxMode` on the thread calls, a tagged `SandboxPolicy` per
+        // turn.
+        let cases = [
+            (PermissionMode::AllowAll, "never", "danger-full-access", "dangerFullAccess"),
+            (PermissionMode::OnRequest, "on-request", "workspace-write", "workspaceWrite"),
+            (PermissionMode::PromptUnmatched, "untrusted", "workspace-write", "workspaceWrite"),
+            (PermissionMode::DenyUnmatched, "never", "read-only", "readOnly"),
+        ];
+        for (mode, approval, sandbox, policy) in cases {
+            for frame in [
+                thread_start_request(2, "/w", "gpt-5.6-sol", Some(mode)),
+                thread_resume_request(2, "thread-1", Some(mode)),
+            ] {
+                let params = &frame["params"];
+                assert_eq!(params["approvalPolicy"], approval, "{frame}");
+                assert_eq!(params["sandbox"], sandbox, "{frame}");
+            }
+            let turn = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None, Some(mode));
+            assert_eq!(turn["params"]["approvalPolicy"], approval);
+            assert_eq!(turn["params"]["sandboxPolicy"], json!({"type": policy}));
+            // What the server reports back, in either sandbox spelling,
+            // folds to the same mode.
+            assert_eq!(permission_mode_from_codex(&json!(approval), Some(&json!(sandbox))), Some(mode));
+            assert_eq!(
+                permission_mode_from_codex(&json!(approval), Some(&json!({"type": policy}))),
+                Some(mode)
+            );
+        }
+        // No mode, no keys: the server decides, byte-identical to before.
+        for frame in [
+            thread_start_request(2, "/w", "gpt-5.6-sol", None),
+            thread_resume_request(2, "thread-1", None),
+            turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None, None),
+        ] {
+            let params = frame["params"].as_object().expect("params");
+            for key in ["approvalPolicy", "sandbox", "sandboxPolicy"] {
+                assert!(!params.contains_key(key), "{key} without a mode: {frame}");
+            }
+        }
+    }
+
+    #[test]
+    fn never_inside_workspace_write_reports_no_mode() {
+        // Read-only would understate what the thread may write: no chip
+        // matches, so none is claimed, in either sandbox spelling.
+        for sandbox in [json!("workspace-write"), json!({"type": "workspaceWrite"})] {
+            assert_eq!(permission_mode_from_codex(&json!("never"), Some(&sandbox)), None, "{sandbox}");
+        }
+        assert_eq!(
+            permission_mode_from_codex(&json!("never"), Some(&json!({"type": "readOnly"}))),
+            Some(PermissionMode::DenyUnmatched)
+        );
+        assert_eq!(permission_mode_from_codex(&json!("never"), None), None);
+    }
+
+    #[test]
+    fn the_thread_start_answer_reports_its_mode() {
+        // The captured default lane: `on-request` inside `readOnly` reads
+        // as Auto, the policy deciding; a granular policy reads as nothing.
+        let frames = envelopes("basic.jsonl");
+        let start = frames
+            .iter()
+            .filter(|(direction, _)| *direction == Direction::ServerToClient)
+            .find_map(|(_, frame)| frame.get("result").filter(|result| result.get("thread").is_some()))
+            .expect("thread/start response");
+        assert_eq!(reported_mode(start), Some(PermissionMode::OnRequest));
+        assert_eq!(
+            reported_mode(&json!({"approvalPolicy": {"granular": {}}, "sandbox": {"type": "readOnly"}})),
+            None
+        );
+        assert_eq!(
+            reported_mode(&json!({"approvalPolicy": "never", "sandbox": {"type": "externalSandbox"}})),
+            Some(PermissionMode::AllowAll)
         );
     }
 }

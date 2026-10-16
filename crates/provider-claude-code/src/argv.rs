@@ -16,6 +16,8 @@
 //! User turns go to stdin as NDJSON ([`user_input_line`]); the prompt is
 //! never passed positionally (a variadic flag would eat it — doc §1).
 
+use aui_protocol::PermissionMode;
+
 /// How permission decisions reach the child (addendum 2026-09-24):
 /// `--permission-prompts host` routes every tool approval to the host, and
 /// `--permission-prompt-tool stdio` — a sentinel, not a tool name — delivers
@@ -38,6 +40,57 @@ pub struct SessionLaunch {
     pub model: Option<String>,
     /// The effort flag, when one was requested.
     pub effort: Option<String>,
+    /// The `--permission-mode` flag, when one was requested (see
+    /// [`with_permission_mode`]).
+    pub permission_mode: Option<PermissionMode>,
+}
+
+/// The `--permission-mode` spelling for each neutral approval mode.
+/// `claude --help` (2.1.276) lists `acceptEdits, auto, bypassPermissions,
+/// manual, dontAsk, plan`; `manual` is the asking mode the CLI reports
+/// back as `default` (probed live 2026-10-16).
+pub fn claude_permission_mode(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::AllowAll => "bypassPermissions",
+        PermissionMode::OnRequest => "auto",
+        PermissionMode::PromptUnmatched => "manual",
+        PermissionMode::DenyUnmatched => "dontAsk",
+    }
+}
+
+/// The neutral mode behind a mode the CLI reports (`system/init` and
+/// `system/status` `permissionMode`, `initialize`'s
+/// `current_permission_mode`, `set_permission_mode`'s `mode`). `default`
+/// and `manual` are one mode. `acceptEdits` still asks for anything but
+/// edits, so it reads as Auto; `plan` executes nothing, so it reads as
+/// Read-only. An unknown spelling folds to nothing rather than a guess.
+pub fn permission_mode_from_claude(wire: &str) -> Option<PermissionMode> {
+    match wire {
+        "bypassPermissions" => Some(PermissionMode::AllowAll),
+        "auto" | "acceptEdits" => Some(PermissionMode::OnRequest),
+        "default" | "manual" => Some(PermissionMode::PromptUnmatched),
+        "dontAsk" | "plan" => Some(PermissionMode::DenyUnmatched),
+        _ => None,
+    }
+}
+
+/// Add `--permission-mode <mode>` to a built launch, replacing any the
+/// launch already carried; `None` leaves the launch as built (the CLI's
+/// own default). `bypassPermissions` needs no extra flag at launch — a
+/// child spawned in it starts there (probed live 2026-10-16) — but only
+/// such a child may switch INTO it later over the control channel; any
+/// other refuses "the session was not launched with
+/// --dangerously-skip-permissions", which is why a mid-session pick of
+/// Full access relaunches instead.
+pub fn with_permission_mode(mut launch: SessionLaunch, mode: Option<PermissionMode>) -> SessionLaunch {
+    let Some(mode) = mode else { return launch };
+    if let Some(at) = launch.argv.iter().position(|arg| arg == "--permission-mode") {
+        launch.argv.drain(at..(at + 2).min(launch.argv.len()));
+    }
+    launch.argv.push("--permission-mode".into());
+    launch.argv.push(claude_permission_mode(mode).to_owned());
+    launch.permission_mode = Some(mode);
+    launch
 }
 
 /// The flags every session child carries.
@@ -147,6 +200,7 @@ pub fn argv_for_open(
         session_id: request_id.to_owned(),
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
+        permission_mode: None,
     }
 }
 
@@ -172,6 +226,7 @@ pub fn argv_for_resume(
         session_id: session_id.to_owned(),
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
+        permission_mode: None,
     }
 }
 
@@ -201,6 +256,7 @@ pub fn argv_for_fork(
         session_id: request_id.to_owned(),
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
+        permission_mode: None,
     }
 }
 
@@ -469,5 +525,58 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn each_mode_rides_every_launch_shape_and_none_rides_none() {
+        let cases = [
+            (PermissionMode::AllowAll, "bypassPermissions"),
+            (PermissionMode::OnRequest, "auto"),
+            (PermissionMode::PromptUnmatched, "manual"),
+            (PermissionMode::DenyUnmatched, "dontAsk"),
+        ];
+        for (mode, wire) in cases {
+            for launch in [
+                argv_for_open("req-1", Some("/work"), None, None, None),
+                argv_for_resume("sess-9", None, None, None),
+                argv_for_fork("branch-2", "sess-9", None, None, None),
+            ] {
+                let launch = with_permission_mode(launch, Some(mode));
+                let at = launch.argv.iter().position(|arg| arg == "--permission-mode").expect("flag");
+                assert_eq!(launch.argv.get(at + 1).map(String::as_str), Some(wire));
+                assert_eq!(launch.permission_mode, Some(mode));
+                // No extra allow flag: a Full access launch starts there
+                // on `--permission-mode` alone (probed live 2026-10-16).
+                assert!(!launch.argv.iter().any(|arg| arg.contains("dangerously")), "{:?}", launch.argv);
+            }
+            // What the CLI reports back folds to the same mode.
+            assert_eq!(permission_mode_from_claude(wire), Some(mode));
+        }
+        let bare = with_permission_mode(argv_for_open("req-1", None, None, None, None), None);
+        assert!(!bare.argv.iter().any(|arg| arg == "--permission-mode"), "no mode, no flag");
+        assert_eq!(bare.permission_mode, None);
+    }
+
+    #[test]
+    fn a_new_mode_replaces_the_old_flag() {
+        let launch = with_permission_mode(
+            argv_for_resume("sess-9", None, None, None),
+            Some(PermissionMode::OnRequest),
+        );
+        let launch = with_permission_mode(launch, Some(PermissionMode::AllowAll));
+        let flags: Vec<_> = launch.argv.iter().filter(|arg| *arg == "--permission-mode").collect();
+        assert_eq!(flags.len(), 1, "one flag: {:?}", launch.argv);
+        assert!(launch.argv.contains(&"bypassPermissions".to_owned()));
+        assert!(!launch.argv.contains(&"auto".to_owned()));
+    }
+
+    #[test]
+    fn reported_spellings_fold_to_the_closest_mode() {
+        // The CLI reports the asking mode as `default` even when launched
+        // with `manual` (probed live 2026-10-16).
+        assert_eq!(permission_mode_from_claude("default"), Some(PermissionMode::PromptUnmatched));
+        assert_eq!(permission_mode_from_claude("acceptEdits"), Some(PermissionMode::OnRequest));
+        assert_eq!(permission_mode_from_claude("plan"), Some(PermissionMode::DenyUnmatched));
+        assert_eq!(permission_mode_from_claude("someday"), None, "unknown folds to nothing");
     }
 }

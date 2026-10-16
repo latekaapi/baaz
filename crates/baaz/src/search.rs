@@ -161,6 +161,8 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
+        // The fingerprint described the table just dropped.
+        connection.execute("DELETE FROM meta WHERE key = 'sessions_fingerprint'", [])?;
     } else {
         connection.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
@@ -184,11 +186,40 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
     Ok(connection)
 }
 
-/// Replace the whole session index with `rows`.
+/// A fingerprint of `rows`, in order: what [`rebuild_sessions`] stores
+/// beside the index so an identical rebuild can be skipped.
+fn rows_fingerprint(rows: &[SessionRow]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rows.len().hash(&mut hasher);
+    for row in rows {
+        row.session_id.hash(&mut hasher);
+        row.label.hash(&mut hasher);
+        row.title.hash(&mut hasher);
+        row.first_prompt.hash(&mut hasher);
+        row.body.hash(&mut hasher);
+        row.project.hash(&mut hasher);
+        row.workspace.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Replace the whole session index with `rows`. Returns whether it wrote.
 ///
 /// Deletes-then-inserts in one transaction: a crash leaves the previous
-/// index or the next one, never half of each.
-pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Result<(), rusqlite::Error> {
+/// index or the next one, never half of each. Rows identical to the last
+/// rebuild's (same fingerprint, stored in `meta` in the same transaction)
+/// write nothing: every list refresh and override edit lands here, and a
+/// from-scratch FTS rebuild over ~2,500 transcripts took 6–27 s of disk
+/// for what was, almost every time, the same index.
+pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Result<bool, rusqlite::Error> {
+    let fingerprint = rows_fingerprint(rows);
+    let stored: Option<String> = connection
+        .query_row("SELECT value FROM meta WHERE key = 'sessions_fingerprint'", [], |row| row.get(0))
+        .ok();
+    if stored.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(false);
+    }
     let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM sessions_fts", [])?;
     {
@@ -207,7 +238,12 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
             ])?;
         }
     }
-    transaction.commit()
+    transaction.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('sessions_fingerprint', ?1)",
+        params![fingerprint],
+    )?;
+    transaction.commit()?;
+    Ok(true)
 }
 
 /// The words a person would type to mean "this project", for the indexed
@@ -574,6 +610,22 @@ mod tests {
 
         assert_eq!(query_sessions(&connection, "Storefront", LIMIT).len(), 1, "the name on screen");
         assert_eq!(query_sessions(&connection, "acme-web", LIMIT).len(), 1, "and the folder");
+    }
+
+    /// The same rows twice write once: the second rebuild finds the first's
+    /// fingerprint and leaves the index alone. Any change to a row writes
+    /// again, and the index then reads the new words.
+    #[test]
+    fn an_unchanged_rebuild_writes_nothing() {
+        let mut connection = memory();
+        let rows = [session_row("s1", "generics everywhere", Some("/work/a"))];
+        assert!(rebuild_sessions(&mut connection, &rows).expect("rebuild"), "the first rebuild writes");
+        assert!(!rebuild_sessions(&mut connection, &rows).expect("rebuild"), "the same rows write nothing");
+        assert_eq!(query_sessions(&connection, "generics", LIMIT).len(), 1, "the index still answers");
+        let changed = [session_row("s1", "lifetimes instead", Some("/work/a"))];
+        assert!(rebuild_sessions(&mut connection, &changed).expect("rebuild"), "a changed row writes");
+        assert!(query_sessions(&connection, "generics", LIMIT).is_empty(), "the old words are gone");
+        assert_eq!(query_sessions(&connection, "lifetimes", LIMIT).len(), 1, "the new ones answer");
     }
 
     /// The terms themselves: no duplication when a project was never

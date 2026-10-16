@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use aui_protocol::Delta;
+use aui_protocol::{Delta, PermissionMode};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ModelSummary, PendingApproval,
@@ -47,7 +47,9 @@ use frame::ApprovalRequest;
 
 pub use controls::{
     CONTROL_CONFIRM_TIMEOUT, CONTROL_EFFORT_REJECTED_CARD, CONTROL_MODEL_REJECTED_CARD,
+    CONTROL_MODE_REJECTED_CARD,
 };
+pub use fold::CHILD_EXITED_CARD;
 
 /// One claimed answer: the request is already out of its queue, so this
 /// value is the only right to answer it. Exactly one claimant can hold
@@ -97,6 +99,15 @@ pub struct ClaudeCodeAdapter {
     /// relaunch path (see [`Self::resume_launch_for_effort`]). Shared with
     /// the [`ControlHub`], which rolls it back when the child refuses.
     effort: Arc<Mutex<Option<String>>>,
+    /// Whether the running child may switch into `bypassPermissions` over
+    /// the control channel: only a child launched in it may (probed live
+    /// 2026-10-16 — any other answers "the session was not launched with
+    /// --dangerously-skip-permissions").
+    bypass_capable: Mutex<bool>,
+    /// A Full access pick the running child cannot take live: the next
+    /// `SubmitInput` relaunches with `--resume` and the mode flag first,
+    /// the way a cleared effort does. A later live pick clears it.
+    mode_relaunch_due: Mutex<Option<PermissionMode>>,
     /// The confirmation hub: pending host control requests, matched by
     /// `request_id` when the child's answers arrive on the pump. The pump
     /// holds the same [`Arc`], so confirmation runs on arrival — never on
@@ -171,6 +182,19 @@ pub fn apply_effort_control_request(request_id: &str, level: &str) -> String {
     .to_string()
 }
 
+/// `set_permission_mode` switches the live child's approval mode with no
+/// relaunch: answered `{"mode": …}` and followed by a `system/status`
+/// frame carrying `permissionMode` (probed live 2026-10-16, every mode but
+/// `bypassPermissions` from a child not launched in it).
+pub fn set_permission_mode_control_request(request_id: &str, mode: PermissionMode) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_permission_mode", "mode": argv::claude_permission_mode(mode)},
+    })
+    .to_string()
+}
+
 /// Where the terminal relay lives: the bridge to spawn and the socket to
 /// point it at, plus where its per-session MCP config files land.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,6 +244,8 @@ impl ClaudeCodeAdapter {
             session_id,
             model,
             effort,
+            bypass_capable: Mutex::new(false),
+            mode_relaunch_due: Mutex::new(None),
             hub,
             control_seq: Mutex::new(1),
             sent_control: Mutex::new(Vec::new()),
@@ -522,6 +548,90 @@ impl ClaudeCodeAdapter {
         self.send_control(&apply_effort_control_request(&request_id, level), pending)
     }
 
+    /// The `set_permission_mode` line for the live child. The chip does not
+    /// move here: the child's answer and `status` frame report the mode,
+    /// and a refusal banners its reason.
+    fn send_set_permission_mode(&self, mode: PermissionMode) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::SetPermissionMode(mode),
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        };
+        self.send_control(&set_permission_mode_control_request(&request_id, mode), pending)
+    }
+
+    /// Record the mode a child was launched in: the chip shows it until the
+    /// child's own report (the `initialize` answer, then each `init`)
+    /// confirms or corrects it, and only a child launched in Full access
+    /// may later switch into it live. A launch with no mode flag announces
+    /// nothing — the child's report is the first word.
+    fn note_launch_mode(&self, launch: &SessionLaunch) {
+        let bypass = launch.permission_mode == Some(PermissionMode::AllowAll);
+        *self.bypass_capable.lock().expect("bypass mutex") = bypass;
+        // A child launched in Full access already owes no relaunch into it.
+        if bypass {
+            *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
+        }
+        let moved = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            fold.set_session_id(&launch.session_id);
+            launch.permission_mode.map(|mode| (mode, fold.note_permission_mode(mode)))
+        };
+        if let Some((mode, true)) = moved {
+            let _ = self.tx.send(ProviderEvent::ApprovalModeChanged {
+                session_id: launch.session_id.clone(),
+                mode,
+            });
+        }
+    }
+
+    /// The relaunch a Full access pick owes, when one is due: `--resume`
+    /// with the recorded model and effort plus `--permission-mode
+    /// bypassPermissions`. The take is the claim. Pure — no spawn.
+    fn take_mode_relaunch(&self, session_id: &str) -> Option<SessionLaunch> {
+        let mode = self.mode_relaunch_due.lock().expect("mode relaunch mutex").take()?;
+        let model = self.model.lock().expect("model mutex").clone();
+        let effort = self.effort.lock().expect("effort mutex").clone();
+        Some(argv::with_permission_mode(
+            self.apply_use_own_mcp(argv::argv_for_resume(
+                session_id,
+                model.as_deref(),
+                None,
+                effort.as_deref(),
+            )),
+            Some(mode),
+        ))
+    }
+
+    /// The `--resume` relaunch a turn needs when this adapter holds
+    /// `session_id` but its child is gone — its stream ended on its own
+    /// (the lane may have hung it up since), or it exited — carrying the
+    /// recorded model and effort (the mode rides along in
+    /// [`Self::relaunch`]). `None` when the child is alive, was never
+    /// spawned, or the session is not this adapter's.
+    fn revive_launch(&self, session_id: &str) -> Option<SessionLaunch> {
+        self.check_session(session_id).ok()?;
+        let lost = self.hub.child_lost.load(std::sync::atomic::Ordering::SeqCst);
+        let exited = self.child.lock().expect("child mutex").as_mut().is_some_and(|running| running.has_exited());
+        if !lost && !exited {
+            return None;
+        }
+        let model = self.model.lock().expect("model mutex").clone();
+        let effort = self.effort.lock().expect("effort mutex").clone();
+        Some(self.apply_use_own_mcp(argv::argv_for_resume(
+            session_id,
+            model.as_deref(),
+            None,
+            effort.as_deref(),
+        )))
+    }
+
     /// Fold one raw child stdout line and confirm whatever it settles: the
     /// same [`ControlHub::ingest_line`] the live pump runs per line, so a
     /// scripted frame in tests settles exactly what the live child would.
@@ -588,6 +698,9 @@ impl ClaudeCodeAdapter {
         // The guard drops here: `send_initialize` locks the child again to
         // write, and holding both would hang the open forever.
         drop(child);
+        // Before `initialize` goes out: its answer reports the mode the
+        // child really took, and must land after the launched one.
+        self.note_launch_mode(launch);
         // The catalog arrives on the child's answer to this: without it
         // `ListModels` has nothing to serve but the offline fallback.
         self.send_initialize();
@@ -777,6 +890,16 @@ impl ClaudeCodeAdapter {
         // Requests the old child never answered die with it (Y1b review).
         self.hub.forget_pending();
         let launch = self.with_mcp_config(launch.clone())?;
+        // Every relaunch is the same session: one built without a mode
+        // flag (an effort swap) keeps the mode the child was in, rather
+        // than dropping back to the CLI's default.
+        let launch = match launch.permission_mode {
+            Some(_) => launch,
+            None => {
+                let mode = self.fold.lock().expect("fold mutex").permission_mode();
+                argv::with_permission_mode(launch, mode)
+            }
+        };
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
         let home_env = self.home_env_for(&launch.session_id);
@@ -792,7 +915,9 @@ impl ClaudeCodeAdapter {
             ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
         })?;
         *self.child.lock().expect("child mutex") = Some(running);
-        // A relaunched child restates the whole session, catalog included.
+        // A relaunched child restates the whole session, catalog included
+        // — and its mode, which must land after the launched one.
+        self.note_launch_mode(&launch);
         self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
         if let Some(model) = &launch.model {
@@ -1067,13 +1192,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // reads the record — never one command later.
         self.hub.drain_confirmations();
         match command {
-            Command::OpenSession { request_id, workspace, model, .. } => {
+            Command::OpenSession { request_id, workspace, model, mode, .. } => {
                 let launch =
                     self.launch_for_open(&request_id, workspace.as_deref(), model.as_deref())?;
-                self.spawn_launch(&launch)
+                self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
-            Command::ResumeSession { session_id, .. } => {
-                let launch = self.launch_for_resume(&session_id)?;
+            Command::ResumeSession { session_id, mode, .. } => {
+                let launch = argv::with_permission_mode(self.launch_for_resume(&session_id)?, mode);
                 let ack = self.spawn_launch(&launch)?;
                 // Best-effort resume seeding (see `seed_history_echoes`):
                 // history already shown must not bubble again off the
@@ -1099,9 +1224,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
                 Ok(ack)
             }
-            Command::ForkSession { request_id, session_id, .. } => {
+            Command::ForkSession { request_id, session_id, mode, .. } => {
                 let launch = self.launch_for_fork(&request_id, &session_id)?;
-                self.spawn_launch(&launch)
+                self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
             Command::ListSessions { workspace, .. } => {
                 let projects = self.resolved_config_dir().join("projects");
@@ -1182,10 +1307,28 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
                 Ok(Ack::Accepted)
             }
-            Command::SelectApprovalMode { .. } => Err(ProviderError::unsupported(
-                "select-approval-mode",
-                "session config is spawn-time (--permission-mode); reopen the session to change it",
-            )),
+            Command::SelectApprovalMode { session_id, mode, .. } => {
+                self.check_session(&session_id)?;
+                // Full access is the one mode a child cannot switch into
+                // live unless it was launched in it: the pick is admitted
+                // now, shown now, and lands as a `--resume` relaunch before
+                // the next turn — the next turn is the first one it could
+                // govern anyway.
+                if mode == PermissionMode::AllowAll
+                    && !*self.bypass_capable.lock().expect("bypass mutex")
+                {
+                    *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = Some(mode);
+                    if self.fold.lock().expect("fold mutex").note_permission_mode(mode) {
+                        let _ = self.tx.send(ProviderEvent::ApprovalModeChanged { session_id, mode });
+                    }
+                    return Ok(Ack::Accepted);
+                }
+                // Every other pick rides the control channel, and replaces
+                // a Full access pick still waiting on its relaunch.
+                *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
+                self.send_set_permission_mode(mode)?;
+                Ok(Ack::Accepted)
+            }
             Command::RunShell { .. } => Err(ProviderError::unsupported(
                 "run-shell",
                 "no out-of-turn shell surface was probed over stream-json stdin; the Bash tool \
@@ -1212,6 +1355,19 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // picked level after all. A relaunch that cannot spawn
                 // fails this submit loudly — never silently.
                 if let Some(launch) = self.hub.take_effort_relaunch() {
+                    self.check_session(&session_id)?;
+                    self.relaunch(&launch)?;
+                }
+                // The child is gone (it exited, or the lane hung up on a
+                // lost connection): the session lives on in its transcript,
+                // so this turn resumes it rather than failing against a
+                // dead stdin.
+                if let Some(launch) = self.revive_launch(&session_id) {
+                    self.relaunch(&launch)?;
+                }
+                // A Full access pick the old child could not take live:
+                // relaunch into it before the turn goes out.
+                if let Some(launch) = self.take_mode_relaunch(&session_id) {
                     self.check_session(&session_id)?;
                     self.relaunch(&launch)?;
                 }
@@ -2315,6 +2471,7 @@ mod tests {
             session_id: "sess-1".into(),
             model: Some("opus".into()),
             effort: None,
+            permission_mode: None,
         };
         // The spawn fails (no such program); the old child's requests are
         // forgotten before it is attempted.
@@ -2511,5 +2668,322 @@ mod tests {
         let error =
             adapter.claim_approval("req-x", "deny", None).expect_err("claimed exactly once");
         assert!(matches!(error, ProviderError::Rejected { .. }));
+    }
+
+    fn mode_events(events: &[ProviderEvent]) -> Vec<(String, PermissionMode)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ApprovalModeChanged { session_id, mode } => {
+                    Some((session_id.clone(), *mode))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A live mode pick rides `set_permission_mode` with the CLI's own
+    /// spelling, and the chip moves only on what the child reports back:
+    /// the answer's `mode`, then its `status` frame — announced once.
+    #[test]
+    fn a_live_mode_pick_rides_set_permission_mode_and_folds_the_answer() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::DenyUnmatched,
+            })
+            .expect("a pick lands");
+        let line = adapter.sent_control_lines().pop().expect("one control line");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(value["request"]["subtype"], "set_permission_mode");
+        assert_eq!(value["request"]["mode"], "dontAsk");
+        assert!(mode_events(&drain_events(&adapter)).is_empty(), "nothing moves before the answer");
+        let id = pending_id(&adapter);
+        adapter.ingest_child_line(&serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": id, "response": {"mode": "dontAsk"}},
+        }).to_string());
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"dontAsk","session_id":"sess-1"}"#,
+        );
+        assert_eq!(
+            mode_events(&drain_events(&adapter)),
+            vec![("sess-1".to_owned(), PermissionMode::DenyUnmatched)],
+            "the reported mode, once"
+        );
+        assert!(adapter.hub.pending.lock().expect("pending mutex").is_empty(), "settled");
+    }
+
+    /// A refused mode pick banners the CLI's reason and moves nothing.
+    #[test]
+    fn a_refused_mode_pick_banners_and_moves_nothing() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::PromptUnmatched,
+            })
+            .expect("a pick lands");
+        adapter.ingest_child_line(&error_line(&pending_id(&adapter), "mode refused"));
+        let events = drain_events(&adapter);
+        assert!(mode_events(&events).is_empty(), "a refusal reports no mode");
+        let cards = control_cards(&events);
+        assert_eq!(cards.len(), 1, "one refusal banner: {cards:?}");
+        assert_eq!(cards[0].0, CONTROL_MODE_REJECTED_CARD);
+        assert!(cards[0].1.contains("mode refused"), "the CLI reason: {:?}", cards[0].1);
+    }
+
+    /// Full access cannot be switched into live by a child not launched in
+    /// it (probed live), so the pick is admitted, shown, and owed as a
+    /// `--resume` relaunch carrying `bypassPermissions` — no control line.
+    /// A later live pick cancels the owed relaunch.
+    #[test]
+    fn full_access_from_a_non_bypass_child_relaunches_on_the_next_turn() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::AllowAll,
+            })
+            .expect("a pick lands");
+        assert!(adapter.sent_control_lines().is_empty(), "no control line the child would refuse");
+        assert_eq!(
+            mode_events(&drain_events(&adapter)),
+            vec![("sess-1".to_owned(), PermissionMode::AllowAll)]
+        );
+        let launch = adapter.take_mode_relaunch("sess-1").expect("a relaunch is owed");
+        let at = launch.argv.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+        assert_eq!(launch.argv[at + 1], "bypassPermissions");
+        assert!(launch.argv.contains(&"--resume".to_owned()));
+        assert_eq!(launch.model.as_deref(), Some("sonnet"), "the model rides along");
+        assert!(adapter.take_mode_relaunch("sess-1").is_none(), "the take is the claim");
+
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-2".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::AllowAll,
+            })
+            .expect("a pick lands");
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-3".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::OnRequest,
+            })
+            .expect("a pick lands");
+        assert!(adapter.take_mode_relaunch("sess-1").is_none(), "a live pick cancels it");
+        assert_eq!(adapter.sent_control_lines().len(), 1, "the live pick went out");
+    }
+
+    /// A child launched in Full access may switch live in and out of it:
+    /// the launch announces its mode, and the pick rides the control line.
+    #[test]
+    fn a_bypass_launch_announces_its_mode_and_switches_live() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let launch = argv::with_permission_mode(
+            adapter.launch_for_open("sess-1", None, None).expect("open launch"),
+            Some(PermissionMode::AllowAll),
+        );
+        adapter.note_launch_mode(&launch);
+        adapter.attach_session_for_tests("sess-1");
+        assert_eq!(
+            mode_events(&drain_events(&adapter)),
+            vec![("sess-1".to_owned(), PermissionMode::AllowAll)],
+            "the launched mode shows until the child reports"
+        );
+        // The `initialize` answer restating the same mode moves nothing.
+        adapter.ingest_child_line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{"current_permission_mode":"bypassPermissions"}}}"#,
+        );
+        assert!(mode_events(&drain_events(&adapter)).is_empty(), "no move, no event");
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::AllowAll,
+            })
+            .expect("a pick lands");
+        assert_eq!(adapter.sent_control_lines().len(), 1, "a bypass child takes it live");
+        assert!(adapter.take_mode_relaunch("sess-1").is_none());
+    }
+
+    /// The `init` frame's `permissionMode` is the chip's truth: a child the
+    /// CLI put in `default` reads as Ask, never the seam's default Auto.
+    #[test]
+    fn the_init_frame_folds_its_permission_mode() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let init = r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"sonnet","cwd":"/w","tools":[],"permissionMode":"default"}"#;
+        adapter.ingest_child_line(init);
+        adapter.ingest_child_line(init);
+        assert_eq!(
+            mode_events(&drain_events(&adapter)),
+            vec![("sess-1".to_owned(), PermissionMode::PromptUnmatched)],
+            "once, as Ask"
+        );
+    }
+
+    /// The 2026-10-15 shape, offline: a turn is mid-tool with an approval
+    /// carded when the child's stream ends. The turn must not hang — it
+    /// carries one `CHILD_EXITED_CARD`, the approval card settles and
+    /// leaves the answerable queue, the turn finishes, and the lane hears
+    /// the connection is lost — in that order.
+    #[test]
+    fn a_stream_ending_mid_turn_cards_finishes_and_reports_the_loss() {
+        use aui_protocol::{ApprovalState, Block, Delta};
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let epoch = adapter.hub.begin_child();
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-5","cwd":"/w","tools":[]}"#,
+        );
+        adapter.ingest_child_line(
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},"parent_tool_use_id":null,"session_id":"sess-1"}"#,
+        );
+        adapter.ingest_child_line(
+            r#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"}}}"#,
+        );
+        assert_eq!(adapter.fold.lock().expect("fold mutex").pending_approvals().len(), 1);
+        let _ = drain_events(&adapter);
+
+        adapter.hub.ingest_end_of_stream(epoch, crate::child::CHILD_EXITED_REASON);
+        let events = drain_events(&adapter);
+        let deltas: Vec<Delta> = events
+            .iter()
+            .flat_map(|event| match event {
+                ProviderEvent::Deltas { deltas, .. } => deltas.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let card = deltas.iter().position(|delta| {
+            matches!(delta, Delta::BlockAdded { block: Block::Generic { kind, status, text }, .. }
+                if kind == CHILD_EXITED_CARD && status == "error" && text == crate::child::CHILD_EXITED_REASON)
+        });
+        let finished = deltas.iter().position(|delta| matches!(delta, Delta::TurnFinished { .. }));
+        let (card, finished) = (card.expect("the exit is carded"), finished.expect("the turn finishes"));
+        assert!(card < finished, "the card lands on the turn before it finishes: {deltas:?}");
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
+            )),
+            "the unanswerable approval card settles: {deltas:?}"
+        );
+        assert!(
+            adapter.fold.lock().expect("fold mutex").pending_approvals().is_empty(),
+            "nothing is left to answer the dead child's request"
+        );
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::ConnectionLost { reason }) if reason == crate::child::CHILD_EXITED_REASON),
+            "the loss is reported last: {events:?}"
+        );
+        // A second end of stream (a stray) says nothing new.
+        adapter.hub.ingest_end_of_stream(epoch, "again");
+        assert!(control_cards(&drain_events(&adapter)).is_empty(), "no second card");
+    }
+
+    /// An idle child's stream ending cards nothing (no turn was cut off),
+    /// but still reports the lost connection.
+    #[test]
+    fn an_idle_stream_ending_reports_the_loss_without_a_card() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let epoch = adapter.hub.begin_child();
+        adapter.hub.ingest_end_of_stream(epoch, "gone");
+        let events = drain_events(&adapter);
+        assert!(control_cards(&events).is_empty(), "no turn, no card: {events:?}");
+        assert!(matches!(events.as_slice(), [ProviderEvent::ConnectionLost { .. }]), "{events:?}");
+    }
+
+    /// A deliberate hang-up (relaunch, close, quit) retires its child: that
+    /// child's end of stream — and a replaced child's, arriving after its
+    /// successor started — is expected, so it neither cards nor reports a
+    /// loss that would tear down the successor.
+    #[test]
+    fn a_retired_or_replaced_childs_stream_end_is_ignored() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let first = adapter.hub.begin_child();
+        adapter.hub.retire_child(first);
+        adapter.hub.ingest_end_of_stream(first, "hung up on purpose");
+        assert!(drain_events(&adapter).is_empty(), "a retired child's end is silent");
+
+        let old = adapter.hub.begin_child();
+        let _new = adapter.hub.begin_child();
+        adapter.hub.ingest_end_of_stream(old, "the predecessor ended late");
+        assert!(drain_events(&adapter).is_empty(), "a replaced child's end is silent");
+        // Retiring the replaced epoch must not retire its successor.
+        adapter.hub.retire_child(old);
+        adapter.hub.ingest_end_of_stream(_new, "the successor ended");
+        assert!(
+            matches!(drain_events(&adapter).as_slice(), [ProviderEvent::ConnectionLost { .. }]),
+            "the current child's end still reports"
+        );
+    }
+
+    /// A replaced child's late lines never reach the fold: a status frame
+    /// from the old child naming its old mode would otherwise move the
+    /// chip back. The current child's same frame still folds.
+    #[test]
+    fn a_retired_or_replaced_childs_late_lines_are_ignored() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        let status = |mode: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"status","status":null,"permissionMode":"{mode}","session_id":"sess-1"}}"#
+            )
+        };
+        let old = adapter.hub.begin_child();
+        adapter.hub.retire_child(old);
+        let new = adapter.hub.begin_child();
+        adapter.hub.ingest_line_of(old, &status("dontAsk"));
+        assert!(mode_events(&drain_events(&adapter)).is_empty(), "the retired child's frame is dropped");
+        adapter.hub.ingest_line_of(new, &status("dontAsk"));
+        assert_eq!(
+            mode_events(&drain_events(&adapter)),
+            vec![("sess-1".to_owned(), PermissionMode::DenyUnmatched)],
+            "the current child's frame folds"
+        );
+    }
+
+    /// After a lost child, the held session resumes on the next turn: the
+    /// revive launch is a `--resume` carrying the recorded model and
+    /// effort. A session the adapter does not hold revives nothing.
+    #[test]
+    fn a_lost_child_revives_with_resume_on_the_next_turn() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        *adapter.effort.lock().expect("effort mutex") = Some("high".into());
+        assert!(adapter.revive_launch("sess-1").is_none(), "never spawned, never lost");
+        let epoch = adapter.hub.begin_child();
+        adapter.hub.ingest_end_of_stream(epoch, "gone");
+        let launch = adapter.revive_launch("sess-1").expect("a lost child: a revive is due");
+        let at = launch.argv.iter().position(|arg| arg == "--resume").expect("resume flag");
+        assert_eq!(launch.argv[at + 1], "sess-1");
+        assert_eq!(launch.model.as_deref(), Some("sonnet"));
+        assert_eq!(launch.effort.as_deref(), Some("high"));
+        assert!(adapter.revive_launch("sess-2").is_none(), "not this adapter's session");
+        // The submit attempts the revive and fails loudly (the program does
+        // not exist), never writing into a dead stdin.
+        let error = adapter
+            .dispatch(Command::SubmitInput {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                parts: vec![provider::SubmissionPart::Text("again".into())],
+                display_text: None,
+                effort: Some("high".into()),
+            })
+            .expect_err("the revive cannot spawn here");
+        assert!(
+            matches!(&error, ProviderError::Unavailable { reason } if reason.contains("respawn")),
+            "the revive was attempted: {error:?}"
+        );
     }
 }

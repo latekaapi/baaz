@@ -1755,6 +1755,154 @@ mod tests {
         restore_state(state);
     }
 
+    /// ⎋ on a caret menu keeps the caret in the field: the next key lands
+    /// in the draft, for `/` and `@` alike (live, 2026-10-16: it went
+    /// nowhere until the field was clicked).
+    #[gpui::test]
+    fn composer_menu_escape_keeps_the_field_focused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-esc-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let mut args = test_args(&state.2);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        for caret in ["/", "@"] {
+            vc.simulate_input(caret);
+            vc.run_until_parked();
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "{caret} opens its menu");
+            vc.simulate_keystrokes("down down escape");
+            vc.run_until_parked();
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_none()), "escape closes the {caret} menu");
+            let focused = vc.update(|window, cx| view.update(cx, |view, cx| view.composer_focus_handle(cx).is_focused(window)));
+            assert!(focused, "escape on the {caret} menu took the focus off the field");
+            vc.simulate_input("x");
+            vc.run_until_parked();
+            let text = vc.update(|_, cx| view.read(cx).draft_text(cx));
+            assert_eq!(text, format!("{caret}x"), "the key after escape reached the draft");
+            vc.simulate_keystrokes("backspace backspace");
+            vc.run_until_parked();
+            assert_eq!(vc.update(|_, cx| view.read(cx).draft_text(cx)), "");
+        }
+        // A chip picker's ⎋ hands the keyboard to the composer too, even
+        // when the picker opened with the keyboard elsewhere (a chip click).
+        for keys in ["cmd-shift-p", "cmd-shift-m"] {
+            vc.update(|window, cx| {
+                let root = baaz.read(cx).focus_root.clone();
+                window.focus(&root, cx);
+            });
+            vc.simulate_keystrokes(keys);
+            vc.run_until_parked();
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "{keys} opens its picker");
+            vc.simulate_keystrokes("down escape");
+            vc.run_until_parked();
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_none()), "escape closes the {keys} picker");
+            vc.simulate_input("x");
+            vc.run_until_parked();
+            assert_eq!(vc.update(|_, cx| view.read(cx).draft_text(cx)), "x", "the key after the {keys} picker's escape reached the draft");
+            vc.simulate_keystrokes("backspace");
+            vc.run_until_parked();
+        }
+        restore_state(state);
+    }
+
+    /// A composer menu closed by focusing another field — a click on the
+    /// sidebar's rename field, the search, the URL bar — leaves the
+    /// keyboard in that field: the composer takes it back only when
+    /// nothing else did.
+    #[gpui::test]
+    fn composer_menu_closed_by_another_field_keeps_that_field_focused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-click-elsewhere");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let mut args = test_args(&state.2);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        vc.simulate_input("/");
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "/ opens its menu");
+        // The click: another field takes the keyboard and the menu closes.
+        let rename = vc.update(|_, cx| gpui::Focusable::focus_handle(&baaz.read(cx).rename, cx));
+        vc.update(|window, cx| {
+            window.focus(&rename, cx);
+            baaz.update(cx, |h, cx| h.overlays.update(cx, |overlays, _| overlays.menu = None));
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|window, _| rename.is_focused(window)), "the clicked field keeps the keyboard");
+        let composer = vc.update(|_, cx| view.update(cx, |view, cx| view.composer_focus_handle(cx)));
+        assert!(!vc.update(|window, _| composer.is_focused(window)), "the composer did not take it back");
+        restore_state(state);
+    }
+
+    /// An arrow after the pointer lit a row continues from that row, not
+    /// from the row the keyboard last reached (live, 2026-10-16: ↓↓↓ to
+    /// /plan, hover /usage, ↓ landed on /compact). The pointer is really ON
+    /// a row here: a test without it passed while the bug was live.
+    #[gpui::test]
+    fn composer_menu_arrow_continues_from_the_hovered_row(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-hover-arrow");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let mut args = test_args(&state.2);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
+        // The `@` picker's rows: a walked root, seeded rather than walked.
+        vc.update(|_, cx| {
+            let root = view.read(cx).workspace_path().to_owned();
+            let entries = (0..8)
+                .map(|i| format!("src/file{i}.rs"))
+                .map(|path| crate::files::FileEntry { lower: path.to_lowercase(), path })
+                .collect();
+            let overlays = baaz.read(cx).overlays.clone();
+            overlays.update(cx, |o, _| o.insert_root(root, crate::files::WalkResult { entries, truncated: false }, Vec::new()));
+        });
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        let selected = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.as_ref().map(|m| m.selected))
+        };
+        let size = vc.update(|window, _| window.viewport_size());
+        for caret in ["/", "@"] {
+            vc.simulate_input(caret);
+            vc.run_until_parked();
+            vc.simulate_keystrokes("down down down");
+            vc.run_until_parked();
+            assert_eq!(selected(vc), Some(3), "{caret}: three arrows reach row 3");
+            // Walk the pointer up the window until it lights a row other
+            // than the keyboard's.
+            let mut hovered = None;
+            let mut y = f32::from(size.height) - 4.0;
+            while y > 0.0 && hovered.is_none() {
+                vc.simulate_mouse_move(gpui::point(size.width / 2.0, gpui::px(y)), None, Default::default());
+                vc.run_until_parked();
+                hovered = selected(vc).filter(|row| *row != 3);
+                y -= 4.0;
+            }
+            let hovered = hovered.unwrap_or_else(|| panic!("{caret}: the pointer on a row never made it the selection"));
+            let rows = vc.update(|_, cx| view.read(cx).menu_rows(cx));
+            vc.simulate_keystrokes("down");
+            assert_eq!(selected(vc), Some((hovered + 1) % rows), "{caret}: the arrow continues from the hovered row");
+            // The pointer rests: the keyboard holds the highlight.
+            vc.simulate_keystrokes("down");
+            vc.run_until_parked();
+            assert_eq!(selected(vc), Some((hovered + 2) % rows), "{caret}: a resting pointer never takes the selection back");
+            vc.simulate_keystrokes("escape backspace");
+            vc.run_until_parked();
+            vc.simulate_mouse_move(gpui::point(gpui::px(1.0), gpui::px(1.0)), None, Default::default());
+            vc.run_until_parked();
+        }
+        restore_state(state);
+    }
+
     /// ↑/↓ reach the palette list past its query field.
     ///
     /// The query palettes (Search, Commands, Projects) focus a `gpui_kit`

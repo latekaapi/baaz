@@ -18,10 +18,11 @@
 //! by the adapter's `SubmitInput` arm, which already owns the spawn.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aui_protocol::{Block, Delta};
+use aui_protocol::{Block, Delta, PermissionMode};
 use crossbeam_channel::Sender;
 use provider::ProviderEvent;
 
@@ -39,6 +40,11 @@ pub const CONTROL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 /// adapter's catalog on sight. Only the Claude Code adapter emits this
 /// kind; anything else carrying it is not ours to interpret.
 pub const CONTROL_MODEL_REJECTED_CARD: &str = "claude-control-model-rejected";
+
+/// The [`Block::Generic`] kind carrying a rejected approval-mode change:
+/// the session banner shows its text. The chip needs no resync — it only
+/// ever moves on the mode the child reports, and a refusal reports none.
+pub const CONTROL_MODE_REJECTED_CARD: &str = "claude-control-mode-rejected";
 
 /// The [`Block::Generic`] kind carrying a rejected effort change: the
 /// session banner shows its text. The chip needs no resync — the adapter
@@ -62,6 +68,11 @@ pub(crate) enum PendingControlKind {
     /// a genuine rejection or the timeout — never a spelling the CLI
     /// would have taken.)
     ApplyEffort,
+    /// A live approval-mode switch (`set_permission_mode`, probed live
+    /// 2026-10-16): success is followed by a `status` frame naming the
+    /// mode, which is what moves the chip; error restores nothing (nothing
+    /// moved) and banners the CLI's reason.
+    SetPermissionMode(PermissionMode),
 }
 
 /// One host→child control request awaiting its `control_response`.
@@ -108,6 +119,16 @@ pub struct ControlHub {
     /// when an `apply_flag_settings` refusal arrives (the pump owns no
     /// spawn), consumed by the adapter arm that already owns the spawn.
     pub(crate) effort_relaunch_due: Mutex<Option<SessionLaunch>>,
+    /// Which child's stream is the session's: each spawn takes the next
+    /// epoch, and a deliberate hang-up (relaunch, close, quit) moves past
+    /// its own. Only the current child's end of stream may close turns
+    /// and report a lost connection — a relaunched child's predecessor
+    /// ending must never tear down the child that replaced it.
+    pub(crate) child_epoch: AtomicU64,
+    /// Whether the current child's stream ended on its own: the next turn
+    /// resumes the session instead of writing into a dead stdin. A child
+    /// that never spawned was never lost.
+    pub(crate) child_lost: AtomicBool,
 }
 
 impl ControlHub {
@@ -129,7 +150,22 @@ impl ControlHub {
             effort,
             session_id,
             effort_relaunch_due: Mutex::new(None),
+            child_epoch: AtomicU64::new(0),
+            child_lost: AtomicBool::new(false),
         }
+    }
+
+    /// A child is starting: its stream becomes the session's. Returns the
+    /// epoch its pump reports end of stream under.
+    pub(crate) fn begin_child(&self) -> u64 {
+        self.child_lost.store(false, Ordering::SeqCst);
+        self.child_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The child of `epoch` is being hung up on purpose: its end of stream
+    /// is expected, not a loss. A newer child's epoch is left alone.
+    pub(crate) fn retire_child(&self, epoch: u64) {
+        let _ = self.child_epoch.compare_exchange(epoch, epoch + 1, Ordering::SeqCst, Ordering::SeqCst);
     }
 
     /// Track one host control request from its send until its answer.
@@ -167,6 +203,43 @@ impl ControlHub {
             });
         }
         self.drain_confirmations();
+    }
+
+    /// [`Self::ingest_line`] for one line of the child of `epoch`: a
+    /// retired or replaced child's late lines — a status or init frame
+    /// naming its old permission mode, a stale delta — never reach the
+    /// fold, exactly as its end of stream does not.
+    pub fn ingest_line_of(&self, epoch: u64, line: &str) {
+        if self.child_epoch.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        self.ingest_line(line);
+    }
+
+    /// The current child's stdout ended (`epoch` is the one
+    /// [`Self::begin_child`] gave it; a retired or replaced child's end is
+    /// ignored): whatever turn it was running can never finish, so close it with a [`crate::CHILD_EXITED_CARD`] naming
+    /// `reason` (see [`ClaudeFold::abandon_live_turns`]), forget every
+    /// control request it will never answer, then report the lost
+    /// connection. The live pump calls this once, after its last line —
+    /// the same function the closed-stream tests drive.
+    pub fn ingest_end_of_stream(&self, epoch: u64, reason: &str) {
+        if self.child_epoch.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        if self.child_lost.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (session_id, deltas) = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            let session_id = fold.session_id().map(str::to_owned);
+            (session_id, fold.abandon_live_turns(reason))
+        };
+        self.forget_pending();
+        if !deltas.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id, deltas });
+        }
+        let _ = self.tx.send(ProviderEvent::ConnectionLost { reason: reason.to_owned() });
     }
 
     /// Confirm every queued answer, then refuse every request the child
@@ -272,6 +345,15 @@ impl ControlHub {
                     CONTROL_MODEL_REJECTED_CARD,
                     format!(
                         "Claude Code rejected the model change to \"{wanted}\" ({reason}); still on \"{actual}\"."
+                    ),
+                );
+            }
+            PendingControlKind::SetPermissionMode(wanted) => {
+                self.emit_card(
+                    CONTROL_MODE_REJECTED_CARD,
+                    format!(
+                        "Claude Code rejected the approval mode change to \"{}\" ({reason}).",
+                        wanted.label()
                     ),
                 );
             }

@@ -258,6 +258,7 @@ mod tests {
                 workspace: None,
                 model: None,
                 model_provider: None,
+                mode: None,
             })
             .expect("open")
         else {
@@ -316,6 +317,7 @@ mod tests {
             session_id: "s".into(),
             through_turn: None,
             metadata_only: false,
+            mode: None,
         }) {
             Err(provider::ProviderError::Unsupported { capability, .. }) => {
                 assert_eq!(capability, "fork-session");

@@ -837,6 +837,18 @@ fn main() {
                                     .downcast::<crate::app::Harness>()
                                     .map(|harness| {
                                         harness.update(cx, |this, cx| {
+                                            // A quit that bypasses
+                                            // `QuitApp` (a Quit AppleEvent,
+                                            // the Dock, the terminal-quit
+                                            // dialog's `cx.quit()`) must
+                                            // hang up every provider child
+                                            // too: the process exits without
+                                            // dropping the views, and an
+                                            // orphaned `claude` ran its turn
+                                            // on for 9 minutes with every
+                                            // permission ask failing on its
+                                            // closed stdin (2026-10-15).
+                                            this.shutdown_provider_views(cx);
                                             this.flush_right_save();
                                             this.flush_tabs_save();
                                             // B2a-H2b: a Dock/signal quit in

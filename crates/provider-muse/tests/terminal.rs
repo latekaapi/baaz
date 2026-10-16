@@ -104,6 +104,7 @@ fn open_session(provider: &Provider) -> Ack {
             workspace: Some("/tmp/w".into()),
             model: None,
             model_provider: None,
+            mode: None,
         })
         .expect("open lands")
 }
@@ -115,6 +116,7 @@ fn resume_session(provider: &Provider) -> Ack {
             session_id: "s-1".into(),
             cursor: None,
             metadata_only: false,
+            mode: None,
         })
         .expect("resume lands")
 }

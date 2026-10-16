@@ -1706,6 +1706,19 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         // bottom corners off a long `/` menu).
         let room = f32::from(window.viewport_size().height) - CARET_MENU_CHROME;
         let max_rows = room.min(POPOVER_MAX_H);
+        // The pointer moving over a row makes it the selection, so an arrow
+        // continues from the row that is lit rather than the last one the
+        // keyboard reached (live, 2026-10-16). The library only reports a
+        // real move, so a resting pointer never takes the highlight.
+        let overlays = self.overlays.clone();
+        let hover = move |index: usize, _: &mut Window, cx: &mut gpui::App| {
+            overlays.update(cx, |overlays, cx| {
+                if let Some(menu) = overlays.menu.as_mut().filter(|m| m.kind == kind && m.selected != index) {
+                    menu.selected = index;
+                    cx.notify();
+                }
+            });
+        };
         let element = match kind {
             MenuKind::Command => {
                 let (commands, skill_rows) = self.command_rows(&filter, cx);
@@ -1749,7 +1762,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 });
                 let menu = command_menu("command-menu", format!("/{filter}"), sections, selected).max_rows_height(max_rows);
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
-                menu.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
+                menu.on_select(move |id, window, cx| pick(id, window, cx)).on_hover(hover).into_any_element()
             }
             MenuKind::Mention => {
                 let rows = self.mention_rows(&filter, cx);
@@ -1771,7 +1784,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 });
                 let picker = mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected).max_rows_height(max_rows);
                 let picker = if crate::clock::deterministic() { picker.at_rest() } else { picker };
-                picker.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
+                picker.on_select(move |id, window, cx| pick(id, window, cx)).on_hover(hover).into_any_element()
             }
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.

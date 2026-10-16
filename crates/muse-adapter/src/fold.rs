@@ -347,6 +347,19 @@ impl MuseFold {
         landed
     }
 
+    /// Set a provider-lane session's approval mode: what its adapter
+    /// reports (`ProviderEvent::ApprovalModeChanged`), the one writer of
+    /// the chip on that lane. `false` for a session this fold never saw,
+    /// or a mode it already holds.
+    pub fn set_session_mode(&mut self, session_id: &str, mode: PermissionMode) -> bool {
+        let Some(folded) = self.sessions.get_mut(session_id) else { return false };
+        if folded.session.mode == mode {
+            return false;
+        }
+        folded.session.mode = mode;
+        true
+    }
+
     /// Record what a command was submitted with, so a later `turn/retracted` or
     /// `turn/unqueued` can hand the prompt back to the composer.
     ///
@@ -2304,7 +2317,9 @@ fn cancellation_text(reason: &str) -> String {
     }
 }
 
-fn permission_mode(mode: &ApprovalMode) -> PermissionMode {
+/// The render model's mode for an MSP approval mode: the same four, one to
+/// one.
+pub fn permission_mode(mode: &ApprovalMode) -> PermissionMode {
     match mode {
         ApprovalMode::AllowAll => PermissionMode::AllowAll,
         ApprovalMode::PromptUnmatched => PermissionMode::PromptUnmatched,

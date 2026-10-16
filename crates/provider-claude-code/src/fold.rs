@@ -64,7 +64,7 @@ use std::time::Instant;
 use aui_protocol::{
     ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
     ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, Hunk,
-    ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    PermissionMode, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
     UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
@@ -146,6 +146,12 @@ pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
 
 /// The settled verb of a terminal card.
 pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
+
+/// The [`Block::Generic`] kind carrying "the child's stream ended
+/// mid-turn": the turn it lands on is finished right after it, so the
+/// transcript says why the turn stopped and the session can send again
+/// (the next turn relaunches with `--resume`). Its text names the cause.
+pub const CHILD_EXITED_CARD: &str = "claude-child-exited";
 
 /// Whether `name` is a baaz terminal tool call on this lane, and its tool
 /// short of the `mcp__baaz__` prefix when it is.
@@ -789,6 +795,10 @@ pub struct ClaudeFold {
     turn_model: HashMap<String, String>,
     model: Option<String>,
     session_id: Option<String>,
+    /// The approval mode last reported (or launched), when known: what
+    /// [`step_line`] compares a new report against, so only a move is
+    /// announced, and what a relaunch re-applies.
+    permission_mode: Option<PermissionMode>,
     account: AccountSnapshot,
     /// `can_use_tool` requests waiting on a human decision, oldest first. A
     /// request stays here until `DecideApproval` answers it: nothing in the
@@ -909,6 +919,23 @@ impl ClaudeFold {
     /// The session id from the last `init` frame, when seen.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Name the session before its first `init` frame: the adapter knows
+    /// the id at spawn, and the `initialize` answer — which reports the
+    /// permission mode — lands before any turn's `init`.
+    pub fn set_session_id(&mut self, session_id: &str) {
+        self.session_id = Some(session_id.to_owned());
+    }
+
+    /// The approval mode last reported or launched, when known.
+    pub fn permission_mode(&self) -> Option<PermissionMode> {
+        self.permission_mode
+    }
+
+    /// Record `mode` as the one in effect; `true` when that is a move.
+    pub fn note_permission_mode(&mut self, mode: PermissionMode) -> bool {
+        self.permission_mode.replace(mode) != Some(mode)
     }
 
     /// The session's effective model: the last `init` frame's, or the last
@@ -1275,7 +1302,7 @@ impl ClaudeFold {
             // catalog-carrying answer straight into the catalog let a
             // rejected model/effort change claim success, and let a stray
             // id rewrite `ListModels`.
-            Frame::ControlResponse { request_id, subtype, models, error } => {
+            Frame::ControlResponse { request_id, subtype, models, error, .. } => {
                 self.control_outcomes.push(ControlOutcome {
                     request_id: request_id.clone(),
                     subtype: subtype.clone(),
@@ -1285,7 +1312,9 @@ impl ClaudeFold {
                 Vec::new()
             }
             // The other lane, by choice (see module docs): parsed, ignored.
-            Frame::Stream { .. } | Frame::Ignored { .. } => Vec::new(),
+            // A mode report renders nothing: [`step_line`] carries it out
+            // as its own event.
+            Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => Vec::new(),
         }
     }
 
@@ -1468,6 +1497,47 @@ impl ClaudeFold {
     pub fn finish_stored_turns(&mut self) -> Vec<Delta> {
         let mut deltas = Vec::new();
         self.flush_agents(&mut deltas);
+        self.assistant_turn = None;
+        let open = std::mem::take(&mut self.open);
+        deltas.extend(open.into_iter().map(|turn_id| {
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            Delta::TurnFinished { turn_id, meta }
+        }));
+        deltas
+    }
+
+    /// Close every live turn the child left open when its stream ended:
+    /// the child is gone, so no `result` will ever settle them. Each open
+    /// approval card settles to denied and leaves the answerable queue —
+    /// nothing is left to answer it — and the newest open turn carries one
+    /// [`CHILD_EXITED_CARD`] error block naming `reason`, then every open
+    /// turn finishes. Nothing open means nothing to say: an idle child
+    /// that exits needs no card. LIVE-STREAM ONLY: the pump calls this
+    /// once, at end of stream.
+    pub fn abandon_live_turns(&mut self, reason: &str) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        if self.open.is_empty() {
+            return deltas;
+        }
+        self.resolve_open_thinking(None, &mut deltas);
+        self.flush_agents(&mut deltas);
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for request_id in carded {
+            self.resolve_approval_card(&request_id, ApprovalState::Denied, &mut deltas);
+        }
+        self.pending.clear();
+        self.pending_unknown.clear();
+        let card_turn = self.assistant_turn.clone().or_else(|| self.open.last().cloned());
+        if let Some(turn_id) = card_turn {
+            deltas.push(Delta::BlockAdded {
+                turn_id,
+                block: Block::Generic {
+                    kind: CHILD_EXITED_CARD.into(),
+                    status: "error".into(),
+                    text: reason.to_owned(),
+                },
+            });
+        }
         self.assistant_turn = None;
         let open = std::mem::take(&mut self.open);
         deltas.extend(open.into_iter().map(|turn_id| {
@@ -2782,12 +2852,22 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
         }),
         _ => None,
     };
+    // The mode the child reports (`init`, a `status` frame, a control
+    // answer) is the chip's truth: announced only when it moved, and only
+    // for a named session.
+    let reported =
+        frame.reported_permission_mode().and_then(crate::argv::permission_mode_from_claude);
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
     }
     if let Some(tap) = tap {
         emit(tap);
+    }
+    if let (Some(mode), Some(session_id)) = (reported, session_id) {
+        if fold.note_permission_mode(mode) {
+            emit(ProviderEvent::ApprovalModeChanged { session_id, mode });
+        }
     }
 }
 

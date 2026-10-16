@@ -45,6 +45,21 @@ impl Harness {
     /// one outcome a store exists to prevent.
     pub(crate) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
         edit(self.overrides.entry(session_id.to_owned()).or_default());
+        // A session with no row, no index entry and no chain link is
+        // nothing a rejoin or the search index reads: a new session's
+        // project lands here before either exists, and the full rejoin and
+        // search rebuild cost 0.7–1.2 s of UI thread over ~2,600 rows for
+        // a change neither could see. The store is still written.
+        let inert = !self.sessions.iter().any(|entry| entry.id == session_id)
+            && !self.index.contains_key(session_id)
+            && !crate::sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides);
+        if inert {
+            self.right_save_epoch += 1;
+            self.right_save_pending = false;
+            sessions::write(&self.overrides);
+            cx.notify();
+            return;
+        }
         self.settle_overrides(cx);
     }
 
@@ -662,16 +677,25 @@ impl Harness {
             &self.provider_sessions,
             &self.overrides,
         );
-        // One identity for selection: a real handoff head (a chain with
-        // at least two members) is never filtered as empty, so the
-        // destination row stays highlighted while the pack runs. A fresh
-        // session is its own head (`ChainIndex::head` returns the id
-        // itself when unlinked), so it gets no exemption here and has no
-        // row until its first send reveals it.
-        let active_head =
-            active.as_deref().map(|id| index.head(id)).filter(|head| index.members(head).len() >= 2);
-        let pending_head =
-            pending.as_deref().map(|id| index.head(id)).filter(|head| index.members(head).len() >= 2);
+        // One identity for selection: the open (or awaited) session's row
+        // is never filtered as empty, so the selection always has a row
+        // to stand on — a real handoff head (a chain with at least two
+        // members) keeps the destination highlighted while the pack runs,
+        // and a plain session keeps its row while a turn that never
+        // settled leaves it at zero turns (live, 2026-10-16: the row
+        // vanished mid-session when `running` read false). The one
+        // exception is an unsent new session, whatever its project, which
+        // has no row until its first send reveals it
+        // (`SessionEntry::is_empty`): `drafts` names a project's, `unsent`
+        // one with no project, and both forget the id the moment a turn
+        // starts.
+        let exempt = |id: &str| {
+            let head = index.head(id);
+            let unsent = self.unsent.contains(id) || self.drafts.values().any(|draft| draft == id);
+            (index.members(&head).len() >= 2 || !unsent).then_some(head)
+        };
+        let active_head = active.as_deref().and_then(exempt);
+        let pending_head = pending.as_deref().and_then(exempt);
         let mut rows: Vec<SessionEntry> = collapsed
             .into_iter()
             .filter(|entry| self.show_hidden || !entry.hidden)
@@ -688,6 +712,7 @@ impl Harness {
                     || self.show_empty
                     || entry.provisional
                     || !entry.is_empty()
+                    || sidebar::sent_to(&entry.id, &self.provider_sessions, &self.overrides)
                     || active_head.as_deref() == Some(entry.id.as_str())
                     || pending_head.as_deref() == Some(entry.id.as_str())
             })

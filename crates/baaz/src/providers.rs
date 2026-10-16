@@ -1038,6 +1038,12 @@ impl ExternalApprovalStore {
         self.approvals.remove(id).is_some()
     }
 
+    /// Forget every card: the child that asked is gone, so nothing can
+    /// settle them and no press could be delivered.
+    pub fn clear(&mut self) {
+        self.approvals.clear();
+    }
+
     /// Re-park a card whose decision never landed (the lane refused it):
     /// clear the in-flight mark so the press can be tried again. The card
     /// never settled — settling is the server's job alone.

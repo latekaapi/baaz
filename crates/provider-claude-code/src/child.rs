@@ -11,8 +11,6 @@
 use std::io::{BufReader, BufRead as _, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use provider::ProviderEvent;
-
 use crate::argv::SessionLaunch;
 use crate::controls::ControlHub;
 
@@ -21,13 +19,24 @@ pub struct RunningChild {
     child: Child,
     stdin: ChildStdin,
     pump: Option<std::thread::JoinHandle<()>>,
+    /// The hub and this child's epoch on it: a deliberate hang-up retires
+    /// the epoch so the pump's end of stream reads as expected, not lost.
+    hub: std::sync::Arc<ControlHub>,
+    epoch: u64,
 }
+
+/// What the end-of-stream card says when the current child's stdout
+/// closes on its own: the process exited (or closed its output) without
+/// Baaz hanging up, so any turn it was running stopped there.
+pub const CHILD_EXITED_REASON: &str =
+    "the Claude Code process exited before the turn finished; send again to resume the session";
 
 impl RunningChild {
     /// Spawn `program` with `launch.argv` in `launch.cwd`, holding stdin
     /// open (a closed stdin is not the same as no stdin — doc §1) and
     /// pumping stdout through the shared ingest path
-    /// ([`ControlHub::ingest_line`], the same function the scripted-frame
+    /// ([`ControlHub::ingest_line_of`], gated to this child's epoch, over the
+    /// same [`ControlHub::ingest_line`] the scripted-frame
     /// tests drive) into `events`. The fold is shared with the adapter
     /// (for `ReadAccount`) and locked one line at a time, never for the
     /// whole stream.
@@ -94,20 +103,22 @@ impl RunningChild {
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
         let stdin = child.stdin.take().expect("stdin piped");
-        let hub = std::sync::Arc::clone(hub);
+        let epoch = hub.begin_child();
+        let pump_hub = std::sync::Arc::clone(hub);
         let pump = std::thread::Builder::new()
             .name("provider-claude-code-pump".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
-                    hub.ingest_line(&line);
+                    pump_hub.ingest_line_of(epoch, &line);
                 }
-                let _ = hub.tx.send(ProviderEvent::ConnectionLost {
-                    reason: "the agent process exited".into(),
-                });
+                // A turn the child never finished ends here, carded, and
+                // the lane learns the connection is gone — unless Baaz
+                // hung up on purpose (`shutdown` retired the epoch).
+                pump_hub.ingest_end_of_stream(epoch, CHILD_EXITED_REASON);
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self { child, stdin, pump: Some(pump) })
+        Ok(Self { child, stdin, pump: Some(pump), hub: std::sync::Arc::clone(hub), epoch })
     }
 
     /// Write one NDJSON turn to the child's stdin.
@@ -117,8 +128,15 @@ impl RunningChild {
         self.stdin.flush()
     }
 
+    /// Whether the child process has exited (reaped here when it has).
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
     /// Hang up. Idempotent; also runs on drop.
     pub fn shutdown(&mut self) {
+        // Deliberate: the pump's end of stream that follows is expected.
+        self.hub.retire_child(self.epoch);
         let _ = self.stdin.flush();
         // Detach, never join: the pump ends when stdout closes, which is
         // when the child exits after stdin closes.

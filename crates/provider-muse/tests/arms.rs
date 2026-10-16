@@ -188,6 +188,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 workspace: Some("/tmp/w".into()),
                 model: Some("m-1".into()),
                 model_provider: Some("p-1".into()),
+                mode: None,
             }),
             expected_params: params_of!(SessionStartParams {
                 approval_mode: None,
@@ -208,6 +209,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 session_id: "s-1".into(),
                 cursor: Some("c-1".into()),
                 metadata_only: true,
+                mode: None,
             }),
             expected_params: params_of!(SessionResumeParams {
                 command_id: "cmd-resume".into(),
@@ -227,6 +229,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 session_id: "s-1".into(),
                 through_turn: Some("t-9".into()),
                 metadata_only: false,
+                mode: None,
             }),
             expected_params: params_of!(SessionForkParams {
                 command_id: "cmd-fork".into(),

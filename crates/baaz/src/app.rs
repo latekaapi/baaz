@@ -750,6 +750,10 @@ pub struct Harness {
     /// to while nothing has been sent. A draft has no sidebar row; the entry
     /// leaves the map the moment its first turn is accepted (`turn/started`).
     pub(crate) drafts: HashMap<String, String>,
+    /// New sessions with no project to name them in `drafts` (an unadopted
+    /// root, a provider open with nowhere current): unsent all the same,
+    /// so no row until their first turn starts, which forgets them here.
+    pub(crate) unsent: HashSet<String>,
     /// A draft taken from another project's session, waiting for the picked
     /// project's draft session to exist so it can be moved in. Set by the
     /// project menu's retarget, consumed by `new_session_in`.
@@ -1017,6 +1021,13 @@ pub struct Harness {
     /// session activation manage it directly (see `close_settings` and
     /// `activate`), because both park focus somewhere deliberate instead.
     pub(crate) overlay_was_open: bool,
+    /// Whether that overlay was one of the composer's own menus, whose
+    /// close hands the keyboard back to the composer instead.
+    pub(crate) composer_menu_was_open: bool,
+    /// What held the keyboard while that menu was up: its close hands the
+    /// keyboard back only when the focus is still there (or nowhere), so
+    /// a click that closed it by focusing another field keeps that field.
+    pub(crate) composer_menu_focus: Option<FocusHandle>,
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
     /// True only while the overlay window draws content the main window
@@ -1236,6 +1247,12 @@ pub struct Harness {
     /// wait for the switch (bounded) instead of acting on the session that
     /// is still open; any activation clears it.
     pub(crate) session_switch_pending: bool,
+    /// New muse sessions whose view opened on the click while their
+    /// `session/start` is still on the wire. Not a switch — nothing waits
+    /// on them but the scripted session verbs (see
+    /// [`Self::session_opening`]), so a second "New session" elsewhere is
+    /// never swallowed behind a slow start.
+    pub(crate) starts_in_flight: HashSet<String>,
     /// Which provider open the app asked for last: every `open_on_provider`
     /// / reopen / fork call bumps this and carries its value into the
     /// background work, and `finish_provider_open` lands only the current
@@ -1495,6 +1512,7 @@ impl Harness {
             sidebar_key: None,
             session_cache: Vec::new(),
             drafts: HashMap::new(),
+            unsent: HashSet::new(),
             pending_draft: None,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
@@ -1556,6 +1574,8 @@ impl Harness {
             session_mcp: false,
             focus_root: cx.focus_handle(),
             overlay_was_open: false,
+            composer_menu_was_open: false,
+            composer_menu_focus: None,
             focus_dialog: cx.focus_handle(),
             focus_palette: cx.focus_handle(),
             hosting_overlay: false,
@@ -1612,6 +1632,7 @@ impl Harness {
             skills_new_desc: skills_new_desc.clone(),
             pending_create_skill: false,
             session_switch_pending: false,
+            starts_in_flight: HashSet::new(),
             provider_open_error: None,
             provider_open_epoch: 0,
             pending_disabled_notice: None,
@@ -2246,6 +2267,7 @@ impl Harness {
             // A turn that started is a session made real: it is no draft
             // any more, whether it already had a row or not.
             self.drafts.retain(|_, named| named != &session_id);
+            self.unsent.remove(&session_id);
             if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
                 // muse 1.3.0 lists a zero-turn session in `session/list`
                 // like any other row, so the draft this turn is making real
@@ -2255,7 +2277,8 @@ impl Harness {
                 // `first_send_update` runs (see its doc).
                 let handoff_dest =
                     sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
-                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local(), handoff_dest) {
+                let title = sidebar::send_title(&session_id, prompt.as_deref(), &self.overrides);
+                if sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest) {
                     self.invalidate_list();
                     // The row just went from invisible to visible. A reveal
                     // armed when this session was opened may already have
@@ -6743,12 +6766,45 @@ impl Render for Harness {
         // Two triggers, and both are needed. The first frame has nothing
         // focused at all, so without the `is_none` arm the very first
         // shortcut never fires either.
-        if (window.focused(cx).is_none() || overlay_just_closed)
-            && !self.terminal_focus.is_focused(window)
-        {
-            window.focus(&self.focus_root, cx);
+        // The composer's own menus (the caret menus and the chip pickers)
+        // never take the keyboard from the field, and their ⎋ must leave
+        // the caret in it: parking those on the root left the next key
+        // going nowhere (live, 2026-10-16).
+        let composer_menu_now = self.overlays.read(cx).menu.as_ref().is_some_and(|m| {
+            matches!(
+                m.kind,
+                MenuKind::Command | MenuKind::Mention | MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider
+            )
+        });
+        // Only when nothing else took the keyboard as the menu closed: a
+        // click on the sidebar search, a rename field or the URL bar both
+        // closes the menu and focuses that field, and the composer must
+        // not take it back (the field keeps what was clicked).
+        let focused = window.focused(cx);
+        let keyboard_free = focused.is_none()
+            || focused == self.composer_menu_focus
+            || focused.as_ref() == Some(&self.focus_root);
+        let composer_view = (overlay_just_closed
+            && self.composer_menu_was_open
+            && keyboard_free
+            && !crate::clock::deterministic()
+            && self.pending_switch_dest(cx).is_none())
+        .then(|| self.active.clone())
+        .flatten();
+        let taken_elsewhere = overlay_just_closed && self.composer_menu_was_open && !keyboard_free;
+        if !self.terminal_focus.is_focused(window) {
+            if let Some(view) = composer_view {
+                view.update(cx, |view, cx| view.focus_composer(window, cx));
+            } else if taken_elsewhere {
+                // The field that was clicked is mounted and holds the
+                // keyboard: parking it on the root would steal it too.
+            } else if window.focused(cx).is_none() || overlay_just_closed {
+                window.focus(&self.focus_root, cx);
+            }
         }
         self.overlay_was_open = overlay_now;
+        self.composer_menu_was_open = composer_menu_now;
+        self.composer_menu_focus = if composer_menu_now { window.focused(cx) } else { None };
         let root = aui::keys::track_pointer(
             div()
                 .size_full()

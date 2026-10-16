@@ -159,7 +159,15 @@ impl ProviderAdapter for ScriptedProvider {
         }
         drop(state);
         match command {
-            Command::OpenSession { .. } => {
+            Command::OpenSession { mode, .. } => {
+                // The mode the open asked for is the mode it runs in: echo
+                // it, the way a real adapter reports the mode it started.
+                if let Some(mode) = mode {
+                    let _ = self.inner.tx.send(ProviderEvent::ApprovalModeChanged {
+                        session_id: "s-scripted".into(),
+                        mode,
+                    });
+                }
                 Ok(Ack::Session { session_id: "s-scripted".into(), title: None })
             }
             Command::SubmitInput { session_id, parts, .. } => {

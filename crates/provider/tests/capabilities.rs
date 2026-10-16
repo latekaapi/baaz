@@ -59,6 +59,7 @@ impl ForgetfulAdapter {
             session_id: "s".into(),
             through_turn: None,
             metadata_only: false,
+            mode: None,
         }
     }
 
