@@ -989,6 +989,9 @@ pub struct SessionView {
     tasks: Vec<Task<()>>,
     /// Held only while a turn runs, so the elapsed time advances.
     ticker: Option<Task<()>>,
+    /// `BAAZ_TRACE` send trace: the turn count when the traced send left, so
+    /// `first-reply-painted` waits for its user turn and a reply after it.
+    pub(crate) send_trace_turns: Option<usize>,
     /// Held while a terminal card's command runs: the mirror's next refresh
     /// (see `TERMINAL_MIRROR_TICK`). One at a time; it clears itself.
     terminal_tick: Option<Task<()>>,
@@ -1238,6 +1241,7 @@ impl SessionView {
             tasks: Vec::new(),
             ticker: None,
             terminal_tick: None,
+            send_trace_turns: None,
             handoff_card: None,
             handed_off_to: None,
             input_locked: false,

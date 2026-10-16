@@ -115,3 +115,66 @@ pub fn trace_first_frame() {
         trace_mark("first-content");
     }
 }
+
+/// Root renders counted for [`note_root_render`]'s once-every-two-seconds
+/// line, and when the window they count started.
+static RENDER_WINDOW: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
+
+/// Count one root render; behind `BAAZ_TRACE=1`, print how many happened in
+/// each two seconds that had any (`baaz-perf renders=N/2s`). No line means
+/// none: a window at rest should print nothing at all.
+pub fn note_root_render() {
+    if !trace_enabled() {
+        return;
+    }
+    let Ok(mut slot) = RENDER_WINDOW.lock() else { return };
+    let now = std::time::Instant::now();
+    match slot.as_mut() {
+        Some((start, count)) if now.duration_since(*start) < std::time::Duration::from_secs(2) => *count += 1,
+        Some((start, count)) => {
+            eprintln!("baaz-perf renders={count}/2s");
+            *start = now;
+            *count = 1;
+        }
+        None => *slot = Some((now, 1)),
+    }
+}
+
+/// The send being traced: when Enter landed, and whether its first reply
+/// has been painted yet.
+static SEND_ORIGIN: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+
+/// Start tracing a send (behind `BAAZ_TRACE=1`): Enter has just landed.
+pub fn send_reset() {
+    if trace_enabled() {
+        if let Ok(mut origin) = SEND_ORIGIN.lock() {
+            *origin = Some((std::time::Instant::now(), false));
+        }
+        eprintln!("baaz-send +0us submit");
+    }
+}
+
+/// One stage of the traced send: microseconds since [`send_reset`].
+pub fn send_mark(stage: &str) {
+    if !trace_enabled() {
+        return;
+    }
+    if let Some((at, _)) = SEND_ORIGIN.lock().ok().and_then(|origin| *origin) {
+        eprintln!("baaz-send +{}us {stage}", at.elapsed().as_micros());
+    }
+}
+
+/// Mark `first-reply-painted` once per traced send, from the frame that
+/// first drew assistant output after it.
+pub fn send_reply_painted() {
+    if !trace_enabled() {
+        return;
+    }
+    let Ok(mut origin) = SEND_ORIGIN.lock() else { return };
+    if let Some((at, painted)) = origin.as_mut() {
+        if !*painted {
+            *painted = true;
+            eprintln!("baaz-send +{}us first-reply-painted", at.elapsed().as_micros());
+        }
+    }
+}

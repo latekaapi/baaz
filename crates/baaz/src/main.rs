@@ -797,8 +797,10 @@ fn main() {
         crate::external_urls::kick_external_drain();
     });
     app.run(move |cx| {
+        crate::log::boot_mark("app-running");
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(theme, cx);
+        crate::log::boot_mark("aui-init-done");
         // A deterministic capture holds the platform's reduced-motion switch:
         // every motion primitive (loops, tweens, presence, springs, the
         // streaming caret) resolves to its resting state, so spinners and
@@ -819,10 +821,32 @@ fn main() {
         // foreground executor, which needs the running app.
         crate::external_urls::note_shell_app(cx.to_async());
         crate::log::boot_mark("window-shown");
-        // Chromium starts on the next main-queue turn, outside any gpui update,
-        // so the first browser page finds it ready (B1a, live).
+        // The frame that actually reached the screen, not the request for it.
+        if let Some(window) = cx.windows().first() {
+            let _ = window.update(cx, |_, window, _| {
+                window.on_next_frame(|_, _| crate::log::boot_mark("first-frame"));
+            });
+        }
+        // Chromium starts outside any gpui update, so the first browser page
+        // finds it ready (B1a, live): at once when the restored layout shows
+        // a page, otherwise a second after the window is up — its ~180 ms
+        // main-thread init (spike S1) then never sits between launch and the
+        // first frames (perf audit 2026-10-16).
         #[cfg(feature = "cef")]
-        aui_cef::warm_up_soon();
+        {
+            let restored = crate::layout::read();
+            let page_on_screen = restored.mode == crate::layout::Mode::Browse
+                || (restored.right_open && crate::layout::right_kind(&restored) == crate::layout::RightKind::Browser);
+            if page_on_screen {
+                aui_cef::warm_up_soon();
+            } else {
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    aui_cef::warm_up_soon();
+                })
+                .detach();
+            }
+        }
         cx.on_app_quit(|cx| {
             // B7fix2: a quit that bypasses the menu's `QuitApp` (the Dock,
             // a signal-driven quit) still lands pending pane state first.

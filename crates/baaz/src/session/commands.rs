@@ -156,6 +156,10 @@ impl SessionView {
         }
         self.banner = None;
         self.submitting = true;
+        crate::log::send_reset();
+        if crate::log::trace_enabled() {
+            self.send_trace_turns = Some(self.cached_turns.len());
+        }
         self.append_history(text.clone(), cx);
         let command_id = new_command_id();
         // The wire never gives the prompt back, so the fold has to remember it
@@ -196,6 +200,10 @@ impl SessionView {
     fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
+        crate::log::send_reset();
+        if crate::log::trace_enabled() {
+            self.send_trace_turns = Some(self.cached_turns.len());
+        }
         self.append_history(text.clone(), cx);
         let request_id = new_command_id();
         // The wire never gives the prompt back, so the fold remembers it
@@ -258,6 +266,7 @@ impl SessionView {
         optimistic_id: String,
         cx: &mut Context<Self>,
     ) {
+        crate::log::send_mark("ack");
         match result {
             Ok(provider::Ack::TurnAccepted { turn_id }) => {
                 // Events can beat acks: when the adapter already said
@@ -353,6 +362,7 @@ impl SessionView {
         planning: bool,
         cx: &mut Context<Self>,
     ) {
+        crate::log::send_mark("ack");
         match result {
             Ok(ack) => {
                 if ack.disposition == TurnStartDisposition::Queued {
