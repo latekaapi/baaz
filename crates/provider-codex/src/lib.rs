@@ -27,6 +27,7 @@ pub mod terminal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aui_protocol::PermissionMode;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ModelSummary, PendingApproval,
@@ -58,6 +59,11 @@ pub struct CodexAdapter {
     session_id: Mutex<Option<String>>,
     thread_id: Mutex<Option<String>>,
     model: Mutex<Option<String>>,
+    /// A mid-session approval-mode pick the next `turn/start` carries as
+    /// its `approvalPolicy` + `sandboxPolicy` override ("for this turn and
+    /// subsequent turns", per `TurnStartParams.json`). Taken by that turn;
+    /// put back when the turn fails to start.
+    pending_turn_mode: Mutex<Option<PermissionMode>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
@@ -110,6 +116,7 @@ impl CodexAdapter {
             session_id: Mutex::new(None),
             thread_id: Mutex::new(None),
             model: Mutex::new(None),
+            pending_turn_mode: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
@@ -268,6 +275,7 @@ impl CodexAdapter {
         open_id: &str,
         workspace: Option<&str>,
         model: Option<&str>,
+        mode: Option<PermissionMode>,
     ) -> Result<Ack, ProviderError> {
         if self.child.lock().expect("child mutex").is_some() {
             return Err(ProviderError::Rejected {
@@ -312,12 +320,13 @@ impl CodexAdapter {
         });
         let cwd = cwd.as_deref().unwrap_or(".");
         let started = running
-            .send_frame(thread_start_request(running.next_request_id(), cwd, &resolved))
+            .send_frame(thread_start_request(running.next_request_id(), cwd, &resolved, mode))
             .map_err(Self::unavailable)?;
         let (thread_id, session_id) =
             thread_ids(&started).ok_or_else(|| ProviderError::Unavailable {
                 reason: "thread/start answered without thread ids".into(),
             })?;
+        self.announce_mode(&session_id, child::reported_mode(&started).or(mode));
         *self.session_id.lock().expect("session mutex") = Some(session_id.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.model.lock().expect("model mutex") = Some(resolved.clone());
@@ -391,7 +400,11 @@ impl CodexAdapter {
     /// replayed history and the next live turn share the fold, so the new
     /// turn appends after history with no echo suppression needed: the
     /// resumed child never re-emits a completed turn's items.
-    fn resume_session(&self, session_id: &str) -> Result<Ack, ProviderError> {
+    fn resume_session(
+        &self,
+        session_id: &str,
+        mode: Option<PermissionMode>,
+    ) -> Result<Ack, ProviderError> {
         if self.child.lock().expect("child mutex").is_some() {
             return Err(ProviderError::Rejected {
                 reason: "this adapter already holds a session child; fork or resume instead"
@@ -422,7 +435,7 @@ impl CodexAdapter {
                 reason: format!("the session child is unreachable: {error}"),
             })?;
         let answer = running
-            .send_frame(child::thread_resume_request(running.next_request_id(), session_id))
+            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
             .map_err(Self::unavailable)?;
         let (thread_id, resumed_session, model) =
             child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
@@ -447,6 +460,7 @@ impl CodexAdapter {
             deltas
         };
         *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
+        self.announce_mode(&resumed_session, child::reported_mode(&answer).or(mode));
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.model.lock().expect("model mutex") = Some(model);
         // A resumed lane reconnects its server: re-read the limits the
@@ -460,6 +474,19 @@ impl CodexAdapter {
             });
         }
         Ok(Ack::Session { session_id: resumed_session, title: None })
+    }
+
+    /// Announce the mode `session_id` runs under, when it moved: what the
+    /// server's answer reports, else what the open asked for. Neither
+    /// known announces nothing — the chip is never told a guess.
+    fn announce_mode(&self, session_id: &str, mode: Option<PermissionMode>) {
+        let Some(mode) = mode else { return };
+        if self.fold.lock().expect("fold mutex").note_permission_mode(mode) {
+            let _ = self.tx.send(ProviderEvent::ApprovalModeChanged {
+                session_id: session_id.to_owned(),
+                mode,
+            });
+        }
     }
 
     fn thread_and_model(&self) -> Result<(String, String), ProviderError> {
@@ -498,6 +525,7 @@ impl CodexAdapter {
     ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
+        let mode = self.pending_turn_mode.lock().expect("mode mutex").take();
         let turn = self
             .with_child(|running| {
                 running.send_frame(turn_start_request(
@@ -506,12 +534,30 @@ impl CodexAdapter {
                     &model,
                     text,
                     effort,
+                    mode,
                 ))
-            })?
-            .map_err(Self::unavailable)?;
-        let turn_id = turn_id_from(&turn).ok_or_else(|| ProviderError::Unavailable {
-            reason: "turn/start answered without a turn id".into(),
-        })?;
+            })
+            .and_then(|sent| sent.map_err(Self::unavailable));
+        // The override never reached a started turn — the write failed,
+        // the server answered with an error, or its answer named no turn:
+        // the next one carries it instead, unless a newer pick replaced it.
+        let keep_mode = || {
+            let mut pending = self.pending_turn_mode.lock().expect("mode mutex");
+            if pending.is_none() {
+                *pending = mode;
+            }
+        };
+        let turn = match turn {
+            Ok(turn) => turn,
+            Err(error) => {
+                keep_mode();
+                return Err(error);
+            }
+        };
+        let Some(turn_id) = turn_id_from(&turn) else {
+            keep_mode();
+            return Err(ProviderError::Unavailable { reason: "turn/start answered without a turn id".into() });
+        };
         // The ack carries the submission handle; the turn's true identity is
         // the server-minted id, never derived locally. The full text goes
         // to the model; the bubble shows the display text when one rode
@@ -781,10 +827,12 @@ impl ProviderAdapter for CodexAdapter {
 
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
-            Command::OpenSession { request_id, workspace, model, .. } => {
-                self.open_session(&request_id, workspace.as_deref(), model.as_deref())
+            Command::OpenSession { request_id, workspace, model, mode, .. } => {
+                self.open_session(&request_id, workspace.as_deref(), model.as_deref(), mode)
             }
-            Command::ResumeSession { session_id, .. } => self.resume_session(&session_id),
+            Command::ResumeSession { session_id, mode, .. } => {
+                self.resume_session(&session_id, mode)
+            }
             Command::ForkSession { .. } => Err(ProviderError::Rejected {
                 reason: "thread/fork was never executed against a live server; not forked blind"
                     .into(),
@@ -816,10 +864,16 @@ impl ProviderAdapter for CodexAdapter {
                 self.fold.lock().expect("fold mutex").set_model(&model);
                 Ok(Ack::Accepted)
             }
-            Command::SelectApprovalMode { .. } => Err(ProviderError::unsupported(
-                "select-approval-mode",
-                "no approval-profile switch was probed; reopen the session under its profile",
-            )),
+            Command::SelectApprovalMode { session_id, mode, .. } => {
+                self.check_session(&session_id)?;
+                // Admission only, like a model pick: the running turn keeps
+                // its policy; the next `turn/start` carries the override,
+                // and the server's `thread/settings/updated` then restates
+                // what it took.
+                *self.pending_turn_mode.lock().expect("mode mutex") = Some(mode);
+                self.announce_mode(&session_id, Some(mode));
+                Ok(Ack::Accepted)
+            }
             Command::RunShell { .. } => Err(ProviderError::Rejected {
                 reason: "no out-of-turn shell surface was captured; the shell runs inside turns"
                     .into(),
@@ -1257,6 +1311,7 @@ with open(log, "w") as handle:
                 workspace: None,
                 model: Some("gpt-test".into()),
                 model_provider: None,
+                mode: None,
             })
             .expect("fake handshake opens");
         assert!(matches!(ack, Ack::Session { .. }), "opened: {ack:?}");
@@ -1454,5 +1509,47 @@ with open(log, "w") as handle:
         // any spawn, and this adapter holds no child after them.
         let adapter = CodexAdapter::new("codex");
         assert!(adapter.child.lock().expect("child mutex").is_none());
+    }
+
+    /// A mid-session pick is admitted, shown, and carried by the next
+    /// `turn/start` as its override — never refused as unsupported.
+    #[test]
+    fn a_mode_pick_is_admitted_for_the_next_turn() {
+        let adapter = CodexAdapter::new("codex");
+        *adapter.session_id.lock().expect("session mutex") = Some("s".into());
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r".into(),
+                session_id: "s".into(),
+                mode: PermissionMode::DenyUnmatched,
+            })
+            .expect("a pick lands");
+        assert_eq!(
+            *adapter.pending_turn_mode.lock().expect("mode mutex"),
+            Some(PermissionMode::DenyUnmatched)
+        );
+        let events: Vec<_> = adapter.events().try_iter().collect();
+        assert_eq!(
+            events,
+            vec![ProviderEvent::ApprovalModeChanged {
+                session_id: "s".into(),
+                mode: PermissionMode::DenyUnmatched,
+            }]
+        );
+        // No child: the turn cannot start, so the override waits for the
+        // next one rather than being lost.
+        let ack = adapter.dispatch(Command::SubmitInput {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            parts: vec![SubmissionPart::Text("hi".into())],
+            display_text: None,
+            effort: None,
+        });
+        assert!(ack.is_err());
+        assert_eq!(
+            *adapter.pending_turn_mode.lock().expect("mode mutex"),
+            Some(PermissionMode::DenyUnmatched),
+            "kept for the next turn"
+        );
     }
 }

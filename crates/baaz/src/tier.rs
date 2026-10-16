@@ -73,9 +73,21 @@ use muse_client::MuseClient;
 
 /// The ceiling on one probe, start to finish.
 const PROBE_CEILING: Duration = Duration::from_secs(20);
-/// How long to let the TUI paint before typing at it.
-const SETTLE: Duration = Duration::from_millis(4_000);
-/// How long the palette gets between the text and the Enter.
+/// The longest the TUI gets to draw its composer before the probe types at
+/// it anyway. A ceiling, not a wait: the probe types as soon as
+/// [`COMPOSER_READY`] is on screen. muse 1.4.9 behind its launcher took past
+/// the old fixed 4 s to draw anything, so `/upgrade` and its Enter landed
+/// before the composer existed and the card never drew (2026-10-16).
+const SETTLE: Duration = Duration::from_millis(9_000);
+/// The composer's prompt glyph: the TUI is taking keystrokes once it is drawn.
+const COMPOSER_READY: &str = "\u{276f}";
+/// How long the composer gets after its prompt draws, for its input handler
+/// to catch up with its paint.
+const READY_GRACE: Duration = Duration::from_millis(400);
+/// The longest the palette gets between the text and the Enter; the Enter
+/// goes as soon as the composer echoes the command, plus [`PALETTE`].
+const PALETTE_CEILING: Duration = Duration::from_millis(3_000);
+/// How long the palette gets, once the command is echoed, before the Enter.
 const PALETTE: Duration = Duration::from_millis(700);
 /// The pty's size. Wide enough that the card's lines are not folded into
 /// pieces that no longer contain the words being matched.
@@ -680,12 +692,73 @@ fn sweep_stale_with(current: Option<u32>, is_probe: &dyn Fn(u32) -> bool, kill: 
     }
 }
 
-/// SIGKILL the previous probe's child when it outlived its Baaz process.
+/// SIGKILL the previous probe's child when it outlived its Baaz process,
+/// and every other orphaned probe TUI on the machine.
+///
+/// The pid file only knows this state directory's last probe. Capture and
+/// test runs each probe under their own throwaway `BAAZ_STATE_DIR`, and a
+/// force-quit one leaves its TUI reparented to pid 1 where no pid file will
+/// ever name it: on 2026-10-16 three such TUIs had lived for weeks, one at
+/// 38% CPU holding muse's session index open while its WAL grew past a
+/// gigabyte. So the sweep also kills any [`is_orphaned_probe`] process.
 fn sweep_stale_probe() {
-    sweep_stale_with(read_probe_pid(), &is_probe_child, &|pid| {
+    let kill = |pid: u32| {
         // SAFETY: as in `kill_live_probes`.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    });
+    };
+    sweep_stale_with(read_probe_pid(), &is_probe_child, &kill);
+    if let Some(table) = process_table() {
+        for pid in orphaned_probes(&table) {
+            kill(pid);
+        }
+    }
+}
+
+/// `ps`'s view of every process: one `pid ppid command` line each.
+fn process_table() -> Option<String> {
+    let out = std::process::Command::new("ps").arg("-axo").arg("pid=,ppid=,command=").output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The pids in a `pid ppid command` table that are orphaned probe TUIs.
+///
+/// Pure, so the matcher is tested on text rather than on live processes.
+/// The table is parsed here rather than handed to `pgrep -f`, whose pattern
+/// sits in its own command line and so matches itself.
+fn orphaned_probes(table: &str) -> Vec<u32> {
+    let own = std::process::id();
+    table
+        .lines()
+        .filter_map(|line| {
+            // `ps` right-aligns its columns, so fields sit behind runs of spaces.
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            let pid: u32 = pid.parse().ok()?;
+            let ppid: u32 = ppid.parse().ok()?;
+            let command = command.trim();
+            (pid > 1 && pid != own && ppid == 1 && is_orphaned_probe(command)).then_some(pid)
+        })
+        .collect()
+}
+
+/// Whether `command` is exactly the line [`probe_command`] spawns — a `muse`
+/// binary, `--workspace` on some `…/tier-probe`, then `--trust-workspace`,
+/// and nothing after it — in any state directory.
+///
+/// Deliberately that narrow: the person's own `muse` (any other workspace,
+/// or none), `muse serve`, and every app session's child never end that
+/// way. Paths may hold spaces (`Application Support`), so the line is cut
+/// on the flags rather than split on whitespace. The caller adds the other
+/// half — the parent is gone — so a live Baaz's own probe is never touched.
+fn is_orphaned_probe(command: &str) -> bool {
+    let Some((program, rest)) = command.split_once(" --workspace ") else {
+        return false;
+    };
+    let Some(workspace) = rest.trim_end().strip_suffix(" --trust-workspace") else {
+        return false;
+    };
+    let binary = program.rsplit('/').next().unwrap_or(program);
+    binary.starts_with("muse") && !binary.contains(' ') && workspace.ends_with("/tier-probe")
 }
 
 /// Whether `pid` is still a probe child: its command line names the probe
@@ -1219,17 +1292,23 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
     // 1. Let it paint, answering the cursor-position query. Without the reply
     //    the TUI waits for the terminal it thinks it is talking to and draws
     //    nothing at all.
-    pty.pump(&mut text, SETTLE.min(deadline - Instant::now()));
+    //    Typed as soon as the composer is drawn — never on a fixed clock,
+    //    which a slow start outruns.
+    pty.pump_until(&mut text, SETTLE.min(deadline - Instant::now()), |flat| flat.contains(COMPOSER_READY));
+    pty.pump(&mut text, READY_GRACE);
 
-    // 2. `/upgrade`, then Enter once the palette has caught up.
+    // 2. `/upgrade`, then Enter once the composer has echoed it and the
+    //    palette has caught up.
+    let typed_at = text.len();
     pty.write(b"/upgrade")?;
+    pty.pump_until_from(&mut text, typed_at, PALETTE_CEILING, |flat| flat.contains("upgrade"));
     pty.pump(&mut text, PALETTE);
     pty.write(b"\r")?;
     // Everything read so far is the composer and the slash palette, and the
     // palette's own row for `/upgrade` says the words the card says. Matching
     // it would report the plan the person is being *offered*. Only what the
     // card draws after the Enter counts, so the buffer starts again here.
-    text.clear();
+    let before_enter = std::mem::take(&mut text);
 
     // 3. Let the card finish drawing before reading it. It arrives in pieces,
     //    and one of the early pieces names pay-as-you-go even on a subscribed
@@ -1278,6 +1357,20 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
             .collect();
         eprintln!("tier probe: {} bytes read, {} after flattening, saw {seen:?}", text.len(), flat.len());
     }
+    // `BAAZ_TIER_DUMP=<file>` is the one deliberate exception: the person
+    // running the probe by hand names a file, and the raw terminal bytes —
+    // before and after the Enter — land there, with the flattened screen
+    // beside each, so a card that will not draw can be seen. Never set by
+    // the app itself.
+    if let Some(dump) = std::env::var_os("BAAZ_TIER_DUMP") {
+        let report = format!(
+            "== before Enter (raw) ==\n{before_enter}\n== before Enter (flattened) ==\n{}\n\
+             == after Enter (raw) ==\n{text}\n== after Enter (flattened) ==\n{}\n",
+            flatten(&before_enter),
+            flatten(&text),
+        );
+        let _ = std::fs::write(dump, report);
+    }
 
     // Two failures, and they are not the same failure (finding `support-11`).
     // A card that never drew is a probe that did not get an answer; a card
@@ -1299,6 +1392,10 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
 /// `support-11`): any TUI rewording lands in [`Tier::Unavailable`], which only
 /// warns, so the wording is a fact this build depends on and has to state.
 pub const CARD_SUBSCRIBED: &str = "subscribed to the";
+/// The sentence muse 1.4.9 draws on a subscription whose plan it cannot
+/// name — "You are currently subscribed to a usage plan." — lowercased. A
+/// subscription all the same, shown under [`GENERIC_PLAN_LABEL`].
+pub const CARD_SUBSCRIBED_UNNAMED: &str = "subscribed to a usage plan";
 /// The pay-as-you-go sentences, lowercased, any one of which is a match.
 pub const CARD_PAY_AS_YOU_GO: [&str; 4] = [
     "pay-as-you-go",
@@ -1333,8 +1430,17 @@ fn parse_card(raw: &str) -> Option<Tier> {
     None
 }
 
-/// `…subscribed to the Muse Code High Usage plan.` → `Muse Code High Usage`.
+/// `…subscribed to the Muse Code High Usage plan.` → `Muse Code High Usage`;
+/// `…subscribed to a usage plan.` → [`GENERIC_PLAN_LABEL`]. A named plan wins
+/// when the card says both.
 fn plan_name(text: &str) -> Option<String> {
+    named_plan(text).or_else(|| {
+        text.to_lowercase().contains(CARD_SUBSCRIBED_UNNAMED).then(|| GENERIC_PLAN_LABEL.to_owned())
+    })
+}
+
+/// The plan [`CARD_SUBSCRIBED`] names, when it names one.
+fn named_plan(text: &str) -> Option<String> {
     let start = text.find(CARD_SUBSCRIBED)? + CARD_SUBSCRIBED.len();
     let rest = text[start..].trim_start();
     let end = rest.find(" plan")?;
@@ -1603,6 +1709,26 @@ impl Pty {
         }
     }
 
+    /// [`Self::pump`] until the flattened screen satisfies `ready` or
+    /// `window` runs out, whichever is first.
+    fn pump_until(&mut self, text: &mut String, window: Duration, ready: impl Fn(&str) -> bool) {
+        self.pump_until_from(text, 0, window, ready);
+    }
+
+    /// [`Self::pump_until`], judging only what arrived past byte `from`.
+    fn pump_until_from(&mut self, text: &mut String, from: usize, window: Duration, ready: impl Fn(&str) -> bool) {
+        let until = Instant::now() + window;
+        while Instant::now() < until && text.len() < MAX_OUTPUT {
+            if ready(&flatten(text.get(from..).unwrap_or(""))) {
+                return;
+            }
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            self.pump(text, TICK.min(until.saturating_duration_since(Instant::now())));
+        }
+    }
+
     /// Type at the child.
     fn write(&self, bytes: &[u8]) -> Result<(), String> {
         // SAFETY: `master` is open and `bytes` outlives the call.
@@ -1766,6 +1892,40 @@ mod tests {
             parse_card(&format!("You are currently {CARD_SUBSCRIBED} Team plan.")),
             Some(Tier::Subscription { .. })
         ));
+        assert_eq!(CARD_SUBSCRIBED_UNNAMED, "subscribed to a usage plan");
+        assert_eq!(CARD_SUBSCRIBED_UNNAMED, CARD_SUBSCRIBED_UNNAMED.to_lowercase());
+    }
+
+    #[test]
+    fn an_unnamed_usage_plan_is_a_subscription_under_the_generic_label() {
+        // muse 1.4.9's sentence for a plan it does not name.
+        let card = "Upgrade You are currently subscribed to a usage plan. Current 3% used · Resets 4pm \
+                    Weekly 12% used · Resets Oct 20";
+        match parse_card(card) {
+            Some(Tier::Subscription { plan, current_pct, weekly_pct, .. }) => {
+                assert_eq!(plan, GENERIC_PLAN_LABEL);
+                assert_eq!(current_pct, Some(3));
+                assert_eq!(weekly_pct, Some(12));
+            }
+            other => panic!("expected a subscription, got {other:?}"),
+        }
+        // It is not mistaken for a plan called "a".
+        assert_eq!(plan_name("subscribed to a usage plan."), Some(GENERIC_PLAN_LABEL.to_owned()));
+    }
+
+    #[test]
+    fn a_named_plan_wins_over_the_unnamed_sentence() {
+        let card = "You are currently subscribed to a usage plan. \
+                    You are currently subscribed to the Muse Code High Usage usage plan.";
+        assert_eq!(plan_name(card), Some("Muse Code High Usage".to_owned()));
+    }
+
+    #[test]
+    fn the_pay_as_you_go_card_muse_1_4_9_draws_parses() {
+        // Flattened from a live probe on 2026-10-16.
+        let card = "No active subscription — you're on pay-as-you-go. Subscribe in Account Center \
+                    (https://accountscenter.meta.com/muse_code/?ep=payg) Voice input ❯";
+        assert_eq!(parse_card(card), Some(Tier::PayAsYouGo));
     }
 
     #[test]
@@ -1944,6 +2104,28 @@ mod tests {
         // Pid 1 and below are never someone to kill.
         assert_eq!(parse_probe_pid("1"), None);
         assert_eq!(parse_probe_pid("0"), None);
+    }
+
+    #[test]
+    fn any_orphaned_probe_is_swept_and_nothing_else() {
+        let table = "\
+            1     0 /sbin/launchd
+          32272     1 /Users/me/.local/bin/muse-bin-1.4.4-R5419.1 --workspace /var/folders/h8/T//bz.cQBu/tier-probe --trust-workspace
+          32957     1 /Users/me/.local/bin/muse --workspace /Users/me/Library/Application Support/baaz/tier-probe --trust-workspace
+          40001  3999 /Users/me/.local/bin/muse-bin-1.4.9-R6297.1 --workspace /tmp/st/tier-probe --trust-workspace
+          40002     1 /Users/me/.local/bin/muse-bin-1.4.9-R6297.1 serve
+          40003     1 /Users/me/.local/bin/muse-bin-1.4.9-R6297.1 --workspace /Users/me/code/app --trust-workspace
+          40004     1 /Users/me/.local/bin/muse-bin-1.4.9-R6297.1 --workspace /Users/me/tier-probe --trust-workspace --yolo
+          40005     1 /usr/bin/vim --workspace /tmp/tier-probe --trust-workspace
+          40006     1 grep /tier-probe --trust-workspace
+          40007     1 /bin/zsh -c ps | grep muse --workspace /x/tier-probe --trust-workspace
+        ";
+        // The two orphans, in two state directories; never a probe whose Baaz
+        // is alive (40001), `muse serve`, the person's own sessions, another
+        // program, or a shell line that merely mentions the words.
+        assert_eq!(orphaned_probes(table), vec![32272, 32957]);
+        let own = format!("{} 1 /bin/muse --workspace /t/tier-probe --trust-workspace", std::process::id());
+        assert!(orphaned_probes(&own).is_empty(), "never this process");
     }
 
     #[test]

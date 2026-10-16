@@ -78,6 +78,9 @@ pub struct InitFrame {
     pub cwd: String,
     /// Tool names the turn may call, including `mcp__*` entries.
     pub tools: Vec<String>,
+    /// The permission mode the turn runs in (`permissionMode`), as the
+    /// CLI spells it (`default`, `auto`, `bypassPermissions`, …).
+    pub permission_mode: Option<String>,
 }
 
 /// Token usage inside a stored `assistant` line's message: the same keys
@@ -210,6 +213,16 @@ pub fn decode_catalog_models(response: &Value) -> Vec<CatalogModel> {
 pub enum Frame {
     /// `system/init`: identity, model, cwd, tools.
     Init(InitFrame),
+    /// A `system/status` frame naming the permission mode the child is in
+    /// now (`permissionMode`): emitted after every accepted
+    /// `set_permission_mode` (probed live 2026-10-16). A status frame
+    /// without one is noise and decodes to [`Frame::Ignored`].
+    PermissionMode {
+        /// Session this belongs to.
+        session_id: String,
+        /// The mode as the CLI spells it.
+        mode: String,
+    },
     /// An `assistant` frame: one or more completed content blocks of the
     /// message `message_id`. Several frames may share one message id; each
     /// carries distinct blocks.
@@ -342,6 +355,10 @@ pub enum Frame {
         /// The catalog rows, when this answer carries them: `initialize`
         /// only, empty otherwise.
         models: Vec<CatalogModel>,
+        /// The permission mode this answer reports, as the CLI spells it:
+        /// `initialize`'s `current_permission_mode`, or an accepted
+        /// `set_permission_mode`'s `mode` (probed live 2026-10-16).
+        permission_mode: Option<String>,
         /// The CLI's rejection text, when this answer refuses: what the
         /// session banner shows. `None` on success.
         error: Option<String>,
@@ -420,7 +437,10 @@ pub fn approval_headline(request: &ApprovalRequest) -> String {
 
 /// One host→child `control_response` line answering `request_id` with an
 /// allow. The `updatedInput` rides along as `{}`: the decision here is the
-/// behavior, never a rewritten call.
+/// behavior, never a rewritten call. The CLI reads an empty object as "the
+/// call unchanged" (2.1.276: an absent or key-less `updatedInput` runs the
+/// original input; any other value must deep-equal it or the call is
+/// refused), so `{}` is valid for every request, first or fiftieth.
 pub fn encode_control_allow(request_id: &str) -> String {
     serde_json::json!({
         "type": "control_response",
@@ -462,6 +482,7 @@ impl Frame {
     pub fn session_id(&self) -> Option<&str> {
         match self {
             Frame::Init(init) => Some(&init.session_id),
+            Frame::PermissionMode { session_id, .. } => Some(session_id),
             Frame::Assistant { session_id, .. }
             | Frame::UserResult { session_id, .. }
             | Frame::UserText { session_id, .. }
@@ -472,6 +493,18 @@ impl Frame {
             | Frame::ControlRequest(_)
             | Frame::ControlUnknown { .. }
             | Frame::ControlResponse { .. } => None,
+        }
+    }
+
+    /// The permission mode this frame reports, as the CLI spells it: the
+    /// `init` frame's, a mode-carrying `status` frame's, or a control
+    /// answer's. `None` for every other frame.
+    pub fn reported_permission_mode(&self) -> Option<&str> {
+        match self {
+            Frame::Init(init) => init.permission_mode.as_deref(),
+            Frame::PermissionMode { mode, .. } => Some(mode),
+            Frame::ControlResponse { permission_mode, .. } => permission_mode.as_deref(),
+            _ => None,
         }
     }
 }
@@ -986,8 +1019,23 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                             .to_owned(),
                         cwd: value.get("cwd").and_then(Value::as_str).unwrap_or_default().to_owned(),
                         tools,
+                        permission_mode: value
+                            .get("permissionMode")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                     }))
                 }
+                "status" => match value.get("permissionMode").and_then(Value::as_str) {
+                    Some(mode) => Ok(Frame::PermissionMode {
+                        session_id: value
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        mode: mode.to_owned(),
+                    }),
+                    None => Ok(Frame::Ignored { note: "status".to_owned() }),
+                },
                 // The operator's own hooks are noise; so are the spinner,
                 // the token estimates, and the turn summaries.
                 other => Ok(Frame::Ignored { note: other.to_owned() }),
@@ -1036,10 +1084,16 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 .and_then(|response| response.get("response"))
                 .map(decode_catalog_models)
                 .unwrap_or_default();
+            let inner = get("response");
+            let permission_mode = ["current_permission_mode", "mode"]
+                .iter()
+                .find_map(|key| inner.and_then(|inner| inner.get(*key)).and_then(Value::as_str))
+                .map(str::to_owned);
             Ok(Frame::ControlResponse {
                 request_id: get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 subtype: get("subtype").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 models,
+                permission_mode,
                 error: decode_control_error(response),
             })
         }
@@ -1162,6 +1216,29 @@ mod tests {
             serde_json::from_str(&encode_control_allow("b4554ab2-30c2-4271-8451-dd9d6f5e226d"))
                 .expect("encodes JSON");
         assert_eq!(&written, host_answer);
+    }
+
+    /// The allow line's whole response is `{"behavior":"allow",
+    /// "updatedInput":{}}` — no extra keys, no rewritten input — and it
+    /// is stateless: the same shape answers every request, so a later
+    /// answer cannot drift from the first one the CLI accepted.
+    #[test]
+    fn allow_answer_is_the_unchanged_call_for_every_request() {
+        for request_id in ["req-1", "req-2", "req-50"] {
+            let value: Value =
+                serde_json::from_str(&encode_control_allow(request_id)).expect("encodes JSON");
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {"behavior": "allow", "updatedInput": {}},
+                    },
+                })
+            );
+        }
     }
 
     #[test]
@@ -1441,7 +1518,7 @@ mod tests {
         )
         .expect("decodes");
         match frame {
-            Frame::ControlResponse { request_id, subtype, models, error } => {
+            Frame::ControlResponse { request_id, subtype, models, error, .. } => {
                 assert_eq!(request_id, "baaz-ctl-3");
                 assert_eq!(subtype, "error");
                 assert!(models.is_empty(), "a refusal carries no catalog: {models:?}");
@@ -1595,5 +1672,38 @@ mod tests {
                 if parent_tool_use_id.is_empty() && !results.is_empty()
             )).count();
         assert_eq!(main_results, 1, "the agent's own answer stays main-thread");
+    }
+
+    #[test]
+    fn permission_modes_decode_from_init_status_and_control_answers() {
+        let init = decode_line(
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"m","cwd":"/","tools":[],"permissionMode":"auto"}"#,
+        )
+        .expect("decodes");
+        assert_eq!(init.reported_permission_mode(), Some("auto"));
+        let status = decode_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"dontAsk","session_id":"s"}"#,
+        )
+        .expect("decodes");
+        assert_eq!(status.session_id(), Some("s"));
+        assert_eq!(status.reported_permission_mode(), Some("dontAsk"));
+        let quiet = decode_line(r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s"}"#)
+            .expect("decodes");
+        assert!(matches!(quiet, Frame::Ignored { .. }), "no mode, still noise: {quiet:?}");
+        let initialize = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"c1","response":{"current_permission_mode":"default"}}}"#,
+        )
+        .expect("decodes");
+        assert_eq!(initialize.reported_permission_mode(), Some("default"));
+        let switched = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"c2","response":{"mode":"bypassPermissions"}}}"#,
+        )
+        .expect("decodes");
+        assert_eq!(switched.reported_permission_mode(), Some("bypassPermissions"));
+        let refused = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"c3","error":"Cannot set permission mode"}}"#,
+        )
+        .expect("decodes");
+        assert_eq!(refused.reported_permission_mode(), None);
     }
 }

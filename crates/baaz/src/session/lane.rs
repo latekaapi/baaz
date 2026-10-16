@@ -63,6 +63,11 @@ impl ExternalQuestions {
         self.questions.insert(question.id.clone(), question);
     }
 
+    /// Forget every parked question: the child that asked is gone.
+    fn clear(&mut self) {
+        self.questions.clear();
+    }
+
     /// Whether any provider question is still waiting on the person.
     pub(super) fn is_empty(&self) -> bool {
         self.questions.is_empty()
@@ -129,16 +134,21 @@ impl SessionView {
         // the catalog is asked for on the same open.
         this.request_provider_pending(cx);
         this.request_provider_models(cx);
+        // A Claude Code lane outlives a lost child: its adapter resumes the
+        // session (`--resume`) on the next send, and the resumed child's
+        // events arrive on this same stream — so only that lane keeps
+        // draining past a lost connection.
+        let revives = this.provider_kind() == ProviderId::ClaudeCode;
         this.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
                 if this.update(cx, |view, cx| view.on_provider_event(event, cx)).is_err() {
                     return;
                 }
-                // The lane's provider is hung up and will never deliver
-                // again: stop draining so a late event cannot surface past
-                // the banner.
-                if lost {
+                // Any other lane's provider is hung up and will never
+                // deliver again: stop draining so a late event cannot
+                // surface past the banner.
+                if lost && !revives {
                     return;
                 }
             }
@@ -171,7 +181,7 @@ impl SessionView {
                 }
                 // Control-channel refusals arrive as generic cards, never
                 // as transcript: the Claude Code adapter banners the CLI's
-                // reason through these two kinds (see
+                // reason through these three kinds (see
                 // `provider_claude_code::controls`). Each one shows as the
                 // session banner and stays out of the fold — a refusal is
                 // not a turn. A model refusal also resyncs the chip from
@@ -186,7 +196,8 @@ impl SessionView {
                             block: Block::Generic { ref kind, ref text, .. },
                             ..
                         } if kind == provider_claude_code::CONTROL_MODEL_REJECTED_CARD
-                            || kind == provider_claude_code::CONTROL_EFFORT_REJECTED_CARD =>
+                            || kind == provider_claude_code::CONTROL_EFFORT_REJECTED_CARD
+                            || kind == provider_claude_code::CONTROL_MODE_REJECTED_CARD =>
                         {
                             self.set_banner(text, None, cx);
                             model_refused |=
@@ -259,6 +270,18 @@ impl SessionView {
                     cx,
                 );
             }
+            // The adapter's word on the approval mode — the mode it started
+            // the child in, then whatever the child reports — is the one
+            // writer of the chip on this lane, so it never shows the seam's
+            // default for a session that runs in another mode.
+            provider::ProviderEvent::ApprovalModeChanged { session_id, mode } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                if self.fold.set_session_mode(&session_id, mode) {
+                    cx.notify();
+                }
+            }
             provider::ProviderEvent::QuestionRaised { session_id, question_id, headline } => {
                 if session_id != self.session_id {
                     return;
@@ -279,12 +302,17 @@ impl SessionView {
                     }
                 }
                 // No finish will ever land, so settle the send state here:
-                // drop every optimistic bubble and stop reading Working, or
-                // both stick with no turn behind them.
+                // drop every optimistic bubble, stop reading Working, and
+                // drop every approval or question the dead child asked —
+                // nothing is left to answer them — or each sticks with no
+                // turn behind it ("Finishing up…" forever, 2026-10-15).
                 self.submitting = false;
                 for optimistic in std::mem::take(&mut self.pending_optimistic) {
                     self.remove_optimistic_turn(&optimistic.id);
                 }
+                self.clear_running();
+                self.external_approvals.clear();
+                self.external_questions.clear();
                 self.set_banner(&format!("Provider connection lost: {reason}"), None, cx);
             }
         }
@@ -296,6 +324,17 @@ impl SessionView {
         match &self.lane {
             Lane::Provider(lane) => lane.provider.clone(),
             Lane::Muse => panic!("a muse view has no provider lane"),
+        }
+    }
+
+    /// Fold every event the lane's provider holds, the way the lane task
+    /// would: what an application-level test drives, where `gate_sync`
+    /// forwarded only the events that existed at open.
+    #[cfg(test)]
+    pub(crate) fn test_drain_provider(&mut self, cx: &mut Context<Self>) {
+        let events: Vec<_> = self.test_provider().lock().expect("lane provider").events().try_iter().collect();
+        for event in events {
+            self.on_provider_event(event, cx);
         }
     }
 }
@@ -777,6 +816,15 @@ mod tests {
         vc: &mut gpui::VisualTestContext,
         session_id: &str,
     ) -> (Entity<SessionView>, futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>) {
+        open_lane_view_as(vc, session_id, "codex")
+    }
+
+    /// [`open_lane_view`] on a named provider lane.
+    fn open_lane_view_as(
+        vc: &mut gpui::VisualTestContext,
+        session_id: &str,
+        provider_id: &str,
+    ) -> (Entity<SessionView>, futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>) {
         use provider::ProviderAdapter as _;
 
         let mut adapter = provider::scripted::ScriptedProvider::new();
@@ -788,7 +836,7 @@ mod tests {
         let session_id = session_id.to_owned();
         let view = vc.update(|window, cx| {
             let host = SessionHost {
-                provider_id: "codex".to_owned(),
+                provider_id: provider_id.to_owned(),
                 workspace: "/tmp/w1-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
@@ -1151,6 +1199,65 @@ mod tests {
             assert!(
                 view.external_approvals.get("ap-late").is_none(),
                 "an approval raised after ConnectionLost never reaches the surface"
+            );
+        });
+    }
+
+    /// A lost connection mid-turn settles everything the dead child left
+    /// waiting (2026-10-15: "Finishing up… memory reminders" forever): the
+    /// running turn, its approval, its question. A Claude Code lane keeps
+    /// draining, because its adapter resumes the session on the next send
+    /// and the resumed child speaks on the same stream.
+    #[gpui::test]
+    fn a_lost_connection_settles_the_turn_and_a_claude_lane_keeps_listening(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view_as(vc, "s-1", "claude-code");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.provider_kind(), ProviderId::ClaudeCode);
+                view.running = Some(super::super::Running {
+                    turn_id: "t-1".to_owned(),
+                    started: crate::clock::now_instant(),
+                });
+                view.inject_external_approval(
+                    ExternalApproval {
+                        id: "ap-1".to_owned(),
+                        session_id: "s-1".to_owned(),
+                        provider: ProviderId::ClaudeCode,
+                        kind: ExternalApprovalKind::ClaudeCanUseTool,
+                        headline: "Bash".to_owned(),
+                        reason: "Bash".to_owned(),
+                        dont_ask_again: None,
+                        stage_token: None,
+                        decision_sent: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        let lost = provider::ProviderEvent::ConnectionLost { reason: "exited mid-turn".into() };
+        tx.unbounded_send(lost).expect("the lane channel is open");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.busy(), "no turn reads as running after the loss");
+            assert!(view.external_approvals.get("ap-1").is_none(), "the dead child's ask is gone");
+            assert!(view.banner.as_deref().is_some_and(|banner| banner.contains("exited mid-turn")));
+        });
+        tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+            session_id: "s-1".to_owned(),
+            approval_id: "ap-2".to_owned(),
+            headline: "from the resumed child".to_owned(),
+        })
+        .expect("a Claude Code lane still drains after the loss");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).external_approvals.get("ap-2").is_some(),
+                "the resumed child's ask reaches the surface"
             );
         });
     }
@@ -2899,6 +3006,31 @@ mod tests {
             .collect();
         assert_eq!(modes.len(), 2, "plan mode attempts the DenyUnmatched switch, drew {modes:?}");
         vc.update(|_, cx| assert!(view.read(cx).plan_mode(), "the accepted switch holds the pill"));
+    }
+
+    /// The chip shows the mode the adapter reports, not the seam's
+    /// default: a Claude child the CLI runs in `default` reads as Ask,
+    /// and another session's report changes nothing here.
+    #[gpui::test]
+    fn the_chip_follows_the_adapters_mode_report(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-1".into(),
+            mode: aui_protocol::PermissionMode::PromptUnmatched,
+        })
+        .expect("lane open");
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-other".into(),
+            mode: aui_protocol::PermissionMode::AllowAll,
+        })
+        .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
+        });
     }
 
     /// W4: plan mode stands back down when the child refuses the switch —

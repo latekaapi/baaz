@@ -123,6 +123,7 @@ impl SessionView {
                 session_id: self.session_id.clone(),
                 through_turn,
                 metadata_only: false,
+                mode: Some(self.mode()),
             };
             let provider = self.provider_kind();
             self.provider_send(command, cx, move |this, result, cx| match result {

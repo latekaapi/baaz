@@ -65,6 +65,11 @@ pub enum Command {
         /// This is not the backend itself (see [`crate::ProviderAdapter::id`]):
         /// a backend with no such routing leaves it `None`.
         model_provider: Option<String>,
+        /// The approval mode the session starts in — the composer chip's
+        /// pick for the draft. Absent leaves the backend's own default,
+        /// which the adapter then reports back rather than the chip
+        /// guessing it.
+        mode: Option<PermissionMode>,
     },
     /// Re-attach to a stored session. With `cursor` the provider serves only
     /// the suffix after it; with `metadata_only` it serves no history and
@@ -78,6 +83,10 @@ pub enum Command {
         cursor: Option<String>,
         /// Serve metadata only; page history separately.
         metadata_only: bool,
+        /// The approval mode the re-attached session runs in, as in
+        /// [`Command::OpenSession`]. A backend that stores no mode with
+        /// the session would otherwise come back in its own default.
+        mode: Option<PermissionMode>,
     },
     /// Branch a session into a new one, copying history through
     /// `through_turn` (inclusive) or all completed turns when absent.
@@ -90,6 +99,9 @@ pub enum Command {
         through_turn: Option<String>,
         /// Serve metadata only; page history separately.
         metadata_only: bool,
+        /// The approval mode the branch runs in, as in
+        /// [`Command::OpenSession`].
+        mode: Option<PermissionMode>,
     },
     /// List stored sessions, newest activity first.
     ListSessions {

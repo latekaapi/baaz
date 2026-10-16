@@ -251,6 +251,7 @@ fn resume_replays_stored_history_once_with_its_model() {
             session_id: session_id.into(),
             cursor: None,
             metadata_only: false,
+            mode: None,
         })
         .expect("resume lands over the stub");
     assert!(

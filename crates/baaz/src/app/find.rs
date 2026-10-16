@@ -123,9 +123,14 @@ impl Harness {
             // The adopted name too, when this root has one: a renamed
             // project is findable by the name on screen as well as by
             // the folder it still lives in.
+            // `workspace` is canonical already; the project roots go
+            // through the same cache, so the build reads each from disk
+            // once rather than once per indexed session.
             let adopted = workspace
                 .as_deref()
-                .and_then(|root| self.projects.find_by_root(std::path::Path::new(root)))
+                .and_then(|root| {
+                    self.projects.projects.iter().find(|p| canon.get(&p.root.to_string_lossy()) == root)
+                })
                 .map(|p| p.name.clone());
             per_session.insert(
                 session_id.clone(),
@@ -266,15 +271,21 @@ impl Harness {
             rows.len()
         ));
         let work = move || {
+            // One rebuild at a time: two overlapping ones fought over the
+            // database lock (8 s and 20 s at boot), and the second now finds
+            // the first's fingerprint and writes nothing.
+            static REBUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _turn = REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let at = std::time::Instant::now();
             let mut connection = match crate::search::open() {
                 Ok(connection) => connection,
                 Err(_) => return,
             };
-            let _ = crate::search::rebuild_sessions(&mut connection, &rows);
+            let wrote = crate::search::rebuild_sessions(&mut connection, &rows).unwrap_or(false);
             crate::log::boot_mark(&format!(
-                "search-rebuild-done rows={} in={}ms",
+                "search-rebuild-done rows={} wrote={} in={}ms",
                 rows.len(),
+                wrote,
                 at.elapsed().as_millis()
             ));
         };

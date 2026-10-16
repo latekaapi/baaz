@@ -23,6 +23,25 @@ impl SessionView {
             return;
         }
         let text = self.composer.read(cx).value().to_string();
+        // The session is still starting: the words as they stand at this
+        // Enter are what goes the moment the start lands (`start_landed`),
+        // so the field clears like any send and the view reads busy until
+        // then. An empty Enter has nothing to wait with — no approval can
+        // be pending before the session exists.
+        if matches!(self.start, StartState::Starting(_)) {
+            let empty = text.trim().is_empty() && self.images.is_empty() && self.files.is_empty();
+            if empty || self.attachments_pending() {
+                return;
+            }
+            self.composer.update(cx, |state, cx| state.set_value("", window, cx));
+            self.note_draft(cx);
+            if let Some(queue) = self.start_queue() {
+                queue.sends.push(text);
+            }
+            self.submitting = true;
+            cx.notify();
+            return;
+        }
         if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
             // ⏎ on an empty composer answers a pending approval (its hint).
             self.allow_pending(window, cx);
@@ -36,6 +55,14 @@ impl SessionView {
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
         self.note_draft(cx);
+        self.dispatch_text(text, window, cx);
+    }
+
+    /// What a send does with words already taken from the composer: the
+    /// shell escape, a typed command, or a turn. [`Self::send`] runs it at
+    /// once; a send made while the session was starting runs it on landing
+    /// with the text captured at its Enter.
+    pub(super) fn dispatch_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         // `!` is the shell escape hatch (research §1.12): a command, not a turn,
         // outside any turn, and still subject to the approval policy.
         if let Some(command) = text.strip_prefix('!') {
@@ -438,6 +465,17 @@ impl SessionView {
         if !self.busy() {
             return;
         }
+        // Stop while the session is still starting takes back the sends
+        // waiting on it: nothing has left, so the words go back in the
+        // composer and the view stops reading busy.
+        if let Some(queue) = self.start_queue() {
+            let sends = std::mem::take(&mut queue.sends);
+            if !sends.is_empty() {
+                self.submitting = false;
+                self.restore_prompt(sends.join("\n\n"), cx);
+            }
+            return;
+        }
         // Same gate as steering: an `Unavailable` stop button must say why
         // instead of sending a command the seam refuses.
         if !crate::providers::capability_state(self.provider_kind(), provider::Capability::TurnControl)
@@ -647,6 +685,13 @@ impl SessionView {
             }
             return;
         }
+        // The server knows no session yet: the latest pick waits for the
+        // start and goes when it lands; the chip reads it meanwhile.
+        if let Some(queue) = self.start_queue() {
+            queue.model = Some(model_id.to_owned());
+            self.apply_model_selected(model_id, cx);
+            return;
+        }
         let model = self.model_selection_for(model_id);
         let params = SessionSetModelParams {
             command_id: new_command_id(),
@@ -802,10 +847,11 @@ impl SessionView {
     /// `session/approvalModeChanged`. On a provider lane the mode travels
     /// as a neutral `SelectApprovalMode` — the seam's closed mode set,
     /// mapped one-to-one, never reinterpreted — and a refusal banners its
-    /// reason: neither new adapter accepts a mid-session switch (Claude
-    /// Code takes `--permission-mode` at spawn; Codex takes its profile
-    /// at open), so the pick is attempted and the reason surfaces.
-    pub(super) fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+    /// reason. The chip moves on the adapter's `ApprovalModeChanged`, not
+    /// here: Claude Code switches live over `set_permission_mode` (Full
+    /// access relaunches on the next turn), Codex overrides on the next
+    /// `turn/start`.
+    pub(crate) fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         if self.is_provider_lane() {
             let command = ProviderCommand::SelectApprovalMode {
                 request_id: new_command_id(),
@@ -817,6 +863,13 @@ impl SessionView {
                     this.report_provider_error(&error, cx);
                 }
             });
+            return;
+        }
+        // The server knows no session yet: the latest pick waits for the
+        // start, and the chip reads it meanwhile (see `mode`).
+        if let Some(queue) = self.start_queue() {
+            queue.mode = Some(mode);
+            cx.notify();
             return;
         }
         let params = SessionSetApprovalModeParams {
@@ -862,6 +915,10 @@ impl SessionView {
                     this.report_provider_error(&error, cx);
                 }
             });
+            return;
+        }
+        if self.start_queue().is_some() {
+            self.set_banner("Nothing to compact yet — the session is still starting.", None, cx);
             return;
         }
         let params = SessionCompactParams {
@@ -918,6 +975,14 @@ impl SessionView {
                 cx.notify();
             }
             ProviderId::Muse => {
+                // The catalog is the session's: an open picker fills when
+                // the start lands rather than staying silently empty.
+                if let Some(queue) = self.start_queue() {
+                    queue.models = true;
+                    self.models_error = Some("Models list once the session has started…".to_owned());
+                    cx.notify();
+                    return;
+                }
                 let Some(client) = self.wire_client(cx) else { return };
                 let params = ModelListParams { session_id: Some(self.session_id.clone()) };
                 self.wire_call(
@@ -1011,11 +1076,10 @@ impl SessionView {
         if self.plan == on {
             return;
         }
-        // A provider lane has no plan-mode channel: turning it on would
-        // need `DenyUnmatched`, which both adapters refuse (spawn-time /
-        // open-time config only). Attempt it honestly through the mode
-        // switch and stand the flag back down on refusal, so the pill
-        // never claims enforcement the child never took.
+        // A provider lane has no plan-mode channel: turning it on asks
+        // for `DenyUnmatched` through the mode switch, and the flag stands
+        // back down on refusal, so the pill never claims enforcement the
+        // child never took.
         if self.is_provider_lane() {
             self.plan = on;
             let restore = if on {

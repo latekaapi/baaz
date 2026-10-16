@@ -178,14 +178,14 @@ pub fn dispatch(
     terminal: Option<(String, muse_client::schema::SessionConfig)>,
 ) -> Result<Ack, ProviderError> {
     match command {
-        Command::OpenSession { request_id, workspace, model, model_provider } => {
+        Command::OpenSession { request_id, workspace, model, model_provider, mode } => {
             let (session_id, config) = match terminal {
                 Some((id, config)) => (Some(id), Some(config)),
                 None => (None, None),
             };
             let result = client
                 .session_start(&SessionStartParams {
-                    approval_mode: None,
+                    approval_mode: mode.map(approval_mode),
                     command_id: request_id,
                     config,
                     model_id: model,
@@ -199,7 +199,9 @@ pub fn dispatch(
                 title: result.session.title,
             })
         }
-        Command::ResumeSession { request_id, session_id, cursor, metadata_only } => {
+        // MSP stores the mode with the session and resumes and forks it
+        // as stored: neither call takes one.
+        Command::ResumeSession { request_id, session_id, cursor, metadata_only, mode: _ } => {
             let config = terminal.map(|(_, config)| config);
             let result = client
                 .session_resume(&SessionResumeParams {
@@ -216,7 +218,7 @@ pub fn dispatch(
                 title: result.session.title,
             })
         }
-        Command::ForkSession { request_id, session_id, through_turn, metadata_only } => {
+        Command::ForkSession { request_id, session_id, through_turn, metadata_only, mode: _ } => {
             let result = client
                 .session_fork(&SessionForkParams {
                     command_id: request_id,

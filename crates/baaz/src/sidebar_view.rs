@@ -3135,6 +3135,9 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.sessions.push(empty_entry("s-fresh"));
+                // A new session is a draft until a turn starts: what keeps
+                // the open session's own exemption off it.
+                h.drafts.insert("p-fresh".into(), "s-fresh".into());
                 let host = crate::session::SessionHost {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
@@ -3168,6 +3171,8 @@ mod tests {
                     crate::sidebar::first_send_update(row, Some("Fix the header"), chrono::Local::now(), false),
                     "the first send touches a zero-turn row"
                 );
+                // The turn started: the session is no draft any more.
+                h.drafts.retain(|_, id| id != "s-fresh");
                 h.invalidate_list();
             });
         });
@@ -3179,6 +3184,42 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert!(visible.contains(&"s-fresh".to_owned()), "the row appears on the first send");
+        // A new session with no project (an unadopted root) has no
+        // `drafts` entry to keep the exemption off it: `unsent` does,
+        // until its first turn starts.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions.push(empty_entry("s-root"));
+                h.unsent.insert("s-root".into());
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".into(),
+                    workspace: workspace.clone(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view =
+                    cx.new(|cx| crate::session::SessionView::new("s-root".into(), None, host, window, cx));
+                h.active = Some(view);
+                h.invalidate_list();
+            });
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx).visible_sessions(cx).iter().map(|entry| entry.id.clone()).collect::<Vec<_>>()
+        });
+        assert!(!visible.contains(&"s-root".to_owned()), "an unsent root session has no row, got {visible:?}");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _cx| {
+                let row = h.sessions.iter_mut().find(|entry| entry.id == "s-root").expect("root row");
+                crate::sidebar::first_send_update(row, Some("Map the folder"), chrono::Local::now(), false);
+                h.unsent.remove("s-root");
+                h.invalidate_list();
+            });
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx).visible_sessions(cx).iter().map(|entry| entry.id.clone()).collect::<Vec<_>>()
+        });
+        assert!(visible.contains(&"s-root".to_owned()), "the root session's row appears on its first send");
         // A real handoff head with zero own turns keeps its row: the
         // two-member chain exempts the head from the empty filter.
         vc.update(|window, cx| {
@@ -3210,6 +3251,67 @@ mod tests {
             visible.contains(&"h-dst".to_owned()),
             "a real handoff head with zero own turns keeps its row, got {visible:?}"
         );
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// A session that was sent to keeps its row at zero turns (live,
+    /// 2026-10-16): the open session's first turn never settled, so once
+    /// `running` read false the empty filter dropped the selected row. The
+    /// open session is never filtered once it is no draft, and a row the
+    /// stores record a send for — a byline ask, a provider first prompt —
+    /// is never empty, open or not.
+    #[gpui::test]
+    fn a_sent_session_keeps_its_row_when_its_first_turn_never_settles(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("sent-row");
+        let workspace = dir.to_string_lossy().into_owned();
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let open = active_view(vc, &workspace, "s-live");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                // The open session: zero turns, not running, unnamed, no
+                // draft — the turn started and never settled.
+                let mut live = scroll_entry("s-live", "p");
+                live.turns = 0;
+                live.project = None;
+                h.sessions.push(live);
+                // Another session with a recorded ask and zero turns.
+                let mut asked = scroll_entry("s-asked", "p");
+                asked.turns = 0;
+                asked.project = None;
+                asked.last_ask = Some("Explain the schema".into());
+                h.sessions.push(asked);
+                // A provider session admitted once: its record holds the
+                // first prompt, nothing else.
+                crate::provider_sessions::upsert_open(
+                    &mut h.provider_sessions,
+                    "claude-code",
+                    "s-admitted",
+                    None,
+                    None,
+                    None,
+                );
+                crate::provider_sessions::note_first_prompt(&mut h.provider_sessions, "s-admitted", "Draw the db");
+                h.merge_provider_rows();
+                // And a true noise row, which still goes.
+                let mut noise = scroll_entry("s-noise", "p");
+                noise.turns = 0;
+                noise.project = None;
+                h.sessions.push(noise);
+                h.sessions_loaded = true;
+                h.index_loaded = true;
+                h.active = Some(open.clone());
+                h.invalidate_list();
+            })
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx).visible_sessions(cx).iter().map(|entry| entry.id.clone()).collect::<Vec<_>>()
+        });
+        for id in ["s-live", "s-asked", "s-admitted"] {
+            assert!(visible.iter().any(|v| v == id), "{id} keeps its row, got {visible:?}");
+        }
+        assert!(!visible.iter().any(|v| v == "s-noise"), "a never-sent zero-turn row still goes, got {visible:?}");
         b3c_teardown(&dir, guard, old);
     }
 

@@ -6,7 +6,7 @@
 //! not transcript — a connection ending, an approval raised, a question
 //! asked. Small on purpose: anything a delta can say, the delta says.
 
-use aui_protocol::Delta;
+use aui_protocol::{Delta, PermissionMode};
 
 /// Something the provider did on its own — not the answer to a command.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +44,16 @@ pub enum ProviderEvent {
         question_id: String,
         /// One-line human summary of what is being asked.
         headline: String,
+    },
+    /// The session's approval mode as the provider now reports it: what
+    /// the composer chip shows. Sent when a session starts in a mode and
+    /// whenever the backend says it moved — a pick the backend took, or
+    /// its own fallback — so the chip never shows a mode nobody set.
+    ApprovalModeChanged {
+        /// The owning session.
+        session_id: String,
+        /// The mode in effect.
+        mode: PermissionMode,
     },
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.

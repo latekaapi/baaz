@@ -43,6 +43,7 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
             workspace: None,
             model: None,
             model_provider: None,
+            mode: None,
         })
         .expect("open")
     else {
@@ -163,12 +164,14 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             session_id: "s".into(),
             cursor: None,
             metadata_only: false,
+            mode: None,
         },
         Command::ForkSession {
             request_id: "r".into(),
             session_id: "s".into(),
             through_turn: None,
             metadata_only: false,
+            mode: None,
         },
         Command::ListSessions { cursor: None, limit: None, workspace: None },
         Command::ReadSession { session_id: "s".into(), metadata_only: false },

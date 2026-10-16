@@ -963,7 +963,7 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             if is_session_step(&step) {
                 for _ in 0..SWITCH_WAIT_POLLS {
                     let pending = this
-                        .read_with(cx, |this, _| this.session_switch_pending)
+                        .read_with(cx, |this, _| this.session_opening())
                         .unwrap_or(false);
                     if !pending {
                         break;
@@ -971,7 +971,7 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                     cx.background_executor().timer(SWITCH_POLL).await;
                 }
                 let still_pending = this
-                    .read_with(cx, |this, _| this.session_switch_pending)
+                    .read_with(cx, |this, _| this.session_opening())
                     .unwrap_or(false);
                 if still_pending {
                     let active = this

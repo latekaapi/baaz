@@ -34,6 +34,19 @@ pub(crate) fn draft_decision(
     }
 }
 
+/// Whether a `session/start` answer is the session its view was opened
+/// under. `sessionId` is an exact identity the server takes as given (MSP
+/// `SessionStartParams.sessionId`: "Exact identity for this new root
+/// session"), so a different id is a server that broke that promise — said
+/// out loud, never adopted silently into a view keyed on the minted one.
+fn minted_start_answer(minted: &str, answered: &str) -> Result<(), String> {
+    if minted == answered {
+        Ok(())
+    } else {
+        Err(format!("the server started session {answered}, not the requested {minted}"))
+    }
+}
+
 /// Which parked ids survive the MRU cap, in order: drafts are never evicted,
 /// everything else keeps most-recent-first up to `limit`.
 pub(crate) fn evict_parked(
@@ -457,12 +470,22 @@ impl Harness {
                 }
             }
             let availability = projects.measure_availability();
-            Ok::<_, MuseError>((sessions, branches, availability))
+            // Every root the join below will resolve, canonicalized here
+            // rather than on the UI thread: ~2,000 distinct roots made the
+            // join itself 520–830 ms of frozen window per reply.
+            let mut canon = crate::projects::CanonicalCache::default();
+            for root in sessions.iter().filter_map(|s| s.workspace_root.as_deref()) {
+                canon.get(root);
+            }
+            for project in &projects.projects {
+                canon.get(&project.root.to_string_lossy());
+            }
+            Ok::<_, MuseError>((sessions, branches, availability, canon))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
             let reply_at = std::time::Instant::now();
             let row_count = match &result {
-                Ok((sessions, _, _)) => sessions.len(),
+                Ok((sessions, _, _, _)) => sessions.len(),
                 Err(_) => 0,
             };
             crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
@@ -474,13 +497,13 @@ impl Harness {
             let already = this.sessions_loaded;
             this.sessions_loaded = true;
             crate::log::boot_mark("sessions-loaded");
-            if let Ok((sessions, branches, availability)) = result {
+            if let Ok((sessions, branches, availability, mut canon)) = result {
                 this.projects.refresh_availability(&availability);
                 let projects = this.projects.clone();
                 let join_at = std::time::Instant::now();
-                // One cache over the whole loop: each distinct workspace
-                // root is canonicalized once, not once per row per project.
-                let mut canon = crate::projects::CanonicalCache::default();
+                // One cache over the whole loop, filled off the UI thread:
+                // each distinct workspace root was canonicalized once, in
+                // the work above.
                 let wire: Vec<SessionEntry> = sessions
                     .iter()
                     .map(|s| {
@@ -670,8 +693,15 @@ impl Harness {
                 || crate::steps::head_runs_without_session(&self.args.steps),
             // An in-flight open — `session/start` or a provider lane —
             // holds session verbs until it lands; window verbs run on.
-            self.session_switch_pending,
+            self.session_opening(),
         )
+    }
+
+    /// Whether a session the scripted verbs should wait for is still
+    /// opening: a switch in flight, or a new muse session whose view is up
+    /// while its `session/start` is still on the wire.
+    pub(crate) fn session_opening(&self) -> bool {
+        self.session_switch_pending || !self.starts_in_flight.is_empty()
     }
 
     /// `--steps`: drive the open session from the command line so a screenshot
@@ -1137,6 +1167,11 @@ impl Harness {
         for id in provider_ids {
             self.rejoin_provider_row(&id);
         }
+        // One cache over the whole pass, as the list join keeps: each
+        // distinct root is canonicalized once, not once per row per project
+        // — the per-row `canonicalize` calls were most of a 600–870 ms
+        // rejoin over ~2,600 rows.
+        let mut canon = crate::projects::CanonicalCache::default();
         for entry in &mut self.sessions {
             if entry.provider.is_some() {
                 continue;
@@ -1147,26 +1182,32 @@ impl Harness {
             let meta = self.overrides.get(&entry.id);
             // A missing root resolves nowhere: the row falls back to "Other
             // workspaces" while the adoption stays in the store.
-            let resolved = self
-                .projects
-                .resolve_available(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()));
+            let resolved = self.projects.resolve_available_cached(
+                entry.workspace.as_deref(),
+                meta.and_then(|m| m.project.as_deref()),
+                &mut canon,
+            );
             entry.project = resolved.as_ref().map(|p| p.id.clone());
             entry.project_name = resolved.as_ref().map(|p| p.name.clone());
             if entry.local {
                 // A local row predates the wire list: no index or store
                 // source speaks for it, so its label ("New session", or the
                 // first prompt set on `turn/started`) stands until the wire
-                // lists it. Only an explicit rename overrides it; the flags
-                // still follow the store, so pin and hide work meanwhile.
+                // lists it. Only an explicit rename or a generated title
+                // overrides it — the two store sources ranked above the
+                // prompt, so the row and the header that falls back to it
+                // read the title the moment it lands; the flags still
+                // follow the store, so pin and hide work meanwhile.
                 let meta = self.overrides.get(&entry.id);
                 entry.hidden = meta.is_some_and(|m| m.hidden);
                 entry.pinned = meta.is_some_and(|m| m.pinned);
                 entry.archived = meta.is_some_and(|m| m.archived);
-                if let Some(name) =
-                    meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty())
-                {
-                    entry.label = name.to_owned();
+                let pick = |value: Option<&str>| value.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+                if let Some(name) = pick(meta.and_then(|m| m.name.as_deref())) {
+                    entry.label = name;
                     entry.named = true;
+                } else if let Some(generated) = pick(meta.and_then(|m| m.generated_title.as_deref())) {
+                    entry.label = generated;
                 }
                 continue;
             }
@@ -1205,7 +1246,7 @@ impl Harness {
             // and a side session still reads hidden — even before its
             // override write lands (the persisted `hidden` flag carries a
             // restart).
-            Self::apply_title_flags(&self.titles_pending.clone(), &self.side_sessions.clone(), entry);
+            Self::apply_title_flags(&self.titles_pending, &self.side_sessions, entry);
             // A fixture or replayed row names its own preview the way it
             // names its label: no store or index source speaks for a
             // scripted id, so a rejoin must not blank it either.
@@ -1522,12 +1563,81 @@ impl Harness {
                 );
             }
         }
-        // The switch lands on the round-trip below, after the following
-        // steps would run: session verbs wait for it (see `run_steps`)
-        // instead of acting on the session that is still open.
-        self.session_switch_pending = true;
+        // The id is ours, not the server's (`session/start` takes an exact
+        // identity), so a plain new session opens its view on the click:
+        // the empty state and the composer paint in this frame instead of
+        // after a round trip that took 1–5 s under a busy server. A switch
+        // keeps the old view up until its start lands (Y2b), so it waits.
+        let minted = params.session_id.get_or_insert_with(muse_client::new_command_id).clone();
+        let early = switch.is_none();
+        if early {
+            crate::log::boot_mark("new-draft-open");
+            self.key_pending_ask(&minted);
+            self.open(minted.clone(), false, false, window, cx);
+            if let Some(view) = self.find_view(&minted, cx) {
+                view.update(cx, |view, _| view.begin_start());
+            }
+            self.dress_new_session(&minted, current.clone(), effort, window, cx);
+            match started_project.clone() {
+                Some(id) => {
+                    self.drafts.insert(id, minted.clone());
+                }
+                None => {
+                    self.unsent.insert(minted.clone());
+                }
+            }
+            crate::log::boot_mark("new-draft-shown");
+            // Scripted session verbs wait for the start (see `run_steps`);
+            // nothing else does, so this is no switch.
+            self.starts_in_flight.insert(minted.clone());
+        } else {
+            // The switch lands on the round-trip below, after the following
+            // steps would run: session verbs wait for it (see `run_steps`)
+            // instead of acting on the session that is still open.
+            self.session_switch_pending = true;
+        }
         let work = move || client.session_start(&params);
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(started) if early => {
+                crate::log::boot_mark("session/start-reply early");
+                let session_id = started.session.session_id.clone();
+                this.starts_in_flight.remove(&minted);
+                if let Err(reason) = minted_start_answer(&minted, &session_id) {
+                    this.drafts.retain(|_, id| *id != minted);
+                    this.refuse_minted_start(&minted, reason, cx);
+                    this.fail_pending_handoff("the session started under another id".to_owned(), cx);
+                    return;
+                }
+                this.insert_started_row(&started.session);
+                if let Some(view) = this.find_view(&session_id, cx) {
+                    if let Ok(envelope) = serde_json::to_value(&started.session) {
+                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
+                    }
+                    view.update(cx, |view, cx| view.start_landed(window, cx));
+                }
+                this.land_handoff_destination(session_id.clone(), cx);
+                if let Some(view) =
+                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
+                {
+                    this.attach_handoff_prefix(&view, cx);
+                }
+                if let Some(id) = started_project.as_deref() {
+                    crate::baaz_log!("session/start project={id} reason=no-draft");
+                }
+            }
+            Err(error) if early => {
+                crate::baaz_log!("session/start failed: {error}");
+                this.starts_in_flight.remove(&minted);
+                // The view stays, draft and all, saying why; the next
+                // "New session" starts fresh rather than reusing it.
+                this.drafts.retain(|_, id| *id != minted);
+                if let Some(view) = this.find_view(&minted, cx) {
+                    view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
+                }
+                this.fail_pending_handoff(error.to_string(), cx);
+                this.drop_pending_ask();
+                this.report(&error, cx);
+            }
             Ok(started) => {
                 // A cancelled or superseded switch never lands: its session
                 // was created on the wire, but no view opens for it, nothing
@@ -1564,18 +1674,7 @@ impl Harness {
                 // row appear. The session groups under the project it
                 // started in, even when its folder later proves to be a
                 // worktree of that root.
-                this.set_override(&session_id, |meta| meta.project = current.clone(), cx);
-                // The row does not exist when the view activates, so its
-                // project name arrives now.
-                let name = this.project_name_for(&session_id);
-                if let Some(view) = this.active.clone() {
-                    view.update(cx, |view, cx| {
-                        view.set_project_name(name);
-                        // The cached centre reuses a clean view: push the
-                        // repaint with the name.
-                        cx.notify();
-                    });
-                }
+                let retarget = this.dress_new_session(&session_id, current.clone(), effort, window, cx);
                 // A handoff to muse lands here: the pack submits onto the
                 // fresh view, which the lane check above just built.
                 this.land_handoff_destination(session_id.clone(), cx);
@@ -1587,21 +1686,12 @@ impl Harness {
                 {
                     this.attach_handoff_prefix(&view, cx);
                 }
-                // The project's effort rides along before the first turn.
-                if let Some(effort) = effort {
-                    if let Some(view) = this.active.clone() {
-                        view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
-                    }
-                }
-                // A retargeted draft lands in the session it was moved to.
-                let moving = this.pending_draft.take();
-                let retarget = moving.is_some();
-                if let Some(view) =
-                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
-                {
-                    Self::land_moving_draft(&view, moving, window, cx);
-                } else if moving.is_some() {
-                    this.pending_draft = moving;
+                // The started row goes in locally: the reply carried the
+                // whole session, so no `session/list` round trip (27 pages,
+                // 5–10 s, and a full rejoin on landing) is spent on it.
+                this.insert_started_row(&started.session);
+                if started_project.is_none() {
+                    this.unsent.insert(session_id.clone());
                 }
                 if let Some(id) = started_project.clone() {
                     this.drafts.insert(id.clone(), session_id);
@@ -1611,7 +1701,6 @@ impl Harness {
                         if retarget { "retarget" } else { "no-draft" }
                     );
                 }
-                this.load_sessions(cx);
             }
             Err(error) => {
                 // A stale switch's failure belongs to nobody: the person
@@ -1634,6 +1723,87 @@ impl Harness {
                 this.report(&error, cx);
             }
         });
+    }
+
+    /// A start answered for an id other than the one its view was opened
+    /// under: the view can never land (its events key on the minted id), so
+    /// it fails visibly instead of reading Starting forever, and the queued
+    /// sends go back in its composer.
+    fn refuse_minted_start(&mut self, minted: &str, reason: String, cx: &mut Context<Self>) {
+        crate::baaz_log!("session/start: {reason}");
+        self.unsent.remove(minted);
+        if let Some(view) = self.find_view(minted, cx) {
+            view.update(cx, |view, cx| view.start_failed(reason, cx));
+        }
+        self.drop_pending_ask();
+    }
+
+    /// What a new muse session's view carries before its first turn,
+    /// whether it opened on the click or after its start landed: the
+    /// project it files under, that project's name and effort, and a
+    /// retargeted draft in flight. Returns whether a draft was retargeted.
+    fn dress_new_session(
+        &mut self,
+        session_id: &str,
+        project: Option<String>,
+        effort: Option<aui_protocol::ReasoningEffort>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // No row until the first send. Under muse 1.2.1 this held
+        // because the wire itself listed a session only after its
+        // log flushed on `turn/completed`; muse 1.3.0 lists a
+        // zero-turn session like any other, so as of v0.1 prep
+        // task 3 `SessionEntry::is_empty` enforces the rule itself
+        // instead of assuming the wire will — the `turn/started`
+        // handler still inserts the local row that makes the first
+        // row appear. The session groups under the project it
+        // started in, even when its folder later proves to be a
+        // worktree of that root.
+        self.set_override(session_id, |meta| meta.project = project, cx);
+        // The row does not exist when the view activates, so its
+        // project name arrives now.
+        let name = self.project_name_for(session_id);
+        let view = self.active.clone().filter(|view| view.read(cx).session_id == session_id);
+        if let Some(view) = &view {
+            view.update(cx, |view, cx| {
+                view.set_project_name(name);
+                // The cached centre reuses a clean view: push the
+                // repaint with the name.
+                cx.notify();
+            });
+            // The project's effort rides along before the first turn.
+            if let Some(effort) = effort {
+                view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
+            }
+        }
+        // A retargeted draft lands in the session it was moved to.
+        let moving = self.pending_draft.take();
+        let retarget = moving.is_some();
+        if let Some(view) = &view {
+            Self::land_moving_draft(view, moving, window, cx);
+        } else if moving.is_some() {
+            self.pending_draft = moving;
+        }
+        retarget
+    }
+
+    /// Put a just-started muse session's row in the list from the
+    /// `session/start` reply itself — the same join a `session/list` row
+    /// gets — so the start costs no list round trip. The row stays out of
+    /// view until its first turn (`SessionEntry::is_empty`); the periodic
+    /// and post-turn refreshes still replace it with the wire's own.
+    pub(crate) fn insert_started_row(&mut self, session: &muse_client::schema::Session) {
+        let mut entry = SessionEntry::join(
+            session,
+            self.index.get(&session.session_id),
+            self.overrides.get(&session.session_id),
+            &self.projects,
+        );
+        Harness::apply_title_flags(&self.titles_pending, &self.side_sessions, &mut entry);
+        self.sessions.retain(|row| row.id != entry.id);
+        self.sessions.push(entry);
+        self.invalidate_list();
     }
 
     /// `session/start` in `root`, which is never adopted: no project
@@ -1705,9 +1875,62 @@ impl Harness {
                 &spec.args,
             );
         }
-        self.session_switch_pending = true;
+        // Opened on the click, like [`Self::new_session_open`]: the id is
+        // ours, so the view need not wait for the server's answer.
+        let minted = params.session_id.get_or_insert_with(muse_client::new_command_id).clone();
+        let early = switch.is_none();
+        if early {
+            crate::log::boot_mark("new-draft-open");
+            self.key_pending_ask(&minted);
+            // Before `open`, which asks `session_workspace` where this
+            // session lives and has nothing else to go on.
+            self.starting_root = Some((minted.clone(), projects::canonical_str(&root.to_string_lossy())));
+            self.open(minted.clone(), false, false, window, cx);
+            if let Some(view) = self.find_view(&minted, cx) {
+                view.update(cx, |view, _| view.begin_start());
+            }
+            // No project override: a `meta.project` of `None` is exactly
+            // what files this session under Unfiled. No `drafts` entry
+            // either, so `unsent` keeps its row out until the first send.
+            self.unsent.insert(minted.clone());
+            let moving = self.pending_draft.take();
+            if let Some(view) = self.active.clone().filter(|view| view.read(cx).session_id == minted) {
+                Self::land_moving_draft(&view, moving, window, cx);
+            } else if moving.is_some() {
+                self.pending_draft = moving;
+            }
+            crate::log::boot_mark("new-draft-shown");
+            self.starts_in_flight.insert(minted.clone());
+        } else {
+            self.session_switch_pending = true;
+        }
         let work = move || client.session_start(&params);
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(started) if early => {
+                crate::log::boot_mark("session/start-reply early");
+                this.starts_in_flight.remove(&minted);
+                if let Err(reason) = minted_start_answer(&minted, &started.session.session_id) {
+                    this.refuse_minted_start(&minted, reason, cx);
+                    return;
+                }
+                this.insert_started_row(&started.session);
+                if let Some(view) = this.find_view(&minted, cx) {
+                    if let Ok(envelope) = serde_json::to_value(&started.session) {
+                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
+                    }
+                    view.update(cx, |view, cx| view.start_landed(window, cx));
+                }
+                crate::baaz_log!("session/start root (no project)");
+            }
+            Err(error) if early => {
+                crate::baaz_log!("new-in: session/start failed: {error}");
+                this.starts_in_flight.remove(&minted);
+                if let Some(view) = this.find_view(&minted, cx) {
+                    view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
+                }
+                this.drop_pending_ask();
+                this.report(&error, cx);
+            }
             Ok(started) => {
                 // Stale switch, like [`Self::new_session_open`]: created on
                 // the wire, never opened, parked, or persisted.
@@ -1739,7 +1962,8 @@ impl Harness {
                     this.pending_draft = moving;
                 }
                 crate::baaz_log!("session/start root (no project)");
-                this.load_sessions(cx);
+                this.unsent.insert(session_id.clone());
+                this.insert_started_row(&started.session);
             }
             Err(error) => {
                 // Stale switch: nobody waits, nobody is dialogued.
@@ -2366,6 +2590,23 @@ impl Harness {
         }
     }
 
+    /// The approval mode a provider session opens (or reopens) in: the
+    /// command line's `--approval-mode` first, then the project's last
+    /// chip pick (`ModeSelected` writes it), else the seam's default. Always
+    /// a mode, and always sent: the adapter starts the child in it and
+    /// reports it back, so the chip shows what was asked for until the
+    /// child says otherwise — never a default nobody sent.
+    fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
+        self.args
+            .approval_mode
+            .as_ref()
+            .or_else(|| {
+                self.projects.resolve(workspace, project).and_then(|p| p.defaults.approval_mode.as_ref())
+            })
+            .map(muse_adapter::permission_mode)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn open_on_provider(
         &mut self,
         provider_id: ProviderId,
@@ -2402,6 +2643,7 @@ impl Harness {
         }
         let factory = self.provider_factory.clone();
         let workspace_bg = workspace.clone();
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
         // The terminal relay's route: the request id is the session id the
         // bridge will answer for (Claude Code takes it as `--session-id`;
         // Codex's bridge answers for it until the minted thread id lands) —
@@ -2434,6 +2676,7 @@ impl Harness {
                 workspace: Some(workspace_bg),
                 model: None,
                 model_provider: None,
+                mode: Some(mode),
             })?;
             // Tests drain after the send, synchronously on the test
             // executor: no forwarding thread ever wakes the lane task.
@@ -2492,6 +2735,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         use provider::ProviderAdapter as _;
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
         let mut adapter = provider::scripted::ScriptedProvider::new();
         let bridged = adapter
             .connect(&conn::connect_info())
@@ -2504,6 +2748,7 @@ impl Harness {
                         workspace: Some(workspace.clone()),
                         model: None,
                         model_provider: None,
+                        mode: Some(mode),
                     })
                     .map_err(|error| error.to_string())?;
                 match ack {
@@ -2607,10 +2852,24 @@ impl Harness {
         }
         // Like the muse path: the session groups under the project it
         // started in, and the drafts map names it while it is unsent so a
-        // repeated ⌘N reopens it instead of spawning another child.
+        // repeated ⌘N reopens it instead of spawning another child. Only a
+        // fresh open is a draft: a reopen or a fork lands a session that
+        // already has a record, and naming it here made the next ⌘N
+        // "reuse" whatever was clicked last — a handoff destination's row
+        // reads zero turns, so it passed for unsent and ⌘N did nothing.
+        let fresh = !self.provider_sessions.contains_key(&session_id);
         if let Some(id) = project.clone() {
             self.set_override(&session_id, |meta| meta.project = Some(id.clone()), cx);
-            self.drafts.insert(id, session_id.clone());
+        }
+        if fresh {
+            match project.clone() {
+                Some(id) => {
+                    self.drafts.insert(id, session_id.clone());
+                }
+                None => {
+                    self.unsent.insert(session_id.clone());
+                }
+            }
         }
         // The local record: `session/list` only knows muse sessions, so
         // this row is what brings the lane back after a restart — the
@@ -3006,14 +3265,16 @@ impl Harness {
                 crate::session_migration::ResumeGate::BaazHome => {}
             }
             use provider::ProviderAdapter as _;
+            let mode = self.provider_open_mode(record.workspace.as_deref(), record.project.as_deref());
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
                 .connect(&conn::connect_info())
                 .map_err(|error| error.to_string())
                 .and_then(|_| {
                     let provider = provider::Provider::new(resumed);
-                    let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())
-                        .map_err(|error| error.to_string())?;
+                    let session_id =
+                        crate::provider_sessions::send_resume(&provider, &record, &new_command_id(), Some(mode))
+                            .map_err(|error| error.to_string())?;
                     #[cfg(test)]
                     let (provider, events) = conn::gate_sync(provider);
                     #[cfg(not(test))]
@@ -3072,6 +3333,7 @@ impl Harness {
         // The gate reads the registry off the UI thread: cloned up front
         // for the same reason.
         let registry = self.provider_sessions.clone();
+        let mode = self.provider_open_mode(Some(&workspace), record.project.as_deref());
         let work = move || -> (Result<ProviderOpen, provider::ProviderError>, usize) {
             // The consent gate, on the background executor: before the
             // person's Move click an old session resumes from its
@@ -3117,7 +3379,8 @@ impl Harness {
                 let provider = factory(provider_id)?;
                 #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
-                let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())?;
+                let session_id =
+                    crate::provider_sessions::send_resume(&provider, &record, &new_command_id(), Some(mode))?;
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
                 // starts, with no forwarding thread.
@@ -3227,6 +3490,7 @@ impl Harness {
         // A fork is an ask like any other: it joins the last-wins epoch.
         self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
         let epoch = self.provider_open_epoch;
+        let mode = self.provider_open_mode(Some(&workspace), None);
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the fork still goes
         // through `ResumeSession` so the failure is the honest one.
@@ -3244,6 +3508,7 @@ impl Harness {
                             session_id: session_id.clone(),
                             cursor: None,
                             metadata_only: false,
+                            mode: Some(mode),
                         })
                         .map_err(|error| error.to_string())?;
                     match ack {
@@ -3319,6 +3584,7 @@ impl Harness {
                 session_id: session_id.clone(),
                 cursor: None,
                 metadata_only: false,
+                mode: Some(mode),
             })?;
             // Tests drain after the resume, synchronously on the test
             // executor: no forwarding thread wakes the lane task.
@@ -4014,8 +4280,11 @@ impl Harness {
                 if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
+                // A generated title outranks the prompt, even on a retry
+                // of a first turn that never settled (`send_title`).
+                let title = sidebar::send_title(&session_id, Some(&prompt), &self.overrides);
                 if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest) {
+                    if sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest) {
                         self.invalidate_list();
                     }
                 } else {
@@ -4023,7 +4292,7 @@ impl Harness {
                     // send): build it now, titled from the prompt.
                     self.merge_provider_rows();
                     if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest);
+                        sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest);
                         self.invalidate_list();
                     }
                 }
@@ -5418,6 +5687,13 @@ mod tests {
             draft_decision(&drafts, "p", |_| false),
             DraftDecision::Start { stale: Some("s-draft".into()) }
         );
+    }
+
+    #[test]
+    fn a_start_answered_under_another_id_is_refused() {
+        assert_eq!(minted_start_answer("s-1", "s-1"), Ok(()));
+        let refused = minted_start_answer("s-1", "s-2").expect_err("a foreign id never lands");
+        assert!(refused.contains("s-2") && refused.contains("s-1"), "{refused}");
     }
 
     #[test]
@@ -7164,6 +7440,326 @@ mod tests {
                 assert!(fired.get(), "actions run again once the destination opens");
             });
         });
+        lane_restore(state);
+    }
+
+    /// A muse child that answers only `session/start`, echoing the id the
+    /// start carried, and logs every request line to `log`: what the
+    /// start-landing tests drive without a real server.
+    fn starting_client(dir: &std::path::Path, root: &std::path::Path, log: &std::path::Path) -> std::sync::Arc<MuseClient> {
+        starting_client_answering(dir, root, log, None)
+    }
+
+    /// [`starting_client`], answering every start with `answer` as its id
+    /// instead of the one asked for, when one is given.
+    fn starting_client_answering(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        log: &std::path::Path,
+        answer: Option<&str>,
+    ) -> std::sync::Arc<MuseClient> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = dir.join("fake-muse.sh");
+        let answered = answer.map_or_else(|| "$sid".to_owned(), str::to_owned);
+        let body = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{log}'
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || continue
+  case "$line" in
+    *'"method":"session/start"'*)
+      sid=$(printf '%s' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"session":{{"sessionId":"%s","createdAt":"2026-10-16T00:00:00Z","updatedAt":"2026-10-16T00:00:00Z","path":"","status":"idle","turnCount":0,"workspaceRoot":"{root}"}},"viewCursor":"c0"}}}}\n' "$id" "{answered}";;
+    *) printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"not here"}}}}\n' "$id";;
+  esac
+done
+"#,
+            log = log.display(),
+            root = root.display(),
+        );
+        std::fs::write(&script, body).expect("fake muse script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::sync::Arc::new(
+            MuseClient::spawn(&muse_client::MuseConfig {
+                program: script,
+                trust_workspace: false,
+                no_session_log: false,
+                extra_args: Vec::new(),
+            })
+            .expect("the fake child spawns"),
+        )
+    }
+
+    /// Adopt `dir` as the current project and pick muse for new sessions.
+    fn adopt_for_muse(harness: &mut Harness, dir: &std::path::Path) -> String {
+        let id = harness.projects.add(dir).id.clone();
+        harness.projects.current = Some(id.clone());
+        harness.current_project = Some(id.clone());
+        harness.new_provider = ProviderId::Muse.as_str().to_owned();
+        id
+    }
+
+    /// "New session" shows its draft in the click's own update, before any
+    /// round trip: the id is minted locally and the view is up while
+    /// `session/start` is still on the wire. When the start lands, the row
+    /// goes in from the reply itself — no `session/list` is ever sent for
+    /// it. Restore the wait (open in the landing) and the first block
+    /// finds the old centre; restore `load_sessions` there and the log
+    /// names `session/list`.
+    #[gpui::test]
+    fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("new-early");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let log = state.2.join("requests.log");
+        let project = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                adopt_for_muse(harness, &state.2)
+            })
+        });
+        let minted = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let view = harness.active.clone().expect("the draft is up before the start lands");
+                let id = view.read(cx).session_id.clone();
+                assert!(view.read(cx).is_starting(), "its start is still on the wire");
+                assert!(harness.starts_in_flight.contains(&id), "scripted verbs wait for it");
+                assert!(!harness.session_switch_pending, "a new session is no switch");
+                assert_eq!(harness.drafts.get(&project), Some(&id), "a second click reuses it");
+                id
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the draft stays open");
+            assert_eq!(view.read(cx).session_id, minted, "the start kept the minted id");
+            assert!(!view.read(cx).is_starting(), "the start landed");
+            assert!(harness.starts_in_flight.is_empty(), "nothing is still opening");
+            let row = harness.sessions.iter().find(|entry| entry.id == minted).expect("the row is in");
+            assert_eq!(row.project.as_deref(), Some(project.as_str()), "it files under its project");
+            assert_eq!(row.turns, 0, "zero turns: out of view until its first send");
+            assert!(harness.overlays.read(cx).dialog.is_none(), "no failure dialog");
+        });
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(requests.contains("\"session/start\""), "the start was sent: {requests}");
+        assert!(!requests.contains("session/list"), "no list round trip for one row: {requests}");
+        lane_restore(state);
+    }
+
+    /// A start that fails leaves the early view up, draft and all, saying
+    /// why — and forgets it as the project's draft, so the next "New
+    /// session" starts fresh instead of reopening a session that is not.
+    #[gpui::test]
+    fn a_failed_early_start_keeps_the_view_and_frees_the_draft(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("new-early-fail");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let project = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.client = Some(dead_client());
+                adopt_for_muse(harness, &state.2)
+            })
+        });
+        let minted = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                harness.active.clone().expect("the draft is up").read(cx).session_id.clone()
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the view stays");
+            assert_eq!(view.read(cx).session_id, minted);
+            assert!(!view.read(cx).is_starting(), "the start settled");
+            assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
+            assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
+            assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
+        });
+        lane_restore(state);
+    }
+
+    /// New session, open another session, New session again — twice over:
+    /// every New session ends on an unsent draft in the centre, never on
+    /// the session clicked before it. Run under a muse default and a Codex
+    /// default, the "another" being a stored Codex session either way.
+    fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provider: ProviderId) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state(name);
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let log = state.2.join("requests.log");
+        let (factory, _) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_factory = factory;
+                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                let project = adopt_for_muse(harness, &state.2);
+                harness.new_provider = provider.as_str().to_owned();
+                z4_seed_stored_codex(harness, cx);
+                // The live case: a handoff destination in this project, its
+                // one turn the hidden pack acknowledgement — so its row
+                // reads zero turns, like a draft's.
+                let record = harness.provider_sessions.get_mut("s-codex-old").expect("seeded");
+                record.project = Some(project);
+                record.turns = 1;
+                record.handoff_from = Some("s-claude-src".into());
+                record.handoff_from_provider = Some("claude-code".into());
+                record.handoff_title = Some("Project Layout Overview Explained".into());
+                record.title = None;
+                record.first_prompt = None;
+                harness.merge_provider_rows();
+            });
+        });
+        let new_lands_a_draft = |vc: &mut gpui::VisualTestContext, round: &str| {
+            vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                let view = harness.active.clone().unwrap_or_else(|| panic!("{round}: a view is open"));
+                let id = view.read(cx).session_id.clone();
+                assert_ne!(id, "s-codex-old", "{round}: New session left the clicked session up");
+                assert!(harness.is_live_draft(&id, cx), "{round}: the centre is an unsent draft");
+                assert_eq!(view.read(cx).provider_kind(), provider, "{round}: on the default's lane");
+                assert!(!harness.session_opening(), "{round}: nothing is still opening");
+                id
+            })
+        };
+        let open_other = |vc: &mut gpui::VisualTestContext, round: &str| {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                let view = harness.active.clone().unwrap_or_else(|| panic!("{round}: a view is open"));
+                assert_eq!(view.read(cx).session_id, "s-codex-old", "{round}: the click opened it");
+                assert!(!harness.session_opening(), "{round}: the reopen landed");
+            });
+        };
+        let first = new_lands_a_draft(vc, "first new");
+        open_other(vc, "first open");
+        let second = new_lands_a_draft(vc, "second new");
+        open_other(vc, "second open (parked)");
+        let third = new_lands_a_draft(vc, "third new");
+        assert_eq!(first, second, "the project's unsent draft is reused, not a second one");
+        assert_eq!(second, third, "and again");
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn new_after_open_lands_a_draft_on_muse(cx: &mut gpui::TestAppContext) {
+        new_after_open_lands_a_draft(cx, "new-open-new-muse", ProviderId::Muse);
+    }
+
+    #[gpui::test]
+    fn new_after_open_lands_a_draft_on_codex(cx: &mut gpui::TestAppContext) {
+        new_after_open_lands_a_draft(cx, "new-open-new-codex", ProviderId::Codex);
+    }
+
+    /// What the person does while the start is on the wire waits for it:
+    /// the text at Enter is what goes (not the field's later edits), the
+    /// field clears at once and the view reads busy, and the latest model
+    /// and mode picks reach the wire after the start lands — the mode chip
+    /// reading the pick meanwhile. Restore the old flag and the edited
+    /// text is what is sent; drop the queue and neither pick is sent.
+    #[gpui::test]
+    fn what_is_done_while_the_start_is_on_the_wire_goes_when_it_lands(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("new-early-queue");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let log = state.2.join("requests.log");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                adopt_for_muse(harness, &state.2);
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let view = harness.active.clone().expect("the draft is up");
+                view.update(cx, |view, cx| {
+                    assert!(view.is_starting());
+                    view.set_draft("captured at enter".into(), window, cx);
+                    view.send(window, cx);
+                    assert_eq!(view.draft_text(cx), "", "the field clears like any send");
+                    assert!(view.busy(), "the queued send reads as pending");
+                    view.set_draft("edited afterwards".into(), window, cx);
+                    view.set_model("muse-early", cx);
+                    view.set_mode(aui_protocol::PermissionMode::DenyUnmatched, cx);
+                    assert_eq!(
+                        view.mode_label(),
+                        aui_protocol::PermissionMode::DenyUnmatched.label(),
+                        "the chip reads the waiting pick"
+                    );
+                });
+            })
+        });
+        vc.run_until_parked();
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        let turn = requests.lines().find(|line| line.contains("\"turn/start\"")).expect("the queued send went");
+        assert!(turn.contains("captured at enter"), "the Enter's text is sent: {turn}");
+        assert!(!requests.contains("edited afterwards"), "never the later edit: {requests}");
+        assert!(requests.contains("session/setModel") && requests.contains("muse-early"), "{requests}");
+        assert!(requests.contains("session/setApprovalMode"), "{requests}");
+        lane_restore(state);
+    }
+
+    /// A start answered under another id than the minted one fails the
+    /// view visibly — never Starting forever, never a row under the
+    /// minted id — and a send that waited goes back in the composer.
+    #[gpui::test]
+    fn a_start_answered_under_another_id_fails_the_view(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("new-early-foreign");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let log = state.2.join("requests.log");
+        let project = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.client = Some(starting_client_answering(&state.2, &state.2, &log, Some("s-foreign")));
+                adopt_for_muse(harness, &state.2)
+            })
+        });
+        let minted = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let view = harness.active.clone().expect("the draft is up");
+                view.update(cx, |view, cx| {
+                    view.set_draft("kept".into(), window, cx);
+                    view.send(window, cx);
+                });
+                view.read(cx).session_id.clone()
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the view stays");
+            assert_eq!(view.read(cx).session_id, minted);
+            assert!(!view.read(cx).is_starting(), "the start settled as failed");
+            assert!(!view.read(cx).busy(), "nothing reads as pending");
+            assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
+            assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
+            assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
+        });
+        // The restored prompt lands on the next composer frame.
+        vc.update(|window, cx| {
+            let view = baaz.read(cx).active.clone().expect("view");
+            view.update(cx, |view, cx| {
+                view.render_composer_band(window, cx);
+                assert_eq!(view.draft_text(cx), "kept", "the waiting send went back in the composer");
+            });
+        });
+        let requests = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!requests.contains("turn/start"), "nothing was sent to a session that never landed: {requests}");
         lane_restore(state);
     }
 
@@ -10303,6 +10899,127 @@ mod tests {
             let harness = baaz.read(cx);
             let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
             assert_eq!(row.label, "Shiny generated", "the auto-title names the provider row");
+        });
+        lane_restore(state);
+    }
+
+    /// A finished provider turn counts: one real send through the lane
+    /// (the scripted double echoes a user turn, an assistant turn and its
+    /// finish) raises the record's and the row's `turns` to at least one
+    /// and moves `updatedMs` — the count the empty filter and the row's
+    /// byline both read.
+    #[gpui::test]
+    fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("turn-count");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let open_id = vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let id = harness.active.clone().expect("the lane opened").read(cx).session_id.clone();
+                // An old stamp, so the move below is the turn's, not the open's.
+                harness.provider_sessions.get_mut(&id).expect("the open's record").updated_ms = 1;
+                id
+            })
+        });
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the lane view");
+            view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx));
+        });
+        vc.run_until_parked();
+        // The double's echo: the user turn, the assistant turn, its finish.
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the lane view");
+            view.update(cx, |view, cx| view.test_drain_provider(cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let record = &harness.provider_sessions[&open_id];
+            assert!(record.turns >= 1, "the finished turn counts on the record, held {}", record.turns);
+            assert!(record.updated_ms > 1, "the finished turn moves the record");
+            let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+            assert!(row.turns >= 1, "the row reads the counted turn, held {}", row.turns);
+            assert!(!row.is_empty(), "a counted session is never empty");
+        });
+        lane_restore(state);
+    }
+
+    /// A retry of a first turn that never settled keeps the generated
+    /// title (live, 2026-10-16): the row still reads zero turns, so the
+    /// admission's `first_send_update` used to title it from the resent
+    /// prompt — over the generated title, in the row and in the header that
+    /// falls back to it once the row is filtered.
+    #[gpui::test]
+    fn a_retried_first_send_keeps_the_generated_title(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("retry-title");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let (view, open_id) = vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the lane opened");
+            let id = view.read(cx).session_id.clone();
+            (view, id)
+        });
+        let accept = |vc: &mut gpui::VisualTestContext, turn: &str| {
+            let (id, turn) = (open_id.clone(), turn.to_owned());
+            vc.update(|_, cx| {
+                view.update(cx, |_, cx| {
+                    cx.emit(SessionEvent::ProviderTurnAccepted {
+                        session_id: id,
+                        prompt: "create a simple html explainer".into(),
+                        turn_id: turn,
+                    });
+                });
+            });
+            vc.run_until_parked();
+        };
+        accept(vc, "t-first");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_override(&open_id, |meta| {
+                    meta.generated_title = Some("Simple HTML Database Structure Explainer".into());
+                }, cx);
+            });
+        });
+        // The first turn never settled; the person retries the same words.
+        accept(vc, "t-retry");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+            assert_eq!(row.turns, 0, "the first turn never settled");
+            assert_eq!(row.label, "Simple HTML Database Structure Explainer", "the retry keeps the title");
+            assert_eq!(
+                harness.collapsed_head_label(&open_id, cx).as_deref(),
+                Some("Simple HTML Database Structure Explainer"),
+                "the header reads the generated title"
+            );
         });
         lane_restore(state);
     }

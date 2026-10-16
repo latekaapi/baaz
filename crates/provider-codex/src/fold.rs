@@ -67,7 +67,7 @@ use std::time::Instant;
 use aui_protocol::{
     ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
     ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat,
-    Hunk, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    Hunk, PermissionMode, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
     UploadState,
 };
 use provider::ProviderEvent;
@@ -75,7 +75,7 @@ use serde_json::Value;
 
 use crate::child::{
     ApprovalKind, FileChangeApprovalParams, MCP_ELICITATION_ID_PREFIX,
-    PermissionsApprovalParams, elicitation_is_tool_approval,
+    PermissionsApprovalParams, elicitation_is_tool_approval, permission_mode_from_codex,
 };
 use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Item, Notification, TokenCounts};
 
@@ -950,6 +950,9 @@ pub struct CodexFold {
     session_id: Option<String>,
     thread_id: Option<String>,
     model: Option<String>,
+    /// The approval mode last reported or picked, when known: what a new
+    /// report is compared against, so only a move is announced.
+    permission_mode: Option<PermissionMode>,
     assistant_started: HashSet<String>,
     /// Blocks added per turn, in order: the index a later `turn/plan/updated`
     /// rewrites wholesale (replace, never append).
@@ -1028,6 +1031,16 @@ impl CodexFold {
     /// The server-minted session id, once `thread/started` has been seen.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The approval mode last reported or picked, when known.
+    pub fn permission_mode(&self) -> Option<PermissionMode> {
+        self.permission_mode
+    }
+
+    /// Record `mode` as the one in effect; `true` when that is a move.
+    pub fn note_permission_mode(&mut self, mode: PermissionMode) -> bool {
+        self.permission_mode.replace(mode) != Some(mode)
     }
 
     /// The latest turn id seen on `turn/started`, if any.
@@ -2207,9 +2220,29 @@ pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(Provide
         }
         _ => None,
     });
+    // `thread/settings/updated` restates what the thread now runs under
+    // (captured in `fixtures/codex/thinking.jsonl` after a per-turn
+    // override): its policy and sandbox are the chip's truth, announced
+    // only when they moved.
+    let (reported, settings_thread) = match &frame {
+        Frame::Notification(Notification::Unknown { method, params })
+            if method == "thread/settings/updated" =>
+        {
+            let mode = params.get("threadSettings").and_then(|settings| {
+                permission_mode_from_codex(settings.get("approvalPolicy")?, settings.get("sandboxPolicy"))
+            });
+            (mode, params.get("threadId").and_then(Value::as_str).map(str::to_owned))
+        }
+        _ => (None, None),
+    };
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
-        emit(ProviderEvent::Deltas { session_id, deltas });
+        emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
+    }
+    if let (Some(mode), Some(session_id)) = (reported, session_id.or(settings_thread)) {
+        if fold.note_permission_mode(mode) {
+            emit(ProviderEvent::ApprovalModeChanged { session_id, mode });
+        }
     }
 }
 
@@ -4413,5 +4446,29 @@ mod tests {
         let (kind, _, target) = face(&failed);
         assert_eq!(kind, ToolKind::Shell, "failures keep their error card");
         assert!(target.contains("ls"), "the failed command stays titled: {target}");
+    }
+
+    #[test]
+    fn thread_settings_updates_fold_into_the_mode_once() {
+        // `fixtures/codex/thinking.jsonl` carries the server restating the
+        // thread's settings after a per-turn override.
+        let line = fixture_lines("thinking.jsonl")
+            .into_iter()
+            .find(|line| line.contains("thread/settings/updated"))
+            .expect("a settings line");
+        let envelope: Value = serde_json::from_str(&line).expect("json");
+        let frame = envelope["frame"].to_string();
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        step_line(&mut fold, &frame, &mut |event| events.push(event));
+        step_line(&mut fold, &frame, &mut |event| events.push(event));
+        let modes: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ApprovalModeChanged { mode, .. } => Some(mode),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modes, vec![PermissionMode::OnRequest], "on-request, announced once");
     }
 }
