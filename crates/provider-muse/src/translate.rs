@@ -330,13 +330,13 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             Ok(Ack::TurnAccepted { turn_id: result.turn_id })
         }
-        Command::SteerInput { request_id, session_id, expected_turn, parts } => {
+        Command::SteerInput { request_id, session_id, expected_turn, parts, effort } => {
             client
                 .turn_steer(&TurnSteerParams {
                     command_id: request_id,
                     expected_turn_id: expected_turn,
                     input: parts.into_iter().map(input_part).collect(),
-                    reasoning_effort: None,
+                    reasoning_effort: reasoning_effort(effort.as_deref()),
                     session_id,
                 })
                 .map_err(transport_error)?;
@@ -382,6 +382,12 @@ pub fn dispatch(
                     .models
                     .into_iter()
                     .map(|model| ModelSummary {
+                        // The host's own tiers (1.4.9); empty from an older
+                        // host, which offers the whole vocabulary.
+                        efforts: model
+                            .effort_tiers()
+                            .map(|tiers| tiers.into_iter().map(str::to_owned).collect())
+                            .unwrap_or_default(),
                         id: model.model_id,
                         label: model.display_label,
                         active: model.is_active,

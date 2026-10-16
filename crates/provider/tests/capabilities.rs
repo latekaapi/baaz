@@ -69,6 +69,7 @@ impl ForgetfulAdapter {
             session_id: "s".into(),
             expected_turn: "t".into(),
             parts: vec![SubmissionPart::Text("x".into())],
+            effort: None,
         }
     }
 }

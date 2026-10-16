@@ -2144,9 +2144,15 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .filter(|o| o.effort.is_some())
                     .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
                     .collect();
+                // The Default row's own detail: the model's default level
+                // where the provider names one (muse 1.4.9).
+                let base = options
+                    .iter()
+                    .find(|o| o.effort.is_none())
+                    .map_or_else(|| crate::overlays::effort_detail(None).to_owned(), |o| o.detail.clone());
                 let default_detail = match listed.note() {
-                    Some(note) => format!("{} — {note}", crate::overlays::effort_detail(None)),
-                    None => crate::overlays::effort_detail(None).to_owned(),
+                    Some(note) => format!("{base} — {note}"),
+                    None => base,
                 };
                 let default_row = PickerRow::new(crate::overlays::effort_row_id(None), crate::overlays::effort_label(None), default_detail);
                 let current = self.effort.and_then(|e| self.effort_levels().iter().position(|l| *l == e));
@@ -2238,7 +2244,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             MenuKind::Mode => {
                 let rows: Vec<PickerRow> = MODES
                     .iter()
-                    .map(|mode| PickerRow::new(format!("{mode:?}"), mode.label(), mode.description()))
+                    .map(|mode| {
+                        // An unavailable mode says why on its detail line;
+                        // the pick restates it rather than switching.
+                        let detail = self
+                            .mode_unavailable(*mode)
+                            .unwrap_or_else(|| mode.description().to_owned());
+                        PickerRow::new(format!("{mode:?}"), mode.label(), detail)
+                    })
                     .collect();
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     if let Some(mode) = MODES.iter().copied().find(|m| format!("{m:?}") == id.as_ref()) {

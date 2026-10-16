@@ -533,6 +533,8 @@ for line in sys.stdin:
     params = req.get("params") or {}
     if method == "turn/steer" and fail_steer:
         resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "commandRejected: missing_run", "data": {"kind": "commandRejected", "reason": "missing_run"}}}
+    elif method == "session/setApprovalMode":
+        resp = {"jsonrpc": "2.0", "id": rid, "result": {"commandId": params.get("commandId"), "status": "accepted", "applyOutcome": "completed", "effectiveMode": {"mode": params.get("mode"), "source": "approvalReconfigure", "lastCommandId": params.get("commandId")}}}
     elif method in ("turn/unqueue", "turn/steer"):
         tid = params.get("turnId", params.get("expectedTurnId"))
         resp = {"jsonrpc": "2.0", "id": rid, "result": {"commandId": params.get("commandId"), "status": "accepted", "turnId": tid}}
@@ -671,6 +673,33 @@ for line in sys.stdin:
     fn pending_prompt_of(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Option<String> {
         vc.run_until_parked();
         vc.update(|_, cx| view.read(cx).pending_prompt.clone())
+    }
+
+    /// A muse mode pick re-selects the posture too: `session/setApprovalMode`
+    /// and then a metadata-only `session/resume` naming the mode's
+    /// permission profile. Without the second call Full access stayed
+    /// sandboxed and Ask stayed with the LLM judge (live 2026-10-16).
+    #[gpui::test]
+    fn a_muse_mode_pick_reselects_the_permission_profile(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-profile", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-profile");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_mode(PermissionMode::AllowAll, cx)));
+        wait_for_wire(&stub, vc, "session/resume");
+        let methods: Vec<String> = stub
+            .requests()
+            .iter()
+            .filter_map(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
+            .filter(|m| m.starts_with("session/"))
+            .collect();
+        assert_eq!(methods, ["session/setApprovalMode", "session/resume"], "mode first, then the profile");
+        let mode = stub.saw("session/setApprovalMode").expect("the mode went out");
+        assert_eq!(mode.pointer("/params/mode").and_then(|m| m.as_str()), Some("allowAll"));
+        let resume = stub.saw("session/resume").expect("the profile went out");
+        assert_eq!(resume.pointer("/params/sessionId").and_then(|m| m.as_str()), Some("s-1"));
+        assert_eq!(resume.pointer("/params/permissionProfile").and_then(|m| m.as_str()), Some(":unrestricted"));
+        assert_eq!(resume.pointer("/params/excludeItems"), Some(&serde_json::json!(true)), "metadata only: no replay");
     }
 
     /// The reported turn: queue a message, Steer it, `turn/unqueued` lands —

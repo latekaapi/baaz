@@ -182,7 +182,8 @@ impl SessionView {
                 // Control-channel refusals arrive as generic cards, never
                 // as transcript: the Claude Code adapter banners the CLI's
                 // reason through these three kinds (see
-                // `provider_claude_code::controls`). Each one shows as the
+                // `provider_claude_code::controls`), plus the notice that a
+                // model switch left Auto. Each one shows as the
                 // session banner and stays out of the fold — a refusal is
                 // not a turn. A model refusal also resyncs the chip from
                 // the adapter's catalog, which already rolled back; an
@@ -197,7 +198,8 @@ impl SessionView {
                             ..
                         } if kind == provider_claude_code::CONTROL_MODEL_REJECTED_CARD
                             || kind == provider_claude_code::CONTROL_EFFORT_REJECTED_CARD
-                            || kind == provider_claude_code::CONTROL_MODE_REJECTED_CARD =>
+                            || kind == provider_claude_code::CONTROL_MODE_REJECTED_CARD
+                            || kind == provider_claude_code::CONTROL_MODE_FALLBACK_CARD =>
                         {
                             self.set_banner(text, None, cx);
                             model_refused |=
@@ -281,6 +283,22 @@ impl SessionView {
                 if self.fold.set_session_mode(&session_id, mode) {
                     cx.notify();
                 }
+            }
+            // The turn an ack named now has its streamed id (Claude Code
+            // acks before the CLI names the turn): keep the alias, and
+            // re-key the one thing recorded under the ack's id — the plan
+            // turn — so its reply still becomes the plan card.
+            provider::ProviderEvent::TurnIdentified { session_id, accepted, turn_id } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                if self.plan_turn.as_deref() == Some(accepted.as_str()) {
+                    self.plan_turn = Some(turn_id.clone());
+                }
+                if self.turn_aliases.len() >= super::MAX_COMPLETED_TURNS {
+                    self.turn_aliases.clear();
+                }
+                self.turn_aliases.insert(accepted, turn_id);
             }
             provider::ProviderEvent::QuestionRaised { session_id, question_id, headline } => {
                 if session_id != self.session_id {
@@ -938,6 +956,60 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).session().cloned(), before, "a muse event folds nothing");
             assert!(!view.read(cx).busy(), "a refused start never marks running");
+        });
+    }
+
+    /// Claude Code acks a submit before the CLI names the turn: the ack's
+    /// id is the adapter's handle, the turn streams under its first API
+    /// message id. `TurnIdentified` maps one onto the other, so everything
+    /// keyed by the ack — the plan turn, the late-ack staleness check, an
+    /// ack that lands after its alias — reads the streamed turn.
+    #[gpui::test]
+    fn turn_identified_maps_the_ack_id_onto_the_streamed_turn(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Delta, Turn, TurnMeta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view_as(vc, "s-1", "claude-code");
+        vc.update(|_, cx| view.update(cx, |view, _| view.plan_turn = Some("r-1".to_owned())));
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::TurnIdentified {
+                session_id: "s-1".to_owned(),
+                accepted: "r-1".to_owned(),
+                turn_id: "msg-1".to_owned(),
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.plan_turn.as_deref(), Some("msg-1"), "the plan turn re-keys");
+            assert_eq!(view.streamed_turn_id("r-1"), "msg-1");
+            assert_eq!(view.streamed_turn_id("r-other"), "r-other", "an unaliased ack is its own id");
+            assert!(!view.provider_turn_finished("r-1"), "not finished yet");
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "msg-1".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnFinished { turn_id: "msg-1".to_owned(), meta: TurnMeta::default() },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).provider_turn_finished("r-1"),
+                "a late ack for a finished turn reads stale through its alias"
+            );
         });
     }
 
@@ -2384,6 +2456,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::with_catalog(vec![
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "sonnet".into(),
                 label: "Sonnet".into(),
                 active: true,
@@ -2393,6 +2466,7 @@ mod tests {
                 description: None,
             },
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "haiku".into(),
                 label: "Haiku".into(),
                 active: false,
@@ -3389,6 +3463,7 @@ mod tests {
             profile_id: None,
             provider_id: "codex".to_owned(),
             release_date: None,
+            ..Default::default()
         };
         vc.update(|_, cx| {
             view.update(cx, |view, _| {

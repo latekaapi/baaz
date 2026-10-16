@@ -139,6 +139,10 @@ def canned(method, params, granted=()):
                 "isDefault": True,
                 "modelId": "fake-pro",
                 "providerId": "fake",
+                # 1.4.9's per-row tiers; "hyper" is a tier this build's
+                # closed enum cannot spell and must not fail the row.
+                "defaultReasoningEffort": "medium",
+                "variants": ["low", "medium", "hyper"],
             }],
             "profileId": None,
             "providerId": "fake",

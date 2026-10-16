@@ -630,6 +630,13 @@ fn build_start_params(
         workspace_root: Some(canonical_path(root).to_string_lossy().into_owned()),
         provider_id: Some(provider.to_owned()),
         model_id,
+        // The approval mode alone does not set the posture: the profile
+        // carries the sandbox and who reviews (see
+        // `muse_adapter::permission_profile`). No mode, no pick — the host
+        // default stands, which is what the chip's default reads.
+        permission_profile: approval_mode
+            .as_ref()
+            .map(|mode| muse_adapter::permission_profile(muse_adapter::permission_mode(mode)).to_owned()),
         approval_mode,
         ..Default::default()
     }
@@ -1075,6 +1082,27 @@ mod tests {
         // does for a project's own defaults.
         let params = start_params_for_root(&dir, "meta", Some(ApprovalMode::AllowAll));
         assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A start that names a mode names its permission profile too, so the
+    /// sandbox and the reviewer match the chip from the first turn; a start
+    /// with no mode leaves the host default for both.
+    #[test]
+    fn start_params_carry_the_modes_permission_profile() {
+        use muse_client::schema::ApprovalMode;
+        let dir = state_dir("start-params-profile");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        assert_eq!(start_params_for_root(&dir, "meta", None).permission_profile, None);
+        for (mode, profile) in [
+            (ApprovalMode::AllowAll, ":unrestricted"),
+            (ApprovalMode::OnRequest, ":auto-review"),
+            (ApprovalMode::PromptUnmatched, ":ask-me"),
+            (ApprovalMode::DenyUnmatched, ":read-only"),
+        ] {
+            let params = start_params_for_root(&dir, "meta", Some(mode.clone()));
+            assert_eq!(params.permission_profile.as_deref(), Some(profile), "{mode:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

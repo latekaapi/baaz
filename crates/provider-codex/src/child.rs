@@ -103,6 +103,22 @@ impl ApprovalKind {
             _ => None,
         }
     }
+
+    /// The human question a pending approval asks with, in the words the
+    /// Claude Code and Muse cards use ("Allow Codex to run this command?")
+    /// — never the wire method, which is what the tap carried before
+    /// when the request named no `reason`. The model's reason stays on
+    /// the transcript card. An MCP elicitation carries its own sentence
+    /// (`message`), so this is only its fallback.
+    pub fn headline(self) -> &'static str {
+        match self {
+            ApprovalKind::Command => "Allow Codex to run this command?",
+            ApprovalKind::FileChange => "Allow Codex to edit this file?",
+            ApprovalKind::Permissions => "Allow Codex to change permissions?",
+            ApprovalKind::McpElicitation => "Allow Codex to use this tool?",
+            ApprovalKind::Unknown => "Allow Codex to continue?",
+        }
+    }
 }
 
 /// A server approval request waiting for a decision: the JSON-RPC id to
@@ -339,6 +355,22 @@ pub fn turn_start_request(
     json!({"id": id, "method": "turn/start", "params": Value::Object(params)})
 }
 
+/// The `effort` a `turn/start` carries, given the session's pick, the
+/// last level a started turn carried (`sticky`), and the model's catalog
+/// default. `TurnStartParams.effort` applies "for this turn and subsequent
+/// turns", and the 0.144.6 schema gives no reset spelling (`null` is
+/// typed the same as absent), so Default after a non-default pick sends
+/// the model's `defaultReasoningEffort` explicitly; Default with nothing
+/// standing omits the key, byte-identical to the old shape. A reset whose
+/// default is unknown omits the key too — never a guessed level.
+pub fn turn_effort(picked: Option<&str>, sticky: Option<&str>, model_default: Option<&str>) -> Option<String> {
+    match picked.filter(|level| !level.is_empty()) {
+        Some(level) => Some(level.to_owned()),
+        None if sticky.is_some() => model_default.map(str::to_owned),
+        None => None,
+    }
+}
+
 /// The `thread/resume` call rejoining a stored thread by id. Per
 /// `ThreadResumeParams` only `threadId` is required; the response carries
 /// the thread (with its `turns[]` history, per the `Thread.turns`
@@ -398,6 +430,10 @@ pub struct ModelInfo {
     /// `supportedReasoningEfforts`, so the effort menu follows the
     /// selected model with no second fetch.
     pub efforts: Vec<SupportedEffort>,
+    /// The row's `defaultReasoningEffort` (required on `Model` in the
+    /// 0.144.6 schema): the level a Default turn resets to after a pick,
+    /// since an omitted `effort` leaves the last override standing.
+    pub default_effort: Option<String>,
 }
 
 /// The `model/list` call: always with `includeHidden: true` (a hidden row
@@ -459,6 +495,11 @@ pub fn model_catalog(result: &Value) -> Vec<ModelInfo> {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         efforts: supported_efforts(result, id),
+                        default_effort: row
+                            .get("defaultReasoningEffort")
+                            .and_then(Value::as_str)
+                            .filter(|level| !level.is_empty())
+                            .map(str::to_owned),
                     })
                 })
                 .collect()
@@ -1117,7 +1158,8 @@ impl RunningChild {
             let headline = params
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or(method)
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or(ApprovalKind::McpElicitation.headline())
                 .to_owned();
             if let Ok(mut shared) = shared.lock() {
                 shared.approvals.insert(item_id.clone(), PendingApproval {
@@ -1136,11 +1178,7 @@ impl RunningChild {
         } else if let Some(kind) = ApprovalKind::from_method(method) {
             let item_id =
                 params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned();
-            let headline = params
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or(method)
-                .to_owned();
+            let headline = kind.headline().to_owned();
             if let Ok(mut shared) = shared.lock() {
                 shared.approvals.insert(item_id.clone(), PendingApproval {
                     request_id: id.clone(),
@@ -1482,6 +1520,24 @@ mod tests {
             })
             .map(|(_, frame)| frame.clone())
             .unwrap_or_else(|| panic!("no client frame for {method}"))
+    }
+
+    #[test]
+    fn default_after_a_pick_resets_to_the_model_default() {
+        // A pick rides as itself, standing or not.
+        assert_eq!(turn_effort(Some("high"), None, Some("medium")).as_deref(), Some("high"));
+        assert_eq!(turn_effort(Some("low"), Some("high"), Some("medium")).as_deref(), Some("low"));
+        // Default with nothing standing omits the key: the old shape.
+        assert_eq!(turn_effort(None, None, Some("medium")), None);
+        assert_eq!(turn_effort(Some(""), None, Some("medium")), None);
+        // Default after a pick: the override would persist ("this turn and
+        // subsequent turns"), so the model's default is sent explicitly.
+        assert_eq!(turn_effort(None, Some("high"), Some("medium")).as_deref(), Some("medium"));
+        // An unknown default is never guessed.
+        assert_eq!(turn_effort(None, Some("high"), None), None);
+        // The frame carries the reset level as an ordinary `effort`.
+        let frame = turn_start_request(3, "t", "m", "hi", turn_effort(None, Some("high"), Some("medium")).as_deref(), None);
+        assert_eq!(frame["params"]["effort"], json!("medium"));
     }
 
     #[test]
@@ -1891,6 +1947,11 @@ mod tests {
         // `requestApproval` catch), but on the lane that is never answered
         // blind.
         assert_eq!(ApprovalKind::from_method("item/future/requestApproval"), Some(K::Unknown));
+        // Each lane asks in words, never with its wire method.
+        assert_eq!(K::Command.headline(), "Allow Codex to run this command?");
+        assert_eq!(K::FileChange.headline(), "Allow Codex to edit this file?");
+        assert_eq!(K::Permissions.headline(), "Allow Codex to change permissions?");
+        assert_eq!(K::Unknown.headline(), "Allow Codex to continue?");
         assert_eq!(ApprovalKind::from_method("turn/start"), None);
         assert_eq!(ApprovalKind::from_method("item/tool/requestUserInput"), None);
         // Elicitations classify on params, never on method alone: only an
@@ -2014,6 +2075,30 @@ mod tests {
             shared.questions.contains_key("q-1"),
             "the refused question is recorded for ListPending"
         );
+    }
+
+    /// The live matrix's command ask read
+    /// `item/commandExecution/requestApproval` on the tap: the request
+    /// named no `reason`, and the method stood in. The tap now asks the
+    /// card's own question, reason or not.
+    #[test]
+    fn a_command_approval_tap_asks_in_words_not_the_wire_method() {
+        for params in [
+            json!({"threadId": "t", "turnId": "u", "itemId": "c-1", "command": "touch x"}),
+            json!({"threadId": "t", "turnId": "u", "itemId": "c-1", "command": "touch x",
+                   "reason": "Needs to write outside the sandbox"}),
+        ] {
+            let (written, seen, _) = serve_question("item/commandExecution/requestApproval", params);
+            assert!(written.is_empty(), "the press answers later: {written:?}");
+            assert!(
+                matches!(
+                    seen.as_slice(),
+                    [ProviderEvent::ApprovalRequested { headline, .. }]
+                    if headline == "Allow Codex to run this command?"
+                ),
+                "{seen:?}"
+            );
+        }
     }
 
     #[test]
@@ -2183,6 +2268,10 @@ mod tests {
         let legacy_levels: Vec<&str> =
             legacy.efforts.iter().map(|level| level.id.as_str()).collect();
         assert_eq!(legacy_levels, ["low", "medium", "high", "xhigh"]);
+        // `defaultReasoningEffort` rides each row: what a Default turn
+        // resets to after a pick.
+        assert_eq!(sol.default_effort.as_deref(), Some("low"));
+        assert_eq!(legacy.default_effort.as_deref(), Some("medium"));
         // The hidden shape, as the live probe returns it: hidden rows
         // parse and stay marked, so the menu can filter them.
         let hidden_page = json!({
@@ -2192,6 +2281,7 @@ mod tests {
                 "description": "Fast and affordable agentic coding model.",
                 "hidden": true,
                 "isDefault": false,
+                "defaultReasoningEffort": "low",
                 "supportedReasoningEfforts": [
                     {"reasoningEffort": "low", "description": "Fast responses with lighter reasoning"}
                 ],
@@ -2201,6 +2291,7 @@ mod tests {
         let hidden_rows = model_catalog(&hidden_page);
         assert_eq!(hidden_rows.len(), 1);
         assert!(hidden_rows[0].hidden, "the hidden flag survives the parse");
+        assert_eq!(hidden_rows[0].default_effort.as_deref(), Some("low"));
         assert_eq!(hidden_rows[0].efforts.len(), 1);
     }
 

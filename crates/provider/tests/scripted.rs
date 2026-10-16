@@ -193,6 +193,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             session_id: "s".into(),
             expected_turn: "t".into(),
             parts: vec![SubmissionPart::Text("x".into())],
+            effort: None,
         },
         Command::InterruptTurn {
             request_id: "r".into(),

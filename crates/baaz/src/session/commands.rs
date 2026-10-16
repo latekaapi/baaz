@@ -251,6 +251,10 @@ impl SessionView {
     ) {
         match result {
             Ok(provider::Ack::TurnAccepted { turn_id }) => {
+                // Events can beat acks: when the adapter already said
+                // which turn this ack names, use the streamed id; else
+                // `TurnIdentified` re-keys what this records when it lands.
+                let turn_id = self.streamed_turn_id(&turn_id).to_owned();
                 // Busy until the provider speaks (X1): the ack only admits
                 // the send, so `submitting` stays true — the status row
                 // keeps reading Working — until the first provider event
@@ -417,6 +421,7 @@ impl SessionView {
                 session_id: self.session_id.clone(),
                 expected_turn: turn_id,
                 parts: self.provider_parts(text.clone()),
+                effort: crate::projects::effort_string(self.effort),
             };
             self.images.clear();
             self.files.clear();
@@ -768,6 +773,11 @@ impl SessionView {
             self.claude_efforts =
                 rows.iter().map(|row| (row.id.clone(), row.efforts.clone())).collect();
         }
+        self.mode_limits = rows
+            .iter()
+            .filter(|row| !row.unavailable_modes.is_empty())
+            .map(|row| (row.id.clone(), row.unavailable_modes.clone()))
+            .collect();
         self.models = rows
             .into_iter()
             .map(|row| ModelCatalogEntry {
@@ -782,6 +792,7 @@ impl SessionView {
                 profile_id: None,
                 provider_id: provider_id.to_owned(),
                 release_date: None,
+                ..Default::default()
             })
             .collect();
         // The session's model names no catalog row (Codex serves models its
@@ -805,6 +816,7 @@ impl SessionView {
                 profile_id: None,
                 provider_id: provider_id.to_owned(),
                 release_date: None,
+                ..Default::default()
             });
         }
         self.models_error = None;
@@ -834,6 +846,7 @@ impl SessionView {
                 profile_id: None,
                 provider_id: self.provider_id.clone(),
                 release_date: None,
+                ..Default::default()
             });
         }
         for row in &mut self.models {
@@ -877,8 +890,17 @@ impl SessionView {
             session_id: self.session_id.clone(),
             mode: wire_mode(mode),
         };
+        // The posture follows the mode: the profile is re-selected on the
+        // loaded session by `session/resume` (the one wire that admits it
+        // after start), or Full access stays sandboxed and Ask stays with
+        // the LLM judge (live 2026-10-16).
+        let profile = profile_resume_params(&self.session_id, mode);
         let Some(client) = self.wire_client(cx) else { return };
-        self.wire_call(cx, move || client.session_set_approval_mode(&params), |this, result, cx| {
+        let work = move || {
+            client.session_set_approval_mode(&params)?;
+            client.session_resume(&profile).map(|_| ())
+        };
+        self.wire_call(cx, work, |this, result, cx| {
             if let Err(error) = result {
                 this.report(&error, cx);
             }
@@ -1318,6 +1340,7 @@ mod tests {
             .map(|row| {
                 let id = row.get("id").and_then(serde_json::Value::as_str).expect("row id");
                 provider::ModelSummary {
+                    unavailable_modes: Vec::new(),
                     id: id.to_owned(),
                     label: row
                         .get("displayName")
@@ -1357,6 +1380,7 @@ mod tests {
     fn claude_fixture_catalog() -> Vec<provider::ModelSummary> {
         vec![
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "default".into(),
                 label: "Default (recommended)".into(),
                 active: false,
@@ -1372,6 +1396,7 @@ mod tests {
                 ),
             },
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "opus[1m]".into(),
                 label: "Opus (1M context)".into(),
                 active: false,
@@ -1387,6 +1412,7 @@ mod tests {
                 ),
             },
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "claude-fable-5-1[1m]".into(),
                 label: "Fable".into(),
                 active: false,
@@ -1403,6 +1429,7 @@ mod tests {
                 ),
             },
             provider::ModelSummary {
+                unavailable_modes: Vec::new(),
                 id: "sonnet".into(),
                 label: "Sonnet".into(),
                 active: false,
@@ -1415,6 +1442,9 @@ mod tests {
                 description: Some("Sonnet 5 · Efficient for routine tasks (claude-sonnet-5)".into()),
             },
             provider::ModelSummary {
+                // Haiku's row omits `supportsAutoMode`: the CLI refuses
+                // `set_permission_mode{auto}` on it.
+                unavailable_modes: vec![aui_protocol::PermissionMode::OnRequest],
                 id: "haiku".into(),
                 label: "Haiku".into(),
                 active: false,
@@ -1538,6 +1568,7 @@ mod tests {
                     profile_id: Some("p-1".into()),
                     provider_id: "meta".into(),
                     release_date: None,
+                    ..Default::default()
                 }];
                 let selection = view.model_selection_for("muse-everyday");
                 assert_eq!(selection.model_id, "muse-everyday");
@@ -1687,6 +1718,43 @@ mod tests {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             let rows = view.read(cx).menu_rows(cx);
             assert_eq!(rows, 7, "Default plus the six union levels");
+        });
+    }
+
+    /// Auto on a Claude Code model without it: the mode picker's Auto row
+    /// says "Not available for Haiku" while the chip's model is Haiku —
+    /// alias or the resolved full id the stream reports — and nothing on
+    /// a model that has auto, or for any other mode.
+    #[gpui::test]
+    fn claude_code_auto_is_unavailable_on_a_model_without_it(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::PermissionMode;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "claude-code", "s-auto");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+            });
+            view.update(cx, |view, cx| view.set_model("haiku", cx));
+            view.update(cx, |view, _| {
+                assert_eq!(
+                    view.mode_unavailable(PermissionMode::OnRequest).as_deref(),
+                    Some("Not available for Haiku")
+                );
+                for mode in [PermissionMode::AllowAll, PermissionMode::PromptUnmatched, PermissionMode::DenyUnmatched] {
+                    assert_eq!(view.mode_unavailable(mode), None, "{mode:?} stays available");
+                }
+                assert_eq!(
+                    SessionView::resolve_mode_limits("claude-haiku-4-5-20251001", &view.mode_limits),
+                    vec![PermissionMode::OnRequest],
+                    "the resolved id finds Haiku's row"
+                );
+                assert!(SessionView::resolve_mode_limits("claude-sonnet-5", &view.mode_limits).is_empty());
+            });
+            view.update(cx, |view, cx| view.set_model("sonnet", cx));
+            view.update(cx, |view, _| {
+                assert_eq!(view.mode_unavailable(PermissionMode::OnRequest), None);
+            });
         });
     }
 
@@ -1971,6 +2039,61 @@ mod tests {
                 );
                 let ultra = options.iter().find(|o| effort_row_id(o.effort) == "Ultra").expect("ultra");
                 assert_eq!(ultra.detail, "The largest budget MSP accepts.");
+            });
+        });
+    }
+
+    /// muse 1.4.9: a row naming its tiers narrows the menu to them, with
+    /// the host's own text and the row's default as what Default means; a
+    /// tier the closed enum cannot spell is skipped; a row naming none
+    /// (an older host) keeps the full menu; and the list follows the model.
+    #[gpui::test]
+    fn muse_effort_list_follows_the_rows_own_tiers(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        use muse_client::schema::{ModelDescribedReasoningEffort, ModelReasoningEffortVariants};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "muse", "s-muse-tiers");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models = vec![
+                    ModelCatalogEntry {
+                        display_label: "Tiered".into(),
+                        is_active: true,
+                        model_id: "tiered".into(),
+                        provider_id: "meta".into(),
+                        default_reasoning_effort: Some("medium".into()),
+                        variants: Some(ModelReasoningEffortVariants::Tiers(
+                            ["low", "medium", "hyper", "high"].map(str::to_owned).to_vec(),
+                        )),
+                        reasoning_effort_variants: Some(vec![ModelDescribedReasoningEffort {
+                            description: Some("Quick answers".into()),
+                            tier: "low".into(),
+                        }]),
+                        ..Default::default()
+                    },
+                    ModelCatalogEntry {
+                        display_label: "Old host".into(),
+                        model_id: "untiered".into(),
+                        provider_id: "meta".into(),
+                        ..Default::default()
+                    },
+                ];
+            });
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("the tiered row offers levels");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Low", "Medium", "High"], "only the row's own tiers");
+                assert_eq!(options[0].detail, "The model's default: Medium.");
+                assert_eq!(options[1].detail, "Quick answers");
+                assert_eq!(view.effort_levels().len(), 3, "the slider walks the same stops");
+                // Another row's submenu reads that row: an older host's.
+                let EffortOptions::Available(options) = view.effort_options_for(Some("untiered")) else {
+                    panic!("an older host still offers effort");
+                };
+                assert_eq!(options.len(), 9, "the full closed enum plus Default");
             });
         });
     }

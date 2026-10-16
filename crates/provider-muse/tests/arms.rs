@@ -387,12 +387,14 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 session_id: "s-1".into(),
                 expected_turn: "t-1".into(),
                 parts: vec![SubmissionPart::Text("steer this".into())],
+                // The picked level rides the steer, as it rides turn/start.
+                effort: Some("high".into()),
             }),
             expected_params: params_of!(TurnSteerParams {
                 command_id: "cmd-steer".into(),
                 expected_turn_id: "t-1".into(),
                 input: vec![muse_client::schema::TurnInputPart::text("steer this")],
-                reasoning_effort: None,
+                reasoning_effort: Some(muse_client::schema::ReasoningEffort::High),
                 session_id: "s-1".into(),
             }),
             check_ack: Box::new(accepted),
@@ -456,6 +458,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                     assert_eq!(models[0].id, "fake-pro");
                     assert_eq!(models[0].label, "Fake Pro");
                     assert!(!models[0].active);
+                    assert_eq!(models[0].efforts, ["low", "medium", "hyper"]);
                 }
                 other => panic!("expected a model catalog, got {other:?}"),
             }),

@@ -6,7 +6,7 @@
 //! deltas on [`crate::ProviderEvent`]; query results ride here because they
 //! answer the caller's question synchronously.
 
-use aui_protocol::Delta;
+use aui_protocol::{Delta, PermissionMode};
 
 /// One row of a session listing: identity plus the display title, when the
 /// provider could derive one. Never fabricated — absent stays absent.
@@ -37,6 +37,10 @@ pub struct ModelSummary {
     pub is_default: bool,
     /// The provider's one-line description, when it sends one.
     pub description: Option<String>,
+    /// Approval modes the provider says this model cannot run in, so the
+    /// mode picker can say so before a switch is refused. Empty when the
+    /// provider names no limit — absent is never read as unsupported.
+    pub unavailable_modes: Vec<PermissionMode>,
 }
 
 /// One pending approval, pointed at — not the full card, which arrives as a

@@ -2336,6 +2336,25 @@ pub fn permission_mode(mode: &ApprovalMode) -> PermissionMode {
     }
 }
 
+/// The muse built-in permission profile a chip mode runs under (muse
+/// 1.4.9 `permissionProfile`, selected on `session/start` and re-selected
+/// on a loaded session by `session/resume`).
+///
+/// The approval mode alone does not carry the posture. A session left on
+/// the host default (`:auto-review`) keeps the OS sandbox — Full access
+/// could not write outside the workspace — and lets the LLM judge settle
+/// Prompt-bound calls, so Ask never reached the person (both seen live
+/// 2026-10-16, `provider-muse/tests/live_modes.rs`). Profile and approval
+/// mode are orthogonal on the wire, so every mode selects both.
+pub fn permission_profile(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::AllowAll => ":unrestricted",
+        PermissionMode::OnRequest => ":auto-review",
+        PermissionMode::PromptUnmatched => ":ask-me",
+        PermissionMode::DenyUnmatched => ":read-only",
+    }
+}
+
 /// The approval mode in words, for a policy resolution with nothing better to
 /// name (finding F11).
 fn approval_mode_name(mode: &ApprovalMode) -> &'static str {
@@ -3287,6 +3306,17 @@ fn answer_for(question: &msp::UserInputQuestion, settled: &msp::UserInputSettled
 
 #[cfg(test)]
 mod tests {
+    /// Each chip mode selects its own built-in profile: Full access the
+    /// unsandboxed one, Ask the human reviewer, never the judge's default.
+    #[test]
+    fn each_mode_selects_its_own_permission_profile() {
+        use aui_protocol::PermissionMode as M;
+        assert_eq!(super::permission_profile(M::AllowAll), ":unrestricted");
+        assert_eq!(super::permission_profile(M::OnRequest), ":auto-review");
+        assert_eq!(super::permission_profile(M::PromptUnmatched), ":ask-me");
+        assert_eq!(super::permission_profile(M::DenyUnmatched), ":read-only");
+    }
+
     use super::*;
 
     fn started(fold: &mut MuseFold, session_id: &str) {

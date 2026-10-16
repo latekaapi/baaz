@@ -123,6 +123,26 @@ pub struct CatalogModel {
     /// The effort levels this row supports (`supportedEffortLevels`):
     /// empty when the answer names none (Haiku carries no effort fields).
     pub efforts: Vec<String>,
+    /// Whether the row runs in `auto` permission mode
+    /// (`supportsAutoMode`). 2.1.276 sends `true` on every row that does
+    /// and omits the field on Haiku, which refuses
+    /// `set_permission_mode{auto}` with "auto mode unavailable for this
+    /// model" (probed live 2026-10-16). `None` when no row of the answer
+    /// names the field at all: an older CLI that never sends it is
+    /// unknown, not a catalog of models without auto.
+    pub supports_auto_mode: Option<bool>,
+}
+
+impl CatalogModel {
+    /// The neutral approval modes this row cannot run in: Auto when the
+    /// answer says the row has no auto mode, nothing when it does or does
+    /// not say.
+    pub fn unavailable_modes(&self) -> Vec<aui_protocol::PermissionMode> {
+        match self.supports_auto_mode {
+            Some(false) => vec![aui_protocol::PermissionMode::OnRequest],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Normalize a Claude Code model id for catalog matching: lowercase, strip
@@ -164,6 +184,9 @@ pub fn decode_catalog_models(response: &Value) -> Vec<CatalogModel> {
         .get("models")
         .and_then(Value::as_array)
         .map(|models| {
+            // A row that omits `supportsAutoMode` lacks auto only when the
+            // answer speaks the field at all (see `supports_auto_mode`).
+            let names_auto = models.iter().any(|row| row.get("supportsAutoMode").is_some());
             models
                 .iter()
                 .filter_map(|row| {
@@ -201,6 +224,9 @@ pub fn decode_catalog_models(response: &Value) -> Vec<CatalogModel> {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        supports_auto_mode: names_auto.then(|| {
+                            row.get("supportsAutoMode").and_then(Value::as_bool).unwrap_or(false)
+                        }),
                     })
                 })
                 .collect()
@@ -1706,4 +1732,23 @@ mod tests {
         .expect("decodes");
         assert_eq!(refused.reported_permission_mode(), None);
     }
+
+    /// `supportsAutoMode` reads per row; a row that omits it lacks auto
+    /// only when some row of the answer names the field.
+    #[test]
+    fn catalog_rows_read_auto_mode_support() {
+        let answer = serde_json::json!({"models": [
+            {"value": "sonnet", "supportsAutoMode": true},
+            {"value": "haiku"},
+        ]});
+        let rows = decode_catalog_models(&answer);
+        assert_eq!(rows[0].supports_auto_mode, Some(true));
+        assert!(rows[0].unavailable_modes().is_empty());
+        assert_eq!(rows[1].supports_auto_mode, Some(false));
+        assert_eq!(rows[1].unavailable_modes(), vec![aui_protocol::PermissionMode::OnRequest]);
+        let silent = decode_catalog_models(&serde_json::json!({"models": [{"value": "haiku"}]}));
+        assert_eq!(silent[0].supports_auto_mode, None, "an answer that never names it is unknown");
+        assert!(silent[0].unavailable_modes().is_empty());
+    }
+
 }
