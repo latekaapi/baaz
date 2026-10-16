@@ -769,6 +769,12 @@ pub struct SessionView {
     /// Turn ids this view already saw complete. A `turn/started` for one of
     /// them is the re-attach replay, not new work, and never marks running.
     completed_turns: HashSet<String>,
+    /// Provider lane: submit-ack turn id → the id that turn streams under,
+    /// from the adapter's `TurnIdentified` (Claude Code acks before the
+    /// CLI names the turn). Everything keyed by an ack's id resolves
+    /// through [`SessionView::streamed_turn_id`]. Bounded like
+    /// `completed_turns`.
+    turn_aliases: HashMap<String, String>,
     /// Q1b: tool-call id → the wall time (epoch ms) its block first
     /// appeared. Stamped in `refresh_render_cache` where applied deltas
     /// materialise, read back through the transcript `Folds` so live run
@@ -885,6 +891,12 @@ pub struct SessionView {
     /// a row that names no levels (Haiku) maps to an empty list, which the
     /// effort menu explains instead of listing the launch flag's levels.
     claude_efforts: HashMap<String, Vec<String>>,
+    /// The approval modes each catalog model cannot run in, folded from
+    /// the neutral catalog's `unavailable_modes` (Claude Code: Auto on a
+    /// row without `supportsAutoMode`). Model id → its limits; a model
+    /// with none has no entry. The mode picker reads it for the chip's
+    /// model, so a refused switch is explained before it is tried.
+    mode_limits: HashMap<String, Vec<PermissionMode>>,
     /// The session's reasoning effort. `None` is "Default", which omits the
     /// field; client-side, because nothing on the wire reflects it back.
     effort: Option<ReasoningEffort>,
@@ -1140,6 +1152,7 @@ impl SessionView {
             last_tick_secs: None,
             running: None,
             completed_turns: HashSet::new(),
+            turn_aliases: HashMap::new(),
             tool_first_seen: HashMap::new(),
             submitting: false,
             pending_optimistic: Vec::new(),
@@ -1174,6 +1187,7 @@ impl SessionView {
             history_model: None,
             codex_efforts: HashMap::new(),
             claude_efforts: HashMap::new(),
+            mode_limits: HashMap::new(),
             effort: None,
             plan: false,
             plan_previous_mode: None,
@@ -1505,6 +1519,7 @@ impl SessionView {
                 profile_id: None,
                 provider_id: "muse".to_owned(),
                 release_date: None,
+                ..Default::default()
             })
             .collect();
     }
@@ -1638,7 +1653,14 @@ impl SessionView {
     /// The application reads this off the [`SessionEvent::ProviderTurnAccepted`]
     /// turn id before arming the row (W8c).
     pub fn provider_turn_finished(&self, turn_id: &str) -> bool {
-        self.completed_turns.contains(turn_id)
+        self.completed_turns.contains(self.streamed_turn_id(turn_id))
+    }
+
+    /// The id the turn an ack named streams under: the adapter's
+    /// `TurnIdentified` alias when one arrived, else the ack's own id
+    /// (Codex and Muse ack the streamed id itself).
+    pub(crate) fn streamed_turn_id<'a>(&'a self, accepted: &'a str) -> &'a str {
+        self.turn_aliases.get(accepted).map_or(accepted, String::as_str)
     }
 
     /// What the sidebar row stands on while this session waits on a person:
@@ -2445,6 +2467,21 @@ fn wire_mode(mode: PermissionMode) -> ApprovalMode {
     }
 }
 
+/// The `session/resume` that re-selects `mode`'s permission profile on the
+/// loaded session `session_id`: metadata only (`excludeItems`), so the
+/// view already open replays nothing — probed live, it answers with one
+/// `session/statusChanged` and commits the profile at the next permission
+/// epoch.
+fn profile_resume_params(session_id: &str, mode: PermissionMode) -> muse_client::schema::SessionResumeParams {
+    muse_client::schema::SessionResumeParams {
+        command_id: new_command_id(),
+        session_id: session_id.to_owned(),
+        permission_profile: Some(muse_adapter::permission_profile(mode).to_owned()),
+        exclude_items: Some(true),
+        ..Default::default()
+    }
+}
+
 /// Page a session's whole view forward, from the beginning, into fold events.
 ///
 /// Blocking: every call waits on the wire, so this runs on the background
@@ -3205,6 +3242,7 @@ mod tests {
             profile_id: None,
             provider_id: "muse".to_owned(),
             release_date: None,
+            ..Default::default()
         };
         // A reopened session: the fold names no model, the session's own
         // past names a catalog row — the chip reads the row's label.
@@ -3278,6 +3316,7 @@ mod tests {
             profile_id: None,
             provider_id: "muse".to_owned(),
             release_date: None,
+            ..Default::default()
         };
         // The catalog's active row is stale: the chip names row 1.
         vc.update(|_, cx| {

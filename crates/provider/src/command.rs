@@ -197,6 +197,12 @@ pub enum Command {
         expected_turn: String,
         /// Ordered content parts; required and non-empty.
         parts: Vec<SubmissionPart>,
+        /// The reasoning level for the model calls this input reaches, as
+        /// on [`Command::SubmitInput`]. muse's `turn/steer` takes it
+        /// (`reasoningEffort`, "applies forward, never backward"); an
+        /// adapter whose steer has no such channel ignores it. `None`
+        /// omits the field — unspecified, not a reset.
+        effort: Option<String>,
     },
     /// Stop the foreground turn (the stop button). With `retract`, an
     /// un-started turn is durably retracted so its prompt can be restored.

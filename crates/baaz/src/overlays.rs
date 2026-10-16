@@ -601,9 +601,10 @@ pub fn effort_row_id(effort: Option<ReasoningEffort>) -> String {
     effort.map(|e| format!("{e:?}")).unwrap_or_else(|| "default".to_owned())
 }
 
-/// The full closed enum as a menu — what the muse lane offers, unchanged:
-/// MSP accepts every tier including the `max` tier muse 1.1.1 added
-/// between `xhigh` and `ultra`. Other lanes never read this; they derive
+/// The full closed enum as a menu — what the muse lane offers when the
+/// host names no tiers for the model (pre-1.4.9, or `"unknown"`): MSP
+/// accepts every tier including the `max` tier muse 1.1.1 added between
+/// `xhigh` and `ultra`. Other lanes never read this; they derive
 /// their list from their own catalog (Codex, per model) or offer no
 /// control at all (Claude Code, with its reason).
 pub fn muse_efforts() -> Vec<EffortOption> {

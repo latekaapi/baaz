@@ -46,6 +46,12 @@ pub const CONTROL_MODEL_REJECTED_CARD: &str = "claude-control-model-rejected";
 /// ever moves on the mode the child reports, and a refusal reports none.
 pub const CONTROL_MODE_REJECTED_CARD: &str = "claude-control-mode-rejected";
 
+/// The [`Block::Generic`] kind saying a model switch left Auto: the new
+/// model has no auto mode, so the adapter asked the child into its asking
+/// mode and the chip follows the mode the child then reports. The session
+/// banner shows its text; nothing was refused.
+pub const CONTROL_MODE_FALLBACK_CARD: &str = "claude-control-mode-fallback";
+
 /// The [`Block::Generic`] kind carrying a rejected effort change: the
 /// session banner shows its text. The chip needs no resync — the adapter
 /// re-sends the picked level on the next submit, so chip and child
@@ -431,7 +437,7 @@ impl ControlHub {
     /// Scope one refusal banner to the held session and send it down the
     /// event stream. The card's kind tells the app what failed; its text is
     /// the sentence the banner shows.
-    fn emit_card(&self, kind: &str, text: String) {
+    pub(crate) fn emit_card(&self, kind: &str, text: String) {
         let session_id = self.session_id.lock().expect("session mutex").clone();
         let _ = self.tx.send(ProviderEvent::Deltas {
             session_id,

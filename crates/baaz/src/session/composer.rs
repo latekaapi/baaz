@@ -5,7 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
-use crate::overlays::{EffortOption, EffortOptions, effort_detail, muse_efforts};
+use crate::overlays::{EffortOption, EffortOptions, effort_detail, effort_label, muse_efforts};
 
 impl SessionView {
     // ------------------------------------------------------------ the menus
@@ -268,7 +268,9 @@ impl SessionView {
 
     /// The effort menu's answer for this session: the current provider's
     /// levels for the currently selected model, or the typed reason there
-    /// is no control. muse offers the whole closed enum, unchanged; Codex
+    /// is no control. muse reads the selected row's own tiers (1.4.9's
+    /// `variants`, with its described tiers' text), falling back to the
+    /// whole closed enum when the host sends none; Codex
     /// reads the selected model's `supportedReasoningEfforts` with the
     /// provider's own descriptions (or the catalog's union with a note when
     /// the model names no row); Claude Code reads the selected value's own
@@ -284,10 +286,44 @@ impl SessionView {
     /// a model row's nested submenu in the model picker (D4).
     pub(super) fn effort_options_for(&self, model: Option<&str>) -> EffortOptions {
         match self.provider_kind() {
-            ProviderId::Muse => EffortOptions::Available(muse_efforts()),
+            ProviderId::Muse => self.muse_effort_options(model),
             ProviderId::ClaudeCode => self.claude_code_efforts(model),
             ProviderId::Codex => self.codex_effort_options(model),
         }
+    }
+
+    /// The muse arm of [`SessionView::effort_options`]: the selected
+    /// catalog row's tiers, `Default` first and described as the row's
+    /// `defaultReasoningEffort` when it names one. A row with no tiers (an
+    /// older host, `"unknown"`, or no row at all) offers the whole closed
+    /// enum as before — MSP validates the tier. A tier the closed enum
+    /// cannot spell is skipped, never fabricated.
+    fn muse_effort_options(&self, model: Option<&str>) -> EffortOptions {
+        let current = model.map(str::to_owned).unwrap_or_else(|| self.model_id());
+        let Some(row) = self.models.iter().find(|row| row.model_id == current) else {
+            return EffortOptions::Available(muse_efforts());
+        };
+        let Some(tiers) = row.effort_tiers() else {
+            return EffortOptions::Available(muse_efforts());
+        };
+        let default_detail = match row.default_reasoning_effort.as_deref().and_then(crate::projects::parse_effort) {
+            Some(level) => format!("The model's default: {}.", effort_label(Some(level))),
+            None => effort_detail(None).to_owned(),
+        };
+        let mut options = vec![EffortOption { effort: None, detail: default_detail }];
+        options.extend(tiers.into_iter().filter_map(|tier| {
+            let effort = crate::projects::parse_effort(tier)?;
+            Some(EffortOption {
+                effort: Some(effort),
+                detail: row
+                    .effort_description(tier)
+                    .map_or_else(|| effort_detail(Some(effort)).to_owned(), str::to_owned),
+            })
+        }));
+        if options.len() == 1 {
+            return EffortOptions::Unavailable(format!("{current} accepts no reasoning levels."));
+        }
+        EffortOptions::Available(options)
     }
 
     /// The model the effort options read: `model` when given, else the
@@ -595,9 +631,70 @@ impl SessionView {
     }
 
     pub(super) fn pick_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        // The picker has no disabled row: an unavailable mode restates its
+        // reason and closes, rather than sending a switch the provider
+        // refuses (Claude Code: "auto mode unavailable for this model").
+        if let Some(reason) = self.mode_unavailable(mode) {
+            self.toast(format!("{} unavailable", mode.label()), reason, cx);
+            self.close_menu(cx);
+            return;
+        }
         self.set_mode(mode, cx);
         cx.emit(SessionEvent::ModeSelected { mode: wire_mode(mode) });
         self.close_menu(cx);
+    }
+
+    /// Why `mode` cannot be picked on the chip's model — "Not available
+    /// for Haiku" — when the catalog says that model cannot run it; `None`
+    /// when it can, or when nothing says otherwise.
+    pub(crate) fn mode_unavailable(&self, mode: PermissionMode) -> Option<String> {
+        let model = self.model_id();
+        if model.is_empty() || !Self::resolve_mode_limits(&model, &self.mode_limits).contains(&mode) {
+            return None;
+        }
+        let label = match self.models.iter().find(|row| row.model_id == model) {
+            Some(row) => row.display_label.clone(),
+            None if self.provider_kind() == ProviderId::ClaudeCode => {
+                crate::providers::claude_code_model_label(&model)
+            }
+            None => model,
+        };
+        Some(format!("Not available for {label}"))
+    }
+
+    /// The modes `model` cannot run in: its own catalog entry, else — the
+    /// stream reports resolved full ids (`claude-haiku-4-5-20251001`)
+    /// while the catalog keys on aliases (`haiku`) — the entries that
+    /// normalize to the same id, failing that the same family, the way
+    /// [`Self::resolve_claude_row`] finds effort levels. With several
+    /// matches only the limits every one shares count, so a limit is
+    /// never claimed from a sibling row.
+    pub(super) fn resolve_mode_limits(
+        model: &str,
+        limits: &HashMap<String, Vec<PermissionMode>>,
+    ) -> Vec<PermissionMode> {
+        use provider_claude_code::frame::normalize_model_id;
+        if let Some(own) = limits.get(model) {
+            return own.clone();
+        }
+        let want = normalize_model_id(model);
+        let family = |id: &str| id.split('-').next().unwrap_or(id).to_owned();
+        let shared = |matches: Vec<&Vec<PermissionMode>>| -> Option<Vec<PermissionMode>> {
+            let (first, rest) = matches.split_first()?;
+            Some(first.iter().copied().filter(|mode| rest.iter().all(|other| other.contains(mode))).collect())
+        };
+        shared(limits.iter().filter(|(key, _)| normalize_model_id(key) == want).map(|(_, modes)| modes).collect())
+            .or_else(|| {
+                let want_family = family(&want);
+                shared(
+                    limits
+                        .iter()
+                        .filter(|(key, _)| family(&normalize_model_id(key)) == want_family)
+                        .map(|(_, modes)| modes)
+                        .collect(),
+                )
+            })
+            .unwrap_or_default()
     }
 
     /// A click (or Enter) on a provider menu row. A `handoff:<wire>` row

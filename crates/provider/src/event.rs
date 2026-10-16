@@ -55,6 +55,21 @@ pub enum ProviderEvent {
         /// The mode in effect.
         mode: PermissionMode,
     },
+    /// The turn an earlier [`crate::Ack::TurnAccepted`] named streams
+    /// under `turn_id`: from here on that turn is `turn_id` in every
+    /// delta, and anything keyed by the ack's id maps across. Sent by an
+    /// adapter whose backend names a turn only once it speaks (Claude
+    /// Code: the turn is its first API message id, the one its stored
+    /// history replays under), never by one whose ack already carries
+    /// the streamed id.
+    TurnIdentified {
+        /// The owning session.
+        session_id: String,
+        /// The turn id the acknowledgement carried.
+        accepted: String,
+        /// The id the turn streams under.
+        turn_id: String,
+    },
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.
     ConnectionLost {

@@ -864,6 +864,27 @@ pub struct ClaudeFold {
     /// stray answer with a foreign id cannot move the catalog, the model,
     /// or the effort: only the adapter's id match acts.
     control_outcomes: Vec<ControlOutcome>,
+    /// Submissions the adapter acknowledged, oldest first: each ack's
+    /// turn id, and whether its turn has spoken yet. The CLI names a
+    /// turn only when its first API message streams (the message id is
+    /// the turn id, live and on replay alike, so the ledger key holds),
+    /// so the ack cannot carry that id; the first turn to open while a
+    /// submission waits is that submission's turn, and each `result`
+    /// frame closes the oldest one (stdin is processed in order).
+    submissions: std::collections::VecDeque<Submission>,
+    /// `(acknowledged, streamed)` pairs found since the last
+    /// [`ClaudeFold::take_turn_aliases`], announced as
+    /// `ProviderEvent::TurnIdentified`.
+    turn_aliases: Vec<(String, String)>,
+}
+
+/// One acknowledged submission waiting on (or running) its turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Submission {
+    /// The turn id the submit acknowledgement carried.
+    accepted: String,
+    /// Whether its turn opened (and so was aliased).
+    opened: bool,
 }
 
 /// One child→host `control_response`: the raw answer, queued for the
@@ -950,6 +971,43 @@ impl ClaudeFold {
     /// as the child's own.
     pub fn catalog_models(&self) -> &[crate::frame::CatalogModel] {
         &self.catalog
+    }
+
+    /// The catalog row a model id names: its `value` exactly, else the one
+    /// row whose value or resolved id normalizes to the same id (the
+    /// stream reports resolved full ids). Two such rows name no row.
+    pub fn catalog_row(&self, model: &str) -> Option<&crate::frame::CatalogModel> {
+        use crate::frame::normalize_model_id;
+        if let Some(row) = self.catalog.iter().find(|row| row.value == model) {
+            return Some(row);
+        }
+        let want = normalize_model_id(model);
+        let mut matches = self.catalog.iter().filter(|row| {
+            normalize_model_id(&row.value) == want
+                || row.resolved_model.as_deref().map(normalize_model_id).as_deref() == Some(want.as_str())
+        });
+        match (matches.next(), matches.next()) {
+            (Some(row), None) => Some(row),
+            _ => None,
+        }
+    }
+
+    /// Record an acknowledged submission: the next turn to open is the
+    /// one `accepted` named (see [`ClaudeFold::take_turn_aliases`]).
+    pub fn note_submission(&mut self, accepted: &str) {
+        self.submissions.push_back(Submission { accepted: accepted.to_owned(), opened: false });
+    }
+
+    /// Forget a submission whose line never reached the child.
+    pub fn forget_submission(&mut self, accepted: &str) {
+        self.submissions.retain(|submission| submission.accepted != accepted);
+    }
+
+    /// The acknowledged turn ids whose turns have since opened, each with
+    /// the id the turn streams under, oldest first. Drained: each pair is
+    /// announced once.
+    pub fn take_turn_aliases(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.turn_aliases)
     }
 
     /// Keep a confirmed `initialize` catalog: the adapter calls this only
@@ -1263,6 +1321,10 @@ impl ClaudeFold {
                 // assistant behind it still closes, with a default meta —
                 // never the turn's totals twice. A bare denial turn opened
                 // above owns the frame the same way.
+                // This result answers the oldest submission, spoken or
+                // not: one that never opened a turn (an error before any
+                // message) must not claim the next submission's turn.
+                self.submissions.pop_front();
                 let finishing = std::mem::take(&mut self.open);
                 let owner = self
                     .assistant_turn
@@ -1338,6 +1400,11 @@ impl ClaudeFold {
         self.started.insert(message_id.to_owned(), ());
         self.open.push(message_id.to_owned());
         self.assistant_turn = Some(message_id.to_owned());
+        // The oldest acknowledged submission still waiting is this turn's.
+        if let Some(waiting) = self.submissions.iter_mut().find(|submission| !submission.opened) {
+            waiting.opened = true;
+            self.turn_aliases.push((waiting.accepted.clone(), message_id.to_owned()));
+        }
         // A live turn starts now (its rows tick from here); a replayed
         // turn keeps its filed `None`.
         let timestamp = self.live.then(epoch_ms_now);
@@ -1515,6 +1582,9 @@ impl ClaudeFold {
     /// that exits needs no card. LIVE-STREAM ONLY: the pump calls this
     /// once, at end of stream.
     pub fn abandon_live_turns(&mut self, reason: &str) -> Vec<Delta> {
+        // The child that would have answered the waiting submissions is
+        // gone: none of them will ever open a turn on it.
+        self.submissions.clear();
         let mut deltas = Vec::new();
         if self.open.is_empty() {
             return deltas;
@@ -2858,6 +2928,13 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     let reported =
         frame.reported_permission_mode().and_then(crate::argv::permission_mode_from_claude);
     let deltas = fold.apply(&frame);
+    // An acknowledged turn found its streamed id: announced before the
+    // deltas that carry it, so the app maps the ack's id first.
+    if let Some(session_id) = session_id.as_ref() {
+        for (accepted, turn_id) in fold.take_turn_aliases() {
+            emit(ProviderEvent::TurnIdentified { session_id: session_id.clone(), accepted, turn_id });
+        }
+    }
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
     }
@@ -5164,4 +5241,70 @@ mod tests {
         assert_eq!(timestamp_ms(&serde_json::json!({})), None);
         assert_eq!(timestamp_ms(&serde_json::json!({"timestamp": "not-a-time"})), None);
     }
+
+    /// The submit ack's turn id is not the id the turn streams under (the
+    /// first API message id, which history replays under too): each
+    /// acknowledged submission pairs with the next turn to open, in order,
+    /// and a submission whose turn never spoke does not claim the next
+    /// one's. Three live turns (`resume-replay.jsonl`), three acks.
+    #[test]
+    fn acknowledged_submissions_pair_with_the_turns_they_open() {
+        let lines = fixture_lines("resume-replay.jsonl");
+        let mut fold = ClaudeFold::new();
+        // r-0's turn ended with a bare result before speaking.
+        fold.note_submission("r-0");
+        let bare = serde_json::json!({
+            "type": "result", "session_id": "s", "result": "",
+            "usage": {"input_tokens": 0, "output_tokens": 0}, "duration_ms": 1,
+        })
+        .to_string();
+        fold.apply(&decode_line(&bare).expect("decodes"));
+        assert!(fold.take_turn_aliases().is_empty(), "nothing opened");
+        for accepted in ["r-1", "r-2", "r-3"] {
+            fold.note_submission(accepted);
+        }
+        let mut deltas = Vec::new();
+        let mut aliases = Vec::new();
+        for line in &lines {
+            deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
+            aliases.extend(fold.take_turn_aliases());
+        }
+        let starts = assistant_ids(&deltas);
+        assert_eq!(starts.len(), 3);
+        let want: Vec<(String, String)> = ["r-1", "r-2", "r-3"]
+            .iter()
+            .zip(&starts)
+            .map(|(accepted, streamed)| (accepted.to_string(), streamed.to_string()))
+            .collect();
+        assert_eq!(aliases, want, "each ack names the turn it opened, once");
+        // The turn ids themselves stay the message ids: the ledger key a
+        // reopen's replay reproduces.
+        assert!(starts.iter().all(|id| id.starts_with("msg")), "{starts:?}");
+    }
+
+    /// `step_line` announces the alias before the deltas that carry the
+    /// streamed id, so the app maps the ack's id first.
+    #[test]
+    fn step_line_announces_the_streamed_turn_before_its_deltas() {
+        let mut fold = ClaudeFold::new();
+        fold.set_session_id("s");
+        fold.note_submission("r-1");
+        let reply = serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg-9", "content": [{"type": "text", "text": "hi"}]},
+            "session_id": "s", "uuid": "u-9", "parent_tool_use_id": null,
+        })
+        .to_string();
+        let mut events = Vec::new();
+        step_line(&mut fold, &reply, &mut |event| events.push(event));
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::TurnIdentified { session_id, accepted, turn_id }, ProviderEvent::Deltas { .. }]
+                if session_id == "s" && accepted == "r-1" && turn_id == "msg-9"
+            ),
+            "{events:?}"
+        );
+    }
+
 }

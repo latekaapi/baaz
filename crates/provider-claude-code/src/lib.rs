@@ -47,7 +47,7 @@ use frame::ApprovalRequest;
 
 pub use controls::{
     CONTROL_CONFIRM_TIMEOUT, CONTROL_EFFORT_REJECTED_CARD, CONTROL_MODEL_REJECTED_CARD,
-    CONTROL_MODE_REJECTED_CARD,
+    CONTROL_MODE_FALLBACK_CARD, CONTROL_MODE_REJECTED_CARD,
 };
 pub use fold::CHILD_EXITED_CARD;
 
@@ -560,6 +560,34 @@ impl ClaudeCodeAdapter {
         self.send_control(&set_model_control_request(&request_id, model), pending)
     }
 
+    /// A switch onto a model the catalog says has no auto mode, made while
+    /// the session is in Auto, asks the child into its asking mode and says
+    /// why. The CLI accepts such a `set_model` and keeps reporting `auto`
+    /// (probed live 2026-10-16: sonnet in auto → `set_model{haiku}` answered
+    /// success, the next `initialize` still said `auto`, and
+    /// `set_permission_mode{auto}` then failed with "auto mode unavailable
+    /// for this model"), so without this the chip would claim a mode the
+    /// model cannot run. The chip moves only on the mode the child reports
+    /// back, as for any pick.
+    fn leave_auto_if_unsupported(&self, model: &str) {
+        let (in_auto, row) = {
+            let fold = self.fold.lock().expect("fold mutex");
+            (fold.permission_mode() == Some(PermissionMode::OnRequest), fold.catalog_row(model).cloned())
+        };
+        let Some(row) = row.filter(|row| in_auto && row.supports_auto_mode == Some(false)) else {
+            return;
+        };
+        if self.send_set_permission_mode(PermissionMode::PromptUnmatched).is_ok() {
+            self.hub.emit_card(
+                CONTROL_MODE_FALLBACK_CARD,
+                format!(
+                    "Auto is not available for {}; Claude Code will ask before acting.",
+                    row.display_name
+                ),
+            );
+        }
+    }
+
     /// The `apply_flag_settings` line raising the live child's effort from
     /// the next turn, with no relaunch. Best-effort: a delivery failure
     /// leaves the recorded level untouched at the dispatch site, and a
@@ -1030,18 +1058,22 @@ impl ClaudeCodeAdapter {
             self.fold.lock().expect("fold mutex").record_display_text(text, display);
         }
         let line = argv::user_content_line(text, images);
-        match self.child.lock().expect("child mutex").as_mut() {
+        // Noted before the line goes out: the pump may fold the turn's
+        // first message before this thread locks the fold again.
+        self.fold.lock().expect("fold mutex").note_submission(&turn_id);
+        let sent = match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
-            })?,
-            None => {
-                return Err(ProviderError::Unavailable {
-                    reason: "no session child is running".into(),
-                })
-            }
+            }),
+            None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
+        };
+        if let Err(error) = sent {
+            self.fold.lock().expect("fold mutex").forget_submission(&turn_id);
+            return Err(error);
         }
-        // The ack carries the submission handle; the turn's true identity
-        // arrives on the event stream (the child replays user messages).
+        // The ack carries the submission handle: the CLI names the turn
+        // only when its first message streams, and the fold announces
+        // that id as `TurnIdentified` against this one.
         Ok(Ack::TurnAccepted { turn_id })
     }
 
@@ -1368,6 +1400,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     }
                     return Err(error);
                 }
+                self.leave_auto_if_unsupported(&model);
                 Ok(Ack::Accepted)
             }
             Command::SelectApprovalMode { session_id, mode, .. } => {
@@ -1547,6 +1580,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                             label: row.display_name.clone(),
                             id: row.value.clone(),
                             efforts: row.efforts.clone(),
+                            unavailable_modes: row.unavailable_modes(),
                             hidden: false,
                             is_default: row.value == "default",
                             description: match (&row.description, &row.resolved_model) {
@@ -2384,7 +2418,7 @@ mod tests {
                 "models": [
                     {"value": "sonnet", "displayName": "Sonnet",
                      "resolvedModel": "claude-sonnet-5",
-                     "supportedEffortLevels": ["low", "high"]},
+                     "supportedEffortLevels": ["low", "high"], "supportsAutoMode": true},
                     {"value": "haiku", "displayName": "Haiku",
                      "resolvedModel": "claude-haiku-4-5-20251001"},
                 ],
@@ -2431,6 +2465,83 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Answer one tracked `initialize` with [`catalog_line`]'s two rows:
+    /// Sonnet runs in auto, Haiku (no `supportsAutoMode`) does not.
+    fn fold_catalog(adapter: &ClaudeCodeAdapter) {
+        adapter.hub.track(PendingControl {
+            kind: PendingControlKind::Initialize,
+            request_id: "init-1".into(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        });
+        adapter.ingest_child_line(&catalog_line("init-1", "success", None));
+    }
+
+    /// The catalog says which rows have no auto mode, and `ListModels`
+    /// carries it as the row's unavailable modes; a row that has auto
+    /// carries none.
+    #[test]
+    fn the_catalog_marks_auto_unavailable_on_a_model_without_it() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        fold_catalog(&adapter);
+        let Ok(Ack::ModelCatalog { models, .. }) =
+            adapter.dispatch(Command::ListModels { session: Some("sess-1".into()) })
+        else {
+            panic!("the catalog answers");
+        };
+        let limits: Vec<(&str, &[PermissionMode])> =
+            models.iter().map(|row| (row.id.as_str(), row.unavailable_modes.as_slice())).collect();
+        assert_eq!(limits, vec![("sonnet", &[][..]), ("haiku", &[PermissionMode::OnRequest][..])]);
+    }
+
+    /// Switching to a model without auto while in Auto asks the child into
+    /// its asking mode and banners why — the CLI itself accepts the switch
+    /// and keeps reporting `auto` (probed). The chip waits for the child's
+    /// report. A switch onto a model with auto, or one made outside Auto,
+    /// sends nothing more.
+    #[test]
+    fn switching_to_a_model_without_auto_leaves_auto_visibly() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        fold_catalog(&adapter);
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::OnRequest);
+        let select = |model: &str| {
+            adapter
+                .dispatch(Command::SelectModel {
+                    request_id: "r-1".into(),
+                    session_id: "sess-1".into(),
+                    model: model.into(),
+                    model_provider: None,
+                })
+                .expect("a pick lands");
+        };
+        select("sonnet");
+        assert_eq!(adapter.sent_control_lines().len(), 1, "set_model only");
+        select("haiku");
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[1].contains("set_model"), "{}", lines[1]);
+        assert!(lines[2].contains("set_permission_mode") && lines[2].contains("\"mode\":\"manual\""), "{}", lines[2]);
+        let cards = control_cards(&drain_events(&adapter));
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].0, CONTROL_MODE_FALLBACK_CARD);
+        assert!(cards[0].1.contains("Auto is not available for Haiku"), "{}", cards[0].1);
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").permission_mode(),
+            Some(PermissionMode::OnRequest),
+            "the chip moves on the child's report, not here"
+        );
+        // Out of Auto, the same switch sends no mode change.
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::PromptUnmatched);
+        select("haiku");
+        assert_eq!(adapter.sent_control_lines().len(), 4);
     }
 
     /// A `set_model` the child confirms stays picked: success finalises

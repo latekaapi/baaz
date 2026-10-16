@@ -64,6 +64,12 @@ pub struct CodexAdapter {
     /// subsequent turns", per `TurnStartParams.json`). Taken by that turn;
     /// put back when the turn fails to start.
     pending_turn_mode: Mutex<Option<PermissionMode>>,
+    /// The last explicit level a started turn carried. `effort` on
+    /// `turn/start` applies "for this turn and subsequent turns", so while
+    /// this is set a Default turn must reset to the model's default rather
+    /// than omit the key (see [`child::turn_effort`]). Cleared on every
+    /// open and resume, and by a reset that lands.
+    sent_effort: Mutex<Option<String>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
@@ -117,6 +123,7 @@ impl CodexAdapter {
             thread_id: Mutex::new(None),
             model: Mutex::new(None),
             pending_turn_mode: Mutex::new(None),
+            sent_effort: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
@@ -329,6 +336,7 @@ impl CodexAdapter {
         self.announce_mode(&session_id, child::reported_mode(&started).or(mode));
         *self.session_id.lock().expect("session mutex") = Some(session_id.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
+        *self.sent_effort.lock().expect("effort mutex") = None;
         *self.model.lock().expect("model mutex") = Some(resolved.clone());
         self.fold.lock().expect("fold mutex").set_model(&resolved);
         // The gated MCP tools run in this cwd, and their elicitation
@@ -462,6 +470,7 @@ impl CodexAdapter {
         *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
         self.announce_mode(&resumed_session, child::reported_mode(&answer).or(mode));
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
+        *self.sent_effort.lock().expect("effort mutex") = None;
         *self.model.lock().expect("model mutex") = Some(model);
         // A resumed lane reconnects its server: re-read the limits the
         // same way an open does, best-effort.
@@ -525,6 +534,18 @@ impl CodexAdapter {
     ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
+        let sticky = self.sent_effort.lock().expect("effort mutex").clone();
+        let picked = effort.filter(|level| !level.is_empty());
+        // Only a reset reads the catalog: the model's own default level.
+        let model_default = if picked.is_none() && sticky.is_some() {
+            self.with_child(Self::fetch_catalog)?
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|row| row.id == model))
+                .and_then(|row| row.default_effort)
+        } else {
+            None
+        };
+        let wire_effort = child::turn_effort(picked, sticky.as_deref(), model_default.as_deref());
         let mode = self.pending_turn_mode.lock().expect("mode mutex").take();
         let turn = self
             .with_child(|running| {
@@ -533,7 +554,7 @@ impl CodexAdapter {
                     &thread_id,
                     &model,
                     text,
-                    effort,
+                    wire_effort.as_deref(),
                     mode,
                 ))
             })
@@ -558,6 +579,11 @@ impl CodexAdapter {
             keep_mode();
             return Err(ProviderError::Unavailable { reason: "turn/start answered without a turn id".into() });
         };
+        // The level now standing: a pick stands; a reset that landed clears
+        // it; a reset with no known default leaves it for the next turn.
+        if picked.is_some() || wire_effort.is_some() {
+            *self.sent_effort.lock().expect("effort mutex") = picked.map(str::to_owned);
+        }
         // The ack carries the submission handle; the turn's true identity is
         // the server-minted id, never derived locally. The full text goes
         // to the model; the bubble shows the display text when one rode
@@ -955,6 +981,7 @@ impl ProviderAdapter for CodexAdapter {
                         .into_iter()
                         .filter(|row| !row.hidden || row.id == active)
                         .map(|row| ModelSummary {
+                            unavailable_modes: Vec::new(),
                             active: row.id == active,
                             label: row.label,
                             id: row.id,
