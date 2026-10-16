@@ -1751,12 +1751,35 @@ impl Harness {
             });
         });
         // The service's requests queue on socket threads; this pump runs
-        // them on the UI thread, one pass every 15 ms, until the window is
-        // gone. A pass is one `drain`: queued tools answer and waiting runs
-        // are polled, so a long run never stalls a frame.
+        // them on the UI thread until the window is gone. A pass is one
+        // `drain`: queued tools answer and waiting runs are polled, so a
+        // long run never stalls a frame. Passes come every 15 ms only while
+        // something waits; otherwise the pump sleeps until a socket thread
+        // queues a job (a 2 s fallback pass covers anything that slipped
+        // past the signal). It used to wake the UI thread 66 times a second
+        // forever (perf audit 2026-10-16).
+        let mut woken = this.terminal_service.take_wake();
         this.tasks.push(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
             loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(15)).await;
+                let busy = match this.update(cx, |this, _| this.terminal_service.busy()) {
+                    Ok(busy) => busy,
+                    Err(_) => return,
+                };
+                match woken.as_mut() {
+                    Some(rx) if !busy => {
+                        let timer = cx.background_executor().timer(std::time::Duration::from_secs(2));
+                        futures::pin_mut!(timer);
+                        let closed = matches!(futures::future::select(rx.next(), timer).await, futures::future::Either::Left((None, _)));
+                        while rx.try_recv().is_ok() {}
+                        if closed {
+                            // A closed signal would answer at once forever:
+                            // fall back to the timer.
+                            woken = None;
+                        }
+                    }
+                    _ => cx.background_executor().timer(std::time::Duration::from_millis(15)).await,
+                }
                 let alive = this.update(cx, |this, cx| {
                     this.terminal_service.drain(cx);
                 });
@@ -6298,6 +6321,7 @@ impl Render for Harness {
         // closes it after paint (see `session::draw_end_marker`).
         session::note_draw_start();
         crate::sidebar_view::note_baaz_render();
+        crate::log::note_root_render();
         self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.

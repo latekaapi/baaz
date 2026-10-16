@@ -232,6 +232,14 @@ impl SessionView {
             window.request_animation_frame();
         }
         self.sync_render_cache();
+        if let Some(sent_at) = self.send_trace_turns {
+            let replied = self.cached_turns.len() >= sent_at + 2
+                && matches!(self.cached_turns.last().map(|turn| &**turn), Some(aui_protocol::Turn::Assistant { .. }));
+            if replied {
+                self.send_trace_turns = None;
+                crate::log::send_reply_painted();
+            }
+        }
         if self.cached_turns.is_empty() {
             return self.empty_or_loading(window, cx);
         }

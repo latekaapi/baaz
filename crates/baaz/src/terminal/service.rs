@@ -97,8 +97,11 @@ const OPEN_TITLE_GRACE: Duration = Duration::from_secs(3);
 pub const RUN_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// `terminal_run`'s maximum `timeout_ms`.
 pub const RUN_MAX_TIMEOUT_MS: u64 = 600_000;
-/// How often the listener notices the shutdown flag.
-const ACCEPT_POLL: Duration = Duration::from_millis(50);
+/// How often the listener notices the shutdown flag. A connection never
+/// waits for it: the listener blocks in `poll(2)` and wakes the moment one
+/// arrives (it used to sleep 50 ms between non-blocking accepts, ~25 ms on
+/// every agent terminal call).
+const ACCEPT_POLL: Duration = Duration::from_millis(250);
 /// What every relay tool reports when Baaz is not serving its socket.
 pub const UNAVAILABLE: &str = "Baaz isn't running; the terminal is unavailable";
 
@@ -236,10 +239,15 @@ pub struct TerminalService {
     /// The listener thread, joined on drop so removal never races a still
     /// bound socket.
     accept: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The other end of `Shared::wake`, until the pump takes it.
+    woken: std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<()>>>,
 }
 
 struct Shared {
     host: Entity<TerminalHost>,
+    /// Rung by a socket thread when it queues a job, so the UI-side pump
+    /// sleeps until there is something to do (see [`TerminalService::busy`]).
+    wake: futures::channel::mpsc::UnboundedSender<()>,
     sessions: Mutex<HashMap<String, PathBuf>>,
     queue: Mutex<VecDeque<Job>>,
     pending: Mutex<Vec<PendingRun>>,
@@ -379,6 +387,9 @@ impl TerminalService {
     /// ([`fallback_socket_path`]) instead of silently disabling the tools.
     pub fn start_at(host: Entity<TerminalHost>, support_dir: &Path, pid: u32) -> Self {
         let primary = socket_path_for(support_dir, pid);
+        if let Some(run) = primary.parent() {
+            sweep_dead_sockets(run, pid);
+        }
         // No world-readable window: a restrictive umask holds from the run
         // dir's creation through the bind and its chmod, so neither the dir
         // nor the socket ever carries group/other bits. `DirBuilder::mode`
@@ -387,8 +398,10 @@ impl TerminalService {
         // choose. The trailing `set_permissions` tightens pre-existing
         // dirs; the guard restores the mask on every return below.
         let _umask = UmaskGuard::restrict();
+        let (wake, woken) = futures::channel::mpsc::unbounded();
         let shared = Arc::new(Shared {
             host,
+            wake,
             sessions: Mutex::new(HashMap::new()),
             queue: Mutex::new(VecDeque::new()),
             pending: Mutex::new(Vec::new()),
@@ -424,7 +437,7 @@ impl TerminalService {
                         primary.display(),
                         socket_path_len(&primary)
                     ));
-                    return Self { shared, socket_path: primary, shutdown, owned: false, accept: Mutex::new(None) };
+                    return Self { shared, socket_path: primary, shutdown, owned: false, accept: Mutex::new(None), woken: Mutex::new(Some(woken)) };
                 }
             }
         } else {
@@ -437,7 +450,7 @@ impl TerminalService {
         // A leftover file from a crashed run binds fine once removed; a
         // live socket means another window owns the name, so keep hands off.
         if path.exists() && UnixStream::connect(&path).is_ok() {
-            return Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None) };
+            return Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None), woken: Mutex::new(Some(woken)) };
         }
         let _ = std::fs::remove_file(&path);
         match UnixListener::bind(&path) {
@@ -455,6 +468,7 @@ impl TerminalService {
                     shutdown,
                     owned: true,
                     accept: Mutex::new(Some(accept)),
+                    woken: Mutex::new(Some(woken)),
                 }
             }
             Err(error) => {
@@ -468,7 +482,7 @@ impl TerminalService {
                     path.display(),
                     socket_path_len(&path)
                 ));
-                Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None) }
+                Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None), woken: Mutex::new(Some(woken)) }
             }
         }
     }
@@ -567,6 +581,21 @@ impl TerminalService {
     /// Run every queued request and poll every pending run. Call on the UI
     /// thread only — everything here touches [`TerminalHost`] or a
     /// [`WebviewState`].
+    /// The wake signal for the UI-side pump: one message per queued job.
+    /// Taken once; `None` after.
+    pub fn take_wake(&self) -> Option<futures::channel::mpsc::UnboundedReceiver<()>> {
+        self.woken.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Whether a pass of [`Self::drain`] has anything to do now or soon: a
+    /// queued job, or a run, mark watch or browser call still waiting.
+    pub fn busy(&self) -> bool {
+        !self.shared.queue.lock().expect("job queue").is_empty()
+            || !self.shared.pending.lock().expect("pending runs").is_empty()
+            || !self.shared.marks.lock().expect("mark watches").is_empty()
+            || !self.shared.pending_browser.lock().expect("pending browser").is_empty()
+    }
+
     pub fn drain(&self, cx: &mut App) {
         let jobs: Vec<Job> = self.shared.queue.lock().expect("job queue").drain(..).collect();
         for job in jobs {
@@ -672,12 +701,58 @@ fn accept_loop(listener: UnixListener, shared: Arc<Shared>, shutdown: Arc<Atomic
                 std::thread::spawn(move || serve_conn(stream, worker));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL);
+                wait_readable(&listener, ACCEPT_POLL);
             }
             Err(_) => {
                 std::thread::sleep(ACCEPT_POLL);
             }
         }
+    }
+}
+
+/// Remove `terminal-<pid>.sock` files in `run` whose process is gone.
+///
+/// A quit removes its own socket, but a crash or a force-quit never does:
+/// 3,419 dead ones had piled up in one support dir (perf audit 2026-10-16).
+/// Only names this service writes are touched, and never `own_pid`'s.
+pub(crate) fn sweep_dead_sockets(run: &Path, own_pid: u32) -> usize {
+    let Ok(entries) = std::fs::read_dir(run) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("terminal-"))
+            .and_then(|n| n.strip_suffix(".sock"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid || pid_alive(pid) {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether a process with `pid` exists (signal 0 probes without sending).
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill(2) with signal 0 only checks permission and existence.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Block until `listener` has a connection waiting or `timeout` passes.
+fn wait_readable(listener: &UnixListener, timeout: Duration) {
+    use std::os::fd::AsRawFd;
+    let mut fd = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: one valid pollfd for the duration of the call.
+    let ready = unsafe { libc::poll(&mut fd, 1, timeout.as_millis() as libc::c_int) };
+    if ready < 0 {
+        std::thread::sleep(timeout);
     }
 }
 
@@ -724,6 +799,7 @@ fn serve_conn(stream: UnixStream, shared: Arc<Shared>) {
         };
         let (tx, rx) = mpsc::channel();
         shared.queue.lock().expect("job queue").push_back(Job { id: id.clone(), session, tool, params, reply: tx });
+        let _ = shared.wake.unbounded_send(());
         // The socket thread waits; the UI thread answers in `drain`. A
         // dead UI (quit mid-request) drops the sender and unblocks this.
         // The reply is already the full `{id, ok, result | error}` line,
@@ -3138,5 +3214,23 @@ mod tests {
             err_text(&bcall(cx, &fx, "sb-stuck", "browser_open", json!({"url": "https://example.com/page"})));
         assert!(message.contains("https://example.com/page"), "the timeout names the URL: {message}");
         assert!(message.contains("may still be loading"), "the load may yet land: {message}");
+    }
+
+    #[test]
+    fn dead_sockets_are_swept_and_live_ones_kept() {
+        let dir = std::env::temp_dir().join(format!("baaz-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("run dir");
+        let own = std::process::id();
+        // pid 1 (launchd) is always alive; a huge pid never is.
+        for name in [format!("terminal-{own}.sock"), "terminal-1.sock".into(), "terminal-4000000.sock".into(), "notes.txt".into()] {
+            std::fs::write(dir.join(name), b"").expect("file");
+        }
+        assert_eq!(sweep_dead_sockets(&dir, own), 1, "only the dead pid's socket goes");
+        assert!(dir.join(format!("terminal-{own}.sock")).exists());
+        assert!(dir.join("terminal-1.sock").exists(), "a live process keeps its socket");
+        assert!(!dir.join("terminal-4000000.sock").exists());
+        assert!(dir.join("notes.txt").exists(), "other names are never touched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

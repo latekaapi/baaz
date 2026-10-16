@@ -35,6 +35,7 @@
 //! the retry backoff and the two tickers, and the fire-and-forget
 //! `account/loginCancel`.
 
+use std::future::Future as _;
 use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext as _, Context, Task, Window};
@@ -77,7 +78,7 @@ pub trait WireCall: Sized + 'static {
             let result = call.await;
             let _ = this.update(cx, |this, cx| then(this, result, cx));
         });
-        self.wire_tasks().push(task);
+        park(self.wire_tasks(), task);
     }
 
     /// [`Self::wire_call`] for a completion that needs the window: the same
@@ -93,8 +94,24 @@ pub trait WireCall: Sized + 'static {
             let result = call.await;
             let _ = this.update_in(cx, |this, window, cx| then(this, result, window, cx));
         });
-        self.wire_tasks().push(task);
+        park(self.wire_tasks(), task);
     }
+}
+
+/// Park `task` in `tasks`, first dropping the ones already finished once the
+/// list is long: nothing ever removed them, so a long-lived entity kept one
+/// finished task per wire call it ever made (perf audit 2026-10-16).
+///
+/// Each parked task is polled at most once to completion with a no-op
+/// waker; nothing else awaits these tasks, so the waker it replaces is
+/// never one anybody listens on.
+fn park(tasks: &mut Vec<Task<()>>, task: Task<()>) {
+    const PRUNE_AT: usize = 64;
+    if tasks.len() >= PRUNE_AT {
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        tasks.retain_mut(|parked| std::pin::Pin::new(parked).poll(&mut context).is_pending());
+    }
+    tasks.push(task);
 }
 
 /// Issue a neutral [`Command`] on the background executor and come back
@@ -282,5 +299,26 @@ mod tests {
 
         let seen = vc.update(|_, cx| probe.read(cx).seen.clone());
         assert_eq!(seen, Some(Ok("fork-session".to_owned())));
+    }
+
+    /// Finished wire tasks are dropped once the list is long: two hundred
+    /// completed calls leave a short list, and every completion still ran.
+    #[gpui::test]
+    fn finished_wire_tasks_do_not_pile_up(cx: &mut gpui::TestAppContext) {
+        let vc = cx.add_empty_window();
+        let probe = vc.update(|_, cx| cx.new(|_| Probe { tasks: Vec::new(), seen: None }));
+        let landed = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        for _ in 0..200 {
+            let landed = landed.clone();
+            vc.update(|_, cx| {
+                probe.update(cx, |probe, cx| {
+                    probe.wire_call(cx, || (), move |_, (), _| landed.set(landed.get() + 1));
+                });
+            });
+            vc.run_until_parked();
+        }
+        assert_eq!(landed.get(), 200, "every completion landed");
+        let parked = vc.update(|_, cx| probe.read(cx).tasks.len());
+        assert!(parked <= 64, "finished tasks were dropped, {parked} still parked");
     }
 }
