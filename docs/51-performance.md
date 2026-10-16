@@ -69,3 +69,26 @@ Each step re-runs M and reports before/after numbers. Library changes ship as an
 P0 touches `search.rs`, `index.rs`, `app/find.rs`, `app/list.rs`, `main.rs`, `aui-terminal` — nearly disjoint from the
 other session's provider work, so **M and P0 can start now in a worktree**. #7 and the registry half of #1 overlap doc
 50 P3/P4; do them together after the other session commits.
+
+## 5. Progress (2026-10-16, branch `perf/measure-p0` + agentic-ui `perf/p0`)
+
+Measured on copies of the real stores unless noted. "Not seen live" means no person or capture has watched it in
+the running app yet.
+
+| # | Fix | Before → after |
+|---|---|---|
+| 1 | Search index syncs only changed sessions (fingerprints, rowid deletes, WAL, no schema write per open) | full rebuild 34 s / 13.6 s CPU / ~1 GB → 5 ms unchanged, 39 ms one changed (19 s once, first run) |
+| 2 | Index read: no `search_text`; stamps from the covering index; labels cached in `index-cache.json`; title/prompt cut to 1,000 chars | 5.4 s → 4 ms with a current cache (cache 5.5 MB, loads in 7 ms); full read runs once in the background after boot |
+| 4 | `aui_motion::looping` and the text shimmer wake their view on a 30 Hz timer (stepped loops at their step) through a next-frame callback, so a hidden window wakes nothing; the terminal card mirror at 10 Hz | per-frame (60–120 Hz root renders) → ≤ 30 Hz; approval wait 23 % → 15 % CPU (window behind other apps); the ported shimmer is **not seen live** |
+| 3 | CEF warms up a second after the window unless a page is restored; its safety pump idles at 1 Hz with no page open | not measurable in a debug build (CEF ships in release bundles only) — checked in the BaazCheck bundle |
+| 5 | Terminal service pump sleeps until a job is queued; listener blocks in `poll(2)`; pty reader thread and UI notifier wait on signals, not 8 ms timers | ~66 + ~250/tab wakeups per second at rest → 0 at rest; accept no longer waits up to 50 ms |
+| 10 | `rejoin` and search rows canonicalize once per root per pass; `sessions.json` writes off the UI thread, ordered by generation | (UI-thread stalls, not timed) |
+| 11 | Session rows open on mouse-down (a shown action tray stops the press) | 60–120 ms earlier per switch (perceived) |
+| 13 | Finished wire tasks pruned; dead terminal sockets swept at start | unbounded → ≤ 64 parked; 3,419 → 0 |
+| M | `BAAZ_TRACE`: `first-frame`, `app-running`, `aui-init-done`; `renders=N/2s`; `baaz-send` submit → ack → first-reply-painted | warm boot first frame 170–245 ms (target 150): ~80 ms before `app.run`, ~60 ms window creation |
+
+Deferred to doc 50 P4 (it moves Muse onto the provider lane): the Muse optimistic bubble.
+Found while measuring: offline, the sidebar never leaves its loading skeleton (Muse-gated, doc 50 P1), so the
+login screen animates indefinitely — now at 30 Hz instead of display rate.
+Measurement traps: replay runs read the real Muse index unless `XDG_DATA_HOME` is isolated; `ps %cpu` is a decaying
+average (use cumulative `ps -o time`); test windows behind the owner's apps get no display link.

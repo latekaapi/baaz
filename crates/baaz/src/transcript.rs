@@ -936,19 +936,19 @@ fn blocks_fingerprint(blocks: &[Block]) -> u64 {
 /// count, busyness (settled or live), the fold's toggled state, and a
 /// fingerprint of the blocks — so steady-state rebuilds skip the walk
 /// while an in-place update (a settle, a failure) still re-plans. Bounded:
-/// past the cap the whole cache drops rather than growing with the
-/// transcript.
+/// past the cap the least recently used half is dropped.
 /// B12fix: what the per-turn fold cache holds, keyed by turn id, block
 /// count, busyness, toggled state and block fingerprint.
-type FoldCache = HashMap<(String, usize, bool, bool, u64), Option<FoldPlan>>;
+type FoldCache = HashMap<(String, usize, bool, bool, u64), (Option<FoldPlan>, u64)>;
 
 pub fn fold_plan_cached(turn: &Turn, settled: bool, toggled: &HashSet<String>) -> Option<FoldPlan> {
     use std::cell::RefCell;
     use std::collections::HashMap;
     thread_local! {
         static FOLD_CACHE: RefCell<FoldCache> = RefCell::new(HashMap::new());
+        static FOLD_CLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
-    const FOLD_CACHE_CAP: usize = 128;
+    const FOLD_CACHE_CAP: usize = 512;
     let Turn::Assistant { id, blocks, .. } = turn else { return None };
     let key = (
         id.clone(),
@@ -957,16 +957,32 @@ pub fn fold_plan_cached(turn: &Turn, settled: bool, toggled: &HashSet<String>) -
         toggled.contains(&fold_key(id)),
         blocks_fingerprint(blocks),
     );
-    if let Some(hit) = FOLD_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+    let now = FOLD_CLOCK.with(|clock| {
+        clock.set(clock.get() + 1);
+        clock.get()
+    });
+    let hit = FOLD_CACHE.with(|cache| {
+        cache.borrow_mut().get_mut(&key).map(|(plan, used)| {
+            *used = now;
+            plan.clone()
+        })
+    });
+    if let Some(hit) = hit {
         return hit;
     }
     let plan = fold_plan(turn);
     FOLD_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.len() >= FOLD_CACHE_CAP {
-            cache.clear();
+            // Least recently used half out, not the whole cache: clearing
+            // made every frame of a long transcript a miss once more than
+            // the cap's turns had been seen (perf audit 2026-10-16).
+            let mut ages: Vec<u64> = cache.values().map(|(_, used)| *used).collect();
+            ages.sort_unstable();
+            let cutoff = ages[ages.len() / 2];
+            cache.retain(|_, (_, used)| *used > cutoff);
         }
-        cache.insert(key, plan.clone());
+        cache.insert(key, (plan.clone(), now));
     });
     plan
 }

@@ -816,6 +816,14 @@ pub struct Harness {
     /// Override writes snapshotted by `settle_overrides` and not yet on
     /// disk; while any is, the quit flush writes synchronously.
     pub(crate) overrides_writes_in_flight: usize,
+    /// The last right-pane snapshot landed, hashed: an identical refresh
+    /// skips the redraw.
+    pub(crate) right_snapshot_print: Option<u64>,
+    /// The file watch on the right pane's project root, and the task that
+    /// turns its events into refreshes; both dropped when the pane closes.
+    right_watch: Option<(crate::right_watch::RightWatch, Task<()>)>,
+    /// A refresh asked for while one was in flight: run once it lands.
+    right_refresh_again: bool,
     /// Sessions whose in-memory pane state still uses a pre-merge
     /// `diff`/`git` kind and whose disk copy must migrate onto the merged
     /// `changes` view (B8fix): marked by [`Self::save_right_for_active`],
@@ -1566,6 +1574,9 @@ impl Harness {
             right_save_epoch: 0,
             right_save_pending: false,
             overrides_writes_in_flight: 0,
+            right_snapshot_print: None,
+            right_watch: None,
+            right_refresh_again: false,
             right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
@@ -3214,6 +3225,40 @@ impl Harness {
     /// How often the open pane re-reads git and the filesystem while it sits
     /// open on a kind that reads them: at most once per interval.
     const RIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    /// The fallback poll while a file watch follows the root.
+    const RIGHT_WATCHED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+    /// How long a burst of file events settles before one refresh.
+    const RIGHT_WATCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+
+    /// Keep a file watch on `root` while the right pane shows it: a change
+    /// on disk refreshes the pane within [`Self::RIGHT_WATCH_SETTLE`].
+    fn ensure_right_watch(&mut self, root: Option<&std::path::Path>, cx: &mut Context<Self>) {
+        let Some(root) = root else {
+            self.right_watch = None;
+            return;
+        };
+        if crate::clock::deterministic() {
+            return;
+        }
+        if self.right_watch.as_ref().is_some_and(|(watch, _)| watch.root() == root) {
+            return;
+        }
+        let Some((watch, mut events)) = crate::right_watch::RightWatch::start(root) else {
+            self.right_watch = None;
+            return;
+        };
+        let task = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while events.next().await.is_some() {
+                cx.background_executor().timer(Self::RIGHT_WATCH_SETTLE).await;
+                while events.try_recv().is_ok() {}
+                if this.update(cx, |this, cx| this.refresh_right_now(cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        self.right_watch = Some((watch, task));
+    }
 
     /// Whether `kind` shows data read from git or the filesystem: everything
     /// but the Browser.
@@ -3265,6 +3310,7 @@ impl Harness {
             return;
         }
         if self.right_refresh_in_flight {
+            self.right_refresh_again = true;
             return;
         }
         self.right_refresh_in_flight = true;
@@ -3274,7 +3320,7 @@ impl Harness {
         let dir_cache = self.right_cache.take_dir_cache();
         let preview = self.right_cache.preview_for(&root);
         cx.spawn(async move |this, cx| {
-            let (snapshot, dir_cache, reload) = cx
+            let snapshot = cx
                 .background_executor()
                 .spawn(async move {
                     let mut dir_cache = dir_cache;
@@ -3283,18 +3329,36 @@ impl Harness {
                     let reload = preview
                         .as_ref()
                         .and_then(|preview| crate::right::preview_reload_for(&root, preview));
-                    (snapshot, dir_cache, reload)
+                    // What the pane would draw, hashed here off the UI
+                    // thread: an unchanged refresh lands without a redraw.
+                    let print = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        format!("{snapshot:?}").hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    (snapshot, dir_cache, reload, print)
                 })
                 .await;
+            let (snapshot, dir_cache, reload, print) = (snapshot.0, snapshot.1, snapshot.2, snapshot.3);
             let _ = this.update(cx, |this, cx| {
                 this.right_refresh_in_flight = false;
                 this.right_cache.restore_dir_cache(dir_cache);
                 let root = snapshot.root.clone();
                 this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
+                let reloaded = reload.is_some();
                 if let Some(reload) = reload {
                     crate::right::apply_preview_reload(&mut this.right_cache, &root, reload);
                 }
-                cx.notify();
+                // The 2 s refresh used to redraw the window even when git and
+                // the tree were exactly as before (perf audit 2026-10-16).
+                if reloaded || this.right_snapshot_print != Some(print) {
+                    this.right_snapshot_print = Some(print);
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.right_refresh_again) {
+                    this.refresh_right_now(cx);
+                }
             });
         })
         .detach();
@@ -3311,8 +3375,10 @@ impl Harness {
         let root = self.right_project().map(|(root, _)| root);
         if !open || !Self::right_needs_data(kind) {
             self.right_last_key = Some((open, kind, root));
+            self.right_watch = None;
             return;
         }
+        self.ensure_right_watch(root.as_deref(), cx);
         if self.right_last_key != Some((open, kind, root.clone())) {
             self.right_last_key = Some((open, kind, root));
             self.refresh_right_now(cx);
@@ -3322,10 +3388,13 @@ impl Harness {
         // landed: never fetched re-reads at once, a fresh landing waits out
         // the interval, and a hung in-flight read is never doubled.
         let Some(root) = root else { return };
-        let due = self
-            .right_cache
-            .fetched_at(kind, &root)
-            .is_none_or(|at| at.elapsed() >= Self::RIGHT_REFRESH_INTERVAL);
+        // With a live watch the poll is only a fallback.
+        let interval = if self.right_watch.is_some() {
+            Self::RIGHT_WATCHED_INTERVAL
+        } else {
+            Self::RIGHT_REFRESH_INTERVAL
+        };
+        let due = self.right_cache.fetched_at(kind, &root).is_none_or(|at| at.elapsed() >= interval);
         if due && !self.right_refresh_in_flight {
             self.refresh_right_now(cx);
         }
