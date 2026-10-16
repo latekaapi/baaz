@@ -302,14 +302,20 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
         attention: None,
         branch: None,
         created_at: row.updated_at.clone(),
+        created_by_client: None,
         first_user_prompt: None,
         forked_from: None,
+        generated_name: None,
+        kind: None,
         last_activity_at: row.last_activity_at.clone(),
         model_id: None,
         name: None,
+        name_origin: None,
+        parent_session_id: None,
         path: String::new(),
         provider_id: None,
         session_id: row.session_id.clone(),
+        side_from: None,
         status: if row.status == "running" {
             muse_client::schema::SessionStatus::Running
         } else {
@@ -2333,6 +2339,7 @@ impl Harness {
             cursor: None,
             history: None,
             config: None,
+            permission_profile: None,
         };
         // The terminal relay's route: re-register the stored id and carry
         // the bridge — grant-gated, like the start.
@@ -4100,6 +4107,7 @@ impl Harness {
             exclude_items: Some(true),
             history: None,
             config: None,
+            permission_profile: None,
         };
         // The terminal relay's route, as in `open`: re-registered and
         // carried, grant-gated.
@@ -10741,14 +10749,20 @@ done
                     attention: None,
                     branch: None,
                     created_at: "2026-09-13T10:00:00Z".into(),
+                    created_by_client: None,
                     first_user_prompt: None,
                     forked_from: None,
+                    generated_name: None,
+                    kind: None,
                     last_activity_at: None,
                     model_id: None,
                     name: None,
+                    name_origin: None,
+                    parent_session_id: None,
                     path: String::new(),
                     provider_id: None,
                     session_id: "count-c".into(),
+                    side_from: None,
                     status: muse_client::schema::SessionStatus::Idle,
                     title: None,
                     turn_count: 2,

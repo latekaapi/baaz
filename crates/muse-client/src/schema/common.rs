@@ -46,6 +46,11 @@ open_enum! {
     CapabilityName {
         UserShell = "userShell",
         SessionMcp = "sessionMcp",
+        SessionListStream = "sessionListStream",
+        Feedback = "feedback",
+        ComputerUseSetup = "computerUseSetup",
+        ComputerUseHostSetup = "computerUseHostSetup",
+        SessionRename = "sessionRename",
     }
 }
 
@@ -164,10 +169,31 @@ pub struct ContextUsage {
     pub window_tokens: Option<u64>,
 }
 
+/// Server-computed session cost member of [`CumulativeTokenUsage`] (tdd SS4.6.5, amendment
+/// #41610; muse 1.4.9). An estimate: it may move either way on price re-adoption.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CumulativeCost {
+    /// `true` when at least one leg lacked price data — render `(partial)`.
+    pub partial: bool,
+    /// Estimated USD total, finite and non-negative.
+    pub usd: f64,
+}
+
 /// Session running totals of counted-once usage (tdd SS4.6.5).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CumulativeTokenUsage {
+    /// Cache-read tokens, session total (muse 1.4.9). **Additive-optional**: absent on the wire
+    /// from older hosts, and an absent split contributes 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Cache-write tokens, session total (muse 1.4.9). Additive-optional like the read split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Server-computed session cost (muse 1.4.9); absent when no leg is priced — omit the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CumulativeCost>,
     /// Output tokens, session total.
     pub output_tokens: u64,
     /// Counted-once prompt tokens, session total.
@@ -279,6 +305,12 @@ pub struct ErrorData {
     /// The exceeded byte limit, on `inputTooLarge` errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_bytes: Option<u64>,
+    /// The store on `pluginNotFound` (`-32035`, SS3.29.1; muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<String>,
+    /// The rejected marketplace or plugin name on the plugin/marketplace arms (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The requested `outputRef.id`, on the `item/readOutput` arms (`notFound`,
     /// `outputUnavailable`, and the misaligned-offset `invalidParams`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,6 +328,13 @@ pub struct ErrorData {
     /// default for this code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Why a branch seed did not use a checkpoint, on the fork/side-chat validation arms (muse
+    /// 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_fallback_reason: Option<String>,
+    /// The branch-seed path the host read before rejecting, on the same arms (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_path: Option<String>,
     /// The rejected skill selector on `skillNotFound` (`-32032`, SS3.22.4; muse 1.3.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
@@ -305,6 +344,9 @@ pub struct ErrorData {
     /// Winning settlement on `userInputAlreadySettled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement: Option<UserInputSettlementSummary>,
+    /// The rejected upload id on `uploadNotFound` (`-32038`, SS3.33; muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
     /// User-input prompt identity on SS5.10 errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_id: Option<String>,
@@ -354,6 +396,12 @@ open_enum! {
         UserInputNotFound = "userInputNotFound",
         UserInputAlreadySettled = "userInputAlreadySettled",
         UserInputAnswerInvalid = "userInputAnswerInvalid",
+        ComputerUseUnavailable = "computerUseUnavailable",
+        MarketplaceNotFound = "marketplaceNotFound",
+        PluginNotFound = "pluginNotFound",
+        MarketplaceAlreadyExists = "marketplaceAlreadyExists",
+        PluginMutationsDisabled = "pluginMutationsDisabled",
+        UploadNotFound = "uploadNotFound",
     }
 }
 
@@ -550,6 +598,23 @@ impl InitializeParams {
     }
 }
 
+open_enum! {
+    /// Whether the host can enforce the sandbox (muse 1.4.9). A host property probed once, never
+    /// negotiated — which is why it is not a capability.
+    SandboxAvailability {
+        Available = "available",
+        Unavailable = "unavailable",
+    }
+}
+
+open_enum! {
+    /// Why sandbox enforcement is impossible on this host (muse 1.4.9).
+    SandboxUnavailableReason {
+        UserNamespacesDenied = "userNamespacesDenied",
+        BubblewrapUnavailable = "bubblewrapUnavailable",
+    }
+}
+
 /// The `initialize` result (SS1.4.1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -565,6 +630,14 @@ pub struct InitializeResult {
     pub platform_family: PlatformFamily,
     /// Server operating system.
     pub platform_os: PlatformOs,
+    /// Whether this host can enforce the sandbox (muse 1.4.9). Additive-optional: older hosts
+    /// omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_availability: Option<SandboxAvailability>,
+    /// Why enforcement is impossible; sent only when `sandboxAvailability` is `unavailable`, and a
+    /// client MUST NOT infer a reason when none is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_unavailable_reason: Option<SandboxUnavailableReason>,
     /// Envelope schema version and stable-surface fingerprint.
     pub schema: SchemaInfo,
     /// Server identification.
@@ -829,6 +902,10 @@ pub struct SkillCatalogEntry {
     pub selector: String,
     /// Where the skill comes from.
     pub source: SkillSource,
+    /// The skill's declared human-readable name (`SKILL.md` `metadata.display-name`); absent when
+    /// the skill declares none (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `skill/changed` params (tdd SS3.22.2, muse 1.3.0): the session's user-invocable set changed;
@@ -1233,14 +1310,15 @@ pub struct WorkflowControlResult {
     pub status: CommandStatus,
 }
 
-/// The `sha256:` stable-surface fingerprint of the muse 1.3.0 schema bundle these types were
-/// generated from (`fixtures/msp/msp/manifest.json`).
+/// The `sha256:` stable-surface fingerprint of the muse 1.4.9 schema bundle these types were
+/// generated from (`fixtures/msp/msp/manifest.json`). muse 1.3.0 through 1.4.8 published
+/// `sha256:ab69549a…`; 1.4.9's surface is additive over it, so these types decode both.
 ///
 /// Compare it against `InitializeResult.schema.fingerprint`. **A mismatch is a WARNING, never an
 /// error**: the server is free to ship a different stable surface, and additive evolution keeps
 /// these types working (research §1.2). Log it, do not refuse the connection.
 pub const SCHEMA_FINGERPRINT: &str =
-    "sha256:ab69549a7ebb423fce94068762da0b5ff3cdec1f8fc263dcc17248eda117f852";
+    "sha256:5d3b43e5ccdb7dc4f5a32c380f5f2cde0f10e3059b93610afb2e73f73b1d914c";
 
 /// Every wire **method** in the SS1.9 published index (`MspMethod`).
 ///
@@ -1261,6 +1339,7 @@ pub const MSP_METHODS: &[&str] = &[
     "session/fork",
     "session/list",
     "session/read",
+    "session/sideChat",
     "turn/start",
     "turn/steer",
     "turn/interrupt",
@@ -1273,9 +1352,18 @@ pub const MSP_METHODS: &[&str] = &[
     "session/userShell",
     "model/list",
     "skill/list",
+    "skill/setActivation",
+    "skill/import",
+    "hook/list",
+    "plugin/list",
+    "plugin/install",
+    "plugin/marketplaceAdd",
+    "plugin/marketplaceUpdate",
+    "plugin/marketplaceRemove",
     "task/background",
     "task/stop",
     "task/stopAll",
+    "task/list",
     "goal/set",
     "goal/edit",
     "goal/clear",
@@ -1283,6 +1371,9 @@ pub const MSP_METHODS: &[&str] = &[
     "goal/resume",
     "workflow/cancel",
     "workflow/childControl",
+    "workflow/pause",
+    "workflow/resume",
+    "media/upload",
     "view/subscribe",
     "view/unsubscribe",
     "view/page",
@@ -1293,21 +1384,34 @@ pub const MSP_METHODS: &[&str] = &[
     "userInput/answer",
     "userInput/cancel",
     "userInput/clarify",
+    "userInput/interrupt",
     "usage/read",
+    "feedback/submit",
+    "recap/request",
+    "recap/cancel",
+    "computerUseSettings/read",
+    "computerUseSettings/update",
+    "computerUseSetup/read",
+    "computerUseSetup/start",
+    "computerUseSetup/check",
 ];
 
 /// Every wire **notification** in the SS1.9 published index (`MspNotification`).
 ///
-/// The binary additionally emits `session/started` ([`SessionStartedParams`]), which this index
-/// omits — a client must accept it.
+/// `session/started` ([`SessionStartedParams`]) was emitted but unindexed before muse 1.4.9; the
+/// 1.4.9 index lists it.
 pub const MSP_NOTIFICATIONS: &[&str] = &[
     "initialized",
+    "session/started",
+    "session/closed",
     "skill/changed",
     "turn/started",
     "turn/completed",
     "turn/retracted",
     "turn/retryScheduled",
+    "turn/modelRetryScheduled",
     "turn/unqueued",
+    "turn/foregroundCompleted",
     "item/started",
     "item/updated",
     "item/delta",
@@ -1315,11 +1419,12 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "view/gap",
     "approval/requested",
     "approval/updated",
+    "approval/reviewing",
     "approval/resolved",
     "userInput/requested",
     "userInput/settled",
+    "userInput/engaged",
     "session/modelChanged",
-    "session/nameChanged",
     "session/reasoningEffortChanged",
     "session/statusChanged",
     "session/goalChanged",
@@ -1328,9 +1433,15 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "session/tokenUsage",
     "session/contextUsage",
     "session/approvalModeChanged",
+    "recap/completed",
     "session/modelRouteUnserved",
+    "session/nameChanged",
     "session/viewHealthChanged",
+    "session/listChanged",
     "usage/changed",
+    "computerUseSetup/changed",
+    "plugin/changed",
+    "plugin/marketplaceChanged",
 ];
 
 /// Every server-initiated wire request in the schema's `requests` index
@@ -1391,6 +1502,12 @@ pub const MSP_ERROR_DATA_KINDS: &[&str] = &[
     "commandRejected",
     "backpressured",
     "skillNotFound",
+    "computerUseUnavailable",
+    "marketplaceNotFound",
+    "pluginNotFound",
+    "marketplaceAlreadyExists",
+    "pluginMutationsDisabled",
+    "uploadNotFound",
     "viewTruncated",
     "outputUnavailable",
     "boundaryPruned",

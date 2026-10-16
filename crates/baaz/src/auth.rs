@@ -216,6 +216,7 @@ mod tests {
 
     fn state(kind: AccountStateKind, label: Option<&str>) -> AccountState {
         AccountState {
+            avatar_url: None,
             credential_required: true,
             label: label.map(str::to_owned),
             state: kind,

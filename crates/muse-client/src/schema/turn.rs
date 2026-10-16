@@ -13,6 +13,9 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageAttachment {
+    /// This attachment's name, `<itemId>/<n>` (muse 1.4.9). **Additive-optional**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
     /// Pixel height, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
@@ -164,8 +167,29 @@ pub struct TurnError {
     pub kind: TurnErrorKind,
     /// Human-readable failure text.
     pub message: String,
+    /// Typed quota-exhaustion detail (muse 1.4.9): present iff the stopping failure was the quota
+    /// class. Branch on presence, never by parsing `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaDetail>,
     /// The server's judgment that resubmitting the same input may succeed.
     pub retryable: bool,
+}
+
+/// Typed quota-exhaustion detail of a [`TurnError`] (tdd SS4.5.1, muse 1.4.9).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaDetail {
+    /// Which quota was exhausted.
+    pub limit_kind: LimitKind,
+    /// Epoch milliseconds at which the provider says usage resets.
+    pub resets_at_ms: u64,
+}
+
+open_enum! {
+    /// Quota limit kinds (tdd SS4.5.1, muse 1.4.9).
+    LimitKind {
+        TierLimit = "tierLimit",
+    }
 }
 
 open_enum! {
@@ -180,6 +204,7 @@ open_enum! {
         ModelError = "modelError",
         LaunchError = "launchError",
         AuthRequired = "authRequired",
+        McpLinkError = "mcpLinkError",
     }
 }
 
@@ -217,6 +242,9 @@ pub struct TurnInputPart {
     /// The part type.
     #[serde(rename = "type")]
     pub r#type: TurnInputPartType,
+    /// The `media/upload` receipt, required on a `video` part (tdd SS3.2, SS3.33; muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
     /// Pixel width; must be provided together with `height` or not at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -234,6 +262,7 @@ impl TurnInputPart {
             selector: None,
             text: Some(text.into()),
             r#type: TurnInputPartType::Text,
+            upload_id: None,
             width: None,
         }
     }
@@ -249,6 +278,7 @@ impl TurnInputPart {
             selector: None,
             text: None,
             r#type: TurnInputPartType::Image,
+            upload_id: None,
             width: None,
         }
     }
@@ -265,6 +295,7 @@ impl TurnInputPart {
             selector: Some(selector.into()),
             text: None,
             r#type: TurnInputPartType::Skill,
+            upload_id: None,
             width: None,
         }
     }
@@ -277,6 +308,7 @@ closed_enum! {
         Text = "text",
         Image = "image",
         Skill = "skill",
+        Video = "video",
     }
 }
 
@@ -321,17 +353,30 @@ pub struct TurnInterruptResult {
 pub struct TurnRef {
     /// The `commandId` of the submit that minted it.
     pub command_id: String,
+    /// `queuedTurns[]` only (muse 1.4.9): the queued submit's presentation text, so a late joiner
+    /// can render it before launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    /// `queuedTurns[]` only: set when `displayText` was cut to the committed-surface budget.
+    /// Absent unless `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
     /// The turn's id, pre-minted per tdd SS3.1.4.
     pub turn_id: String,
 }
 
-/// `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract was durably accepted. The
-/// retracted user-message item is re-emitted via `item/updated` with `retracted: true`.
+/// `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract durably settled. On
+/// `accepted` the retracted user-message item is re-emitted via `item/updated` with
+/// `retracted: true`; muse 1.4.9 also emits it `declined`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnRetractedParams {
     /// The retracted submission's command id.
     pub command_id: String,
+    /// The settlement outcome (muse 1.4.9). **Additive-optional**: absent reads as `accepted`,
+    /// which is all a pre-1.4.9 host ever emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RetractOutcome>,
     /// The owning session.
     pub session_id: String,
     /// The durable records this event folded from.
@@ -340,6 +385,49 @@ pub struct TurnRetractedParams {
     pub turn_id: String,
     /// Opaque, strictly monotonic view cursor.
     pub view_cursor: String,
+}
+
+/// `turn/modelRetryScheduled` params (tdd SS4.5.1, muse 1.4.9): the provider backoff behind one
+/// model attempt is scheduled and waiting out its delay. The model-layer sibling of
+/// [`TurnRetryScheduledParams`] — same members minus `reason`. Non-terminal; the delay is the
+/// recorded backoff, never an absolute fire time.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnModelRetryScheduledParams {
+    /// The attempt that failed (>= 1).
+    pub attempt: u32,
+    /// The failing model attempt's durable kind, verbatim (open vocabulary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// The failing model attempt's HTTP status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// The model-retry chain bound.
+    pub max_attempts: u32,
+    /// The attempt about to run.
+    pub next_attempt: u32,
+    /// The scheduled backoff delay in milliseconds, verbatim from the durable fact.
+    pub retry_delay_ms: u64,
+    /// The owning session.
+    pub session_id: String,
+    /// The durable records this event folded from.
+    pub source_range: SourceRange,
+    /// The failing model attempt's provider system, verbatim, e.g. `"meta"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// The running turn whose model attempt is being retried.
+    pub turn_id: String,
+    /// Opaque, strictly monotonic view cursor.
+    pub view_cursor: String,
+}
+
+open_enum! {
+    /// A `turn/retracted` settlement outcome (tdd SS4.5.1, muse 1.4.9). An unknown value reads as
+    /// `accepted`, the event's historical meaning.
+    RetractOutcome {
+        Accepted = "accepted",
+        Declined = "declined",
+    }
 }
 
 /// `turn/retryScheduled` params (tdd SS4.5.1): a durable turn retry-scheduled fact folded — the
@@ -351,6 +439,12 @@ pub struct TurnRetractedParams {
 pub struct TurnRetryScheduledParams {
     /// The attempt that failed (producer-normalized, >= 1).
     pub attempt: u32,
+    /// The failing model attempt's durable kind, verbatim (muse 1.4.9; open vocabulary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// The failing model attempt's HTTP status (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
     /// The turn's model-retry chain bound.
     pub max_attempts: u32,
     /// The attempt about to run (producer contract: `attempt < nextAttempt <= maxAttempts`).
@@ -364,6 +458,9 @@ pub struct TurnRetryScheduledParams {
     pub session_id: String,
     /// The durable record this event folded from (`first == last`).
     pub source_range: SourceRange,
+    /// The failing model attempt's provider system, verbatim (muse 1.4.9), e.g. `"meta"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
     /// The running turn whose model attempt is being retried.
     pub turn_id: String,
     /// Opaque, strictly monotonic view cursor.
@@ -401,6 +498,22 @@ pub struct TurnStartParams {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The target session.
     pub session_id: String,
+    /// A queued `!` shell action riding this turn (muse 1.4.9), run at the next model-call
+    /// boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_shell: Option<TurnUserShell>,
+    /// A sticky replacement of the session's runtime workspace-root set, binding at this turn's
+    /// launch (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<String>>,
+}
+
+/// The queued `!` shell action a `turn/start` carries (tdd SS3.2, muse 1.4.9).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnUserShell {
+    /// The shell command text, without the leading `!`.
+    pub command_text: String,
 }
 
 /// `turn/start` result (tdd SS3.2).

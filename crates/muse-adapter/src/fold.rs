@@ -1700,10 +1700,18 @@ impl Folded {
             // transcript (presentation policy, `docs/01-transport.md`).
             msp::ItemKind::ReminderChild => return None,
             // `workflow` has no home in the library yet, so it takes the
-            // mandated generic rendering: kind + status + `fallbackText`.
+            // mandated generic rendering: kind + status + `fallbackText`. So
+            // does a kind this build has never heard of, under its own wire
+            // name rather than the word "unknown" (MSP SS4.10).
             _ => Block::Generic {
-                kind: item.kind.as_wire().unwrap_or("unknown").to_owned(),
-                status: item.status.as_wire().unwrap_or("unknown").to_owned(),
+                kind: match &item.kind {
+                    msp::ItemKind::Unknown(raw) => raw.clone(),
+                    known => known.as_wire().unwrap_or("unknown").to_owned(),
+                },
+                status: match &item.status {
+                    msp::ItemStatus::Unknown(raw) => raw.clone(),
+                    known => known.as_wire().unwrap_or("unknown").to_owned(),
+                },
                 text: item.fallback_text.clone().unwrap_or_default(),
             },
         };

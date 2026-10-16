@@ -60,6 +60,10 @@ pub struct Session {
     pub branch: Option<String>,
     /// RFC3339. For a fork this is the fork session id's UUIDv7 mint instant.
     pub created_at: String,
+    /// The handshake [`ClientInfo`] recorded when the session was opened (muse 1.4.9), echoed
+    /// verbatim — provenance, never a visibility gate. **Additive-optional**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_client: Option<ClientInfo>,
     /// Derived first-user-prompt preview (tdd SS2.14.1). **Additive-optional**, omitted when
     /// underivable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +71,13 @@ pub struct Session {
     /// `null` for root sessions; fork provenance otherwise. Required-nullable.
     #[serde(default)]
     pub forked_from: Option<ForkProvenance>,
+    /// The served generated short title (muse 1.4.9). **Additive-optional**, fold-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_name: Option<String>,
+    /// What kind of session this is (muse 1.4.9): `root` or `subagent`. **Additive-optional**;
+    /// absent reads as a root session, and an unknown value is an unknown-but-present kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SessionKind>,
     /// Content-activity recency, RFC3339 (tdd SS2.4, ADR 31983 D5; muse 1.3.0). **Additive-
     /// optional**: omitted when no content record exists. Never advanced by lifecycle bookkeeping
     /// (the resume marker, re-stamps) or a fork's copied seed-replay records, and never precedes
@@ -82,6 +93,13 @@ pub struct Session {
     /// reads it, it never sends the rename).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// How the served `name` was set (muse 1.4.9). **Additive-optional**: absent, like an unknown
+    /// value, reads as unknown — never fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_origin: Option<SessionNameOrigin>,
+    /// The containing top-level session's id when `kind` is `subagent` (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// Absolute path of the session's durable log; non-nullable. Under the ephemeral session
     /// profile it is the **empty string**, meaning "no durable log exists" — the one value a client
     /// must not hand to a filesystem call.
@@ -91,6 +109,14 @@ pub struct Session {
     pub provider_id: Option<String>,
     /// The session identity.
     pub session_id: String,
+    /// Side provenance (muse 1.4.9): `null` for root sessions and forks. Optional *and* nullable,
+    /// so absent and `null` stay distinguishable through a round trip.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub side_from: Option<Option<SideProvenance>>,
     /// Load state as this host knows it; `session/list` reports `notLoaded` for sessions loaded by
     /// *other* hosts.
     pub status: SessionStatus,
@@ -106,6 +132,51 @@ pub struct Session {
     /// never fabricated. Required-nullable.
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+open_enum! {
+    /// What kind of session this is (spec 42713, muse 1.4.9).
+    SessionKind {
+        Root = "root",
+        Subagent = "subagent",
+    }
+}
+
+open_enum! {
+    /// How the served session name was set (tdd SS2.4/SS4.6.7, muse 1.4.9).
+    SessionNameOrigin {
+        Automatic = "automatic",
+        Custom = "custom",
+    }
+}
+
+/// Side provenance of a `session/sideChat` session (tdd SS2.4/SS2.5.7, muse 1.4.9).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SideProvenance {
+    /// The `commandId` of the `session/sideChat` that created it.
+    pub command_id: String,
+    /// An opaque provenance string preserved verbatim. Display-only — never parse it.
+    pub cut_cursor: String,
+    /// The source main session this side was opened from.
+    pub session_id: String,
+}
+
+/// How the last folded turn ended, restated on `session/resume` and `session/read` so a reopened
+/// session can report a failed last turn (tdd SS2.5.2, muse 1.4.9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTurn {
+    /// Copied when the `turn/completed` carried it; host-death `failed` terminals do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnError>,
+    /// Free display text on a synthesized host-death terminal; never a branch point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The turn's terminal.
+    pub terminal: TurnTerminal,
+    /// The turn's id; a live `turn/completed` deduplicates against it.
+    pub turn_id: String,
 }
 
 /// `session/approvalModeChanged` params (tdd SS5.12): the fold of the durable approval-mode
@@ -416,8 +487,9 @@ pub struct SessionModelRouteUnservedParams {
     pub installed_provider_id: String,
     /// The standing (still bound, now unroutable) model.
     pub model_id: String,
-    /// The standing model's provider; `null` when the selection names none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The standing model's provider; `null` when the selection names none. **Required-nullable**
+    /// since muse 1.4.9's schema, which now agrees with the wire.
+    #[serde(default)]
     pub provider_id: Option<String>,
     /// The owning session.
     pub session_id: String,
@@ -447,6 +519,10 @@ pub struct SessionReadParams {
 pub struct SessionReadResult {
     /// The served history.
     pub history: SessionHistory,
+    /// How the last folded turn ended (muse 1.4.9). **Additive-optional**; absence is a
+    /// non-assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn: Option<LastTurn>,
     /// The same pending set as `session/resume`. Because `session/read` never subscribes this is
     /// a point-in-time log read only: no requests are re-issued after it.
     pub pending_requests: Vec<PendingRequestEntry>,
@@ -480,6 +556,10 @@ pub struct SessionResumeParams {
     /// reports what was actually served. Ignored when `cursor` or `excludeItems` makes it moot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryPreference>,
+    /// The launch permission-profile pick (muse 1.4.9): a profile id the host catalog already
+    /// admits. Select, never create; omitted keeps the session's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
     /// The session to load.
     pub session_id: String,
 }
@@ -490,6 +570,10 @@ pub struct SessionResumeParams {
 pub struct SessionResumeResult {
     /// The served history.
     pub history: SessionHistory,
+    /// How the last folded turn ended (muse 1.4.9). **Additive-optional**; absence is a
+    /// non-assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn: Option<LastTurn>,
     /// The late-joiner pending set; empty when nothing is pending.
     pub pending_requests: Vec<PendingRequestEntry>,
     /// The loaded session.
@@ -559,8 +643,14 @@ pub struct SessionSetModelResult {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionNameChangedParams {
+    /// The latest retained generated short title (muse 1.4.9). **Additive-optional**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_name: Option<String>,
     /// The new canonical name now in effect.
     pub name: String,
+    /// How the new name was set (muse 1.4.9). **Additive-optional**: absent reads as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_origin: Option<SessionNameOrigin>,
     /// The owning session.
     pub session_id: String,
     /// The durable records this event folded from.
@@ -664,6 +754,10 @@ pub struct SessionStartParams {
     /// Initial model; server default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// The new session's initial permission profile (muse 1.4.9): a profile id the host catalog
+    /// already admits. Select, never create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
     /// Initial provider routing; server default when omitted or explicit `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -675,6 +769,10 @@ pub struct SessionStartParams {
     /// Absolute path, folded into the first metadata record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
+    /// The initial runtime workspace-root set (muse 1.4.9): ordered absolute canonical existing
+    /// directories, the first being the CWD and primary root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<String>>,
 }
 
 /// `session/start` result (tdd SS2.5.1).
@@ -688,8 +786,8 @@ pub struct SessionStartResult {
     pub view_cursor: String,
 }
 
-/// `session/started` params — **not in the SS1.9 published index**, but emitted by the muse 1.1.1
-/// binary right after a `session/start` result. The payload is the same [`Session`] object.
+/// `session/started` params, emitted right after a `session/start` result. The payload is the same
+/// [`Session`] object. Unindexed from muse 1.1.1 to 1.4.8; the 1.4.9 index lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStartedParams {
@@ -751,7 +849,7 @@ pub struct SessionTodoListChangedParams {
 /// `session/tokenUsage` params (tdd SS4.6.5): one per model completion that reports usage. Carries
 /// the raw counters verbatim plus the server-derived counted-once `promptTokens`/`totalTokens` and
 /// the session `cumulative` block. Accumulate-only: `cumulative` never goes backward.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTokenUsageParams {
     /// Session running totals at this cursor; the fold owns the accumulation. Subagent/workflow

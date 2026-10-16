@@ -235,6 +235,15 @@ pub struct UserInputSettledParams {
     /// The clarification, when the prompt was clarified; `null` otherwise. Required-nullable.
     #[serde(default)]
     pub clarification: Option<UserInputClarification>,
+    /// The decision time as RFC3339 (muse 1.4.9). Required-nullable in the 1.4.9 schema but
+    /// absent from older hosts, so it is modelled optional *and* nullable: absent and `null` both
+    /// survive a round trip.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub decided_at: Option<Option<String>>,
     /// The command that settled it; `null` when nothing did. Required-nullable.
     #[serde(default)]
     pub decided_by_command_id: Option<String>,

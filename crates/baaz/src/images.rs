@@ -177,6 +177,7 @@ impl Image {
             width: Some(self.width),
             height: Some(self.height),
             text: None,
+            upload_id: None,
         }
     }
 }

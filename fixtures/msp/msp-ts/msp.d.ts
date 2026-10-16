@@ -106,6 +106,8 @@ export interface ApprovalRequestParams {
   rawArgs: string;
   sessionId: string;
   sourceRange: SourceRange;
+  /** Present only for a child (native subagent) approval projected onto the parent session's plane (ADR 36182); parent-own approvals omit it. */
+  subagentOrigin?: ApprovalSubagentOrigin;
   subject: ApprovalSubject;
   taskId: string;
   toolCallId: string;
@@ -133,6 +135,8 @@ export type ApprovalResolvedBy = "user" | "policy" | "llmJudge" | (string & {});
 export interface ApprovalResolvedParams {
   amendment?: ApprovalAmendment;
   approvalId: string;
+  /** The decision time as RFC3339, projected from the durable `DecisionApplied` record's own stamp (ADR 45450 D3): optional on the wire so decoders tolerate its absence, always populated by current hosts. */
+  decidedAt?: string;
   decidedByCommandId?: string;
   decision: ApprovalDecision;
   itemId: string;
@@ -141,6 +145,8 @@ export interface ApprovalResolvedParams {
   sessionId: string;
   sourceRange: SourceRange;
   stageEvidence: ApprovalStageEvidence[];
+  /** Present only for a child (native subagent) approval projected onto the parent session's plane (ADR 36182); parent-own approvals omit it. */
+  subagentOrigin?: ApprovalSubagentOrigin;
   turnId: string;
   viewCursor: string;
 }
@@ -169,12 +175,22 @@ export interface ApprovalStageResolution {
   kind: string;
 }
 
+/** Child (native subagent) provenance for an approval projected onto the PARENT session's approval plane (#36182 / ADR 36182): identifies the originating child run/agent so a client can attribute the prompt. Omitted (`skip_serializing_if`) on the parent's own approvals, so pre-existing parent frames stay byte-identical. */
+export interface ApprovalSubagentOrigin {
+  /** The child run that parked on this approval. */
+  childRunId: string;
+  /** The child session stream id whose records carry this approval. */
+  childSessionId: string;
+  /** The originating child's subagent id, from the parent session's durable subagent control records. */
+  subagentId: string;
+}
+
 /** Open approval subject union. Unknown kinds are rendered generically and never auto-approved by clients (tdd SS5.2). */
 export interface ApprovalSubject {
   access?: string;
   command?: string;
   host?: string;
-  /** Open discriminator: `shell | fileAccess | network | process | tool`. */
+  /** Open discriminator: `shell | fileAccess | network | unixSocket | process | tool`. */
   kind: string;
   origin?: ApprovalOrigin;
   path?: string;
@@ -199,6 +215,8 @@ export interface ApprovalUpdatedParams {
   currentRequirementId: ApprovalRequirementRef;
   sessionId: string;
   sourceRange: SourceRange;
+  /** Present only for a child (native subagent) approval projected onto the parent session's plane (ADR 36182); parent-own approvals omit it. */
+  subagentOrigin?: ApprovalSubagentOrigin;
   subject: ApprovalSubject;
   viewCursor: string;
 }
@@ -220,7 +238,7 @@ export interface BranchState {
 }
 
 /** A grantable capability name (SS1.4.4). Open: the reserved `rawLog` entry joins this domain as an additive open-enum extension when SS6 un-defers (#13929, Scenario 5 AS-3) — closed would make that a retype. */
-export type CapabilityName = "userShell" | "sessionMcp" | (string & {});
+export type CapabilityName = "userShell" | "sessionMcp" | "sessionListStream" | "feedback" | "computerUseSetup" | "computerUseHostSetup" | "sessionRename" | (string & {});
 
 /** The client's requested capability posture (SS1.4.1). Every member defaults; an absent `capabilities` object means all defaults. */
 export interface ClientCapabilities {
@@ -242,6 +260,34 @@ export interface ClientInfo {
   title?: string;
   /** Client version string. */
   version: string;
+}
+
+/** The language a Code Mode cell ran in (ADR 42727 D2). Open: values are lowercase VS Code language identifiers, and only `javascript` (the V8 engine) is minted today. */
+export type CodeModeLanguage = "javascript" | (string & {});
+
+/** One public-output span inside the item's `visibleOutput` (ADR 42727 D3).  Offsets index the UTF-8 encoding of the **decoded** `visibleOutput` string, never the JSON-escaped wire text; both ends fall on code-point boundaries; named and measured like `item/readOutput`'s byte range. */
+export interface CodeModeOutputSpan {
+  /** Length of the span, in bytes. Range 0–9007199254740991 inclusive. */
+  lengthBytes: number;
+  /** Start of the span, in bytes. Range 0–9007199254740991 inclusive. */
+  offsetBytes: number;
+  /** What the bytes are. */
+  stream: CodeModeOutputStream;
+}
+
+/** What a Code Mode output span's bytes are (ADR 42727 D3). Open: each engine mints its own values. */
+export type CodeModeOutputStream = "transcript" | (string & {});
+
+/** Code Mode's `details` payload (ADR 42727 D2/D3).  Every member is absent when it does not apply, never `null`; an empty `outputSpans` list is never served. */
+export interface CodeModeReceipt {
+  /** `wait` only, when the producer resolved it: the `itemId` of the `execute` item that started the cell. */
+  cellItemId?: string;
+  /** `execute`, and `wait` when the producer resolved the originating execute: the language the cell ran in. */
+  language?: CodeModeLanguage;
+  /** The public cell-output spans, ascending and non-overlapping; absent when there is no cell body or a hook rewrote the served body. */
+  outputSpans?: CodeModeOutputSpan[];
+  /** `execute` only: the top-level key of the item's `args` object whose value is the cell source. A pointer, never source bytes. */
+  sourceArg?: string;
 }
 
 /** The uniform SS3.1.2 command acknowledgement: admission only, never an outcome. `session/compact` alone may answer `"noop"`; every other command answers `"accepted"`. */
@@ -267,6 +313,137 @@ export type CompactionOutcome = "compacted" | "noop" | "failed" | "cancelled" | 
 /** What initiated a compaction (tdd SS4.5.10). Open. */
 export type CompactionTrigger = "manual" | "auto" | (string & {});
 
+/** One row of the Settings apps list. */
+export interface ComputerUseApp {
+  /** The app's bundle ID: the stored key. */
+  bundleId: string;
+  /** The choice as it applies: a block wins over a grant. */
+  choice: ComputerUseAppChoice;
+  /** When Computer Use last showed an approval card for the app, RFC3339 UTC; absent when it never has. */
+  lastAskedAt?: string;
+  /** Settings can't change this row; its choice is `blocked`. Omitted means false. */
+  locked?: boolean;
+  /** Why the row is locked, when it is. */
+  lockedBy?: ComputerUseAppLock;
+  /** The name the approval card shows for it, else the name stored with its grant or its last card; absent when there is none. */
+  name?: string;
+}
+
+/** A per-app choice. **Open**, like `ComputerUseChoice`. */
+export type ComputerUseAppChoice = "ask" | "alwaysAllow" | "blocked" | (string & {});
+
+/** Why Settings can't change a row. **Open**. */
+export type ComputerUseAppLock = "builtIn" | "file" | (string & {});
+
+/** One per-app choice to set in `computerUseSettings/update`. */
+export interface ComputerUseAppPatch {
+  /** The app's bundle ID. */
+  bundleId: string;
+  /** `ask` removes the app's grant and the user's block; `alwaysAllow` saves a grant and removes the user's block; `blocked` adds the user's block and removes the grant. */
+  choice: ComputerUseAppChoice;
+}
+
+/** One row of the Settings blocked-apps list. */
+export interface ComputerUseBlockedApp {
+  /** The app's bundle ID, or the family prefix when `prefix` is true. */
+  bundleId: string;
+  /** A built-in block, which Settings cannot remove (ADR 630 D18.8). */
+  locked: boolean;
+  /** A built-in family row: it blocks every bundle ID that starts with `bundleId`. Omitted means false; only locked rows are prefixes. */
+  prefix?: boolean;
+}
+
+/** A capability dropdown's value (ADR 630 D18.4). **Open**: the read result carries it, so an older client tolerates a value it does not know. */
+export type ComputerUseChoice = "ask" | "alwaysAllow" | (string & {});
+
+/** One installed or running app, for Settings' app picker. */
+export interface ComputerUseInstalledApp {
+  /** The app's bundle ID. */
+  bundleId: string;
+  /** The name the approval card shows for it. */
+  name: string;
+}
+
+/** One macOS permission as setup last saw it. **Open**, like the phase. */
+export type ComputerUsePermission = "granted" | "missing" | "unknown" | (string & {});
+
+/** `computerUseSettings/read` result, also answered by `computerUseSettings/update`. */
+export interface ComputerUseSettings {
+  /** The apps list: apps Computer Use has asked about, most recent first; then the other saved grants, then the user's other blocks; then the locked rows. Each app once. A host that serves the list always answers it, so its absence means an older host. */
+  apps?: ComputerUseApp[];
+  /** The user's blocks in the order they were added, then the built-in blocks when `showBuiltIns` asked for them. */
+  blockedApps: ComputerUseBlockedApp[];
+  /** The computer-control dropdown, as it applies: `ask` while the stored blocked-apps list can't be read (ADR 630 D18.4). */
+  computerControl: ComputerUseChoice;
+  /** The installed and running apps, sorted by name, when the read asked for `installed`. */
+  installedApps?: ComputerUseInstalledApp[];
+  /** The screenshots dropdown, under the same rule. */
+  screenshots: ComputerUseChoice;
+}
+
+/** `computerUseSettings/read` params. */
+export interface ComputerUseSettingsReadParams {
+  /** Also answer `installedApps`, for an app picker. Omitted means false. */
+  installed?: boolean;
+  /** Also list the built-in blocks as locked rows (the D18.8 toggle). Omitted means false. */
+  showBuiltIns?: boolean;
+}
+
+/** `computerUseSettings/update` params: a patch. Omitted members are left alone; the whole patch applies or none of it does. */
+export interface ComputerUseSettingsUpdateParams {
+  /** Per-app choices to set. A locked app is refused; so is a bundle ID named twice, or also in `blockApps` or `unblockApps`. */
+  apps?: ComputerUseAppPatch[];
+  /** Bundle IDs to add to the user's blocked apps. A built-in block is refused: it is already blocked. */
+  blockApps?: string[];
+  /** The new computer-control dropdown value. */
+  computerControl?: ComputerUseChoice;
+  /** The new screenshots dropdown value. */
+  screenshots?: ComputerUseChoice;
+  /** Bundle IDs to remove from the user's blocked apps. Only the user's own entries can be removed; a built-in block stays. */
+  unblockApps?: string[];
+}
+
+/** `computerUseSetup/changed` params. */
+export interface ComputerUseSetupChanged {
+  /** The session whose setup state changed; absent for the host's own setup, which only `computerUseHostSetup` holders receive. */
+  sessionId?: string;
+  /** Its new state. */
+  state: ComputerUseSetupState;
+}
+
+/** Where the session's setup stands: `cua_setup`'s state codes, camelCase. **Open**: a result vocabulary, so an older client tolerates a new state. */
+export type ComputerUseSetupPhase = "dormant" | "inProgress" | "restartRequired" | "readyForTarget" | "stopped" | (string & {});
+
+/** `computerUseSetup/read` params. */
+export interface ComputerUseSetupReadParams {
+  /** The session whose setup to read. Omitted reads the host's own setup, which needs the `computerUseHostSetup` grant. */
+  sessionId?: string;
+}
+
+/** `computerUseSetup/start` params: a human command. */
+export interface ComputerUseSetupStartParams {
+  /** The client's id for this command. */
+  commandId: string;
+  /** The session whose setup to start. Omitted starts the host's own setup, which needs the `computerUseHostSetup` grant. */
+  sessionId?: string;
+}
+
+/** The session's setup state: the result of both methods and the `computerUseSetup/changed` payload's `state`. */
+export interface ComputerUseSetupState {
+  /** Accessibility. */
+  accessibility: ComputerUsePermission;
+  /** Input Monitoring: computer use is ready without it; some actions need it. */
+  inputMonitoring: ComputerUsePermission;
+  /** The sentence `cua_setup` gives the user for this answer. */
+  message?: string;
+  /** The `cua_setup` refusal code when the call was refused, verbatim. */
+  refused?: string;
+  /** Screen Recording. */
+  screenRecording: ComputerUsePermission;
+  /** Where setup stands. */
+  setup: ComputerUseSetupPhase;
+}
+
 /** Context pressure level (tdd SS4.6.6): hard threshold first, both inclusive `>=`. Open. */
 export type ContextPressureLevel = "normal" | "warning" | "blocked" | (string & {});
 
@@ -280,8 +457,40 @@ export interface ContextUsage {
   windowTokens?: number;
 }
 
-/** Session running totals of counted-once usage (tdd SS4.6.5). */
+/** Cron's `details` payload (ADR 42728 D2, thirteenth directive).  Every field a family owns lives here, under the container's one `details` key, rather than flat beside the discriminators — ADR 43399 D5 as amended. Each is a **bounded machine fact**: scalars, short identifiers and a small fixed-shape array of those. */
+export interface CronReceipt {
+  /** Cron `create` and `delete`: the job id. On `delete`'s `missing` arm this is the caller's own id echoed back under ADR 43399 D1's declared echo — that arm has no server-side subject to name.  Also the field ADR 42728 D4's D8 declaration names as conveying the hidden fact on the declared `created` + `cancelled` pairing: a job row was committed and will fire. */
+  jobId?: string;
+  /** Cron `list`: the served jobs in server order, `active` and `firing` rows only. */
+  jobs?: CronReceiptJob[];
+  /** Cron `create` (`created`, `duplicate`): absolute epoch-milliseconds of the job's next scheduled fire (the existing job's on `duplicate`, ADR 42728 D2). */
+  nextFireAtMs?: number;
+}
+
+/** One row of the Cron `list` receipt's `jobs` array (ADR 42728 D2).  Server order, and **`active` + `firing` rows only** — the owner's `Serve active+firing only` directive. A small fixed-shape array of scalars, which is what keeps it inside D5's bounded-machine-fact rule. */
+export interface CronReceiptJob {
+  /** The job's server-owned id. */
+  jobId: string;
+  /** Absolute epoch-milliseconds of the job's next scheduled fire. */
+  nextFireAtMs: number;
+}
+
+/** Server-computed session cost member of [`CumulativeTokenUsage`] (tdd SS4.6.5, Amendment #41610 FR-41610-2/3). */
+export interface CumulativeCost {
+  /** True when at least one leg lacked price data — clients render `(partial)`. */
+  partial: boolean;
+  /** Estimated USD total, finite and non-negative. */
+  usd: number;
+}
+
+/** Session running totals of counted-once usage (tdd SS4.6.5).  Amendment #41610: the cache splits and server-computed `cost` join the counters. The counters stay accumulate-only; `cost` is the documented exception — it may move either way on price re-adoption and is labeled estimate (INV-41610-1). `Copy` was dropped for the `cost` member. */
 export interface CumulativeTokenUsage {
+  /** Cache-read tokens, session total (FR-41610-1): saturating sum of the per-completion splits; an absent split contributes 0. Additive-optional: absent on the wire reads as 0 and zero totals are omitted, so pre-feature bytes decode and re-encode identically. */
+  cacheReadTokens?: number;
+  /** Cache-write tokens, session total (FR-41610-1). Additive-optional like the read split. */
+  cacheWriteTokens?: number;
+  /** Server-computed session cost (FR-41610-2): `None` (wire-absent) when no leg is priced — clients omit the row. Additive-optional: absent reads as unpriced. */
+  cost?: CumulativeCost;
   /** Output tokens, session total. */
   outputTokens: number;
   /** Counted-once prompt tokens, session total. */
@@ -346,6 +555,10 @@ export interface ErrorData {
   latestBoundaryCursor?: string | null;
   /** The exceeded byte limit, on `inputTooLarge` errors. */
   limitBytes?: number;
+  /** The store on `pluginNotFound` (`-32035`, SS3.29.1). */
+  marketplace?: string;
+  /** The rejected marketplace name on `marketplaceNotFound` (`-32034`, SS3.29.7) and `marketplaceAlreadyExists` (`-32036`, SS3.29.2); the rejected plugin name on `pluginNotFound` (`-32035`, SS3.29.1). */
+  name?: string;
   /** The requested `outputRef.id`, on the same `item/readOutput` arms. */
   outputRef?: string;
   /** Candidate retained paths on `sessionAmbiguous`. */
@@ -356,12 +569,18 @@ export interface ErrorData {
   resolution?: ApprovalResolutionSummary;
   /** Whether retrying can succeed (e.g. `overloaded`). When present, overrides the error table row's `retryable` default for this code. */
   retryable?: boolean;
+  /** Why the branch seed did not use a checkpoint, on the same arms: one of `no_usable_checkpoint`, `unsupported_checkpoint_shape`, `checkpoint_has_model_visible_tail`, `checkpoint_missing_suffix`; absent when the seed used a checkpoint or no fallback was recorded. */
+  seedFallbackReason?: string;
+  /** The branch-seed path the host read before rejecting, on branch-validation rejections (`session/fork`, `session/sideChat`: the `forkBoundaryInvalid`, `commandRejected` and `sessionNotFound` arms; SS2.5.3, SS2.5.7; #51365): one of `runtime_checkpoint_tail`, `runtime_full_replay`, `legacy_session_data` — the durable branch-seed vocabulary, so the client cites the real seed decision instead of guessing at a stale binary. */
+  seedPath?: string;
   /** The rejected skill selector on `skillNotFound` (`-32032`, SS3.22.4). */
   selector?: string;
   /** Session identity on errors whose lookup is session-scoped. */
   sessionId?: string;
   /** Winning settlement on `userInputAlreadySettled`. */
   settlement?: UserInputSettlementSummary;
+  /** The rejected upload id on `uploadNotFound` (`-32038`, SS3.33). */
+  uploadId?: string;
   /** User-input prompt identity on SS5.10 errors. */
   userInputId?: string;
   /** The blocked view position on `pageEventTooLarge` errors. */
@@ -369,7 +588,7 @@ export interface ErrorData {
 }
 
 /** A stable `error.data.kind` category (SS1.6): camelCase, the value clients branch on. Open: SS2–SS5 lanes add kinds additively as their methods land (Appendix B already registers them), and the spec's edge-case rule makes a new `kind` additive only because this domain is declared open. */
-export type ErrorKind = "parseError" | "invalidRequest" | "notInitialized" | "alreadyInitialized" | "methodNotFound" | "invalidParams" | "experimentalRequired" | "internal" | "pageEventTooLarge" | "outputResultTooLarge" | "overloaded" | "inputTooLarge" | "capabilityRequired" | "notFound" | "interrupted" | "cancelled" | "sessionNotFound" | "sessionInUse" | "sessionAmbiguous" | "forkBoundaryInvalid" | "sessionNotLoaded" | "sessionStreamMismatch" | "commandRejected" | "backpressured" | "skillNotFound" | "viewTruncated" | "outputUnavailable" | "boundaryPruned" | "boundaryUnusable" | "noBoundary" | "approvalNotFound" | "approvalAlreadyResolved" | "approvalChoiceInvalid" | "approvalRequirementStale" | "approvalReviewerUnavailable" | "userInputNotFound" | "userInputAlreadySettled" | "userInputAnswerInvalid" | (string & {});
+export type ErrorKind = "parseError" | "invalidRequest" | "notInitialized" | "alreadyInitialized" | "methodNotFound" | "invalidParams" | "experimentalRequired" | "internal" | "pageEventTooLarge" | "outputResultTooLarge" | "overloaded" | "inputTooLarge" | "capabilityRequired" | "notFound" | "interrupted" | "cancelled" | "sessionNotFound" | "sessionInUse" | "sessionAmbiguous" | "forkBoundaryInvalid" | "sessionNotLoaded" | "sessionStreamMismatch" | "commandRejected" | "backpressured" | "skillNotFound" | "computerUseUnavailable" | "marketplaceNotFound" | "pluginNotFound" | "marketplaceAlreadyExists" | "pluginMutationsDisabled" | "uploadNotFound" | "viewTruncated" | "outputUnavailable" | "boundaryPruned" | "boundaryUnusable" | "noBoundary" | "approvalNotFound" | "approvalAlreadyResolved" | "approvalChoiceInvalid" | "approvalRequirementStale" | "approvalReviewerUnavailable" | "userInputNotFound" | "userInputAlreadySettled" | "userInputAnswerInvalid" | (string & {});
 
 /** The `error` member of an error response (SS1.2 §2.4). */
 export interface ErrorObject {
@@ -389,6 +608,52 @@ export interface ErrorResponse {
   id: RequestId | null;
   /** The literal `"2.0"`. */
   jsonrpc: JsonRpcVersion;
+}
+
+/** `feedback/submit` classification (tdd SS3.25): the four TUI classes in camelCase wire spelling. **Closed**: a client-selected param vocabulary (#22785 E2). */
+export type FeedbackClassification = "bug" | "badResult" | "goodResult" | "other";
+
+/** `feedback/submit` result `outcome` (tdd SS3.25): how one confirmed submit resolved, mirroring the TUI `FeedbackSubmitOutcome` taxonomy. **Open**: a server-produced result vocabulary (#22785 E2) — an older client reading a newer value it does not know follows the open-enum tolerance rule instead of rejecting it. */
+export type FeedbackSubmitOutcome = "uploaded" | "recorded" | "acceptedWithoutReceipt" | "trackingFailed" | "trackingUncertain" | "dark" | "disabled" | "noCredential" | "authRejected" | "rateLimited" | "failed" | (string & {});
+
+/** `feedback/submit` params (tdd SS3.25): mirrors the TUI confirm-time `FeedbackRequest`. The call itself is the explicit confirm. */
+export interface FeedbackSubmitParams {
+  /** Consent to attach the session record; honored only for `bug`/`badResult` with `session_id` present. `true` with `with_files: false`, with a non-`bug`/`badResult` classification, or without `session_id` is `invalidParams` (F4, F8). Defaults to `false`. */
+  attachSessionRecord?: boolean;
+  /** The report class (required). */
+  classification: FeedbackClassification;
+  /** An absolute same-host path to a client-packed bundle, admitted only as a regular file under a size cap. */
+  clientArtifactsPath?: string;
+  /** The user report text (required; non-empty for `bug`). */
+  note: string;
+  /** Names the session this call is about when present (F8, superseding F3): the bundle lands in that session's dir. Names a session this host owns. When absent, the bundle lands in the host-level feedback folder and the `session_id` tag is omitted. */
+  sessionId?: string;
+  /** The files-consent decision (required). */
+  withFiles: boolean;
+}
+
+/** `feedback/submit` result (tdd SS3.25): the upload receipt. */
+export interface FeedbackSubmitResult {
+  /** The host-local absolute path of the always-written local bundle. */
+  bundlePath: string;
+  /** The failure cause on the `failed`, `acceptedWithoutReceipt`, `trackingFailed`, and `trackingUncertain` arms. */
+  cause?: string;
+  /** The consent-vs-reality local-tracing note, kept for display. */
+  localTracingNote?: string;
+  /** How the submit resolved. */
+  outcome: FeedbackSubmitOutcome;
+  /** The effective retry delay in milliseconds, on `rateLimited`. */
+  retryAfterMs?: number;
+  /** The consent-vs-reality session note, kept for display. */
+  sessionNote?: string;
+  /** Whether the consented session record rode at all. */
+  sessionRecordAttached: boolean;
+  /** Whether the consented session record rode shortened to fit. */
+  sessionRecordTruncated: boolean;
+  /** The internal receipt-Task id once that Task succeeds. */
+  taskId?: string;
+  /** The intake's accept id — always present on the `uploaded` arm, optional on `trackingFailed`/`trackingUncertain`; never fabricated on `recorded`. */
+  uploadId?: string;
 }
 
 /** Where a fork cuts the source history (tdd SS2.5.3). Turn ids are used instead of counts because ids stay stable across compaction and concurrent appends while indices do not. */
@@ -486,6 +751,39 @@ export type HistoryNoneReason = "excluded" | "cursorSuffix" | "historyBudget" | 
 /** The `history` request preference of `session/resume` (tdd SS2.5.2). The forced values downgrade `anchored` → `inline` → `snapshot` → `none`; under `auto` the full rung order is anchoredSnapshot → inline → snapshot → elided snapshot → none. */
 export type HistoryPreference = "auto" | "inline" | "snapshot" | "anchored";
 
+/** One installed handler (tdd SS3.26.1). */
+export interface HookCatalogEntry {
+  /** The row's own switch (tdd SS3.26.1). Non-enabled rows are included as `false`, never dropped. */
+  enabled: boolean;
+  /** The event the handler runs on (ADR 33398 D7 item 2). */
+  event: HookEventName;
+  /** Where the handler comes from (ADR 33398 D7 item 1). */
+  handlerKind: HookHandlerKind;
+  /** The handler key (config key or plugin hook id). */
+  key: string;
+}
+
+/** Hook event names (tdd SS3.26.1, ADR 33398 D7 item 2): the lowercase-first-letter spelling of every `HookEventKind::all()` variant. Open (server-produced result vocabulary, the #22785 enum-openness rule): a future event value is additive. */
+export type HookEventName = "sessionStart" | "userPromptSubmit" | "preToolUse" | "permissionRequest" | "postToolUse" | "preCompact" | "postCompact" | "subagentStart" | "subagentStop" | "stop" | "sessionEnd" | "notification" | "postToolUseFailure" | "stopFailure" | "postToolBatch" | "interrupt" | "sessionFork" | "toolUseStart" | "preLLMCall" | "postLLMCall" | (string & {});
+
+/** A hook row's origin (tdd SS3.26.1, ADR 33398 D7 item 1): the config `HookSourceKind` values plus plugin-contributed. Open (server-produced result vocabulary, the #22785 enum-openness rule): a future origin is additive. */
+export type HookHandlerKind = "managed" | "user" | "project" | "plugin" | (string & {});
+
+/** `hook/list` params (tdd SS3.26.1). Per-session because hook scope follows the session's workspace and plugin state. */
+export interface HookListParams {
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `hook/list` result (tdd SS3.26.1): one row per installed handler per event — a `ResolvedHookHandler` carries one event, and grouping would lose matcher/command identity (ADR 33398 D7 item 1). */
+export interface HookListResult {
+  /** The session's installed hook rows (tdd SS3.26.1 promises the set, not an order). */
+  hooks: HookCatalogEntry[];
+}
+
+/** `hookRun` durable outcome (tdd SS4.5.11). Open: new outcomes are additive, and clients MUST render unknown values generically. */
+export type HookRunStatus = "completed" | "blocked" | "failed" | "timedOut" | "cancelled" | (string & {});
+
 /** Disposition when a turn is already running (tdd SS3.2). The wire default is `queue`: an SDK caller who has not looked at session state should not silently mutate an in-flight turn. */
 export type IfBusy = "queue" | "steer" | "replace";
 
@@ -509,6 +807,10 @@ export interface InitializeResult {
   platformFamily: PlatformFamily;
   /** Server operating system. */
   platformOs: PlatformOs;
+  /** Whether this host can enforce the sandbox (ADR 50064-startup-report-sandbox-availability D2/D4). Optional so the addition is additive under SS1.5.4; a v1 host always sends it, and a client reads absent as unknown — the host predates the field, so the client falls back to its own probe rather than inventing an answer. */
+  sandboxAvailability?: SandboxAvailability;
+  /** Why enforcement is impossible. Sent only when `sandbox_availability` is `unavailable`; a client MUST NOT infer a reason when none is sent. */
+  sandboxUnavailableReason?: SandboxUnavailableReason;
   /** Envelope schema version and stable-surface fingerprint. */
   schema: SchemaInfo;
   /** Server identification. */
@@ -519,7 +821,7 @@ export interface InitializeResult {
   userAgent: string;
 }
 
-/** One transcript item at one revision (tdd SS4.4.1 common fields plus the per-kind fields of SS4.5.2–4.5.10, all optional and owned by the kind their doc names). `item/started`, `item/updated`, and `item/completed` carry the full object; `item/delta` appends to it by field path. */
+/** One transcript item at one revision (tdd SS4.4.1 common fields plus the per-kind fields of SS4.5.2–4.5.11, all optional and owned by the kind their doc names). `item/started`, `item/updated`, and `item/completed` carry the full object; `item/delta` appends to it by field path. */
 export interface Item {
   /** `subagent`: agent definition path. */
   agentPath?: string;
@@ -533,8 +835,12 @@ export interface Item {
   background?: boolean;
   /** `toolCall`: who backgrounded the task; absent on pre-split records — never inferred (tdd SS4.5.5). */
   backgroundInitiator?: BackgroundInitiator;
+  /** `reminderChild`: `true` when this child is a blocking reminder (it holds the turn open until it settles); absent otherwise, never `false` (ADR 41191 D4). The status word stays off the wire; clients name the reminder from `reminderAgentId`. */
+  blocking?: boolean;
   /** `toolCall`: the provider call id (`call_...`), opaque. */
   callId?: string;
+  /** `workflow`: one `outputRef`-shaped link per recorded child spawn with an objective (`kind: "workflow_child_prompt"`), fetched via `item/readOutput` (tdd SS4.5.8/SS4.7.4, #45449). */
+  childPromptRefs?: OutputRef[];
   /** `subagent`/`reminderChild`: the child's own session id, readable via `session/read`/`view/page` — child transcript drill-down without a second protocol (tdd SS4.5.7). */
   childSessionId?: string;
   /** `reminderChild`: parent-session-dir-relative child log path; absent when no filesystem log. */
@@ -547,14 +853,22 @@ export interface Item {
   commandText?: string;
   /** `subagent`: camelCased `SubagentControlStatus` (open enum); `status` stays the generic item vocabulary. */
   controlStatus?: SubagentControlStatus;
+  /** `agentMessage`: `true` when the provider stream died mid-reply and the run failed with this partial text committed (ADR 50063 D2) — the wire mark for the gate-off "incomplete response" rule (#13328). Absent otherwise; never cleared once set. */
+  cutOff?: boolean;
+  /** `workflow`: the run-level declared-phase label — the last `Phase` detail-row label of the reconciled projection; terminal-only, absent while live (tdd SS4.5.8, #45449). */
+  declaredPhase?: string;
   /** `subagent`: nesting depth. */
   depth?: number;
+  /** `toolCall`: the tool's own words for this call; absent = none (tdd SS4.5.5). */
+  displayLabel?: ToolDisplayLabel;
   /** `userMessage`: presentation form (tdd SS3.2); absent when the client sent none. */
   displayText?: string;
-  /** `userShell`/`subagent`: observed wall-clock duration. */
+  /** `userShell`/`subagent`: observed wall-clock duration. `workflow`: the run's wall time from launch to reconciliation, set only on the settling `item/completed` — never a sum of child durations. */
   durationMs?: number;
   /** `workflow`: launched entry identity. */
   entryId?: string;
+  /** `hookRun`: the hook event in Q2 camelCase vocabulary (tdd SS4.5.11). */
+  event?: HookEventName;
   /** `userShell`: the process exit code, when it exited by code. */
   exitCode?: number;
   /** `userShell`: the terminating signal NUMBER, when signalled (e.g. 9) — the durable payload verbatim; nothing maps numbers to names, and the fold never invents one. */
@@ -565,17 +879,29 @@ export interface Item {
   failureReason?: string;
   /** Server-provided one-line human summary any kind MAY carry, for generic rendering of kinds a client does not recognize; new kinds SHOULD carry it during their first release cycle (tdd SS4.10). */
   fallbackText?: string;
+  /** `workflow`: the human terminal summary projected from the reconciled Launch envelope, bounded at the 64 KiB surface budget; terminal-only (tdd SS4.5.8, #45449). */
+  finalSummary?: string;
   /** `reminderChild`: the reminder generation. */
   generationId?: number;
+  /** `hookRun`: the durable `hook_key` (tdd SS4.5.11). */
+  hookKey?: string;
   /** Bare UUIDv7; the item's identity across its whole lifecycle. Identity rule (tdd SS4.4.1): the task id for task-backed kinds (`toolCall`, `subagent`), the pre-minted commit `message_id` for delta-streamed kinds (`agentMessage`, `reasoning`), and the opening durable record's event id for everything else. Opaque to clients. */
   itemId: string;
   /** The item kind (open enum): clients MUST render unknown kinds generically — kind name plus `status` plus `fallbackText` (tdd SS4.10). */
   kind: ItemKind;
+  /** `hookRun`: capped display label (tdd SS4.5.11). */
+  label?: string;
   /** `workflow`: the reconciled terminal message, set on completion. */
   message?: string;
+  /** `agentMessage`: the phase the model declared on the commit; see [`MessagePhase`]. */
+  messagePhase?: MessagePhase;
   /** `toolCall`: rich content the model saw beyond text; base64 is not inlined on the view (tdd SS4.5.5). */
   modelVisibleContent?: ModelVisibleContent[];
-  /** `subagent`: objective as spawned. */
+  /** `monitorFeed`: the monitor's arm-time description with the durable `"Monitor event: "` summary prefix stripped; model- controlled tool input under the 64 KiB per-surface budget — sanitize before render (ADR 50058-monitor-feed-wire D1/D3). */
+  monitorDescription?: string;
+  /** `monitorFeed`: the monitor task id — the same value as that monitor's `toolCall` `itemId` (ADR 50058-monitor-feed-wire D1). */
+  monitorId?: string;
+  /** `subagent`: objective as spawned, bounded on the wire at the 64 KiB retained-text budget (tdd SS4.5.4, ADR 35691 D9); a cut sets `truncated`. The durable record stays verbatim. */
   objective?: string;
   /** `compaction`: terminal only — folds installed/fallback status. */
   outcome?: CompactionOutcome;
@@ -585,9 +911,11 @@ export interface Item {
   patchRef?: OutputRef;
   /** `toolCall`: server-authored edit-family diff summary (#33025) — always beside `patchRef`; absent = no diff available (tdd SS4.5.5). */
   patchSummary?: PatchSummary;
+  /** `workflow`: `true` only while a durable pause fact is in force for the run's generation; absent otherwise, never `false` (tdd SS4.5.8, ADR 45437 D2; the fold sets it on pause commit and clears it on resume-commit supersession or the generation's terminal). */
+  paused?: boolean;
   /** `reasoning`: provider reasoning item id (e.g. `rs_...`), for provider-side correlation. */
   providerItemId?: string;
-  /** `compaction`: noop/failure reason, verbatim (snake_case durable vocabulary, e.g. `"no_compactable_history"`). */
+  /** `compaction`: noop/failure reason, verbatim (snake_case durable vocabulary, e.g. `"no_compactable_history"`). `hookRun`: terminal-only capped terminal reason (tdd SS4.5.11). */
   reason?: string;
   /** RFC3339 timestamp of the item's driving durable record. Absent on ephemeral-opened items until first durable re-emission (tdd SS4.4.1). */
   recordedAt?: string;
@@ -603,12 +931,32 @@ export interface Item {
   revision: number;
   /** `subagent`: role as spawned. */
   role?: string;
+  /** `hookRun`: terminal-only durable outcome; stays `blocked` when the item settles `rejected` (tdd SS4.5.11). */
+  runStatus?: HookRunStatus;
   /** `workflow`: launched script identity. */
   scriptId?: string;
+  /** `sideChat`: the side's own session id, readable via `session/read`/`view/page` — drill-down without a second protocol (tdd SS4.5.13; ADR 45435 D3). */
+  sideSessionId?: string;
   /** Open enum; terminal = anything other than `"inProgress"`. Unknown values MUST be treated as terminal-unknown and rendered generically (tdd SS4.4.1). */
   status: ItemStatus;
+  /** `toolCall`: the latest external-attempt facet, field-for-field — countdown inputs the client renders the tick from; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusAttempt?: StatusAttempt;
+  /** `toolCall`: the latest child-summary facet, field-for-field; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusChildren?: StatusChildren;
+  /** `toolCall`: the latest health facet, field-for-field; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusHealth?: StatusHealth;
+  /** `toolCall`: the task's visible latest-status line — the latest `Status` message through the shared detail normalization; absent when no status folded or nothing displayable remains (tdd SS4.5.5, #45448). */
+  statusLine?: string;
+  /** `toolCall`: the latest detail's phase row, verbatim; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusPhase?: string;
+  /** `toolCall`: the latest progress facet, field-for-field; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusProgress?: StatusProgress;
+  /** `toolCall`: the latest active-step facet, field-for-field; absent when the latest detail carries none (tdd SS4.5.5, #45448). */
+  statusStep?: StatusStep;
   /** `userMessage`: `true` when injected mid-turn via `turn/steer` or `ifBusy: "steer"`; absent otherwise. */
   steered?: boolean;
+  /** `workflow`: display-only stop affordance — `true` while the run is open, `false` once settled; stopping rides `workflow/cancel` (tdd SS4.5.8, #45449). Authorizes nothing. */
+  stopAvailable?: boolean;
   /** `compaction`: summarizer strategy (installed only). */
   strategyId?: string;
   /** `subagent`: durable child identity (`subagent_id`). */
@@ -621,19 +969,23 @@ export interface Item {
   taskId?: string;
   /** `userMessage`: the prompt text as submitted. `agentMessage`: the accumulated reply, streamed via `item/delta` field `"text"`. `reasoning`: raw committed reasoning text where the provider exposes it (never streamed in v1, tdd SS4.5.4). */
   text?: string;
+  /** `workflow`: the run's launch token budget, set from the launch fact (tdd SS4.5.8, #45449); absent when the launch carried none. */
+  tokenBudget?: WorkflowTokenBudget;
   /** `compaction`: token budget snapshot after, when measured. */
   tokensAfter?: number;
   /** `compaction`: token budget snapshot before, when measured. */
   tokensBefore?: number;
   /** `toolCall`: tool name. */
   tool?: string;
+  /** `toolCall`: the shared semantic receipt — what the operation did, as machine-readable fact (ADR 43399 D1, tdd SS4.5.5). Optional and additive: absence is always valid and is never an error (D3). When present, a server serves the **same** receipt on every item path — `item/completed`, `view/page`, seeded snapshots and resume (D3). Observation only; carries no control authority (D4), and no field in it enters model-visible content (D7). */
+  toolReceipt?: ToolReceipt;
   /** `compaction`: what initiated the compaction. */
   trigger?: CompactionTrigger;
   /** `workflow`: camelCased `WorkflowLaunchTriggerSource`, verbatim (durable runtime vocabulary, e.g. `"modelProposal"`). */
   triggerSource?: string;
-  /** `true` when the server's per-surface text budget saturated a streamed surface (`agentMessage.text`, `reasoning.summary[*]`, `toolCall.visibleOutput`, `userShell.visibleOutput`); the durable full text remains in the log (tdd SS4.5.4). */
+  /** `true` when the server's per-surface text budget saturated a streamed surface (`agentMessage.text`, `reasoning.summary[*]`, `toolCall.visibleOutput`, `userShell.visibleOutput`), cut a `subagent` surface (`objective`, `fallbackText`, `result.summary`, `result.text`), or cut a `monitorFeed` surface (`text`, `fallbackText`, `monitorDescription`) (ADR 50058-monitor-feed-wire D3). On a `subagent` item the flag is item-level and never cleared: once any of those four is cut, every later update keeps it, even when `result.text` arrives whole (ADR 35691 D9). The durable full text remains in the log (tdd SS4.5.4). */
   truncated?: boolean;
-  /** The owning turn (== the submitting `commandId` for fresh turns, tdd SS3.1.4). `null` only for `userShell` — the one kind outside a turn (tdd SS4.5.6). */
+  /** The owning turn (== the submitting `commandId` for fresh turns, tdd SS3.1.4). `null` for the kinds outside a turn: `userShell` always (tdd SS4.5.6), `hookRun` for session-boundary runs, `monitorFeed` always (ADR 50058-monitor-feed-wire D1). */
   turnId?: string | null;
   /** `subagent`: **transitive** observed usage — the child and its own descendants; updated in place, absent until first observation; never folded into `session/tokenUsage.cumulative` (tdd SS4.6.5). */
   usage?: TokenUsage;
@@ -669,8 +1021,8 @@ export interface ItemDeltaParams {
   viewCursor: string;
 }
 
-/** The nine v1 item kinds (tdd SS4.5.2–4.5.10). Open: a new kind is additive evolution, and clients MUST render unknown kinds generically (tdd SS4.10). */
-export type ItemKind = "userMessage" | "agentMessage" | "reasoning" | "toolCall" | "userShell" | "subagent" | "workflow" | "reminderChild" | "compaction" | (string & {});
+/** The eleven v1 item kinds (tdd SS4.5.2–4.5.13) plus post-v1 kinds (tdd SS4.5.14+). Open: a new kind is additive evolution, and clients MUST render unknown kinds generically (tdd SS4.10). */
+export type ItemKind = "userMessage" | "agentMessage" | "reasoning" | "toolCall" | "userShell" | "subagent" | "workflow" | "reminderChild" | "compaction" | "hookRun" | "sideChat" | "webSearch" | "monitorFeed" | (string & {});
 
 /** The `item/readOutput` content encoding (tdd SS4.7.4). Closed: text media is ALWAYS `utf8` and binary media `base64`; a third value would change the client's decode contract. */
 export type ItemReadOutputEncoding = "utf8" | "base64";
@@ -735,8 +1087,51 @@ export interface ItemUpdatedParams {
 /** The literal `"2.0"` every frame carries (SS1.2). */
 export type JsonRpcVersion = "2.0";
 
+/** The last `turn/completed` the session-view fold applied, restated on `session/resume` and `session/read` so a reopened session can report a failed last turn (tdd SS2.5.2, ADR 36635 D2/D3). */
+export interface LastTurn {
+  /** Copied when the `turn/completed` carried it: runtime `failed` terminals do, host-death `failed` terminals do not (ADR 36635 D2). */
+  error?: TurnError;
+  /** Copied when the `turn/completed` carried it; a synthesized host-death `failed` terminal carries only this (`crash`, `crash_inferred`, or `incomplete`). Free display text: clients never branch on it. */
+  reason?: string;
+  /** The turn's terminal (tdd SS4.5.1; open enum). */
+  terminal: TurnTerminal;
+  /** The turn's id, as on its `turn/completed`; clients deduplicate a live `turn/completed` against this member by it (ADR 36635 D2). */
+  turnId: string;
+}
+
+/** Quota limit kinds (tdd SS4.5.1, ADR 50047 D2): open for evolution. */
+export type LimitKind = "tierLimit" | (string & {});
+
+/** `media/upload` params (tdd SS3.33, ADR 45443 D5): one chunk of a client-minted upload. All members required. */
+export interface MediaUploadParams {
+  /** This chunk's bytes; each call's frame stays in the SS1.1 budget. */
+  chunkBase64: string;
+  /** The upload's chunk total; positive. */
+  chunkCount: number;
+  /** This chunk's 0-based position. */
+  chunkIndex: number;
+  /** One per call; SS3.1.1 replay answers the recorded receipt. */
+  commandId: string;
+  /** `video/mp4` or `video/quicktime`, matching `VideoInput`. */
+  mediaType: string;
+  /** The session owning the video store. */
+  sessionId: string;
+  /** The assembled byte count; must equal the bytes the chunks deliver. */
+  totalBytes: number;
+  /** The client-minted upload id (UUIDv7), sent on every chunk. */
+  uploadId: string;
+}
+
+/** `media/upload` result (tdd SS3.33): echoes the client-minted id, on every chunk and replay. */
+export interface MediaUploadResult {
+  /** The receipt the turn part references. */
+  uploadId: string;
+}
+
 /** `userMessage` image attachment metadata (tdd SS4.5.2): metadata only — the durable bytes live in the log and are reachable on the raw altitude. */
 export interface MessageAttachment {
+  /** This attachment's name, `<itemId>/<n>` — the item's id plus this entry's 1-based position in its `attachments` array (tdd SS4.5.2, D-071, ADR 42850; #42850). Name only: no link form and no byte read by id (#42648).  Set by the server on every attachment entry it emits, and identical on live, paging, snapshot and rebuild paths (tdd SS4.5.2). Optional in the schema so older servers stay valid; clients compare and store the whole string and MUST NOT parse it (ADR 42850). */
+  attachmentId?: string;
   /** Pixel height, when known. */
   height?: number;
   /** The image media type (e.g. `"image/png"`). */
@@ -747,12 +1142,17 @@ export interface MessageAttachment {
   width?: number;
 }
 
+/** `agentMessage.messagePhase` (tdd SS4.5.3, #50254): the phase the model declared on the commit, never inferred from position. Set on the completed item only; absent on `item/started`, which opens before the phase is recorded. Open: a client reads an absent or unknown value on a completed item as `"finalAnswer"` and still decodes the item. Not a turn-done signal; `turn/completed` is. */
+export type MessagePhase = "commentary" | "finalAnswer" | (string & {});
+
 /** One visible catalog row (tdd SS3.10). Catalog rows marked hidden never reach the wire, so a client cannot select one. */
 export interface ModelCatalogEntry {
   /** Context limit; `null` when the catalog source declared nothing. */
   contextLimit: number | null;
   /** Cost block; `null` when the catalog source declared nothing. */
   cost: ModelCost | null;
+  /** The row's catalog default. Optional only for decoding older hosts; a present value is never null and is always a member of `variants`. Absent under `"unknown"` (ADR 33400 D2). */
+  defaultReasoningEffort?: ReasoningEffort;
   /** Description; `null` when the catalog source declared nothing. */
   description: string | null;
   /** Presentation label. */
@@ -769,8 +1169,12 @@ export interface ModelCatalogEntry {
   profileId: string | null;
   /** Provider routing. */
   providerId: string;
+  /** Described selectable tiers, a same-order subset of `variants`. Optional only for decoding older hosts; a present value is never null. Absent under `"unknown"` (ADR 33400 D2). */
+  reasoningEffortVariants?: ModelDescribedReasoningEffort[];
   /** Release date; `null` when the catalog source declared nothing. */
   releaseDate: string | null;
+  /** Complete ordered selectable efforts. Optional only for decoding older hosts; a present value is never null. Current hosts always send it. */
+  variants?: ModelReasoningEffortVariants;
 }
 
 /** Where a model catalog came from (tdd SS3.10). **Open**: an unrecognized value is an unknown source, not an error. */
@@ -791,6 +1195,14 @@ export interface ModelCost {
   output: string;
 }
 
+/** One described reasoning-effort tier of a `model/list` row (tdd SS3.10, ADR 33400 D2): a selectable tier plus the catalog's display string for it when declared. */
+export interface ModelDescribedReasoningEffort {
+  /** The catalog's per-tier display string; absent when the catalog declared none. Optional only for decoding; a present value is never null. */
+  description?: string;
+  /** The tier, in the closed D-024 vocabulary. */
+  tier: ReasoningEffort;
+}
+
 /** `model/list` params (tdd SS3.10): the discovery half of the model-picker gesture. **A query, not a command** — no `commandId`, no durable intake record, no view event. */
 export interface ModelListParams {
   /** When present, the row matching that session's effective model is flagged `isActive`. When absent, no row is active — a client may list before it has a session (tdd SS3.10). */
@@ -808,6 +1220,9 @@ export interface ModelListResult {
   /** Where the catalog came from — how a client tells a live provider catalog from a test fake and labels it honestly. */
   source: ModelCatalogSource;
 }
+
+/** A complete ordered effort set, or an explicit unknown capability. */
+export type ModelReasoningEffortVariants = ReasoningEffort[] | UnknownModelReasoningEffortVariants;
 
 /** A model selection (tdd SS3.8). Empty strings are normalized to absent. */
 export interface ModelSelection {
@@ -923,6 +1338,201 @@ export type PlatformFamily = "unix" | "windows";
 /** The server's operating system (SS1.4.1). Closed, for the same reason as [`PlatformFamily`]. */
 export type PlatformOs = "macos" | "linux" | "windows";
 
+/** One installed plugin record (tdd SS3.26.2). */
+export interface PluginCatalogEntry {
+  /** The record's own install switch; non-enabled rows are included as `false`, never dropped. */
+  enabled: boolean;
+  /** The installed plugin's identifier. */
+  id: string;
+  /** The installed record's source provenance (ADR 33398 D7 item 3). */
+  source: PluginSource;
+  /** The installed version. */
+  version: string;
+}
+
+/** `plugin/changed` params (tdd SS3.29.5): an install landed; clients re-issue `plugin/list` (plus `hook/list` and `skill/list`). */
+export interface PluginChangedParams {
+  /** The installed record's own switch. */
+  enabled: boolean;
+  /** The installed record's identifier. */
+  id: string;
+  /** The acting session. */
+  sessionId: string;
+  /** The installed-list provenance vocabulary (tdd SS3.26.2). */
+  source: PluginSource;
+  /** The installed record's version. */
+  version: string;
+}
+
+/** The `plugin/install` local-path arm (tdd SS3.29.1). */
+export interface PluginInstallLocalPathTarget {
+  /** The host folder to install from; absolute recommended, relative resolves against the host working directory. */
+  path: string;
+  /** The install lane; omitted means `default`. */
+  scope?: PluginInstallScope;
+}
+
+/** The `plugin/install` marketplace arm (tdd SS3.29.1). */
+export interface PluginInstallMarketplaceTarget {
+  /** The configured marketplace name. */
+  marketplace: string;
+  /** The plugin name within the store. */
+  name: string;
+}
+
+/** `plugin/install` params (tdd SS3.29.1). Per-session params plus a client-generated `commandId` (UUIDv7) with the uniform SS3.1.1 idempotency contract. */
+export interface PluginInstallParams {
+  /** The client-generated idempotency key (UUIDv7). */
+  commandId: string;
+  /** The target session; its workspace resolves project scope. */
+  sessionId: string;
+  /** Exactly one install target arm. */
+  target: PluginInstallTarget;
+}
+
+/** `plugin/install` result (tdd SS3.29.1): the SS3.1.2 ack envelope plus the installed receipt. */
+export interface PluginInstallResult {
+  /** The echoed idempotency key. */
+  commandId: string;
+  /** The installed record's own switch. */
+  enabled: boolean;
+  /** The installed record's identifier. */
+  id: string;
+  /** The installed-list provenance vocabulary (tdd SS3.26.2). */
+  source: PluginSource;
+  /** The ack status. */
+  status: CommandStatus;
+  /** The installed record's version. */
+  version: string;
+  /** The installer's advisory text when the install succeeded with a caveat; absent otherwise. */
+  warning?: string;
+}
+
+/** The `plugin/install` local-path scope (tdd SS3.29.1). Closed: an unknown scope is `-32602 invalidParams`. */
+export type PluginInstallScope = "default" | "user" | "project";
+
+/** The one structured install target (tdd SS3.29.1): a flat object with two optional arms, exactly one present — the `TurnInputPart` convention, since the v1 schema model names no object-variant union. Both arms or neither is `-32602 invalidParams`. */
+export interface PluginInstallTarget {
+  /** The local-path arm: install from a host folder. */
+  localPath?: PluginInstallLocalPathTarget;
+  /** The marketplace arm: install a named plugin from a store. */
+  marketplace?: PluginInstallMarketplaceTarget;
+}
+
+/** `plugin/list` params (tdd SS3.26.2). Per-session params; rows are the installed plugin records. */
+export interface PluginListParams {
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `plugin/list` result (tdd SS3.26.2): one row per installed plugin record; the spec promises the set, not an order. */
+export interface PluginListResult {
+  /** The installed plugin rows. */
+  plugins: PluginCatalogEntry[];
+}
+
+/** `plugin/marketplaceAdd` params (tdd SS3.29.2). Per-session params plus a client-generated `commandId` (UUIDv7). */
+export interface PluginMarketplaceAddParams {
+  /** The client-generated idempotency key (UUIDv7). */
+  commandId: string;
+  /** The marketplace name to configure. */
+  name: string;
+  /** The target session. */
+  sessionId: string;
+  /** The app's source vocabulary: `owner/repo`, a git URL, a `file://` URL, or a local path. */
+  source: string;
+}
+
+/** What happened to a marketplace (tdd SS3.29.6). Closed: an unknown change is a contract violation, never tolerated. */
+export type PluginMarketplaceChange = "added" | "updated" | "removed";
+
+/** `plugin/marketplaceChanged` params (tdd SS3.29.6): a marketplace was added, updated, or removed. */
+export interface PluginMarketplaceChangedParams {
+  /** What happened. */
+  change: PluginMarketplaceChange;
+  /** The marketplace name. */
+  name: string;
+  /** The stored record's plugin count; omitted on `removed`, never fabricated. */
+  pluginCount?: number;
+  /** The acting session. */
+  sessionId: string;
+  /** The stored record's skipped count; omitted on `removed`, never fabricated. */
+  skippedCount?: number;
+}
+
+/** The stored marketplace record both add and update answer (tdd SS3.29.2, SS3.29.3): the SS3.1.2 ack envelope plus the record. */
+export interface PluginMarketplaceRecordResult {
+  /** The echoed idempotency key. */
+  commandId: string;
+  /** The configured marketplace name. */
+  name: string;
+  /** The plugins the store now offers. */
+  pluginCount: number;
+  /** Entries the store could not offer, with the reason each was skipped; empty when nothing was skipped. */
+  skipped: PluginMarketplaceSkippedEntry[];
+  /** The normalized stored source. */
+  source: PluginMarketplaceSourceShape;
+  /** The ack status. */
+  status: CommandStatus;
+}
+
+/** `plugin/marketplaceRemove` params (tdd SS3.29.4). Per-session params plus a client-generated `commandId` (UUIDv7). */
+export interface PluginMarketplaceRemoveParams {
+  /** The client-generated idempotency key (UUIDv7). */
+  commandId: string;
+  /** The marketplace name to remove. */
+  name: string;
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `plugin/marketplaceRemove` result (tdd SS3.29.4): the SS3.1.2 ack envelope plus the removed name. */
+export interface PluginMarketplaceRemoveResult {
+  /** The echoed idempotency key. */
+  commandId: string;
+  /** The removed marketplace name. */
+  name: string;
+  /** The ack status. */
+  status: CommandStatus;
+}
+
+/** One skipped marketplace entry (tdd SS3.29.2). */
+export interface PluginMarketplaceSkippedEntry {
+  /** The skipped plugin. */
+  plugin: string;
+  /** Why it was skipped. */
+  reason: string;
+}
+
+/** The normalized stored marketplace source (tdd SS3.29.2). */
+export interface PluginMarketplaceSourceShape {
+  /** The stored source kind. */
+  kind: string;
+  /** The stored source path. */
+  path: string;
+}
+
+/** `plugin/marketplaceUpdate` params (tdd SS3.29.3). Per-session params plus a client-generated `commandId` (UUIDv7). */
+export interface PluginMarketplaceUpdateParams {
+  /** The client-generated idempotency key (UUIDv7). */
+  commandId: string;
+  /** The marketplace name to refresh. */
+  name: string;
+  /** The target session. */
+  sessionId: string;
+}
+
+/** A plugin row's source provenance (tdd SS3.26.2, ADR 33398 D7 item 3): camelCase of `PluginSourceProvenance`. Open (server-produced result vocabulary, the #22785 enum-openness rule): a future provenance is additive. */
+export type PluginSource = "curated" | "marketplaceUserAdded" | "foreignImport" | "nativeLocal" | (string & {});
+
+/** Typed quota-exhaustion detail (tdd SS4.5.1, ADR 50047 D2): the limit kind plus the provider's reset instant. */
+export interface QuotaDetail {
+  /** Which quota was exhausted (open enum; unknown values fall back). */
+  limitKind: LimitKind;
+  /** Epoch milliseconds at which the provider says usage resets. */
+  resetsAtMs: number;
+}
+
 /** The reasoning-effort tier sampled at submission (tdd SS3.2, SS3.3). The **same closed tier vocabulary** on both the fresh-turn and steer lanes, spelled identically; invalid tiers are invalid params. `none` is a tier of the vocabulary (ask for no reasoning), not a way to say "unset". */
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -935,6 +1545,60 @@ export interface ReasoningEffortState {
   reasoningEffort: ReasoningEffort;
   /** Which actor class set the default. */
   source: ReasoningEffortChangeSource;
+}
+
+/** `recap/cancel` params (tdd SS3.28.5): the session plus the cancel's own retry id. No target — one in-flight slot per session makes the target unambiguous. */
+export interface RecapCancelParams {
+  /** The cancel's own retry id (required, SS3.1.1). */
+  commandId: string;
+  /** The session whose in-flight recap to cancel (required). */
+  sessionId: string;
+}
+
+/** `recap/cancel` result (tdd SS3.28.5): admission only. In flight → the recap settles `cancelled`; idle → accepted no-op. */
+export interface RecapCancelResult {
+  /** The cancel's id, echoed. */
+  commandId: string;
+  /** Always `accepted` on this path. */
+  status: CommandStatus;
+}
+
+/** `recap/completed` params (tdd SS3.28.2): the settlement, delivered to the requesting connection outside the view stream — no `viewCursor`, no `sourceRange`. `text` is required on `completed` (plus optional `title`, untrusted model output — clients MUST sanitize per spec 442 INV-015); `reason` is required on `failed`; neither rides `cancelled`/`timedOut`. The struct marks the conditional members optional; the SS prose pins the per-outcome rule, the `turn/completed` usage/error convention. */
+export interface RecapCompletedParams {
+  /** The request's id — the correlation key. */
+  commandId: string;
+  /** How the request settled. */
+  outcome: RecapOutcome;
+  /** Why the side-call failed (on `failed`). */
+  reason?: RecapFailureReason;
+  /** The recapped session. */
+  sessionId: string;
+  /** The recap text verbatim (on `completed`). */
+  text?: string;
+  /** The model-produced short title (on `completed`, when produced). */
+  title?: string;
+}
+
+/** `recap/completed` failure reason (tdd SS3.28.2/SS3.28.8): post-ack failures fold to the single initial value. **Open**: later splits stay additive (#22785 E2). */
+export type RecapFailureReason = "providerFailed" | (string & {});
+
+/** `recap/completed` outcome (tdd SS3.28.2): the terminal vocabulary, camelCase per SS1.6. **Open**: a server-produced result vocabulary (#22785 E2). */
+export type RecapOutcome = "completed" | "failed" | "cancelled" | "timedOut" | (string & {});
+
+/** `recap/request` params (tdd SS3.28.1): the session plus the client-minted UUIDv7 retry id. No other param; unknown fields are `invalidParams`. */
+export interface RecapRequestParams {
+  /** The client-minted retry id (required, SS3.1.1). */
+  commandId: string;
+  /** The session to recap (required). */
+  sessionId: string;
+}
+
+/** `recap/request` result (tdd SS3.28.1): admission only — the ack is never the recap. */
+export interface RecapRequestResult {
+  /** The request's id, echoed. */
+  commandId: string;
+  /** Always `accepted` on this path. */
+  status: CommandStatus;
 }
 
 /** One end of a [`SourceRange`]: a record's event id and its sequence number within the stream (tdd SS4.2). */
@@ -966,6 +1630,15 @@ export type RequestId = number | string;
 export interface RequestReceipt {
 }
 
+/** A `turn/retracted` settlement outcome (tdd SS4.5.1, ADR 50074 D1). Open enum (D-033): decode is tolerant — a value outside the list reads as `Accepted` (the event's historical meaning — pre-feature hosts emit it only for accepted retracts), never fails. The bundle keeps enumerating the known values for codegen and docs. */
+export type RetractOutcome = "accepted" | "declined" | (string & {});
+
+/** Whether this host can enforce the sandbox (ADR 50064-startup-report-sandbox-availability D2/D4). A property of the host process, probed once at construction and identical for every session and every connection it serves — never requested, granted, or negotiated, which is why it is not a capability. Open: a future enforcement posture arrives as a new value, read by older clients as unknown. */
+export type SandboxAvailability = "available" | "unavailable" | (string & {});
+
+/** Why sandbox enforcement is impossible on this host. Sent only when [`SandboxAvailability`] is `unavailable`; a client MUST NOT infer a reason when none is sent. Open: a future reason arrives as a new value, read by older clients as unknown. */
+export type SandboxUnavailableReason = "userNamespacesDenied" | "bubblewrapUnavailable" | (string & {});
+
 /** The `schema` pair in [`InitializeResult`] (SS1.4.1, SS1.5.3). `version` is the wire **envelope** schema version — distinct from the session-view `schemaVersion`, the raw-log `schema_version`, and the 0.x/1.0 stability posture, which is not on the wire at all (INV-006a). */
 export interface SchemaInfo {
   /** `sha256:<64 lower hex>` content hash of this server binary's stable-surface bundle (INV-003). A mismatch is a warning condition, not an error (SS1.4.1). */
@@ -994,22 +1667,34 @@ export interface Session {
   branch?: string;
   /** RFC3339. For a fork this is the fork session id's UUIDv7 mint instant (tdd SS2.4). */
   createdAt: string;
+  /** The handshake `ClientInfo` recorded when the session was opened (FR-003), echoed verbatim — provenance, never an interpretation, and never a visibility gate (INV-005). **Additive-optional**; absence has four indistinguishable causes (INV-004): an in-process open; a pre-#23124 record; a half stamp where only one of name/version was recorded (FM-005) and `ClientInfo` requires both; and a session with no admitting handshake of its own — a fork child or a subagent — which never carries a stamp to begin with. */
+  createdByClient?: ClientInfo;
   /** Derived first-user-prompt preview (tdd SS2.14.1, #27598). **Additive-optional**, omitted when underivable. */
   firstUserPrompt?: string;
   /** `null` for root sessions; fork provenance otherwise (tdd SS2.4). */
   forkedFrom: ForkProvenance | null;
+  /** The served generated short title (tdd SS2.4/SS2.14.1, #50048; ADR 50048-generated-name D1). **Additive-optional**, **fold-only**: the snapshot fold derives the latest retained generated pair's short title from the log; `session/list` rows never carry it. Omitted when no pair was ever published — absent reads as unpublished, never fabricated, never inferred from the name text. `name` stays the canonical name it always was. */
+  generatedName?: string;
+  /** What kind of session this is (spec 42713 FR-001, ADR 42713 D1/D4). **Open enum**, v1 values `"root"` and `"subagent"`; a client treats an unknown value as an unknown-but-present kind and renders it, never rejecting the row. **Additive-optional**: absence asserts nothing — the host could not determine the home shape (FM-001), or the value is not yet available to serve (FM-003). */
+  kind?: SessionKind;
   /** Content-activity recency, RFC3339 (tdd SS2.4, ADR 31983 D5). **Additive-optional**: omitted when no content record exists. Never advanced by lifecycle bookkeeping (the resume marker, re-stamps) or a fork's copied seed-replay records, and never precedes `createdAt`. */
   lastActivityAt?: string;
   /** The winning metadata fold's model; `null` when that record omits it. */
   modelId: string | null;
   /** The durable allocated session name (tdd SS2.4/SS2.14.1, #27598; ADR 27598 D2/D4). **Additive-optional**: present when the serving path holds an allocated name, omitted otherwise — absent is never fabricated. Authoritative and renameable via `session/rename`. */
   name?: string;
+  /** How the served `name` was set (tdd SS2.4/SS2.14.1, #50048; ADR 50048 D1/D2). **Additive-optional**, **fold-only**: the snapshot fold (`session/read`, the resume/start/fork-ack snapshot) derives and carries it from the log; `session/list` rows never carry it. Absent — and any value the client does not recognize — reads as unknown, never fabricated. */
+  nameOrigin?: SessionNameOrigin;
+  /** The containing session's id when `kind` is `"subagent"` (FR-002, INV-002) — the id of the TOP-LEVEL session whose home holds this child, which is **not necessarily the session that spawned it**: native-child homes are physical siblings under the outer session's `subagent/` directory, so a subagent spawned by another subagent resolves to the outer session, not to its spawner. A client building a tree from this field gets one level, not a chain. Flat rather than nested: there is exactly one fact to carry, unlike `forkedFrom`'s four-field `ForkProvenance`. **Additive-optional**; a root carries none. */
+  parentSessionId?: string;
   /** Absolute path of the session's durable log; non-nullable. Under the ephemeral session profile it is the **empty string**, meaning "no durable log exists" (tdd SS2.13.2) — the one value a client must not hand to a filesystem call. */
   path: string;
   /** The winning metadata fold's provider; `null` when that record omits it. */
   providerId: string | null;
   /** The session identity. */
   sessionId: string;
+  /** `null` for root sessions and forks; side provenance otherwise (tdd SS2.4/SS2.5.7; ADR 45435 D2). A session carries at most one of `forkedFrom` and `sideFrom`. */
+  sideFrom?: SideProvenance | null;
   /** Load state as this host knows it; `session/list` reports `notLoaded` for sessions loaded by *other* hosts (tdd SS2.4). */
   status: SessionStatus;
   /** Derived display title (tdd SS2.14.1, #27598): a heuristic that may evolve — its carriage, not its derivation, is the contract. **Additive-optional**, omitted when underivable. */
@@ -1043,7 +1728,7 @@ export interface SessionApprovalModeChangedParams {
 /** `session/branchChanged` params (tdd SS4.6.4): a durable workspace-branch observation landed. */
 export interface SessionBranchChangedParams {
   /** The observed branch; `null` on a detached-HEAD observation — a fact, not "unchanged" (tdd SS4.6.4). */
-  branch?: string;
+  branch: string | null;
   /** The owning session. */
   sessionId: string;
   /** The durable records this event folded from. */
@@ -1056,13 +1741,26 @@ export interface SessionBranchChangedParams {
   workspaceRoot: string;
 }
 
+/** `session/closed` params (tdd SS2.6.2; enrolled by #33065): a loaded session was unloaded from this host, broadcast to every initialized connection. After it, the session is `notLoaded`; the log remains on disk and `session/resume` reloads it. A crash emits nothing — only the two orderly unload paths do, and both write the durable `SessionEnd` record first. */
+export interface SessionClosedParams {
+  /** Which orderly unload path fired. */
+  reason: SessionClosedReason;
+  /** The unloaded session. */
+  sessionId: string;
+  /** The final view head; a client that stores it can later `session/resume {cursor}` and receive exactly the (empty) suffix. An **opaque** view cursor: clients relay it, never parse it (tdd SS4.1).  **Required-nullable**: the producers always write the member and write `null` when the final fold failed at unload (`session/idle.rs`, `serve/shutdown.rs`; PR #16779 review) — the host defines no cursor values of its own and never invents one, and the subscriber still learns the session closed. */
+  viewCursor: string | null;
+}
+
+/** The SS2.6.2 closed-reason vocabulary. Server-produced and published OPEN by owner ruling — the #33065 menu-B pick (PR #33201 comment 5638727249, recorded in the enrollment decision record), which settles that this notification reason enum publishes open rather than resting on E2's result-vocabulary rule by analogy. A crash is deliberately not a reason, because a crash emits no notification at all. */
+export type SessionClosedReason = "idle" | "hostShutdown" | (string & {});
+
 /** `session/compact` params (tdd SS3.7): manually compact the session's conversation context — the `/compact` gesture. Compaction runs asynchronously; the ack is admission only. */
 export interface SessionCompactParams {
   /** The SS3.1.1 idempotency handle (UUIDv7). */
   commandId: string;
   /** The target session. */
   sessionId: string;
-  /** The run whose context to compact. Omit and the server resolves the session's current/latest run; a session with no resolvable run rejects with `commandRejected` reason `missing_run` (tdd SS3.7). */
+  /** The run whose context to compact. Omit and the server resolves the session's current/latest run; a session with no resolvable run rejects with `commandRejected` reason `missing_run` (tdd SS3.7). Any syntactically valid UUID: a turn from an older session may carry a v4 or v5 id. A malformed id is `invalidParams`. */
   turnId?: string;
 }
 
@@ -1128,7 +1826,7 @@ export interface SessionForkResult {
 /** `session/goalChanged` params (tdd SS4.6.2): the projected goal block's value changed — identical adoptions emit nothing (the change gate), and an explicit `null` clears. Replace wholesale; `null` never means unchanged. */
 export interface SessionGoalChangedParams {
   /** The full current goal block, or `null` to clear. */
-  goal?: Goal;
+  goal: Goal | null;
   /** The owning session. */
   sessionId: string;
   /** The durable records this event folded from. */
@@ -1149,10 +1847,37 @@ export interface SessionHistory {
   snapshot: ViewSnapshot | null;
 }
 
+/** What kind of session this is (spec 42713 FR-001/FR-005, ADR 42713 D1/D4).  **Open**: a new kind is additive evolution, and a client MUST render an unknown value as an unknown-but-present kind rather than rejecting the row. Both v1 values are terms the tree already uses — the child log directory is `subagent` and `ItemKind` already carries a `subagent` variant — so no new vocabulary is minted. */
+export type SessionKind = "root" | "subagent" | (string & {});
+
+/** Exact branch selection (#42035 FR-42035-2). */
+export interface SessionListBranchFilter {
+  /** 1–32 nonempty branch names, each 1–256 UTF-8 bytes, counted before deduplication; `null` selects sessions with no branch. */
+  anyOf: (string | null)[];
+}
+
+/** `session/listChanged` params (#33084, ADR 33084 D3): one changed row of the `session/list` shape — the full SS2.4 Session object as the answering host's list face serves it at emission (the ADR 29243 live-overlaid row), a replace, never a delta. Emitted only on connections that negotiated the `sessionListStream` capability at `initialize` (ADR 33084 D2); row birth stays on `session/started`, unload pairs with `session/closed`. */
+export interface SessionListChangedParams {
+  /** The served list row for the changed session. */
+  session: Session;
+}
+
+/** The `session/list` filter (#42035, spec 207 FR-42035-2..5). Members are ANDed with each other and with the top-level `workspaceRoot` and `updatedAfter`; values inside each `anyOf` are ORed. The canonical form the server echoes deduplicates and sorts every set, spells session IDs as canonical UUIDs, lowercases text terms, and orders `text.fields` `name` then `title`. */
+export interface SessionListFilter {
+  /** Only sessions whose branch is one of these. */
+  branch?: SessionListBranchFilter;
+  /** Only sessions whose ID is one of these. */
+  sessionId?: SessionListSessionIdFilter;
+  /** Only sessions whose served name or title matches these token prefixes. */
+  text?: SessionListTextFilter;
+}
+
 /** `session/list` params (tdd SS2.5.4). Read-only; never touches leases. */
 export interface SessionListParams {
   /** Opaque page cursor from a prior result. Page cursors are a distinct opaque-string family from view cursors and stream cursors, valid only for re-issuing the same listing (tdd SS2.5.4). Omitted and explicit `null` both mean "first page" (#23468). */
   cursor?: string | null;
+  /** Optional structured selection applied inside the bounded index query before paging (#42035, spec 207 FR-42035-1). Present — including `{}` — makes a supporting server echo its canonical form as `appliedFilter`; omitted keeps the pre-#42035 behavior. */
+  filter?: SessionListFilter;
   /** Page size; default 50, max 200 — the cap is published under #22785 E6c (owner-ruled 2026-08-26). Maximum 200. */
   limit?: number;
   /** Only sessions with log activity after this RFC3339 instant. */
@@ -1163,10 +1888,31 @@ export interface SessionListParams {
 
 /** `session/list` result (tdd SS2.5.4). Ordering is `updatedAt` descending. */
 export interface SessionListResult {
+  /** The canonical filter the server applied, present exactly when the request carried `filter` (#42035, spec 207 FR-42035-1). The probe is per-predicate PRESENCE (ADR 42035 D6): a client that requires filtering checks that every predicate it sent comes back as a member here, and treats a missing member as unsupported. Value equality is the wrong test — canonicalization trims, lowercases, NFC-normalizes, dedupes and sorts, so the echoed values often differ from the sent ones on a correctly filtered page. */
+  appliedFilter?: SessionListFilter;
   /** The next page's cursor; `null` on the last page. */
   nextCursor: string | null;
   /** The page of stored sessions. */
   sessions: Session[];
+}
+
+/** Exact session-ID selection (#42035 FR-42035-2). */
+export interface SessionListSessionIdFilter {
+  /** 1–200 session UUIDs, counted before deduplication. */
+  anyOf: string[];
+}
+
+/** A served session field `session/list` text search reads (#42035 FR-42035-3). The client selects it, so the set is closed. */
+export type SessionListTextField = "name" | "title";
+
+/** Name/title token-prefix search (#42035 FR-42035-3/FR-42035-4). Each term is trimmed, lowercased with ordinary Unicode lowercase, then NFC- normalized, and matches the beginning of an alphanumeric token, accent-sensitively (`check` matches `Checkout`; `eck` does not). NFC means a decomposed and a precomposed spelling of one term are the same term, and the echo returns the composed form. Matching never reorders rows. */
+export interface SessionListTextFilter {
+  /** Every term must match at least one selected field. */
+  allOf?: string[];
+  /** At least one term must match a selected field. `allOf` plus `anyOf` carry 1–16 terms in total, each 1–128 UTF-8 bytes in its canonical form (trimmed, lowercased, NFC) — the bytes `appliedFilter` echoes. Lowercasing and NFC can both lengthen a term, so a term inside the bound raw may still exceed it canonically. */
+  anyOf?: string[];
+  /** The 1–2 unique served fields searched. */
+  fields: SessionListTextField[];
 }
 
 /** One native MCP server supplied at session construction (ADR 32760 D1).  **Closed union** (#33295 owner ruling A1, extending D-033/D-050 to `oneOf`): a validator MUST reject an undeclared `transport` arm — the server fails `session/start` decode on an unknown transport, and a future transport arrives as an explicit schema addition. */
@@ -1183,7 +1929,7 @@ export interface SessionModelChangedParams {
   /** The selected model. */
   modelId: string;
   /** The selected provider; `null` when the selection names none. */
-  providerId?: string;
+  providerId: string | null;
   /** The owning session. */
   sessionId: string;
   /** What drove the selection. */
@@ -1203,7 +1949,7 @@ export interface SessionModelRouteUnservedParams {
   /** The standing (still bound, now unroutable) model. */
   modelId: string;
   /** The standing model's provider; `null` when the selection names none. */
-  providerId?: string;
+  providerId: string | null;
   /** The owning session. */
   sessionId: string;
   /** The durable records this event folded from. */
@@ -1214,8 +1960,12 @@ export interface SessionModelRouteUnservedParams {
 
 /** `session/nameChanged` params (tdd SS4.6.7, #27598): the fold of ANY durable session-name record — the FIRST-NAMING automatic allocate as well as an accepted `session/rename` (or the same in-process runtime command). Replace-wholesale like every SS4.6 sibling. */
 export interface SessionNameChangedParams {
+  /** The latest retained generated short title (tdd SS2.4/SS4.6.7, #50048; ADR 50048-generated-name D1). **Additive-optional**: carried at generated-pair publication and at settlement when a pair is already published; omitted when no pair was ever published — absent reads as unpublished, never fabricated. `name` stays canonical. */
+  generatedName?: string;
   /** The new canonical name now in effect. */
   name: string;
+  /** How the new name was set (tdd SS2.4/SS4.6.7, #50048; ADR 50048 D1/D2). **Additive-optional**: omitted when the emitting fold cannot prove an origin — absent reads as unknown, never fabricated. */
+  nameOrigin?: SessionNameOrigin;
   /** The owning session. */
   sessionId: string;
   /** The durable records this event folded from. */
@@ -1223,6 +1973,9 @@ export interface SessionNameChangedParams {
   /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
   viewCursor: string;
 }
+
+/** How the served session name was set (tdd SS2.4/SS4.6.7, #50048; ADR 50048 D1). **Open enum** (`x-msp-openness: open`): v1 serves `automatic` and `custom`; a client MUST read absent — and any value it does not recognize — as unknown, never fabricated. Open: a future source such as conversation-generated names (#35260) adds a value here, so closed would make that a breaking change. */
+export type SessionNameOrigin = "automatic" | "custom" | (string & {});
 
 /** `session/read` params (tdd SS2.5.5): read one stored session **without attaching** — no writer lease, no load, no subscription, no `SessionResumed` record. */
 export interface SessionReadParams {
@@ -1236,6 +1989,8 @@ export interface SessionReadParams {
 export interface SessionReadResult {
   /** The served history. */
   history: SessionHistory;
+  /** Same member as `session/resume` (tdd SS2.5.5, ADR 36635 D2). */
+  lastTurn?: LastTurn;
   /** The same pointer shape as `session/resume`. Because `session/read` never subscribes this is a point-in-time log read only: no requests are re-issued after it (tdd SS2.5.5). */
   pendingRequests: PendingRequestPointer[];
   /** The session as folded point-in-time. */
@@ -1290,6 +2045,8 @@ export interface SessionResumeParams {
   excludeItems?: boolean;
   /** History mode preference, default `auto`. A PREFERENCE, not a budget override: when the requested mode does not fit the history budget the server downgrades it and `history.mode` reports what was actually served (tdd SS2.5.2). Ignored when `cursor` or `excludeItems` makes it moot. */
   history?: HistoryPreference;
+  /** The launch permission-profile pick (amendment 42624 FR-42624-1, #50054): a profile id the host catalog already admits. Select, never create. Omitted means today's behavior: restore retained authority only, no override. The host restores first, then applies the pick in the same pre-marker step; a pick that fails admission refuses the resume `commandRejected` (-32030; `permission_profile_unknown` / `permission_profile_unavailable`) before any durable byte. Explicit `null` is invalid params (the same closed null-tolerant set as at start). */
+  permissionProfile?: string;
   /** The session to load. */
   sessionId: string;
 }
@@ -1298,6 +2055,8 @@ export interface SessionResumeParams {
 export interface SessionResumeResult {
   /** The served history. */
   history: SessionHistory;
+  /** How the last folded turn ended (tdd SS2.5.2, ADR 36635 D2). **Additive-optional**; absence is a non-assertion. */
+  lastTurn?: LastTurn;
   /** The late-joiner pointer set; empty when nothing is pending. */
   pendingRequests: PendingRequestPointer[];
   /** The loaded session. */
@@ -1364,6 +2123,26 @@ export interface SessionSetReasoningEffortResult {
   status: CommandStatus;
 }
 
+/** `session/sideChat` params (tdd SS2.5.7; ADR 45435 D2). */
+export interface SessionSideChatParams {
+  /** The SS2.5 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The source main session. */
+  sessionId: string;
+}
+
+/** `session/sideChat` result (tdd SS2.5.7; ADR 45435 D2): the `session/resume` envelope for the **new** side session, whose `session.sideFrom` carries the provenance. The side opens empty. */
+export interface SessionSideChatResult {
+  /** The served history (inline; SS2.5.7's empty-items half is #49416 — inherited turns surface until the boundary-aware fold lands). */
+  history: SessionHistory;
+  /** The late-joiner pointer set. */
+  pendingRequests: PendingRequestPointer[];
+  /** The new side session, carrying `sideFrom` provenance. */
+  session: Session;
+  /** The new side session's view head. */
+  viewCursor: string;
+}
+
 /** `session/start` params (tdd SS2.5.1). */
 export interface SessionStartParams {
   /** The session's starting approval mode; server default when omitted or explicit `null` — both spellings select the default (#23468). Select, never create — the value names a mode the host's configuration already defines (tdd SS2.5.1, SS5.12). This is the only surface that declares a non-interactive run's policy (tdd SS5.11, D-008). */
@@ -1374,12 +2153,16 @@ export interface SessionStartParams {
   config?: SessionConfig;
   /** Initial model; server default when omitted. */
   modelId?: string;
+  /** The new session's initial permission profile (amendment 42624 FR-42624-1, ADR 42197 D2): a profile id the host catalog already admits — the rows `permissionProfile/list` serves without `sessionId`. Select, never create. Omitted means today's behavior: the host's configured default under native admission, unchanged. An id the catalog does not carry, or one it serves unavailable, refuses the start `commandRejected` (-32030; `permission_profile_unknown` / `permission_profile_unavailable`) before any durable byte, and an ephemeral host refuses any id (`permission_profile_ephemeral_fixed`). `session/fork` does not admit the member; `session/resume` admits it as the launch pick (FR-42624-1, #50054). Explicit `null` is invalid params: the set of members that tolerate `null` is closed and excludes this one, exactly as it excludes `workspaceRoots`. */
+  permissionProfile?: string;
   /** Initial provider routing; server default when omitted or explicit `null` — both spellings select the default (#23468). */
   providerId?: string | null;
   /** Exact identity for this new root session. When omitted the server mints a UUIDv7. This field never selects an existing session: a retained or reserved id is rejected `commandRejected` with reason `session_id_conflict` (tdd SS2.5.1). */
   sessionId?: string;
   /** Absolute path, folded into the first metadata record. */
   workspaceRoot?: string;
+  /** The session's initial runtime workspace-root set: ordered absolute canonical existing directory paths; the first root is the CWD and plays the primary-root role; every root receives the ADR 11237 `:workspace_roots` rules; extra roots grant no Project Trust. When `workspaceRoot` is also present the two must name the same folder, compared on canonical forms (the raw `workspaceRoot` is canonicalized first; ADR 37313 D9), or the request is invalid params, and so is explicit `null` (the D-049 null-tolerant set is closed and excludes this member). Omitted preserves single-root behavior (tdd SS2.5.1, ADR 37313, #37313). */
+  workspaceRoots?: string[];
 }
 
 /** `session/start` result (tdd SS2.5.1). */
@@ -1388,6 +2171,12 @@ export interface SessionStartResult {
   session: Session;
   /** The session view head after the start fold; the connection is subscribed and receives every view event after this cursor. A deduplicated retry returns this same result (tdd SS2.5.1). */
   viewCursor: string;
+}
+
+/** `session/started` params (tdd SS2.6.1; enrolled by #33065): a session became newly loaded on this host via `session/start`, `session/fork`, or `session/sideChat` (never `session/resume` — Appendix C, OQ-F), broadcast to every initialized connection.  The one member is the same `$defs/Session` object the `session/start`/`session/fork` results carry, so the broadcast and the result describe one fact through one type — the host builds the broadcast payload as a `$defs/Session` — the fresh-start arm reuses the result's `session` member, the start-replay arm builds the live attach snapshot — and the emission is parity-gated against this type at the producer (`session-server` prod-assembly capture) and over the committed transcript corpus (conformance `session_lifecycle_enrollment`). */
+export interface SessionStartedParams {
+  /** The newly loaded session, as of the start/fork fold. */
+  session: Session;
 }
 
 /** A session's load state (tdd SS2.4). */
@@ -1430,7 +2219,7 @@ export interface SessionTokenUsageParams {
   /** Provider finish reason when reported (open vocabulary, verbatim). */
   finishReason?: string;
   /** The effective model that produced this usage; `null` on pre-schema records — never back-filled, an unpriced leg (tdd SS4.6.5). */
-  modelId?: string;
+  modelId: string | null;
   /** Prompt tokens counted exactly once under the provider's cache convention (#8803). Server-derived; deterministic — the provider is in the log. */
   promptTokens: number;
   /** The owning session. */
@@ -1478,6 +2267,22 @@ export interface SessionViewHealthChangedParams {
   sessionId: string;
 }
 
+/** Side provenance folded from the durable side provenance (`SideChatProvenance`, tdd SS2.4/SS2.5.7; ADR 45435 D2). */
+export interface SideProvenance {
+  /** The `commandId` of the `session/sideChat` that created it. */
+  commandId: string;
+  /** An **opaque provenance string** preserved verbatim from the durable side provenance (`source_cut_cursor`). Display-only — not one of the cursor families: clients MUST NOT parse it and no method accepts it (tdd SS2.4). */
+  cutCursor: string;
+  /** The source main session this side was opened from. */
+  sessionId: string;
+}
+
+/** `skill/setActivation` activation target (tdd SS3.30.1). **Closed**: a client-selected write vocabulary (ADR 45433 D2) — a write must fail a scope the host does not implement rather than record activation against an unknown target. Contrast the open read-side [`SkillSource`]. */
+export type SkillActivationScope = "user" | "project" | "bundled" | "plugin";
+
+/** The three-state skill activation (tdd SS3.30.1, ADR 10512 — no new state). **Closed**: a client-selected write vocabulary (ADR 45433 D2). */
+export type SkillActivationState = "on" | "userInvocableOnly" | "off";
+
 /** One typed-invocable shortcut spelling (tdd SS3.22.1). A plugin skill may contribute two rows: its bare-name winner and its qualified `<pluginId>:<skillId>` form. */
 export interface SkillCatalogEntry {
   /** Present when the skill declares an argument hint. */
@@ -1492,6 +2297,8 @@ export interface SkillCatalogEntry {
   selector: string;
   /** Where the skill comes from. */
   source: SkillSource;
+  /** The skill's declared human-readable name (`SKILL.md` `metadata.display-name`), for clients to show where people read the skill's name; absent when the skill declares none (ADR 56597 D2). The palette keeps showing `displayName`. */
+  title?: string;
 }
 
 /** `skill/changed` params (tdd SS3.22.2): the session's user-invocable set changed; clients re-issue `skill/list`. Advisory — the host may coalesce bursts and guarantees no ordering relative to view events (ADR 32471 D3). */
@@ -1500,7 +2307,74 @@ export interface SkillChangedParams {
   sessionId: string;
 }
 
-/** `skill/list` params (tdd SS3.22.1). Per-session because skill scope follows the session's workspace and plugin state. */
+/** The four receipt-list lengths (tdd SS3.30.2): a client renders counts without walking lists. */
+export interface SkillImportCounts {
+  /** `failed.len()`. */
+  failed: number;
+  /** `installed.len()`. */
+  installed: number;
+  /** `quarantined.len()`. */
+  quarantined: number;
+  /** `skipped.len()`. */
+  skipped: number;
+}
+
+/** One import candidate that could neither install nor quarantine (tdd SS3.30.2): recorded so the run continues past it. `id` is null when the candidate never yielded one — present-but-null, never omitted. */
+export interface SkillImportFailure {
+  /** The candidate's id, or null when it never yielded one. */
+  id: string | null;
+  /** Why the candidate failed. */
+  reason: string;
+}
+
+/** `skill/import` params (tdd SS3.30.2, #45433): import foreign skills through the single `SkillsService::import_skills` seam. */
+export interface SkillImportParams {
+  /** The SS3.1.1 idempotency handle (UUIDv7) — required even for `dryRun` previews. */
+  commandId: string;
+  /** Preview for the consent UI; writes nothing. Additive-optional, default false. */
+  dryRun?: boolean;
+  /** Re-import over already-imported ids (the CLI `--force` twin). Additive-optional, default false. */
+  force?: boolean;
+  /** The target session. */
+  sessionId: string;
+  /** The foreign ecosystem to import from. */
+  source: SkillImportSource;
+}
+
+/** One quarantined import candidate (tdd SS3.30.2): kept, not loaded. */
+export interface SkillImportQuarantine {
+  /** The candidate's id. */
+  id: string;
+  /** The quarantine reasons. */
+  reasons: string[];
+}
+
+/** `skill/import` result (tdd SS3.30.2, #45433): the ack envelope plus the service receipt projection. */
+export interface SkillImportResult {
+  /** Echoes the client's id. */
+  commandId: string;
+  /** The four list lengths. */
+  counts: SkillImportCounts;
+  /** Echoes the call's preview flag. */
+  dryRun: boolean;
+  /** Candidates that could neither install nor quarantine. Import never aborts the whole run on one bad candidate. */
+  failed: SkillImportFailure[];
+  /** The ids the run installed, in pipeline order. */
+  installed: string[];
+  /** Kept, not loaded, with reasons. */
+  quarantined: SkillImportQuarantine[];
+  /** Ids the run did not install: already-imported ids and in-run duplicates, verbatim from the seam's `skipped` vec. */
+  skipped: string[];
+  /** Echoes the call's ecosystem. */
+  source: SkillImportSource;
+  /** Admission status. */
+  status: CommandStatus;
+}
+
+/** `skill/import` foreign ecosystem (tdd SS3.30.2). **Closed**: a client-selected write vocabulary (ADR 45433 D2) — a write must fail an ecosystem the host does not implement rather than import from an unknown dir. The host resolves its own foreign dir (the `foreign_skills_sources` derivation); no client paths cross the wire. */
+export type SkillImportSource = "claude" | "codex";
+
+/** `skill/list` params (tdd SS3.22.1, SS3.30.3). Per-session because skill scope follows the session's workspace and plugin state. */
 export interface SkillListParams {
   /** The target session. */
   sessionId: string;
@@ -1510,6 +2384,36 @@ export interface SkillListParams {
 export interface SkillListResult {
   /** The session's user-invocable skill rows. */
   skills: SkillCatalogEntry[];
+}
+
+/** `skill/setActivation` params (tdd SS3.30.1, #45433): turn one skill on or off in any scope through the single `SkillsService::set_activation` seam. */
+export interface SkillSetActivationParams {
+  /** The activation to apply. */
+  activation: SkillActivationState;
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The activation target. */
+  scope: SkillActivationScope;
+  /** Names one skill: a bare or plugin-qualified token from the session's full catalog (tdd SS3.30.3), the SS3.22.1 row vocabulary. */
+  selector: string;
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `skill/setActivation` result (tdd SS3.30.1, #45433): the ack envelope plus the applied state. */
+export interface SkillSetActivationResult {
+  /** The applied activation. */
+  activation: SkillActivationState;
+  /** Echoes the client's id. */
+  commandId: string;
+  /** The activation value in force for that `(selector, scope)` immediately before the write: the same value a full-catalog `skill/list` row would have carried in `activation` for it. */
+  previous: SkillActivationState;
+  /** Echoes the applied write's scope. */
+  scope: SkillActivationScope;
+  /** Echoes the applied write's selector. */
+  selector: string;
+  /** Admission status. */
+  status: CommandStatus;
 }
 
 /** A skill row's source scope (tdd SS3.22.1): the projection of the skills crate's `SkillsSourceScope`. Open (server-produced result vocabulary, the #22785 enum-openness rule): a future scope value is additive. */
@@ -1540,7 +2444,7 @@ export interface SnapshotState {
   /** Every item, in first-opened order, each at its latest revision at the snapshot cursor. One schema per kind, shared with the notification item object — which is what makes snapshot+suffix a pure splice (tdd SS4.9.1). */
   items: Item[];
   /** The settled canonical session name; `null` when the session was never named (#27598, tdd SS4.9.1 / SS2.14). Folds the same durable `session/nameChanged` record `Session.name` reports. */
-  name?: string;
+  name?: string | null;
   /** The pending-approval half of the pending set. */
   pendingApprovals: PendingApprovalPointer[];
   /** The pending-user-input half of the pending set. */
@@ -1565,6 +2469,71 @@ export interface SourceRange {
   last: RecordPosition;
   /** The stream the folded records live on (run stream, or the session stream's mirror of task/approval/subagent-control records — whichever the fold actually consumed, tdd SS4.2). */
   stream: StreamRef;
+}
+
+/** `toolCall.statusAttempt` (tdd SS4.5.5, #45448): the latest `TaskExternalAttemptDetail`, field-for-field — countdown inputs the client renders the tick from, so no event spam. */
+export interface StatusAttempt {
+  /** The attempt number. */
+  attempt: number;
+  /** The error kind (durable vocabulary, verbatim), when recorded. */
+  errorKind?: string;
+  /** The HTTP status, when recorded. */
+  httpStatus?: number;
+  /** The maximum attempts, when known. */
+  maxAttempts?: number;
+  /** The scheduled next attempt, when known. */
+  nextAttempt?: number;
+  /** The operation (durable vocabulary, verbatim). */
+  operation: string;
+  /** The retry delay in ms, when known. */
+  retryDelayMs?: number;
+  /** The external system (durable vocabulary, verbatim). */
+  system: string;
+}
+
+/** `toolCall.statusChildren` (tdd SS4.5.5, #45448): the latest `TaskChildSummaryDetail`, field-for-field. */
+export interface StatusChildren {
+  /** Active children. */
+  active: number;
+  /** Cancelled children. */
+  cancelled: number;
+  /** Completed children. */
+  completed: number;
+  /** Failed children. */
+  failed: number;
+  /** Total children, when known. */
+  total?: number;
+}
+
+/** `toolCall.statusHealth` (tdd SS4.5.5, #45448): the latest `TaskHealthDetail`, field-for-field. */
+export interface StatusHealth {
+  /** The health level (the durable `TaskHealthLevel` vocabulary verbatim). */
+  level: StatusHealthLevel;
+  /** The reason, when recorded. */
+  reason?: string;
+}
+
+/** `toolCall.statusHealth.level` (tdd SS4.5.5, #45448): the durable `TaskHealthLevel` vocabulary verbatim. Open — runtime vocabulary may grow additively, and clients MUST render unknown levels generically. */
+export type StatusHealthLevel = "ok" | "waiting" | "degraded" | "retrying" | "blocked" | "failed" | (string & {});
+
+/** `toolCall.statusProgress` (tdd SS4.5.5, #45448): the latest `TaskProgressDetail`, field-for-field. */
+export interface StatusProgress {
+  /** Completed units. */
+  current: number;
+  /** Total units, when known. */
+  total?: number;
+  /** Unit label, when recorded. */
+  unit?: string;
+}
+
+/** `toolCall.statusStep` (tdd SS4.5.5, #45448): the latest `TaskActiveStepDetail`, field-for-field. */
+export interface StatusStep {
+  /** The step index, when known. */
+  index?: number;
+  /** The active step's label. */
+  label: string;
+  /** The step count, when known. */
+  total?: number;
 }
 
 /** One raw stream named by a [`SourceRange`] (tdd SS4.2). */
@@ -1612,9 +2581,9 @@ export interface SubagentResult {
   evidenceRefs: string[];
   /** Structured result data, verbatim, when present. */
   structuredData?: Record<string, unknown>;
-  /** Bounded result summary (<=512 chars, runtime-enforced). */
+  /** Result summary, bounded on the wire at the 64 KiB retained-text budget (tdd SS4.5.4 and SS4.5.7, ADR 35691 D9); a cut sets the item's `truncated`. The durable record stays verbatim. */
   summary: string;
-  /** Result text (<=32 KiB), when present. */
+  /** Result text, when present, bounded on the wire at the same 64 KiB budget (ADR 35691 D9); a cut sets the item's `truncated`. */
   text?: string;
 }
 
@@ -1688,6 +2657,37 @@ export interface TaskCommandResult {
   taskId: string;
 }
 
+/** One background-task inventory row (tdd SS3.31). The row is the stable contract: `kind` and `status` stay open so a future state extends them without breaking clients. */
+export interface TaskListEntry {
+  /** Who backgrounded the task, mirroring the item field. **Additive-optional**: absent on pre-split records and registry-only rows, never inferred. */
+  backgroundInitiator?: BackgroundInitiator;
+  /** What the workload is: `"tool"` or `"tool.*"` for item rows (the recorded kind when the registry records one, else `"tool"`); the recorded registry kind string verbatim for registry-only rows. Open vocabulary — clients MUST ignore unknown kinds. A `String`, not an enum: registry kind strings are unbounded. */
+  kind: string;
+  /** The host-known task start, RFC3339. **Additive-optional**: omitted, never guessed, when the host does not know it. */
+  startedAt?: string;
+  /** `"inProgress"` — the only value at this increment, since every listed row is non-terminal by construction. */
+  status: TaskListStatus;
+  /** The `toolCall` item's `itemId` for item rows; the runtime registry id for registry-only rows. */
+  taskId: string;
+  /** The short tool name on item-visible tool rows only; never a label, never arguments. **Additive-optional**: absent elsewhere. */
+  tool?: string;
+}
+
+/** `task/list` params (tdd SS3.31): the session whose background-task inventory to read. A read-only query in the `skill/list` mold: no `commandId`, no durable record, no view event. */
+export interface TaskListParams {
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `task/list` result (tdd SS3.31): one row per running background workload in `task/stopAll` reach, oldest first; empty when nothing is running. */
+export interface TaskListResult {
+  /** The session's live background-task rows. */
+  tasks: TaskListEntry[];
+}
+
+/** A task row's status (tdd SS3.31). Open (server-produced result vocabulary, the #22785 enum-openness rule): a future state is additive, and clients MUST ignore unknown statuses. */
+export type TaskListStatus = "inProgress" | (string & {});
+
 /** `task/stopAll` params (tdd §3.15): stop every stoppable background workload live at admission. */
 export interface TaskStopAllParams {
   /** The SS3.1.1 idempotency handle (UUIDv7). */
@@ -1753,6 +2753,24 @@ export interface TokenUsage {
   reasoningTokens: number;
 }
 
+/** `toolCall.displayLabel`: the call's words in three forms, each one line of plain text, always present together. The item's `status` picks the form. */
+export interface ToolDisplayLabel {
+  /** Shown while the call runs (`inProgress`), e.g. "Setting up Computer Use". */
+  active: string;
+  /** Shown after the call succeeds (`completed`), e.g. "Set up Computer Use". */
+  done: string;
+  /** Shown for every other status (failed, rejected, timed out, cancelled), beside that status; never implies success. */
+  neutral: string;
+}
+
+export type ToolReceipt = { details?: CronReceipt; family: "cron"; operation: ToolReceiptOperation; outcome: ToolReceiptOutcome; } | { details?: CodeModeReceipt; family: "codeMode"; operation: ToolReceiptOperation; outcome: ToolReceiptOutcome; } | { details?: Record<string, unknown>; family: string; operation: string; outcome: string; };
+
+/** Which operation within the family the receipt describes (ADR 43399 D1/D2). Open — registered per family, never derived from the tool name. */
+export type ToolReceiptOperation = "create" | "delete" | "list" | "execute" | "wait" | (string & {});
+
+/** What the operation did (ADR 43399 D1/D2). Open, and a **single shared vocabulary**: a value appearing in two families means the same thing in both, which is why the permitted `status` values are bound to the value here rather than per family. */
+export type ToolReceiptOutcome = "created" | "duplicate" | "deleted" | "missing" | "listed" | "rejected" | "completed" | "pending" | "failed" | "timedOut" | "cancelled" | (string & {});
+
 /** Optional W3C trace context, on requests in both directions only — never on responses or notifications (SS1.8). */
 export interface TraceContext {
   /** W3C `traceparent` string; receivers that do not trace ignore it. */
@@ -1767,7 +2785,7 @@ export interface TurnCancelParams {
   commandId: string;
   /** The target session. */
   sessionId: string;
-  /** The exact turn to cancel; omit to target the current foreground turn. */
+  /** The exact turn to cancel; omit to target the current foreground turn. Any syntactically valid UUID: a turn from an older session may carry a v4 or v5 id. A malformed id is `invalidParams`. */
   turnId?: string;
 }
 
@@ -1785,7 +2803,7 @@ export interface TurnCancelResult {
 export interface TurnCompletedParams {
   /** Turn duration; absent means unmeasured, never fabricated. */
   durationMs?: number;
-  /** Present iff `terminal` is `"failed"` (tdd SS4.5.1): mid-turn failures reach the client here — never as a JSON-RPC error. */
+  /** Present when `terminal` is `"failed"`, except on a synthesized host-death terminal, which carries `reason` instead (tdd SS4.5.1, ADR 36635 D2): mid-turn failures reach the client here — never as a JSON-RPC error. */
   error?: TurnError;
   /** The runtime's free-text terminal reason, verbatim. Display and diagnostics only; never branch on it. */
   reason?: string;
@@ -1811,12 +2829,28 @@ export interface TurnError {
   kind: TurnErrorKind;
   /** Human-readable failure text. */
   message: string;
+  /** Typed quota-exhaustion detail (ADR 50047 D2/D3): present iff the stopping failure was the quota class. Clients branch on presence, never by parsing `message`. */
+  quota?: QuotaDetail;
   /** The server's judgment that resubmitting the same input may succeed. */
   retryable: boolean;
 }
 
 /** Turn failure classes (tdd SS4.5.1, `TerminalErrorKind` plus the model-task failure class). Open. */
-export type TurnErrorKind = "stepLimit" | "configError" | "projectionError" | "logError" | "workflowLaunchError" | "environmentError" | "modelError" | "launchError" | "authRequired" | (string & {});
+export type TurnErrorKind = "stepLimit" | "configError" | "projectionError" | "logError" | "workflowLaunchError" | "environmentError" | "modelError" | "launchError" | "authRequired" | "mcpLinkError" | (string & {});
+
+/** `turn/foregroundCompleted` params (tdd SS4.5.12): the turn's foreground work is done and named background reminder checks hold the turn open. Explicitly non-terminal: the turn ends only at `turn/completed` / `turn/unqueued`. */
+export interface TurnForegroundCompletedParams {
+  /** `reminderAgentId`s of the firing's blocking set, never empty; agent ids, never display names. Live-best-effort: reads, resume, and replay may narrow it to the linked subset. */
+  blockingAgents: string[];
+  /** The owning session. */
+  sessionId: string;
+  /** The durable records this event folded from, anchored at the first blocking link of the firing window. */
+  sourceRange: SourceRange;
+  /** The turn whose foreground completed. */
+  turnId: string;
+  /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
+  viewCursor: string;
+}
 
 /** One ordered content part of a turn submission (tdd SS3.2). File mentions are text, not a part type: write `@relative/path` in a text part. A structured `mention` part is reserved and currently rejected, and an unknown part type is `invalidParams` (tdd SS3.1.2, SS3.2) — which is what closes [`TurnInputPartType`].  Modelled as a discriminated flat object rather than a Rust `enum`, the convention [`crate::view::approval::ApprovalSubject`] already established for a wire union in this crate: the v1 schema model names no object-variant union shape and fails closed on one. The serialized JSON is the tdd shape either way; what a flat object cannot express is "`mediaType` is required exactly when `type` is `image`".  **RULED (#22785 E4, owner, 2026-08-26): the precedent is accepted.** A strict union node kind may be funded later as a follow-up; if it is, it must cover [`crate::method::lifecycle::PendingRequestPointer`] too. `height` may only appear together with `width`. `width` may only appear together with `height`. */
 export interface TurnInputPart {
@@ -1834,12 +2868,14 @@ export interface TurnInputPart {
   text?: string;
   /** The part type. */
   type: TurnInputPartType;
+  /** The upload receipt, required on a `video` part (tdd SS3.2, SS3.33; ADR 45443 D5): the client-minted id `media/upload` echoed. */
+  uploadId?: string;
   /** Pixel width; must be provided together with `height` or not at all (tdd SS3.2). Published as a `dependentRequired` pair under #22785 E6c. */
   width?: number;
 }
 
 /** The `type` discriminator of a turn input part (tdd SS3.2). Closed: an unknown part type is `invalidParams` (tdd SS3.1.2). */
-export type TurnInputPartType = "text" | "image" | "skill";
+export type TurnInputPartType = "text" | "image" | "skill" | "video";
 
 /** `turn/interrupt` params (tdd SS3.4): the "user pressed stop" gesture, on the runtime's priority lane. */
 export interface TurnInterruptParams {
@@ -1849,7 +2885,7 @@ export interface TurnInterruptParams {
   retract?: boolean;
   /** The target session. */
   sessionId: string;
-  /** The exact turn to interrupt. Omit to target the session's current foreground turn, resolved at admission; prefer passing the explicit id when you have one (tdd SS3.4). */
+  /** The exact turn to interrupt. Omit to target the session's current foreground turn, resolved at admission; prefer passing the explicit id when you have one (tdd SS3.4). Any syntactically valid UUID: a turn from an older session may carry a v4 or v5 id. A malformed id is `invalidParams`. */
   turnId?: string;
 }
 
@@ -1863,18 +2899,50 @@ export interface TurnInterruptResult {
   turnId: string;
 }
 
+/** `turn/modelRetryScheduled` params (tdd SS4.5.1; ADR `50047-model-retry-scheduled-members` D1): a durable model-stream retry-scheduled fact folded — the provider backoff behind one model attempt is observable BEFORE the turn terminates, so a streaming client can render "system words · retrying in Ss · attempt N/M" instead of dead air. Non-terminal: it never resolves a turn-wait. The sibling `turn/retryScheduled` shape at the model layer: same member names and semantics (attempt/nextAttempt/maxAttempts/ retryDelayMs/system/errorKind/httpStatus), minus `reason` — the row's words derive from `errorKind` through the shared gate-off mapping, and the recorded machine message is not user text. The delay is the recorded scheduled backoff, never an absolute fire time — clients derive any countdown locally. `sourceRange` cites the session stream's mirror of the task-lifecycle record (tdd SS4.2). */
+export interface TurnModelRetryScheduledParams {
+  /** The failed model attempt (producer-normalized, >= 1). */
+  attempt: number;
+  /** The failing model attempt's durable kind, verbatim (ADR 50047 D2) — a plain string: the durable vocabulary is open-ended. */
+  errorKind?: string;
+  /** The failing model attempt's HTTP status (ADR 50047 D2). */
+  httpStatus?: number;
+  /** The model-retry chain bound. */
+  maxAttempts: number;
+  /** The scheduled model attempt (producer contract: attempt < nextAttempt <= maxAttempts; not a schema constraint). */
+  nextAttempt: number;
+  /** The scheduled backoff delay in milliseconds, verbatim from the durable fact. */
+  retryDelayMs: number;
+  /** The owning session. */
+  sessionId: string;
+  /** The durable record this event folded from (the session stream's mirror of the scheduled model task status; `first == last`). */
+  sourceRange: SourceRange;
+  /** The failing model attempt's provider system, verbatim (ADR 50047 D2) — e.g. `"meta"`. Always present from this producer (the durable `system` is a required `String`); optional on the wire so a future omission folds absent instead of failing the frame. */
+  system?: string;
+  /** The running turn whose model attempt is being retried. */
+  turnId: string;
+  /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
+  viewCursor: string;
+}
+
 /** A turn named by the snapshot's active/queued lists (tdd SS4.9.1). */
 export interface TurnRef {
   /** The `commandId` of the submit that minted it. */
   commandId: string;
+  /** `queuedTurns[]` only (#45455; ADR 45443 D7): the queued submit's presentation text, so a late joiner can render it without waiting for launch. A current host sets it on every entry it admits; absent means an older host (or a pre-feature restored entry). Never set on `activeTurn`: the running turn's text is its `userMessage` item. */
+  displayText?: string;
+  /** `queuedTurns[]` only: set when `displayText` was cut to the committed-surface budget, mirroring `userMessage.truncated` (tdd SS4.5.2). Absent unless `true`. */
+  truncated?: boolean;
   /** The turn's id, pre-minted per tdd SS3.1.4. */
   turnId: string;
 }
 
-/** `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract was durably accepted. The retracted user-message item is re-emitted via `item/updated` with `retracted: true`. */
+/** `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract durably settled, accepted or declined (ADR 50074 D1). On `"accepted"` the retracted user-message item is re-emitted via `item/updated` with `retracted: true`; on `"declined"` the client folds the legacy declined rollback instead and no item is re-emitted. */
 export interface TurnRetractedParams {
   /** The retracted submission's command id. */
   commandId: string;
+  /** The retract settlement outcome (tdd SS4.5.1, ADR 50074 D1). Additive-optional: absent reads as `"accepted"` — pre-feature hosts emit the event only for accepted retracts — and so does an unrecognized value (open enum, D-033). */
+  outcome?: RetractOutcome;
   /** The owning session. */
   sessionId: string;
   /** The durable records this event folded from. */
@@ -1889,6 +2957,10 @@ export interface TurnRetractedParams {
 export interface TurnRetryScheduledParams {
   /** The attempt that failed (producer-normalized, >= 1). */
   attempt: number;
+  /** The failing model attempt's durable kind, verbatim (ADR 50047 D2/D3) — a plain string: the durable vocabulary is open-ended. */
+  errorKind?: string;
+  /** The failing model attempt's HTTP status (ADR 50047 D2/D3). */
+  httpStatus?: number;
   /** The turn's model-retry chain bound. */
   maxAttempts: number;
   /** The attempt about to run (producer contract: attempt < nextAttempt <= maxAttempts; not a schema constraint). */
@@ -1901,6 +2973,8 @@ export interface TurnRetryScheduledParams {
   sessionId: string;
   /** The durable record this event folded from (the session stream's mirror of the retry-scheduled task status; `first == last`). */
   sourceRange: SourceRange;
+  /** The failing model attempt's provider system, verbatim (ADR 50047 D2/D3) — e.g. `"meta"`. Absent when no model-attempt facet precedes the retry status on the task (old logs). */
+  system?: string;
   /** The running turn whose model attempt is being retried. */
   turnId: string;
   /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
@@ -1910,7 +2984,7 @@ export interface TurnRetryScheduledParams {
 /** What `turn/start` did with the input (tdd SS3.2). Resolves OQ-H in v1: since `queue` is the default `ifBusy`, clients need to distinguish these without folding history. */
 export type TurnStartDisposition = "started" | "queued" | "steered" | (string & {});
 
-/** `turn/start.providerRequestOptions` is deliberately absent: **RULED (#22785 E3, owner, 2026-08-26) to stay off the published schema.** The schema is the contract, and a free-form-object node kind is revisited only if the experimental field graduates. `turn/start` params (tdd SS3.2). */
+/** `turn/start` params (tdd SS3.2).  `turn/start.providerRequestOptions` is deliberately absent: **RULED (#22785 E3, owner, 2026-08-26) to stay off the published schema.** The schema is the contract, and a free-form-object node kind is revisited only if the experimental field graduates. */
 export interface TurnStartParams {
   /** The SS3.1.1 idempotency handle (UUIDv7). The fresh turn's `turnId` derives from it (tdd SS3.1.4). */
   commandId: string;
@@ -1924,6 +2998,10 @@ export interface TurnStartParams {
   reasoningEffort?: ReasoningEffort;
   /** The target session. */
   sessionId: string;
+  /** A queued `!` shell action riding this turn (tdd SS3.2, ADR 50034): the `!cmd` typed while a turn runs, executed at the next model-call boundary before any later steer. Exclusive with `text` and `skill` input; `input` may be empty only when this member is present. Capability-gated on `userShell`: a carrying turn on a connection without the grant fails `-32010 capabilityRequired`. Explicit `null` is invalid params (the null-tolerant set is closed). A v1 stable member. */
+  userShell?: TurnUserShell;
+  /** A sticky REPLACEMENT of the session's runtime workspace-root set, binding at this turn's launch and persisting for subsequent turns until replaced again — unlike `reasoningEffort`, which is this-turn-only. Same shape and validation as `session/start.workspaceRoots`; invalid params on an explicit `ifBusy: "steer"` submit and so is explicit `null` (the D-049 null-tolerant set is closed); omitted means "unchanged", never "reset" (tdd SS3.2, ADR 37313 D3, #37313). */
+  workspaceRoots?: string[];
 }
 
 /** `turn/start` result (tdd SS3.2). */
@@ -1958,7 +3036,7 @@ export interface TurnStartedParams {
 export interface TurnSteerParams {
   /** The SS3.1.1 idempotency handle (UUIDv7). */
   commandId: string;
-  /** The turn you believe is running. Closes the race where the turn completes or is replaced between your read and your steer: input meant for turn A can never leak into turn B (tdd SS3.3). */
+  /** The turn you believe is running. Closes the race where the turn completes or is replaced between your read and your steer: input meant for turn A can never leak into turn B (tdd SS3.3). Any syntactically valid UUID: a turn from an older session may carry a v4 or v5 id. A malformed id is `invalidParams`; an id that is not the running turn is refused. */
   expectedTurnId: string;
   /** Same content parts as `turn/start`. */
   input: TurnInputPart[];
@@ -1987,7 +3065,7 @@ export interface TurnUnqueueParams {
   commandId: string;
   /** The target session. */
   sessionId: string;
-  /** The queued turn to reclaim, exactly as the queueing `turn/start`'s ack minted it and as snapshot `queuedTurns` lists it. Required, and never "whichever is newest" (tdd SS3.6). */
+  /** The queued turn to reclaim, exactly as the queueing `turn/start`'s ack minted it and as snapshot `queuedTurns` lists it. Required, and never "whichever is newest" (tdd SS3.6). Any syntactically valid UUID: a turn from an older session may carry a v4 or v5 id. A malformed id is `invalidParams`. */
   turnId: string;
 }
 
@@ -2015,6 +3093,12 @@ export interface TurnUnqueuedParams {
   viewCursor: string;
 }
 
+/** The queued `!` shell action a `turn/start` carries (tdd SS3.2, ADR 50034): the `!cmd` typed while a turn runs. The shell's command id derives from the carrying turn's `commandId`, exactly as the app's own queued submit does; the params' sibling `displayText` carries the `!…` presentation form. */
+export interface TurnUserShell {
+  /** The shell command text, without the leading `!`. */
+  commandText: string;
+}
+
 /** One element of a `view/page` result's `events` array: an **unframed view notification** exactly as tdd SS4.2.1 defines it — the nested pair `{"method", "params"}`, which is the live notification minus `jsonrpc` and `emittedAtMs`, with nothing lifted out of `params` and nothing spliced into it. SS4.2.1 is the single normative definition; SS4.7.3 and SS7.4 both cite it, so the two surfaces cannot drift. */
 export interface UnframedViewNotification {
   /** The event type — the live notification's method name, retained because the type lives only in the notification name and would otherwise be lost (tdd SS4.2.1). */
@@ -2032,6 +3116,9 @@ export interface UnframedViewNotificationParams {
   /** The event's opaque, strictly monotonic view cursor. It stays **inside** `params`, where every live notification already carries it (tdd SS4.2.1) — nothing is spliced beside `method`. */
   viewCursor: string;
 }
+
+/** The only scalar alternative to a known effort array. Kept as a closed singleton so arbitrary strings and uppercase spellings fail decoding. */
+export type UnknownModelReasoningEffortVariants = "unknown";
 
 /** `usage/read` result: `{usage?}` — omitted, never `null`, when the host has observed nothing (ADR 32563 D2: truthful absence, no "nothing observed" error). */
 export interface UsageReadResult {
@@ -2118,6 +3205,36 @@ export interface UserInputClarifyResult {
   userInputId: string;
 }
 
+/** `userInput/engaged` params (tdd SS5.10.4, ADR 45450 D2): a fire-and-forget engagement note — the user started interacting with a timed prompt, so the host disarms that prompt's auto-resolution countdown. No result, no errors, no `commandId`, no ledger row. */
+export interface UserInputEngagedParams {
+  /** The target session. */
+  sessionId: string;
+  /** The prompt being engaged. */
+  userInputId: string;
+}
+
+/** `userInput/interrupt` params (tdd SS5.10.2, ADR 45450 D1): interrupt the named prompt carrying confirmed partial answers, then stop the turn.  `answers` is optional and, when present, follows exactly the `userInput/answer` shape and limits (same `questionId` + one-of + `note` rules, same -32057 `userInputAnswerInvalid` on mismatch); absent or empty means interrupt with no confirmed answers. */
+export interface UserInputInterruptParams {
+  /** Confirmed partial answers the named settlement carries. */
+  answers?: UserInputAnswer[];
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The target session. */
+  sessionId: string;
+  /** The prompt being interrupted. */
+  userInputId: string;
+}
+
+/** `userInput/interrupt` result (tdd SS5.10.2). */
+export interface UserInputInterruptResult {
+  /** Echoes the client's id. */
+  commandId: string;
+  /** Admission status. */
+  status: CommandStatus;
+  /** The prompt this interruption settled. */
+  userInputId: string;
+}
+
 export interface UserInputOption {
   description?: string;
   label: string;
@@ -2165,6 +3282,8 @@ export type UserInputSelectionMode = "single" | "multiple";
 export interface UserInputSettledParams {
   answers: UserInputAnswer[];
   clarification: UserInputClarification | null;
+  /** The decision time as RFC3339, projected from the durable settlement record's own stamp (ADR 45450 D3, ruling 2026-10-01): always present on the wire (schema-required, `null`-able); decoders still tolerate its absence (`default`, never skipped — SS5.10.3 keeps every member present), and current hosts always populate it. */
+  decidedAt: string | null;
   decidedByCommandId: string | null;
   outcome: UserInputOutcome;
   reason: string | null;
@@ -2283,6 +3402,10 @@ export interface WorkflowChild {
   childId: string;
   /** The child's observed duration, when recorded. */
   durationMs?: number;
+  /** The attempt's machine failure class, verbatim when recorded (open, snake_case durable runtime vocabulary — the SS1.6 casing exemption). The attempt's outcome (`terminal`, else `status`) stays authoritative, except that `"completed"` with `failureKind` present means it failed (#17769). */
+  failureKind?: string;
+  /** The attempt's failure reason text, verbatim when recorded except cut to at most 2,048 UTF-8 bytes ending in U+2026 when longer. */
+  failureReason?: string;
   /** The child's display label, when recorded. */
   label?: string;
   /** The child's phase, when recorded. */
@@ -2316,7 +3439,7 @@ export interface WorkflowChildControlParams {
   workflowRunId: string;
 }
 
-/** The shared SS3.19/SS3.20 admission-only ack: deliberately bare `{commandId, status}` — settlement arrives as the workflow item's view events, never through the ack. */
+/** The shared SS3.19/SS3.20/SS3.32 admission-only ack: deliberately bare `{commandId, status}` — settlement arrives as the workflow item's view events, never through the ack. */
 export interface WorkflowControlResult {
   /** Echoes the client's id. */
   commandId: string;
@@ -2324,11 +3447,47 @@ export interface WorkflowControlResult {
   status: CommandStatus;
 }
 
+/** `workflow/pause` params (tdd SS3.32, ADR 45437 D2): pause a live workflow run, shaped exactly like `workflow/cancel`. */
+export interface WorkflowPauseParams {
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The target session. */
+  sessionId: string;
+  /** The run to pause, exactly as the `workflow` item names it (SS4.5.8); required, non-empty. */
+  workflowRunId: string;
+}
+
+/** `workflow/resume` params (tdd SS3.34, ADR 45437 D3): resume a paused workflow run, host-driven. */
+export interface WorkflowResumeParams {
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The target session. */
+  sessionId: string;
+  /** The paused run to resume, exactly as the `workflow` item names it (SS4.5.8); required, non-empty. */
+  workflowRunId: string;
+}
+
+/** `workflow/resume` result (tdd SS3.34): admission-only plus the driven turn — always present, since resume always drives (idle fresh turn or busy steer). */
+export interface WorkflowResumeResult {
+  /** Echoes the client's id. */
+  commandId: string;
+  /** Admission status. */
+  status: CommandStatus;
+  /** The turn the host drove: the fresh resume turn on an idle session, the admission-time active turn on a busy session (a routing fact like the SS3.18 wake-gate's, not settlement). */
+  turnId: string;
+}
+
+/** `workflow`: the run's launch token budget (tdd SS4.5.8, #45449). */
+export interface WorkflowTokenBudget {
+  /** The effective launch budget in tokens, verbatim from the launch fact. */
+  total: number;
+}
+
 /** Every wire method in this schema (SS1.9 index). */
-export type MspMethod = "initialize" | "subagent/sendMessage" | "subagent/followupTask" | "subagent/interrupt" | "subagent/stop" | "subagent/resume" | "subagent/reopen" | "subagent/close" | "subagent/readResult" | "session/start" | "session/resume" | "session/fork" | "session/list" | "session/read" | "turn/start" | "turn/steer" | "turn/interrupt" | "turn/cancel" | "turn/unqueue" | "session/compact" | "session/setModel" | "session/rename" | "session/setReasoningEffort" | "session/userShell" | "model/list" | "skill/list" | "task/background" | "task/stop" | "task/stopAll" | "goal/set" | "goal/edit" | "goal/clear" | "goal/pause" | "goal/resume" | "workflow/cancel" | "workflow/childControl" | "view/subscribe" | "view/unsubscribe" | "view/page" | "item/readOutput" | "approval/decide" | "approval/listPending" | "session/setApprovalMode" | "userInput/answer" | "userInput/cancel" | "userInput/clarify" | "usage/read";
+export type MspMethod = "initialize" | "subagent/sendMessage" | "subagent/followupTask" | "subagent/interrupt" | "subagent/stop" | "subagent/resume" | "subagent/reopen" | "subagent/close" | "subagent/readResult" | "session/start" | "session/resume" | "session/fork" | "session/list" | "session/read" | "session/sideChat" | "turn/start" | "turn/steer" | "turn/interrupt" | "turn/cancel" | "turn/unqueue" | "session/compact" | "session/setModel" | "session/rename" | "session/setReasoningEffort" | "session/userShell" | "model/list" | "skill/list" | "skill/setActivation" | "skill/import" | "hook/list" | "plugin/list" | "plugin/install" | "plugin/marketplaceAdd" | "plugin/marketplaceUpdate" | "plugin/marketplaceRemove" | "task/background" | "task/stop" | "task/stopAll" | "task/list" | "goal/set" | "goal/edit" | "goal/clear" | "goal/pause" | "goal/resume" | "workflow/cancel" | "workflow/childControl" | "workflow/pause" | "workflow/resume" | "media/upload" | "view/subscribe" | "view/unsubscribe" | "view/page" | "item/readOutput" | "approval/decide" | "approval/listPending" | "session/setApprovalMode" | "userInput/answer" | "userInput/cancel" | "userInput/clarify" | "userInput/interrupt" | "usage/read" | "feedback/submit" | "recap/request" | "recap/cancel" | "computerUseSettings/read" | "computerUseSettings/update" | "computerUseSetup/read" | "computerUseSetup/start" | "computerUseSetup/check";
 /** Every wire notification in this schema (SS1.9 index). */
-export type MspNotification = "initialized" | "skill/changed" | "turn/started" | "turn/completed" | "turn/retracted" | "turn/retryScheduled" | "turn/unqueued" | "item/started" | "item/updated" | "item/delta" | "item/completed" | "view/gap" | "approval/requested" | "approval/updated" | "approval/resolved" | "userInput/requested" | "userInput/settled" | "session/modelChanged" | "session/reasoningEffortChanged" | "session/statusChanged" | "session/goalChanged" | "session/todoListChanged" | "session/branchChanged" | "session/tokenUsage" | "session/contextUsage" | "session/approvalModeChanged" | "session/modelRouteUnserved" | "session/nameChanged" | "session/viewHealthChanged" | "usage/changed";
+export type MspNotification = "initialized" | "session/started" | "session/closed" | "skill/changed" | "turn/started" | "turn/completed" | "turn/retracted" | "turn/retryScheduled" | "turn/modelRetryScheduled" | "turn/unqueued" | "turn/foregroundCompleted" | "item/started" | "item/updated" | "item/delta" | "item/completed" | "view/gap" | "approval/requested" | "approval/updated" | "approval/reviewing" | "approval/resolved" | "userInput/requested" | "userInput/settled" | "userInput/engaged" | "session/modelChanged" | "session/reasoningEffortChanged" | "session/statusChanged" | "session/goalChanged" | "session/todoListChanged" | "session/branchChanged" | "session/tokenUsage" | "session/contextUsage" | "session/approvalModeChanged" | "recap/completed" | "session/modelRouteUnserved" | "session/nameChanged" | "session/viewHealthChanged" | "session/listChanged" | "usage/changed" | "computerUseSetup/changed" | "plugin/changed" | "plugin/marketplaceChanged";
 /** Every server-initiated wire request in this schema (SS5.3/SS5.10.1 index). */
 export type MspServerRequest = "approval/request" | "userInput/request";
 /** Every error `data.kind` in this schema's error table (SS1.6) — each code's primary kind plus its override kinds. */
-export type MspErrorDataKind = "parseError" | "invalidRequest" | "notInitialized" | "alreadyInitialized" | "methodNotFound" | "experimentalRequired" | "invalidParams" | "internal" | "pageEventTooLarge" | "outputResultTooLarge" | "overloaded" | "inputTooLarge" | "capabilityRequired" | "notFound" | "interrupted" | "cancelled" | "sessionNotFound" | "sessionInUse" | "sessionAmbiguous" | "forkBoundaryInvalid" | "sessionNotLoaded" | "sessionStreamMismatch" | "commandRejected" | "backpressured" | "skillNotFound" | "viewTruncated" | "outputUnavailable" | "boundaryPruned" | "boundaryUnusable" | "noBoundary" | "approvalNotFound" | "approvalAlreadyResolved" | "approvalChoiceInvalid" | "approvalRequirementStale" | "approvalReviewerUnavailable" | "userInputNotFound" | "userInputAlreadySettled" | "userInputAnswerInvalid";
+export type MspErrorDataKind = "parseError" | "invalidRequest" | "notInitialized" | "alreadyInitialized" | "methodNotFound" | "experimentalRequired" | "invalidParams" | "internal" | "pageEventTooLarge" | "outputResultTooLarge" | "overloaded" | "inputTooLarge" | "capabilityRequired" | "notFound" | "interrupted" | "cancelled" | "sessionNotFound" | "sessionInUse" | "sessionAmbiguous" | "forkBoundaryInvalid" | "sessionNotLoaded" | "sessionStreamMismatch" | "commandRejected" | "backpressured" | "skillNotFound" | "computerUseUnavailable" | "marketplaceNotFound" | "pluginNotFound" | "marketplaceAlreadyExists" | "pluginMutationsDisabled" | "uploadNotFound" | "viewTruncated" | "outputUnavailable" | "boundaryPruned" | "boundaryUnusable" | "noBoundary" | "approvalNotFound" | "approvalAlreadyResolved" | "approvalChoiceInvalid" | "approvalRequirementStale" | "approvalReviewerUnavailable" | "userInputNotFound" | "userInputAlreadySettled" | "userInputAnswerInvalid";
