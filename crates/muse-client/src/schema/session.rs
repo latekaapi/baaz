@@ -100,6 +100,12 @@ pub struct Session {
     /// The containing top-level session's id when `kind` is `subagent` (muse 1.4.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// The permission posture the host has committed for this session (muse 1.4.9,
+    /// unpublished in the schema — seen live 2026-10-16 on `session/start`, `session/resume`,
+    /// `session/fork` and `session/statusChanged`). **Additive-optional**: absent asserts nothing.
+    /// It is retained per session across a host restart, and a fork inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_state: Option<PermissionState>,
     /// Absolute path of the session's durable log; non-nullable. Under the ephemeral session
     /// profile it is the **empty string**, meaning "no durable log exists" — the one value a client
     /// must not hand to a filesystem call.
@@ -132,6 +138,25 @@ pub struct Session {
     /// never fabricated. Required-nullable.
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+/// A session's committed permission posture (see [`Session::permission_state`]). Every member
+/// is optional: the shape is unpublished, so nothing here is required of the host.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionState {
+    /// The built-in or catalog profile id in force, e.g. `:read-only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    /// Who reviews what the profile gates: `human`, `autoReview`, `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_authority: Option<String>,
+    /// Whether that reviewer is attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_attached: Option<bool>,
+    /// The posture by axis (`filesystem`, `network`, `approval`, `reviewer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axes: Option<std::collections::BTreeMap<String, String>>,
 }
 
 open_enum! {

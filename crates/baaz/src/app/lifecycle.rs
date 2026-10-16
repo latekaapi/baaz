@@ -313,6 +313,7 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
         name_origin: None,
         parent_session_id: None,
         path: String::new(),
+        permission_state: None,
         provider_id: None,
         session_id: row.session_id.clone(),
         side_from: None,
@@ -2380,7 +2381,15 @@ impl Harness {
             // not start one behind the new view's back.
             let still_open = this.active.clone().filter(|view| view.read(cx).session_id == resumed);
             if let Some(view) = still_open {
-                view.update(cx, |view, cx| view.backfill(cx));
+                view.update(cx, |view, cx| {
+                    // The sandbox follows the mode the session reports,
+                    // whatever it was left under (a session older than
+                    // Baaz's profile picks runs the host default).
+                    if let Ok(resumed) = &result {
+                        view.reconcile_profile(&resumed.session, cx);
+                    }
+                    view.backfill(cx)
+                });
             }
             cx.notify();
         });
@@ -4131,6 +4140,7 @@ impl Harness {
                             // A later resume succeeding is what stands the
                             // lease notice down.
                             view.note_resumed(cx);
+                            view.reconcile_profile(&resumed.session, cx);
                             view.follow_tail(cx);
                         });
                     }
@@ -7716,7 +7726,13 @@ done
         assert!(turn.contains("captured at enter"), "the Enter's text is sent: {turn}");
         assert!(!requests.contains("edited afterwards"), "never the later edit: {requests}");
         assert!(requests.contains("session/setModel") && requests.contains("muse-early"), "{requests}");
-        assert!(requests.contains("session/setApprovalMode"), "{requests}");
+        // A pick that lowers access goes profile first (this fake refuses
+        // it, so the mode — which would read less than the session has —
+        // never follows).
+        assert!(
+            requests.lines().any(|line| line.contains("\"session/resume\"") && line.contains(":read-only")),
+            "{requests}"
+        );
         lane_restore(state);
     }
 
@@ -10760,6 +10776,7 @@ done
                     name_origin: None,
                     parent_session_id: None,
                     path: String::new(),
+                    permission_state: None,
                     provider_id: None,
                     session_id: "count-c".into(),
                     side_from: None,

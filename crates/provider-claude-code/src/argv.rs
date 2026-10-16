@@ -98,7 +98,48 @@ pub fn permission_mode_from_claude(wire: &str) -> Option<PermissionMode> {
 /// could not be shown without running a turn, and the CLI itself warns
 /// that a live sandbox change "may not be fenced until the settings
 /// change is picked up".
-pub const READ_ONLY_DENIED_TOOLS: [&str; 6] = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit"];
+///
+/// Enumerated from the 2.1.276 binary's own tool table (2026-10-16), not
+/// from memory: every tool it flags `enablesCodeExecution` (Bash,
+/// PowerShell, Monitor, AppifactRepl, Workflow, CronCreate, RemoteTrigger,
+/// the two self-hosted-runner actions), the JavaScript `REPL`, and every
+/// tool that writes a file, a worktree or remote state (Edit, MultiEdit,
+/// Write, NotebookEdit, EnterWorktree, ExitWorktree, memory_write, the
+/// Artifact tools, DesignSync, ClaudeDesign, SendFile,
+/// ShareOnboardingGuide). The old names the CLI keeps as aliases
+/// (`KillShell`/`BashOutput` → `TaskStop`/`TaskOutput`) only stop or read
+/// a background task, so they stay. `Agent` (`Task`) stays too: a deny
+/// rule is the session's, so a subagent meets the same list.
+pub const READ_ONLY_DENIED_TOOLS: [&str; 25] = [
+    // Runs commands or code.
+    "Bash",
+    "PowerShell",
+    "Monitor",
+    "REPL",
+    "AppifactRepl",
+    "Workflow",
+    "CronCreate",
+    "RemoteTrigger",
+    "self_hosted_runner_spawn_local",
+    "self_hosted_runner_requeue_session",
+    // Writes files or a worktree.
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+    "EnterWorktree",
+    "ExitWorktree",
+    "memory_write",
+    // Writes remote state.
+    "Artifact",
+    "ArtifactData",
+    "ArtifactComments",
+    "DesignSync",
+    "ClaudeDesign",
+    "SendFile",
+    "ShareOnboardingGuide",
+    "SendFeedback",
+];
 
 /// The Baaz bridge tools Read-only denies (served as
 /// `mcp__baaz__<tool>`): those that type, run, open or close.
@@ -351,14 +392,18 @@ pub fn argv_for_fork(
 /// input frame). Text parts join in order; use [`user_content_line`] when
 /// the turn carries images.
 pub fn user_input_line(text: &str) -> String {
-    user_content_line(text, &[])
+    user_content_line(text, &[], None)
 }
 
 /// One user turn carrying text plus image parts, as NDJSON for the
 /// child's stdin. Probed live 2026-09-26 (`fixtures/claude-code/image.jsonl`):
 /// an `image` content part with a base64 `source` is accepted and echoed
 /// back by `--replay-user-messages` with its media type and length.
-pub fn user_content_line(text: &str, images: &[ImageInput]) -> String {
+///
+/// `uuid`, when given, rides the line's top-level `uuid`: the CLI's echo
+/// repeats it (probed live 2026-10-16, claude 2.1.276), which is how the
+/// fold pairs each line with the turn that answers it.
+pub fn user_content_line(text: &str, images: &[ImageInput], uuid: Option<&str>) -> String {
     let mut content = vec![serde_json::json!({"type": "text", "text": text})];
     for image in images {
         content.push(serde_json::json!({
@@ -370,11 +415,37 @@ pub fn user_content_line(text: &str, images: &[ImageInput]) -> String {
             },
         }));
     }
-    serde_json::json!({
+    let mut line = serde_json::json!({
         "type": "user",
         "message": {"role": "user", "content": content},
-    })
-    .to_string()
+    });
+    if let Some(uuid) = uuid {
+        line["uuid"] = serde_json::Value::String(uuid.to_owned());
+    }
+    line.to_string()
+}
+
+/// A fresh random (version 4) uuid for one stdin line. Hashed from the
+/// standard library's per-instance random keys, so the crate needs no
+/// uuid dependency; uniqueness within a session is all it must give.
+pub fn line_uuid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_nanos())
+        .unwrap_or(0);
+    let half = |salt: u8| {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(nanos);
+        hasher.write_u8(salt);
+        hasher.finish()
+    };
+    let bits = (u128::from(half(0)) << 64) | u128::from(half(1));
+    // Version 4, RFC 4122 variant.
+    let bits = (bits & !(0xF << 76)) | (0x4 << 76);
+    let bits = (bits & !(0x3 << 62)) | (0x2 << 62);
+    let hex = format!("{bits:032x}");
+    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
 /// One image part of an outgoing user turn: base64 bytes plus their media
@@ -579,7 +650,7 @@ mod tests {
         let line = user_content_line("see this", &[ImageInput {
             base64_data: "aGVsbG8=".into(),
             media_type: "image/png".into(),
-        }]);
+        }], None);
         assert!(!line.contains('\n'));
         let value: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
         let content = value

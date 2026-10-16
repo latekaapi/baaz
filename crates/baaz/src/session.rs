@@ -871,6 +871,14 @@ pub struct SessionView {
     /// never sets this — its chip moves only on `session/modelChanged` —
     /// and no lane ever changes provider, which has no setter by design.
     pending_model: Option<String>,
+    /// A muse mode pick's two wire steps (approval mode and permission
+    /// profile) are on the wire. Picks never interleave: one runs at a
+    /// time, and the latest pick made meanwhile waits in
+    /// [`SessionView::mode_pick_queued`].
+    mode_pick_in_flight: bool,
+    /// The newest muse mode pick made while another was on the wire —
+    /// latest wins, an earlier waiting pick is dropped.
+    mode_pick_queued: Option<PermissionMode>,
     /// The Claude Code chip's pre-first-turn seed, resolved once: it reads
     /// up to four files, and the composer asks for it on every frame.
     claude_seed_label: std::cell::OnceCell<SharedString>,
@@ -1183,6 +1191,8 @@ impl SessionView {
             models: Vec::new(),
             models_error: None,
             pending_model: None,
+            mode_pick_in_flight: false,
+            mode_pick_queued: None,
             claude_seed_label: std::cell::OnceCell::new(),
             history_model: None,
             codex_efforts: HashMap::new(),

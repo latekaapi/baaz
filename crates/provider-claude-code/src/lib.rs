@@ -110,6 +110,11 @@ pub struct ClaudeCodeAdapter {
     /// the next `SubmitInput` relaunches with `--resume` and the mode flag
     /// first, the way a cleared effort does. A later live pick clears it.
     mode_relaunch_due: Mutex<Option<PermissionMode>>,
+    /// The approval mode Baaz last asked for — a launch's mode flag or a
+    /// pick — whether or not the child has reported it yet. A relaunch
+    /// built before any report keeps this mode (and so Read-only keeps its
+    /// deny layer) instead of falling back to the CLI's default.
+    requested_mode: Mutex<Option<PermissionMode>>,
     /// Where the running child's Read-only deny layer
     /// ([`argv::read_only_settings`]) came from, which decides how a pick
     /// away from Read-only sheds it.
@@ -278,6 +283,7 @@ impl ClaudeCodeAdapter {
             bypass_capable: Mutex::new(false),
             read_only_layer: Mutex::new(ReadOnlyLayer::Off),
             mode_relaunch_due: Mutex::new(None),
+            requested_mode: Mutex::new(None),
             hub,
             control_seq: Mutex::new(1),
             sent_control: Mutex::new(Vec::new()),
@@ -569,6 +575,13 @@ impl ClaudeCodeAdapter {
     /// for this model"), so without this the chip would claim a mode the
     /// model cannot run. The chip moves only on the mode the child reports
     /// back, as for any pick.
+    ///
+    /// Runs on the child's CONFIRMED switch (see
+    /// [`ControlHub::take_confirmed_model`]), never on the pick: a refused
+    /// `set_model` leaves the session on a model that has Auto. A pick
+    /// into Auto still waiting on its relaunch (out of a launched
+    /// Read-only) becomes a relaunch into Ask instead — the chip moves
+    /// with it, as it moved for the pick.
     fn leave_auto_if_unsupported(&self, model: &str) {
         let (in_auto, row) = {
             let fold = self.fold.lock().expect("fold mutex");
@@ -577,14 +590,30 @@ impl ClaudeCodeAdapter {
         let Some(row) = row.filter(|row| in_auto && row.supports_auto_mode == Some(false)) else {
             return;
         };
+        let text =
+            format!("Auto is not available for {}; Claude Code will ask before acting.", row.display_name);
+        let converted = {
+            let mut due = self.mode_relaunch_due.lock().expect("mode relaunch mutex");
+            let auto_due = *due == Some(PermissionMode::OnRequest);
+            if auto_due {
+                *due = Some(PermissionMode::PromptUnmatched);
+            }
+            auto_due
+        };
+        if converted {
+            let session_id = self.session_id.lock().expect("session mutex").clone();
+            let moved = self.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::PromptUnmatched);
+            if let (Some(session_id), true) = (session_id, moved) {
+                let _ = self.tx.send(ProviderEvent::ApprovalModeChanged {
+                    session_id,
+                    mode: PermissionMode::PromptUnmatched,
+                });
+            }
+            self.hub.emit_card(CONTROL_MODE_FALLBACK_CARD, text);
+            return;
+        }
         if self.send_set_permission_mode(PermissionMode::PromptUnmatched).is_ok() {
-            self.hub.emit_card(
-                CONTROL_MODE_FALLBACK_CARD,
-                format!(
-                    "Auto is not available for {}; Claude Code will ask before acting.",
-                    row.display_name
-                ),
-            );
+            self.hub.emit_card(CONTROL_MODE_FALLBACK_CARD, text);
         }
     }
 
@@ -654,6 +683,9 @@ impl ClaudeCodeAdapter {
     fn note_launch_mode(&self, launch: &SessionLaunch) {
         let bypass = launch.permission_mode == Some(PermissionMode::AllowAll);
         *self.bypass_capable.lock().expect("bypass mutex") = bypass;
+        if let Some(mode) = launch.permission_mode {
+            *self.requested_mode.lock().expect("requested mode mutex") = Some(mode);
+        }
         // A fresh child holds only the layer its argv gave it: one applied
         // live died with the child it was applied to.
         *self.read_only_layer.lock().expect("read-only mutex") = if argv::carries_read_only_settings(launch) {
@@ -968,13 +1000,40 @@ impl ClaudeCodeAdapter {
     /// (an effort swap, a revive, a refused-layer fallback) keeps the mode
     /// the child was in rather than dropping back to the CLI's default —
     /// and with Read-only, its deny layer on `--settings`. Pure — no spawn.
+    ///
+    /// The child's report wins; before any report, the mode Baaz last
+    /// asked for — never no mode, which would launch a Read-only session
+    /// without its deny layer.
     fn with_session_mode(&self, launch: SessionLaunch) -> SessionLaunch {
         match launch.permission_mode {
             Some(_) => launch,
             None => {
-                let mode = self.fold.lock().expect("fold mutex").permission_mode();
+                let reported = self.fold.lock().expect("fold mutex").permission_mode();
+                let mode = reported.or(*self.requested_mode.lock().expect("requested mode mutex"));
                 argv::with_permission_mode(launch, mode)
             }
+        }
+    }
+
+    /// A child that reports Read-only (`dontAsk`) without the deny layer —
+    /// the owner's own `defaultMode` put it there, not Baaz — gets the
+    /// layer live before anything else reaches it: `dontAsk` alone still
+    /// runs whatever an owner allow rule admits, and the chip must not
+    /// read Read-only over that. Runs at each dispatch, so before any turn
+    /// goes out; a refused layer banners and owes a relaunch carrying it.
+    fn ensure_read_only_layer(&self) {
+        let read_only = self.fold.lock().expect("fold mutex").permission_mode() == Some(PermissionMode::DenyUnmatched);
+        if !read_only {
+            return;
+        }
+        let mut layer = self.read_only_layer.lock().expect("read-only mutex");
+        if *layer != ReadOnlyLayer::Off {
+            return;
+        }
+        *layer = ReadOnlyLayer::Live;
+        drop(layer);
+        if self.send_apply_read_only(PermissionMode::DenyUnmatched).is_err() {
+            *self.read_only_layer.lock().expect("read-only mutex") = ReadOnlyLayer::Off;
         }
     }
 
@@ -990,6 +1049,11 @@ impl ClaudeCodeAdapter {
         *self.child.lock().expect("child mutex") = None;
         // Requests the old child never answered die with it (Y1b review).
         self.hub.forget_pending();
+        // So do the lines it never answered: its end of stream is
+        // epoch-gated (a replaced child's never reaches the fold), so
+        // nothing else clears them, and a stale one would pair the new
+        // child's next turn with an old ack.
+        self.fold.lock().expect("fold mutex").forget_submissions();
         let launch = self.with_session_mode(self.with_mcp_config(launch.clone())?);
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
@@ -1057,10 +1121,13 @@ impl ClaudeCodeAdapter {
         if let Some(display) = display_text {
             self.fold.lock().expect("fold mutex").record_display_text(text, display);
         }
-        let line = argv::user_content_line(text, images);
+        // The line's own uuid, which the CLI's echo repeats: the turn that
+        // opens after that echo is this submission's.
+        let uuid = argv::line_uuid();
+        let line = argv::user_content_line(text, images, Some(&uuid));
         // Noted before the line goes out: the pump may fold the turn's
         // first message before this thread locks the fold again.
-        self.fold.lock().expect("fold mutex").note_submission(&turn_id);
+        self.fold.lock().expect("fold mutex").note_submission_line(&turn_id, &uuid);
         let sent = match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
@@ -1286,6 +1353,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // the child already answered must roll back before this command
         // reads the record — never one command later.
         self.hub.drain_confirmations();
+        // A model switch the child confirmed since: Auto follows the model
+        // it actually runs, before this command reads the mode.
+        if let Some(model) = self.hub.take_confirmed_model() {
+            self.leave_auto_if_unsupported(&model);
+        }
+        self.ensure_read_only_layer();
         match command {
             Command::OpenSession { request_id, workspace, model, mode, .. } => {
                 let launch =
@@ -1400,11 +1473,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     }
                     return Err(error);
                 }
-                self.leave_auto_if_unsupported(&model);
+                // Auto is re-checked when the child confirms the switch
+                // (see `leave_auto_if_unsupported`), not here.
                 Ok(Ack::Accepted)
             }
             Command::SelectApprovalMode { session_id, mode, .. } => {
                 self.check_session(&session_id)?;
+                *self.requested_mode.lock().expect("requested mode mutex") = Some(mode);
                 // Full access is the one mode a child cannot switch into
                 // live unless it was launched in it: the pick is admitted
                 // now, shown now, and lands as a `--resume` relaunch before
@@ -1521,18 +1596,24 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 let _ = request_id;
                 let (text, images) = Self::split_parts(&parts);
                 self.check_session(&session_id)?;
-                let line = argv::user_content_line(&text, &images);
-                match self.child.lock().expect("child mutex").as_mut() {
-                    Some(running) => {
-                        running.send_line(&line).map_err(|error| ProviderError::Unavailable {
-                            reason: format!("the session child is unreachable: {error}"),
-                        })?;
-                        Ok(Ack::Accepted)
-                    }
-                    None => Err(ProviderError::Unavailable {
-                        reason: "no session child is running".into(),
+                // The CLI answers a mid-turn line with a turn and a
+                // `result` of its own (probed live 2026-10-16): noted as a
+                // steer under its own uuid, so that turn and that result
+                // close the steer and never a queued submission.
+                let uuid = argv::line_uuid();
+                let line = argv::user_content_line(&text, &images, Some(&uuid));
+                self.fold.lock().expect("fold mutex").note_steer(&uuid);
+                let sent = match self.child.lock().expect("child mutex").as_mut() {
+                    Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
+                        reason: format!("the session child is unreachable: {error}"),
                     }),
+                    None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
+                };
+                if let Err(error) = sent {
+                    self.fold.lock().expect("fold mutex").forget_line(&uuid);
+                    return Err(error);
                 }
+                Ok(Ack::Accepted)
             }
             // TurnControl is Unverified: interrupt/cancel over stdin was
             // never probed, and spelling it as success would be the lie this
@@ -2503,9 +2584,10 @@ mod tests {
 
     /// Switching to a model without auto while in Auto asks the child into
     /// its asking mode and banners why — the CLI itself accepts the switch
-    /// and keeps reporting `auto` (probed). The chip waits for the child's
-    /// report. A switch onto a model with auto, or one made outside Auto,
-    /// sends nothing more.
+    /// and keeps reporting `auto` (probed). Only once the child CONFIRMS the
+    /// switch: until then the session may still be on a model with auto.
+    /// The chip waits for the child's report. A switch onto a model with
+    /// auto, or one made outside Auto, sends nothing more.
     #[test]
     fn switching_to_a_model_without_auto_leaves_auto_visibly() {
         let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
@@ -2521,6 +2603,10 @@ mod tests {
                     model_provider: None,
                 })
                 .expect("a pick lands");
+            let id = pending_id(&adapter);
+            adapter.ingest_child_line(&success_line(&id));
+            // The next dispatch settles the confirmed switch.
+            let _ = adapter.dispatch(Command::ListModels { session: None });
         };
         select("sonnet");
         assert_eq!(adapter.sent_control_lines().len(), 1, "set_model only");
@@ -2539,9 +2625,85 @@ mod tests {
             "the chip moves on the child's report, not here"
         );
         // Out of Auto, the same switch sends no mode change.
+        adapter.hub.pending.lock().expect("pending mutex").clear();
         adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::PromptUnmatched);
         select("haiku");
         assert_eq!(adapter.sent_control_lines().len(), 4);
+    }
+
+    /// A switch onto a model without auto that the child REFUSES leaves the
+    /// session on its old model — which has auto — so Auto stays.
+    #[test]
+    fn a_refused_switch_never_leaves_auto() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        fold_catalog(&adapter);
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::OnRequest);
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "haiku".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        let id = pending_id(&adapter);
+        adapter.ingest_child_line(&error_line(&id, "nope"));
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        let lines = adapter.sent_control_lines();
+        assert!(lines.iter().all(|line| !line.contains("set_permission_mode")), "{lines:?}");
+        let cards = control_cards(&drain_events(&adapter));
+        assert!(cards.iter().all(|(kind, _)| kind != CONTROL_MODE_FALLBACK_CARD), "{cards:?}");
+    }
+
+    /// A pick into Auto still waiting on its relaunch (out of a launched
+    /// Read-only) becomes a relaunch into Ask when a confirmed switch lands
+    /// on a model without auto — it never relaunches into Auto anyway.
+    #[test]
+    fn a_pending_relaunch_into_auto_follows_a_model_without_it() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        fold_catalog(&adapter);
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        *adapter.read_only_layer.lock().expect("read-only mutex") = ReadOnlyLayer::Launched;
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::DenyUnmatched);
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "m-1".into(),
+                session_id: "sess-1".into(),
+                mode: PermissionMode::OnRequest,
+            })
+            .expect("admitted");
+        assert_eq!(*adapter.mode_relaunch_due.lock().expect("mode relaunch mutex"), Some(PermissionMode::OnRequest));
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "haiku".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        let id = pending_id(&adapter);
+        adapter.ingest_child_line(&success_line(&id));
+        let _ = drain_events(&adapter);
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        assert_eq!(
+            *adapter.mode_relaunch_due.lock().expect("mode relaunch mutex"),
+            Some(PermissionMode::PromptUnmatched),
+            "the relaunch goes into Ask"
+        );
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ApprovalModeChanged { mode: PermissionMode::PromptUnmatched, .. }
+            )),
+            "the chip follows the converted pick: {events:?}"
+        );
+        assert!(control_cards(&events).iter().any(|(kind, _)| kind == CONTROL_MODE_FALLBACK_CARD));
+        let lines = adapter.sent_control_lines();
+        assert!(lines.iter().all(|line| !line.contains("set_permission_mode")), "nothing live: {lines:?}");
     }
 
     /// A `set_model` the child confirms stays picked: success finalises
@@ -2683,6 +2845,26 @@ mod tests {
         let _ = adapter.dispatch(Command::ListModels { session: None });
         assert_eq!(adapter.model.lock().expect("model mutex").as_deref(), Some("opus"), "the new pick stands");
         assert!(control_cards(&drain_events(&adapter)).is_empty(), "no stale banner");
+    }
+
+    /// A relaunch forgets the replaced child's waiting submissions too: its
+    /// end of stream is epoch-gated, so nothing else would, and a stale
+    /// entry would name the new child's first turn after an old ack.
+    #[test]
+    fn relaunch_forgets_submissions_the_old_child_never_answered() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").note_submission_line("t-old", "u-old");
+        let launch = SessionLaunch {
+            argv: Vec::new(),
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let _ = adapter.relaunch(&launch);
+        assert!(!adapter.fold.lock().expect("fold mutex").has_submissions(), "nothing stale survives");
     }
 
     /// An `apply_flag_settings` the child rejects falls back to the
@@ -3030,6 +3212,36 @@ mod tests {
     fn applied_settings(line: &str) -> Option<serde_json::Value> {
         let value: serde_json::Value = serde_json::from_str(line).expect("json");
         (value["request"]["subtype"] == "apply_flag_settings").then(|| value["request"]["settings"].clone())
+    }
+
+    /// A child that reports Read-only on its own (the owner's
+    /// `defaultMode: dontAsk`) gets the deny layer live before the next
+    /// command goes on — `dontAsk` alone still runs owner-allowed tools —
+    /// and only once.
+    #[test]
+    fn a_child_reporting_read_only_on_its_own_gets_the_layer() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"dontAsk","session_id":"sess-1"}"#,
+        );
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        let layers: Vec<_> = adapter.sent_control_lines().iter().filter_map(|line| applied_settings(line)).collect();
+        assert_eq!(layers, vec![argv::read_only_settings()], "the layer, once");
+    }
+
+    /// A relaunch built before the child reported any mode keeps the mode
+    /// Baaz last asked for: Read-only never relaunches without its layer.
+    #[test]
+    fn a_relaunch_before_any_report_keeps_the_requested_mode() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        assert_eq!(adapter.fold.lock().expect("fold mutex").permission_mode(), None, "no report yet");
+        let launch = adapter.with_session_mode(argv::argv_for_resume("sess-1", None, None, None));
+        assert_eq!(launch.permission_mode, Some(PermissionMode::DenyUnmatched));
+        assert!(argv::carries_read_only_settings(&launch), "{:?}", launch.argv);
     }
 
     fn pick(adapter: &ClaudeCodeAdapter, mode: PermissionMode) {

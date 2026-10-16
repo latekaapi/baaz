@@ -132,6 +132,11 @@ pub struct ControlHub {
     /// arrives (the pump owns no spawn), consumed by the adapter arm that
     /// already owns the spawn.
     pub(crate) effort_relaunch_due: Mutex<Option<SessionLaunch>>,
+    /// The model of the last `set_model` the child confirmed and no newer
+    /// pick superseded: the adapter re-checks the approval mode against it
+    /// on its next dispatch (the pump cannot write to the child), so a
+    /// refused switch never moves the mode.
+    pub(crate) confirmed_model: Mutex<Option<String>>,
     /// Which child's stream is the session's: each spawn takes the next
     /// epoch, and a deliberate hang-up (relaunch, close, quit) moves past
     /// its own. Only the current child's end of stream may close turns
@@ -163,6 +168,7 @@ impl ControlHub {
             effort,
             session_id,
             effort_relaunch_due: Mutex::new(None),
+            confirmed_model: Mutex::new(None),
             child_epoch: AtomicU64::new(0),
             child_lost: AtomicBool::new(false),
         }
@@ -204,6 +210,12 @@ impl ControlHub {
     /// is the claim: at most one `SubmitInput` performs it.
     pub(crate) fn take_effort_relaunch(&self) -> Option<SessionLaunch> {
         self.effort_relaunch_due.lock().expect("relaunch mutex").take()
+    }
+
+    /// Take the model of a confirmed `set_model`, when one landed since the
+    /// last take. The take is the claim.
+    pub(crate) fn take_confirmed_model(&self) -> Option<String> {
+        self.confirmed_model.lock().expect("confirmed model mutex").take()
     }
 
     /// Fold one raw child stdout line and confirm whatever it settles: the
@@ -283,11 +295,19 @@ impl ControlHub {
             return;
         };
         match subtype {
-            "success" => {
-                if pending.kind == PendingControlKind::Initialize {
-                    self.fold.lock().expect("fold mutex").set_catalog(models);
+            "success" => match pending.kind {
+                PendingControlKind::Initialize => self.fold.lock().expect("fold mutex").set_catalog(models),
+                PendingControlKind::SetModel => {
+                    // Owned read first (see `refuse`): only the pick still
+                    // on record counts — a superseded one answers for
+                    // nothing.
+                    let current = self.model.lock().expect("model mutex").clone();
+                    if current.is_some() && current == pending.wanted_model {
+                        *self.confirmed_model.lock().expect("confirmed model mutex") = current;
+                    }
                 }
-            }
+                _ => {}
+            },
             "error" => {
                 self.refuse(pending, &error_reason(error));
             }

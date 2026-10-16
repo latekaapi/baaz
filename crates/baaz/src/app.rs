@@ -2446,9 +2446,14 @@ impl Harness {
             // left alone.
             let open = this.active.clone().filter(|view| view.read(cx).session_id == resumed_id);
             match result {
-                Ok(_) => {
+                Ok(resumed) => {
                     if let Some(view) = open {
-                        view.update(cx, |view, cx| view.note_resumed(cx));
+                        view.update(cx, |view, cx| {
+                            view.note_resumed(cx);
+                            // The sandbox follows the mode the session
+                            // reports, whatever it was left under.
+                            view.reconcile_profile(&resumed.session, cx);
+                        });
                     }
                     cx.notify();
                 }

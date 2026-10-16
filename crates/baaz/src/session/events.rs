@@ -517,6 +517,8 @@ mod tests {
 import sys, json
 log = open(sys.argv[-1], "a", buffering=1)
 fail_steer = "fail-steer" in sys.argv
+fail_resume = "fail-resume" in sys.argv
+fail_mode = "fail-mode" in sys.argv
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -533,6 +535,13 @@ for line in sys.stdin:
     params = req.get("params") or {}
     if method == "turn/steer" and fail_steer:
         resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "commandRejected: missing_run", "data": {"kind": "commandRejected", "reason": "missing_run"}}}
+    elif method == "session/fork":
+        session = {"sessionId": "s-fork", "path": "", "status": "idle", "activeTurnId": None, "createdAt": "2026-10-16T00:00:00Z", "updatedAt": "2026-10-16T00:00:00Z", "workspaceRoot": None, "providerId": None, "modelId": None, "turnCount": 0, "forkedFrom": None, "approvalMode": {"mode": "allowAll", "source": "startup", "lastCommandId": None}, "permissionState": {"profileId": ":read-only"}}
+        resp = {"jsonrpc": "2.0", "id": rid, "result": {"session": session, "viewCursor": "v4:s-fork:1", "history": {"mode": "none", "items": None, "snapshot": None, "noneReason": "excluded"}, "pendingRequests": []}}
+    elif method == "session/resume" and fail_resume and not (params.get("permissionProfile") == ":read-only" and "allow-read-only" in sys.argv):
+        resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32030, "message": "commandRejected: permission_profile_unavailable", "data": {"kind": "commandRejected", "reason": "permission_profile_unavailable"}}}
+    elif method == "session/setApprovalMode" and fail_mode:
+        resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32030, "message": "commandRejected: policy_rejected", "data": {"kind": "commandRejected", "reason": "policy_rejected"}}}
     elif method == "session/setApprovalMode":
         resp = {"jsonrpc": "2.0", "id": rid, "result": {"commandId": params.get("commandId"), "status": "accepted", "applyOutcome": "completed", "effectiveMode": {"mode": params.get("mode"), "source": "approvalReconfigure", "lastCommandId": params.get("commandId")}}}
     elif method in ("turn/unqueue", "turn/steer"):
@@ -700,6 +709,224 @@ for line in sys.stdin:
         assert_eq!(resume.pointer("/params/sessionId").and_then(|m| m.as_str()), Some("s-1"));
         assert_eq!(resume.pointer("/params/permissionProfile").and_then(|m| m.as_str()), Some(":unrestricted"));
         assert_eq!(resume.pointer("/params/excludeItems"), Some(&serde_json::json!(true)), "metadata only: no replay");
+    }
+
+    /// The `session/` calls the stub saw, as `(method, mode or profile)`.
+    fn mode_calls(stub: &StubServe) -> Vec<(String, String)> {
+        stub.requests()
+            .iter()
+            .filter_map(|v| {
+                let method = v.get("method").and_then(|m| m.as_str())?;
+                let arg = match method {
+                    "session/setApprovalMode" => v.pointer("/params/mode"),
+                    "session/resume" => v.pointer("/params/permissionProfile"),
+                    _ => return None,
+                };
+                Some((method.to_owned(), arg.and_then(|a| a.as_str()).unwrap_or_default().to_owned()))
+            })
+            .collect()
+    }
+
+    fn wait_for_calls(stub: &StubServe, vc: &mut gpui::VisualTestContext, count: usize) -> Vec<(String, String)> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            vc.run_until_parked();
+            let calls = mode_calls(stub);
+            if calls.len() >= count {
+                // Settle: nothing further may follow.
+                std::thread::sleep(Duration::from_millis(150));
+                vc.run_until_parked();
+                return mode_calls(stub);
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {count} mode calls, saw {calls:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn call(method: &str, arg: &str) -> (String, String) {
+        (method.to_owned(), arg.to_owned())
+    }
+
+    /// A pick that lowers access tightens the profile first: if the mode
+    /// step is then refused, the chip reads more access than the session
+    /// has — never less — and the banner says what holds.
+    #[gpui::test]
+    fn a_muse_pick_that_lowers_access_moves_the_profile_first(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-down", &["fail-mode"]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-down");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_mode(PermissionMode::DenyUnmatched, cx)));
+        let calls = wait_for_calls(&stub, vc, 2);
+        assert_eq!(
+            calls,
+            [call("session/resume", ":read-only"), call("session/setApprovalMode", "denyUnmatched")],
+            "profile first, nothing undone"
+        );
+        let banner = vc.update(|_, cx| view.read(cx).banner.clone()).expect("the person sees it");
+        assert!(banner.contains("Read-only sandbox is on"), "{banner}");
+    }
+
+    /// A pick that raises access whose profile is refused puts the mode
+    /// back: the chip never reads Full access over a sandbox that stayed,
+    /// nor a lower mode over a profile that moved.
+    #[gpui::test]
+    fn a_refused_profile_rolls_the_raised_mode_back(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-rollback", &["fail-resume"]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-rollback");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_mode(PermissionMode::AllowAll, cx)));
+        let calls = wait_for_calls(&stub, vc, 3);
+        assert_eq!(
+            calls,
+            [
+                call("session/setApprovalMode", "allowAll"),
+                call("session/resume", ":unrestricted"),
+                call("session/setApprovalMode", "onRequest"),
+            ],
+            "mode, refused profile, mode put back"
+        );
+        let banner = vc.update(|_, cx| view.read(cx).banner.clone()).expect("the person sees it");
+        assert!(banner.contains("stays in Auto"), "{banner}");
+    }
+
+    /// A resumed session whose sandbox is not its mode's (one older than
+    /// Baaz's profile picks runs the host default) is re-picked to match;
+    /// one that already matches sends nothing.
+    #[gpui::test]
+    fn a_resumed_session_under_another_profile_is_matched_to_its_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-reconcile", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-reconcile");
+        let session = |profile: &str| -> muse_client::schema::Session {
+            serde_json::from_value(serde_json::json!({
+                "sessionId": "s-1", "path": "", "status": "idle", "activeTurnId": null,
+                "createdAt": "2026-10-16T00:00:00Z", "updatedAt": "2026-10-16T00:00:00Z",
+                "workspaceRoot": null, "providerId": null, "modelId": null, "turnCount": 1, "forkedFrom": null,
+                "approvalMode": {"mode": "denyUnmatched", "source": "replay", "lastCommandId": null},
+                "permissionState": {"profileId": profile},
+            }))
+            .expect("session")
+        };
+        vc.update(|_, cx| view.update(cx, |view, cx| view.reconcile_profile(&session(":read-only"), cx)));
+        vc.run_until_parked();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(mode_calls(&stub).is_empty(), "a match sends nothing");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.reconcile_profile(&session(":auto-review"), cx)));
+        assert_eq!(wait_for_calls(&stub, vc, 1), [call("session/resume", ":read-only")]);
+        vc.update(|_, cx| assert_eq!(view.read(cx).banner, None));
+    }
+
+    /// A match the host refuses falls back to the read-only sandbox and
+    /// says so: the chip never reads less access than the session has.
+    #[gpui::test]
+    fn a_refused_profile_match_falls_back_to_read_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-reconcile-fail", &["fail-resume", "allow-read-only"]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-reconcile-fail");
+        let session: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+            "sessionId": "s-1", "path": "", "status": "idle", "activeTurnId": null,
+            "createdAt": "2026-10-16T00:00:00Z", "updatedAt": "2026-10-16T00:00:00Z",
+            "workspaceRoot": null, "providerId": null, "modelId": null, "turnCount": 1, "forkedFrom": null,
+            "approvalMode": {"mode": "promptUnmatched", "source": "replay", "lastCommandId": null},
+            "permissionState": {"profileId": ":unrestricted"},
+        }))
+        .expect("session");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.reconcile_profile(&session, cx)));
+        let calls = wait_for_calls(&stub, vc, 2);
+        assert_eq!(calls, [call("session/resume", ":ask-me"), call("session/resume", ":read-only")]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let banner = loop {
+            vc.run_until_parked();
+            if let Some(b) = vc.update(|_, cx| view.read(cx).banner.clone()) {
+                break b;
+            }
+            assert!(Instant::now() < deadline, "no banner");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(banner.contains("now runs read-only"), "{banner}");
+    }
+
+    /// A fork inherits the profile but starts in the host's startup mode:
+    /// the parent's mode is re-picked on the fork, and the envelope the new
+    /// view folds reads it.
+    #[gpui::test]
+    fn a_muse_fork_keeps_the_parents_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-fork", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-fork");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event(
+                        "session/approvalModeChanged",
+                        serde_json::json!({"mode": "denyUnmatched", "source": "approvalReconfigure", "lastCommandId": null}),
+                    ),
+                    cx,
+                )
+            })
+        });
+        assert_eq!(vc.update(|_, cx| view.read(cx).mode_label()), "Read-only", "the parent is Read-only");
+        let forked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = forked.clone();
+        vc.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &SessionEvent, _| {
+                if let SessionEvent::Forked { session, .. } = event {
+                    *sink.borrow_mut() = Some(session.clone());
+                }
+            })
+            .detach();
+            view.update(cx, |view, cx| view.fork(Some("t-1".to_owned()), cx));
+        });
+        let calls = wait_for_calls(&stub, vc, 2);
+        assert_eq!(
+            calls,
+            [call("session/resume", ":read-only"), call("session/setApprovalMode", "denyUnmatched")],
+            "the fork is brought down to the parent's mode, profile first"
+        );
+        let fork_mode = stub
+            .requests()
+            .into_iter()
+            .find(|v| v.get("method").and_then(|m| m.as_str()) == Some("session/setApprovalMode"))
+            .and_then(|v| v.pointer("/params/sessionId").and_then(|m| m.as_str()).map(str::to_owned));
+        assert_eq!(fork_mode.as_deref(), Some("s-fork"), "on the fork, not the parent");
+        let envelope = forked.borrow().clone().expect("the fork opened");
+        assert_eq!(envelope.pointer("/approvalMode/mode").and_then(|m| m.as_str()), Some("denyUnmatched"));
+    }
+
+    /// Quick picks never interleave on the wire, and the latest wins: the
+    /// one made while another was in flight waits; one superseded while
+    /// waiting never goes out.
+    #[gpui::test]
+    fn quick_muse_picks_run_one_at_a_time_and_the_latest_wins(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("mode-serial", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/mode-serial");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(PermissionMode::AllowAll, cx);
+                view.set_mode(PermissionMode::PromptUnmatched, cx);
+                view.set_mode(PermissionMode::DenyUnmatched, cx);
+            })
+        });
+        let calls = wait_for_calls(&stub, vc, 4);
+        assert_eq!(
+            calls,
+            [
+                call("session/setApprovalMode", "allowAll"),
+                call("session/resume", ":unrestricted"),
+                // From Full access, as the first pick left it: down, so
+                // profile first.
+                call("session/resume", ":read-only"),
+                call("session/setApprovalMode", "denyUnmatched"),
+            ],
+            "the superseded Ask pick never went out"
+        );
     }
 
     /// The reported turn: queue a message, Steer it, `turn/unqueued` lands —
