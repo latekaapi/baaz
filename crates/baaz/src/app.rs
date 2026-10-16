@@ -1488,10 +1488,13 @@ impl Harness {
         let new_provider = if args.provider_explicit {
             args.provider.clone()
         } else {
-            let statuses = crate::provider_status::live_statuses();
+            // The cached statuses, read without probing: boot never waits
+            // on (or races) a provider probe for this.
+            let statuses = crate::connect::initial_connect_statuses();
             crate::providers::read_last_provider()
                 .filter(|id| crate::settings_providers::usable_provider(&statuses, *id))
-                .unwrap_or_else(crate::settings_providers::live_default_new_provider)
+                .or_else(|| crate::settings_providers::default_new_provider(&statuses))
+                .unwrap_or_else(|| ProviderId::all()[0])
                 .as_str()
                 .to_owned()
         };

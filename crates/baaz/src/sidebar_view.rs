@@ -919,7 +919,7 @@ impl Harness {
         // connected provider's — a Claude Code or Codex person is signed in
         // even with Muse off (docs/50 P1).
         let other = || {
-            crate::provider_status::live_statuses().into_iter().find_map(|status| {
+            self.connect_statuses.iter().cloned().find_map(|status| {
                 if status.provider == crate::providers::ProviderId::Muse || !status.enabled {
                     return None;
                 }
