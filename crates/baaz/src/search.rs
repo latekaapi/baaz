@@ -131,11 +131,18 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         }
     }
     let connection = Connection::open(path)?;
-    // The smoke query: without FTS5 this fails and the caller treats search
-    // as unavailable rather than as "no matches".
-    connection.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS fts5_smoke USING fts5(x); DROP TABLE fts5_smoke;",
-    )?;
+    // WAL: readers (the palette) never wait on a writer (a sync), and a
+    // commit is one append instead of a rollback journal of every page it
+    // touched — the old full rebuild journalled ~1 GB (measured 2026-10-16).
+    // `:memory:` answers "memory" and that is fine.
+    let _ = connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()));
+    connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(2));
+    // FTS5 is a property of the linked SQLite, not of the file: prove it
+    // once per process on a scratch connection rather than with a schema
+    // write (CREATE + DROP) on every open, which used to run per palette
+    // keystroke and invalidate every other connection's statements.
+    fts5_available()?;
     connection.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);")?;
     let stored: u32 = connection
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -153,6 +160,7 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             "DROP TABLE IF EXISTS sessions_fts;
              DROP TABLE IF EXISTS files_fts;
              DROP TABLE IF EXISTS files_seen;
+             DROP TABLE IF EXISTS sessions_state;
              CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
              CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
              CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
@@ -174,76 +182,185 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
     // checked with a `SELECT` per record — a full-text scan each time
     // (finding `support-4`). This ordinary table carries the key, and
     // `INSERT OR IGNORE` on it both dedupes and says whether the row was new.
+    let had_seen = table_exists(&connection, "files_seen");
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
     )?;
-    // An index written before this table existed still has its rows; seeding
-    // from them is what keeps the first run after an upgrade from recording
-    // every known file a second time.
+    if !had_seen {
+        // An index written before this table existed still has its rows;
+        // seeding from them keeps the first run after an upgrade from
+        // recording every known file a second time. Only on creation: it is
+        // a full scan of `files_fts`, and it used to run on every open.
+        connection.execute_batch(
+            "INSERT OR IGNORE INTO files_seen(path, session_id) SELECT path, session_id FROM files_fts;",
+        )?;
+    }
+    // What [`sync_sessions`] last wrote per session: the FTS rowid to delete
+    // by (an FTS5 `WHERE session_id = ?` is a full scan of the table) and the
+    // fingerprint that says whether the row needs writing at all.
     connection.execute_batch(
-        "INSERT OR IGNORE INTO files_seen(path, session_id) SELECT path, session_id FROM files_fts;",
+        "CREATE TABLE IF NOT EXISTS sessions_state (session_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL, fingerprint INTEGER NOT NULL) WITHOUT ROWID;",
     )?;
     Ok(connection)
 }
 
-/// A fingerprint of `rows`, in order: what [`rebuild_sessions`] stores
-/// beside the index so an identical rebuild can be skipped.
-fn rows_fingerprint(rows: &[SessionRow]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    rows.len().hash(&mut hasher);
-    for row in rows {
-        row.session_id.hash(&mut hasher);
-        row.label.hash(&mut hasher);
-        row.title.hash(&mut hasher);
-        row.first_prompt.hash(&mut hasher);
-        row.body.hash(&mut hasher);
-        row.project.hash(&mut hasher);
-        row.workspace.hash(&mut hasher);
+/// Whether this process's SQLite has FTS5, proven once on a scratch
+/// in-memory connection.
+fn fts5_available() -> Result<(), rusqlite::Error> {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *OK.get_or_init(|| {
+        Connection::open_in_memory()
+            .and_then(|scratch| scratch.execute_batch("CREATE VIRTUAL TABLE smoke USING fts5(x);"))
+            .is_ok()
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("no fts5 in this sqlite".into()),
+        ))
     }
-    format!("{:016x}", hasher.finish())
 }
 
-/// Replace the whole session index with `rows`. Returns whether it wrote.
+/// Whether `name` is a table in `connection`'s main schema.
+fn table_exists(connection: &Connection, name: &str) -> bool {
+    connection
+        .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", params![name], |_| Ok(()))
+        .is_ok()
+}
+
+/// Replace the whole session index with `rows`.
 ///
 /// Deletes-then-inserts in one transaction: a crash leaves the previous
-/// index or the next one, never half of each. Rows identical to the last
-/// rebuild's (same fingerprint, stored in `meta` in the same transaction)
-/// write nothing: every list refresh and override edit lands here, and a
-/// from-scratch FTS rebuild over ~2,500 transcripts took 6–27 s of disk
-/// for what was, almost every time, the same index.
-pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Result<bool, rusqlite::Error> {
-    let fingerprint = rows_fingerprint(rows);
-    let stored: Option<String> = connection
-        .query_row("SELECT value FROM meta WHERE key = 'sessions_fingerprint'", [], |row| row.get(0))
-        .ok();
-    if stored.as_deref() == Some(fingerprint.as_str()) {
-        return Ok(false);
-    }
-    let transaction = connection.transaction()?;
-    transaction.execute("DELETE FROM sessions_fts", [])?;
+/// index or the next one, never half of each. Tests only: the app keeps
+/// the index current with [`sync_sessions`].
+#[cfg(test)]
+pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Result<(), rusqlite::Error> {
     {
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM sessions_fts", [])?;
+        transaction.execute("DELETE FROM sessions_state", [])?;
+        transaction.commit()?;
+    }
+    let synced: Vec<SyncRow<'_>> =
+        rows.iter().map(|row| SyncRow { row, body_ids: &[], fingerprint: 0 }).collect();
+    sync_sessions(connection, &synced, &|_| std::collections::HashMap::new()).map(|_| ())
+}
+
+/// One session row for [`sync_sessions`]: the row's own words, the index
+/// sessions whose transcript text becomes its body, and a fingerprint of
+/// everything that would change what is written.
+pub struct SyncRow<'a> {
+    /// The row: label, title, first prompt, inline body, project, workspace.
+    pub row: &'a SessionRow,
+    /// Muse index ids whose `search_text` is fetched (only when the row is
+    /// written) and placed before the inline body, in this order.
+    pub body_ids: &'a [String],
+    /// Equal to the last write's fingerprint means the row is skipped.
+    pub fingerprint: i64,
+}
+
+/// What one [`sync_sessions`] did, for the trace line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncStats {
+    /// Rows written (new or changed).
+    pub written: usize,
+    /// Rows deleted because their session is gone.
+    pub removed: usize,
+    /// Rows whose fingerprint matched: nothing written.
+    pub unchanged: usize,
+}
+
+/// Bring `sessions_fts` in line with `rows`, writing only what changed.
+///
+/// A row whose fingerprint matches the last write is skipped; a changed or
+/// new one is replaced by rowid; a session no longer in `rows` is deleted.
+/// Bodies are fetched with `bodies` for the written rows only, so a sync
+/// after one finished turn reads one transcript, not 210 MB of them (the
+/// old full rebuild: 34 s, 13.6 s CPU, ~1 GB journalled per run, twice per
+/// turn — measured on a copy 2026-10-16). One transaction.
+pub fn sync_sessions(
+    connection: &mut Connection,
+    rows: &[SyncRow<'_>],
+    bodies: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
+) -> Result<SyncStats, rusqlite::Error> {
+    use std::collections::{HashMap, HashSet};
+    let mut state: HashMap<String, (i64, i64)> = HashMap::new();
+    {
+        let mut select = connection.prepare("SELECT session_id, fts_rowid, fingerprint FROM sessions_state")?;
+        let found = select.query_map([], |row| Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?))))?;
+        for (id, entry) in found.filter_map(Result::ok) {
+            state.insert(id, entry);
+        }
+    }
+    let mut stats = SyncStats::default();
+    let changed: Vec<&SyncRow<'_>> = rows
+        .iter()
+        .filter(|sync| match state.get(&sync.row.session_id) {
+            Some((_, fingerprint)) if *fingerprint == sync.fingerprint && sync.fingerprint != 0 => {
+                stats.unchanged += 1;
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    let wanted: HashSet<&str> = rows.iter().map(|sync| sync.row.session_id.as_str()).collect();
+    let gone: Vec<(String, i64)> = state
+        .iter()
+        .filter(|(id, _)| !wanted.contains(id.as_str()))
+        .map(|(id, (rowid, _))| (id.clone(), *rowid))
+        .collect();
+    let mut fetch: Vec<String> = changed.iter().flat_map(|sync| sync.body_ids.iter().cloned()).collect();
+    fetch.sort();
+    fetch.dedup();
+    let fetched = if fetch.is_empty() { HashMap::new() } else { bodies(&fetch) };
+    let transaction = connection.transaction()?;
+    // A store written before `sessions_state` existed has rows nobody can
+    // address by rowid: clear them once, and this sync writes every row.
+    if state.is_empty() {
+        transaction.execute("DELETE FROM sessions_fts", [])?;
+    }
+    {
+        let mut delete_row = transaction.prepare("DELETE FROM sessions_fts WHERE rowid = ?1")?;
+        let mut delete_state = transaction.prepare("DELETE FROM sessions_state WHERE session_id = ?1")?;
+        for (id, rowid) in &gone {
+            delete_row.execute(params![rowid])?;
+            delete_state.execute(params![id])?;
+            stats.removed += 1;
+        }
         let mut insert = transaction.prepare(
             "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body, project, workspace) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
-        for row in rows {
+        let mut record = transaction.prepare(
+            "INSERT OR REPLACE INTO sessions_state(session_id, fts_rowid, fingerprint) VALUES (?1, ?2, ?3)",
+        )?;
+        for sync in &changed {
+            let row = sync.row;
+            if let Some((rowid, _)) = state.get(&row.session_id) {
+                delete_row.execute(params![rowid])?;
+            }
+            let mut parts: Vec<&str> =
+                sync.body_ids.iter().filter_map(|id| fetched.get(id).map(String::as_str)).collect();
+            if !row.body.is_empty() {
+                parts.push(&row.body);
+            }
+            let body = parts.join("\n");
             insert.execute(params![
                 row.session_id,
                 row.label,
                 row.title,
                 row.first_prompt,
-                row.body,
+                body,
                 row.project,
                 row.workspace
             ])?;
+            record.execute(params![row.session_id, transaction.last_insert_rowid(), sync.fingerprint])?;
+            stats.written += 1;
         }
     }
-    transaction.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('sessions_fingerprint', ?1)",
-        params![fingerprint],
-    )?;
     transaction.commit()?;
-    Ok(true)
+    Ok(stats)
 }
 
 /// The words a person would type to mean "this project", for the indexed
@@ -612,22 +729,6 @@ mod tests {
         assert_eq!(query_sessions(&connection, "acme-web", LIMIT).len(), 1, "and the folder");
     }
 
-    /// The same rows twice write once: the second rebuild finds the first's
-    /// fingerprint and leaves the index alone. Any change to a row writes
-    /// again, and the index then reads the new words.
-    #[test]
-    fn an_unchanged_rebuild_writes_nothing() {
-        let mut connection = memory();
-        let rows = [session_row("s1", "generics everywhere", Some("/work/a"))];
-        assert!(rebuild_sessions(&mut connection, &rows).expect("rebuild"), "the first rebuild writes");
-        assert!(!rebuild_sessions(&mut connection, &rows).expect("rebuild"), "the same rows write nothing");
-        assert_eq!(query_sessions(&connection, "generics", LIMIT).len(), 1, "the index still answers");
-        let changed = [session_row("s1", "lifetimes instead", Some("/work/a"))];
-        assert!(rebuild_sessions(&mut connection, &changed).expect("rebuild"), "a changed row writes");
-        assert!(query_sessions(&connection, "generics", LIMIT).is_empty(), "the old words are gone");
-        assert_eq!(query_sessions(&connection, "lifetimes", LIMIT).len(), 1, "the new ones answer");
-    }
-
     /// The terms themselves: no duplication when a project was never
     /// renamed, and nothing but the name when there is no workspace.
     #[test]
@@ -950,5 +1051,116 @@ mod tests {
         assert_eq!(relativize("/tmp/ws", "a/../../evil.rs"), None);
         assert_eq!(relativize("/tmp/ws", "/etc/passwd"), None);
         assert_eq!(relativize("/tmp/ws", ""), None);
+    }
+
+    #[test]
+    fn sync_writes_only_what_changed_and_fetches_only_those_bodies() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        let mut connection = memory();
+        let rows = [session_row("a", "", None), session_row("b", "", None), session_row("c", "", None)];
+        let ids: Vec<Vec<String>> = rows.iter().map(|row| vec![row.session_id.clone()]).collect();
+        let asked: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let bodies = |want: &[String]| -> HashMap<String, String> {
+            asked.borrow_mut().extend(want.iter().cloned());
+            want.iter().map(|id| (id.clone(), format!("transcript words for {id} kestrel{id}"))).collect()
+        };
+        let sync = |fingerprints: [i64; 3]| -> Vec<SyncRow<'_>> {
+            rows.iter()
+                .zip(&ids)
+                .zip(fingerprints)
+                .map(|((row, body_ids), fingerprint)| SyncRow { row, body_ids, fingerprint })
+                .collect()
+        };
+        let first = sync_sessions(&mut connection, &sync([1, 2, 3]), &bodies).expect("first sync");
+        assert_eq!(first, SyncStats { written: 3, removed: 0, unchanged: 0 });
+        assert_eq!(query_sessions(&connection, "kestrelb", LIMIT).len(), 1, "a fetched body is searchable");
+        asked.borrow_mut().clear();
+        let again = sync_sessions(&mut connection, &sync([1, 2, 3]), &bodies).expect("same sync");
+        assert_eq!(again, SyncStats { written: 0, removed: 0, unchanged: 3 }, "nothing changed, nothing written");
+        assert!(asked.borrow().is_empty(), "no body is read when nothing changed");
+        let one = sync_sessions(&mut connection, &sync([1, 20, 3]), &bodies).expect("one changed");
+        assert_eq!(one, SyncStats { written: 1, removed: 0, unchanged: 2 });
+        assert_eq!(*asked.borrow(), vec!["b".to_owned()], "only the changed row's body is read");
+        assert_eq!(query_sessions(&connection, "kestrelb", LIMIT).len(), 1, "a rewritten row is not duplicated");
+        let two: Vec<SyncRow<'_>> = sync([1, 20, 3]).into_iter().take(2).collect();
+        let gone = sync_sessions(&mut connection, &two, &bodies).expect("one removed");
+        assert_eq!(gone, SyncStats { written: 0, removed: 1, unchanged: 2 });
+        assert!(query_sessions(&connection, "kestrelc", LIMIT).is_empty(), "a removed session is gone");
+    }
+
+    #[test]
+    fn a_store_from_before_the_state_table_is_rewritten_once() {
+        let mut connection = memory();
+        // What an older build left: FTS rows and no `sessions_state`.
+        connection
+            .execute(
+                "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body, project, workspace) VALUES ('old', 'old', '', '', 'stale words', '', NULL)",
+                [],
+            )
+            .expect("old row");
+        let row = session_row("new", "fresh words", None);
+        let stats = sync_sessions(&mut connection, &[SyncRow { row: &row, body_ids: &[], fingerprint: 7 }], &|_| {
+            std::collections::HashMap::new()
+        })
+        .expect("sync");
+        assert_eq!(stats.written, 1);
+        assert!(query_sessions(&connection, "stale", LIMIT).is_empty(), "unaddressable old rows are cleared");
+        assert_eq!(query_sessions(&connection, "fresh", LIMIT).len(), 1);
+    }
+
+    /// Timing on real data, not a gate: `BAAZ_PERF_INDEX` (a copy of Muse's
+    /// `session-index.db`) and `BAAZ_PERF_SEARCH` (a copy of `search.db`,
+    /// modified in place). Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn perf_sync_against_real_copies() {
+        let (Some(index_path), Some(search_path)) =
+            (std::env::var_os("BAAZ_PERF_INDEX"), std::env::var_os("BAAZ_PERF_SEARCH"))
+        else {
+            eprintln!("set BAAZ_PERF_INDEX and BAAZ_PERF_SEARCH");
+            return;
+        };
+        let index_path = std::path::PathBuf::from(index_path);
+        let at = std::time::Instant::now();
+        let index = crate::index::read_at(&index_path);
+        eprintln!("PERF index::read_at rows={} in={:?}", index.len(), at.elapsed());
+        let rows: Vec<SessionRow> = index
+            .iter()
+            .map(|(id, entry)| SessionRow {
+                session_id: id.clone(),
+                label: entry.label().unwrap_or("").to_owned(),
+                title: entry.title.clone(),
+                first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
+                body: String::new(),
+                project: String::new(),
+                workspace: entry.workspace_root.clone(),
+            })
+            .collect();
+        let ids: Vec<Vec<String>> = rows.iter().map(|row| vec![row.session_id.clone()]).collect();
+        let fingerprints: Vec<i64> = rows
+            .iter()
+            .map(|row| index.get(&row.session_id).and_then(|e| e.updated_at_us).unwrap_or(1).max(1))
+            .collect();
+        let bodies = |want: &[String]| crate::index::read_bodies(&index_path, want);
+        let mut connection = open_at(std::path::Path::new(&search_path)).expect("open search copy");
+        for (label, bump) in [("first sync (one-time migration)", None), ("unchanged", None), ("one session changed", Some(0usize))] {
+            let mut prints = fingerprints.clone();
+            if let Some(i) = bump {
+                prints[i] += 1;
+            }
+            let synced: Vec<SyncRow<'_>> = rows
+                .iter()
+                .zip(&ids)
+                .zip(&prints)
+                .map(|((row, body_ids), fingerprint)| SyncRow { row, body_ids, fingerprint: *fingerprint })
+                .collect();
+            let at = std::time::Instant::now();
+            let stats = sync_sessions(&mut connection, &synced, &bodies).expect("sync");
+            eprintln!("PERF sync {label}: {stats:?} in={:?}", at.elapsed());
+        }
+        let at = std::time::Instant::now();
+        let hits = query_sessions(&connection, "sidebar", LIMIT);
+        eprintln!("PERF query 'sidebar' hits={} in={:?}", hits.len(), at.elapsed());
     }
 }

@@ -190,11 +190,38 @@ pub fn read() -> Overrides {
 /// Best-effort: a store that cannot be written loses an override, which is a
 /// nuisance, and never a session, which would be a loss.
 pub fn write(overrides: &Overrides) {
+    write_ordered(next_write_generation(), overrides);
+}
+
+/// Every write's place in line: taken on the UI thread when the state is
+/// snapshotted, so a write landing late on a background thread can be
+/// recognised as older than one already on disk.
+static WRITE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The newest generation on disk; held while writing, so writes are one at
+/// a time.
+static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+/// The next write generation (see [`write_ordered`]).
+pub fn next_write_generation() -> u64 {
+    WRITE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Write `overrides` unless a newer generation already reached the disk.
+///
+/// What lets an override edit write off the UI thread: two quick edits may
+/// finish their background writes in either order, and the older one is
+/// then skipped instead of landing stale state over the newer.
+pub fn write_ordered(generation: u64, overrides: &Overrides) {
+    let Ok(mut written) = WRITTEN.lock() else { return };
+    if generation <= *written {
+        return;
+    }
     let kept: Overrides =
         overrides.iter().filter(|(_, meta)| !meta.is_empty()).map(|(k, v)| (k.clone(), v.clone())).collect();
     if let Ok(text) = serde_json::to_vec_pretty(&kept) {
         let _ = crate::store::write_atomic(&path(), &text);
     }
+    *written = generation;
 }
 
 /// A `userShell` command turned into a row's title (finding F10).

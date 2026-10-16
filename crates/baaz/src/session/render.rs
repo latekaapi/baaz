@@ -10,6 +10,10 @@ use aui::data::button;
 use aui_tokens::ActiveAui;
 use crate::providers::{ApprovalChoice, ExternalApproval};
 
+/// How often a running terminal card's mirror re-reads its tab: 10 Hz is
+/// live to the eye and a twelfth of a 120 Hz display's frames.
+const TERMINAL_MIRROR_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// The transcript column as its own cached entity:
 /// the root embeds the active [`SessionView`] through gpui's `.cached`, so
 /// a sidebar-only frame (wheel, reveal, resize tick) reuses the retained
@@ -232,12 +236,19 @@ impl SessionView {
             return self.empty_or_loading(window, cx);
         }
         let folds = self.fold_intents(window, cx);
-        // A running terminal block holds one animation frame: the D51
-        // mirror tracks arriving output at most once per frame, and a
-        // settled transcript requests nothing — which is what
-        // `bench-idle` asserts.
-        if folds.terminal_live {
-            window.request_animation_frame();
+        // A running terminal block refreshes its D51 mirror on a timer, not
+        // every frame: gpui dirties every ancestor of a notified view, so a
+        // per-frame request re-rendered the whole window at display rate for
+        // as long as a dev server ran (perf audit 2026-10-16). A settled
+        // transcript requests nothing — which is what `bench-idle` asserts.
+        if folds.terminal_live && self.terminal_tick.is_none() {
+            self.terminal_tick = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TERMINAL_MIRROR_TICK).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.terminal_tick = None;
+                    cx.notify();
+                });
+            }));
         }
         let element = self.transcript_list(folds, cx);
         record_frame_stats(frame_start.elapsed());

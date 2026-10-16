@@ -813,6 +813,9 @@ pub struct Harness {
     /// write (B7fix): set when the write is armed, cleared when it lands
     /// or when [`Self::flush_right_save`] lands it early on session switch.
     pub(crate) right_save_pending: bool,
+    /// Override writes snapshotted by `settle_overrides` and not yet on
+    /// disk; while any is, the quit flush writes synchronously.
+    pub(crate) overrides_writes_in_flight: usize,
     /// Sessions whose in-memory pane state still uses a pre-merge
     /// `diff`/`git` kind and whose disk copy must migrate onto the merged
     /// `changes` view (B8fix): marked by [`Self::save_right_for_active`],
@@ -1562,6 +1565,7 @@ impl Harness {
             lights_hidden: false,
             right_save_epoch: 0,
             right_save_pending: false,
+            overrides_writes_in_flight: 0,
             right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
@@ -2992,7 +2996,7 @@ impl Harness {
     /// the red-dot close and the app-quit hook all land here, so up to
     /// 750 ms of pane state never dies with the process.
     pub(crate) fn flush_right_save(&mut self) {
-        if !self.right_save_pending {
+        if !self.right_save_pending && self.overrides_writes_in_flight == 0 {
             return;
         }
         self.right_save_epoch += 1;

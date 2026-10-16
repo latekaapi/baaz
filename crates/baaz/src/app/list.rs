@@ -86,15 +86,27 @@ impl Harness {
     }
 
     /// What every override edit costs once it is made: the rows rejoin, the
-    /// store is written, and the search index is rebuilt around the change.
-    /// The synchronous write supersedes any pending debounced one (B7fix2):
-    /// the disk already leads it, so the armed generation is cancelled and
-    /// can never land stale state over this edit.
+    /// store is written, and the search index is synced around the change.
+    /// The write supersedes any pending debounced one (B7fix2): the armed
+    /// generation is cancelled and can never land stale state over this
+    /// edit. It is snapshotted here and written off the UI thread (perf
+    /// audit 2026-10-16: 110 KB of JSON per pin, rename or title); the
+    /// write generation keeps a late write from landing over a newer one,
+    /// and the quit flush writes synchronously while one is in flight.
     fn settle_overrides(&mut self, cx: &mut Context<Self>) {
         self.right_save_epoch += 1;
         self.right_save_pending = false;
         self.rejoin();
-        sessions::write(&self.overrides);
+        let generation = sessions::next_write_generation();
+        let snapshot = self.overrides.clone();
+        self.overrides_writes_in_flight += 1;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().spawn(async move { sessions::write_ordered(generation, &snapshot) }).await;
+            let _ = this.update(cx, |this, _| {
+                this.overrides_writes_in_flight = this.overrides_writes_in_flight.saturating_sub(1);
+            });
+        })
+        .detach();
         self.rebuild_search_index(cx);
         cx.notify();
     }

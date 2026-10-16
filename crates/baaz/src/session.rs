@@ -989,6 +989,9 @@ pub struct SessionView {
     tasks: Vec<Task<()>>,
     /// Held only while a turn runs, so the elapsed time advances.
     ticker: Option<Task<()>>,
+    /// Held while a terminal card's command runs: the mirror's next refresh
+    /// (see `TERMINAL_MIRROR_TICK`). One at a time; it clears itself.
+    terminal_tick: Option<Task<()>>,
     /// The handoff card's render state on this (source) session: the run's
     /// card, refreshed on every transition. `None` when no handoff ever
     /// started here (see [`crate::handoff`]).
@@ -1234,6 +1237,7 @@ impl SessionView {
             focus: cx.focus_handle(),
             tasks: Vec::new(),
             ticker: None,
+            terminal_tick: None,
             handoff_card: None,
             handed_off_to: None,
             input_locked: false,

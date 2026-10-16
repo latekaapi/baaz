@@ -427,55 +427,106 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
 impl Harness {
     // -------------------------------------------------------------- sessions
 
-    /// Read the local index once at boot; it is a cache, not a source of truth.
+    /// Read the local index; it is a cache, not a source of truth.
+    ///
+    /// Incremental (see [`index::read_changed`]): only rows whose stamp moved
+    /// since the last read are fetched, and the first read of a launch
+    /// starts from Baaz's own saved copy, so the sidebar's labels land
+    /// without a scan of Muse's 700 MB table. That first read also queues
+    /// one full read in the background, which catches anything Muse changed
+    /// without bumping a row's stamp.
     pub(super) fn load_index(&mut self, cx: &mut Context<Self>) {
         crate::log::boot_mark("index-read-sent");
+        let first = !self.index_loaded;
+        let previous = self.index.clone();
         self.wire_call(
             cx,
             move || {
                 let at = std::time::Instant::now();
                 crate::log::boot_mark("index-read-start");
+                let cache = index::cache_path();
+                let previous = if previous.is_empty() { index::load_cache(&cache) } else { previous };
+                let map = index::read_changed(&index::index_path(), &previous);
+                if map != previous {
+                    index::save_cache(&cache, &map);
+                }
+                crate::log::boot_mark(&format!(
+                    "index-read-done rows={} cached={} in={}ms",
+                    map.len(),
+                    previous.len(),
+                    at.elapsed().as_millis()
+                ));
+                map
+            },
+            move |this, index, cx| {
+                this.apply_index(index, cx);
+                if first {
+                    this.reconcile_index(cx);
+                }
+            },
+        );
+    }
+
+    /// The full read behind [`Self::load_index`]'s first incremental one:
+    /// applied (and saved) only when it differs, so a launch whose cache was
+    /// right pays a background read and nothing on the UI thread.
+    fn reconcile_index(&mut self, cx: &mut Context<Self>) {
+        self.wire_call(
+            cx,
+            move || {
+                let at = std::time::Instant::now();
                 let map = index::read();
                 crate::log::boot_mark(&format!(
-                    "index-read-done rows={} in={}ms",
+                    "index-reconcile-done rows={} in={}ms",
                     map.len(),
                     at.elapsed().as_millis()
                 ));
                 map
             },
             |this, index, cx| {
-                crate::log::boot_mark(&format!("index-reply rows={}", index.len()));
-                // Settled, even on an empty read: row visibility comes from the
-                // index, and the sidebar waits for it before debuting groups.
-                this.index_loaded = true;
-                this.index = index;
-                let at = std::time::Instant::now();
-                if this.sessions_loaded {
-                    this.rejoin();
-                } else {
-                    // The wire has not answered yet: paint the sidebar from
-                    // the index now (provisional rows, no meta line) instead
-                    // of holding an empty column until `session/list` lands.
-                    // The list reply replaces them wholesale.
-                    this.install_provisional_rows();
+                if index != this.index && !index.is_empty() {
+                    let cache = index::cache_path();
+                    let snapshot = index.clone();
+                    cx.background_spawn(async move { index::save_cache(&cache, &snapshot) }).detach();
+                    this.apply_index(index, cx);
                 }
-                crate::log::boot_mark(&format!(
-                    "rejoin-done rows={} in={}ms",
-                    this.sessions.len(),
-                    at.elapsed().as_millis()
-                ));
-                crate::log::boot_mark(&format!(
-                    "provisional-rows rows={}",
-                    this.sessions.iter().filter(|e| e.provisional).count()
-                ));
-                this.rebuild_search_index(cx);
-                crate::log::boot_mark("index-loaded");
-                // Same reason as the list reply below: re-arm the cached
-                // pane in this update, not on some later frame's `on_frame`.
-                let _ = this.sync_sidebar_pane(cx);
-                cx.notify();
             },
         );
+    }
+
+    /// Land an index read: labels rejoin, provisional rows paint before the
+    /// wire answers, and the search index syncs around whatever changed.
+    fn apply_index(&mut self, index: std::collections::HashMap<String, index::IndexEntry>, cx: &mut Context<Self>) {
+        crate::log::boot_mark(&format!("index-reply rows={}", index.len()));
+        // Settled, even on an empty read: row visibility comes from the
+        // index, and the sidebar waits for it before debuting groups.
+        self.index_loaded = true;
+        self.index = index;
+        let at = std::time::Instant::now();
+        if self.sessions_loaded {
+            self.rejoin();
+        } else {
+            // The wire has not answered yet: paint the sidebar from
+            // the index now (provisional rows, no meta line) instead
+            // of holding an empty column until `session/list` lands.
+            // The list reply replaces them wholesale.
+            self.install_provisional_rows();
+        }
+        crate::log::boot_mark(&format!(
+            "rejoin-done rows={} in={}ms",
+            self.sessions.len(),
+            at.elapsed().as_millis()
+        ));
+        crate::log::boot_mark(&format!(
+            "provisional-rows rows={}",
+            self.sessions.iter().filter(|e| e.provisional).count()
+        ));
+        self.rebuild_search_index(cx);
+        crate::log::boot_mark("index-loaded");
+        // Same reason as the list reply below: re-arm the cached
+        // pane in this update, not on some later frame's `on_frame`.
+        let _ = self.sync_sidebar_pane(cx);
+        cx.notify();
     }
 
     /// `session/list`, unfiltered and paged: one window over every
@@ -1239,10 +1290,9 @@ impl Harness {
         for id in provider_ids {
             self.rejoin_provider_row(&id);
         }
-        // One cache over the whole pass, as the list join keeps: each
-        // distinct root is canonicalized once, not once per row per project
-        // — the per-row `canonicalize` calls were most of a 600–870 ms
-        // rejoin over ~2,600 rows.
+        // One canonicalize per distinct root for the whole pass, not one
+        // per row per project: this runs on the UI thread on every index
+        // load, list reply and override edit (perf audit 2026-10-16).
         let mut canon = crate::projects::CanonicalCache::default();
         for entry in &mut self.sessions {
             if entry.provider.is_some() {
