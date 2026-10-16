@@ -1627,6 +1627,9 @@ impl Harness {
             // Scripted chrome (`--no-connect` / `--replay`): no child to
             // start a session on, so the draft opens as a local view. Its id
             // is deterministic per project so captures read the same.
+            // Live, with Muse not running yet: bring it up for the next
+            // send (docs/50 P1); offline chrome is a no-op here.
+            self.ensure_muse_started(cx);
             self.open_local_draft(window, cx);
             return;
         };
@@ -1986,6 +1989,9 @@ impl Harness {
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`): no child to
             // start a session on, so the draft opens as a local view.
+            // Live, with Muse not running yet: bring it up for the next
+            // send (docs/50 P1); offline chrome is a no-op here.
+            self.ensure_muse_started(cx);
             self.open_local_draft(window, cx);
             return;
         };
@@ -2781,7 +2787,7 @@ impl Harness {
         // so the lane opens over a connected scripted provider — the same
         // stand-in `open_local_draft` uses for muse, and what lets
         // `new;setprovider:claude-code` end on a provider lane offline.
-        if self.client.is_none() {
+        if self.scripted_chrome() {
             self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
             return;
         }
@@ -3636,7 +3642,7 @@ impl Harness {
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the reopen still goes
         // through `ResumeSession` so the failure is the honest one.
-        if self.client.is_none() || disabled {
+        if self.scripted_chrome() || disabled {
             // The consent gate for this offline branch only: it never
             // reaches the background `work` below, so its admitted move
             // runs here, synchronously — in tests and captures the
@@ -3899,7 +3905,7 @@ impl Harness {
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the fork still goes
         // through `ResumeSession` so the failure is the honest one.
-        if self.client.is_none() {
+        if self.scripted_chrome() {
             use provider::ProviderAdapter as _;
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
@@ -6689,6 +6695,43 @@ mod tests {
             assert!(failure.session_id.is_none(), "a fresh open never earned an id");
             assert_eq!(failure.provider, ProviderId::ClaudeCode);
             assert!(failure.error.contains("no child here"), "the reason survives: {}", failure.error);
+        });
+        lane_restore(state);
+    }
+
+    /// docs/50 P1: with Muse unavailable the sidebar settles on the provider
+    /// records at once, and a Muse sign-out takes only Muse's rows.
+    #[gpui::test]
+    fn muse_never_gates_the_other_providers_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p1-ungate");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.sessions_loaded = false;
+                harness.sessions.clear();
+                z4_seed_stored_codex(harness, cx);
+                harness.sessions.retain(|entry| entry.provider.is_some());
+                harness.sessions_loaded = false;
+                harness.muse_unavailable("Muse is off or not installed".into(), cx);
+                assert!(harness.sessions_loaded, "the sidebar settles without a Muse list");
+                assert!(harness.sessions.iter().any(|e| e.id == "s-codex-old"), "the Codex row shows");
+                assert!(!matches!(harness.wire, crate::app::Wire::Ready));
+                // A Muse row beside it, then a Muse sign-out.
+                let mut muse_row = harness.sessions[0].clone();
+                muse_row.id = "s-muse".into();
+                muse_row.provider = None;
+                harness.sessions.push(muse_row);
+                harness.forget_muse_rows(cx);
+                assert!(harness.sessions.iter().all(|e| e.id != "s-muse"), "Muse's row goes");
+                assert!(harness.sessions.iter().any(|e| e.id == "s-codex-old"), "Codex's row stays");
+                // Offline chrome boots into the capture login screen; a live
+                // launch with Muse signed out does not.
+                harness.args.offline = false;
+                assert!(harness.shell_up(), "the shell is up in live mode with Muse signed out");
+                harness.args.offline = true;
+            });
         });
         lane_restore(state);
     }

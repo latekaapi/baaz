@@ -1484,6 +1484,20 @@ pub fn provider_enabled(id: ProviderId) -> bool {
     live_service().service.status(id).enabled
 }
 
+/// Whether Baaz should start Muse at all: the person has it enabled and the
+/// last probe did not find it missing. A Claude- or Codex-only machine never
+/// spawns `muse serve` and never sees Muse's errors (docs/50 P1).
+pub fn muse_wanted() -> bool {
+    let status = live_service().service.status(ProviderId::Muse);
+    status.enabled && status.installed != Installed::No
+}
+
+/// Whether the last probe found Muse installed: its failure to start is then
+/// a real fault worth a dialog, not the ordinary absence of an unused app.
+pub fn muse_known_installed() -> bool {
+    matches!(live_service().service.status(ProviderId::Muse).installed, Installed::Yes { .. })
+}
+
 /// Flip the person's Enabled switch and persist it through the cache.
 pub fn set_provider_enabled(id: ProviderId, on: bool) {
     live_service().service.set_enabled(id, on);

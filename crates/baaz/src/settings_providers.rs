@@ -134,6 +134,38 @@ pub(crate) fn live_visible_provider_ids() -> Vec<ProviderId> {
     visible_provider_ids(&crate::provider_status::live_statuses())
 }
 
+/// The provider new sessions start on when the person has not picked one
+/// (or picked one that is now off or missing): the first Connected, then the
+/// first installed, then the first enabled, in switcher order. No provider
+/// is the default for being Muse (docs/50 P1).
+pub(crate) fn default_new_provider(statuses: &[ProviderStatus]) -> Option<ProviderId> {
+    use crate::provider_status::{Headline, Installed};
+    let enabled: Vec<&ProviderStatus> = ProviderId::all()
+        .into_iter()
+        .filter_map(|id| statuses.iter().find(|s| s.provider == id && s.enabled))
+        .collect();
+    enabled
+        .iter()
+        .find(|s| s.headline() == Headline::Connected)
+        .or_else(|| enabled.iter().find(|s| matches!(s.installed, Installed::Yes { .. })))
+        .or_else(|| enabled.first())
+        .map(|s| s.provider)
+}
+
+/// Whether `id` can start a session now: on, and not found missing.
+pub(crate) fn usable_provider(statuses: &[ProviderStatus], id: ProviderId) -> bool {
+    statuses
+        .iter()
+        .any(|s| s.provider == id && s.enabled && s.installed != crate::provider_status::Installed::No)
+}
+
+/// [`default_new_provider`] over the live statuses; the switcher's first
+/// provider when nothing is enabled at all.
+pub(crate) fn live_default_new_provider() -> ProviderId {
+    default_new_provider(&crate::provider_status::live_statuses())
+        .unwrap_or_else(|| ProviderId::all()[0])
+}
+
 /// The quiet banner an opened session on a disabled provider shows
 /// instead of starting a child.
 pub(crate) fn disabled_banner(id: ProviderId) -> String {
@@ -453,7 +485,7 @@ impl Harness {
         }
         // A disabled pick is never the default for new sessions again.
         if !on && self.new_provider == id.as_str() {
-            let fallback = live_first_visible().unwrap_or(ProviderId::Muse);
+            let fallback = live_default_new_provider();
             self.new_provider = fallback.as_str().to_owned();
             crate::providers::write_last_provider(fallback);
         }
@@ -769,12 +801,6 @@ impl Harness {
     }
 }
 
-/// The first enabled provider in switcher order, for falling back when
-/// the default's own provider is switched off.
-pub(crate) fn live_first_visible() -> Option<ProviderId> {
-    live_visible_provider_ids().into_iter().next()
-}
-
 /// Start Codex's ChatGPT login and return the browser URL:
 /// `account/login/start {type: chatgpt}` over a short-lived app-server.
 /// Blocking; call it off the UI thread.
@@ -832,6 +858,47 @@ fn codex_signed_in(program: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    fn p1_status(id: ProviderId, installed: crate::provider_status::Installed, auth: crate::provider_status::Auth) -> ProviderStatus {
+        let mut status = ProviderStatus::checking(id);
+        status.installed = installed;
+        status.auth = auth;
+        status
+    }
+
+    /// docs/50 P1: new sessions start on what can run, never on Muse for
+    /// being Muse — the first Connected, then the first installed.
+    #[test]
+    fn the_default_provider_is_the_first_that_can_run() {
+        use crate::provider_status::{Auth, Installed};
+        let signed_in = || Auth::SignedIn { email: Some("a@b".into()), plan: None, method: None };
+        let yes = || Installed::yes("1.0", "/bin/x");
+        // Claude connected, Muse missing: Claude.
+        let statuses = [
+            p1_status(ProviderId::Muse, Installed::No, Auth::Unknown),
+            p1_status(ProviderId::ClaudeCode, yes(), signed_in()),
+            p1_status(ProviderId::Codex, Installed::No, Auth::Unknown),
+        ];
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::ClaudeCode));
+        assert!(!usable_provider(&statuses, ProviderId::Muse), "a missing Muse is not usable");
+        // Nothing connected, Codex installed: Codex, not Muse first in line.
+        let statuses = [
+            p1_status(ProviderId::Muse, Installed::Unknown, Auth::Unknown),
+            p1_status(ProviderId::ClaudeCode, Installed::No, Auth::Unknown),
+            p1_status(ProviderId::Codex, yes(), Auth::SignedOut),
+        ];
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::Codex));
+        // Muse connected: Muse, on the same rule as any other.
+        let statuses = [
+            p1_status(ProviderId::Muse, yes(), signed_in()),
+            p1_status(ProviderId::ClaudeCode, yes(), Auth::SignedOut),
+        ];
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::Muse));
+        // A disabled provider is never the default.
+        let mut off = p1_status(ProviderId::ClaudeCode, yes(), signed_in());
+        off.enabled = false;
+        assert_eq!(default_new_provider(&[off]), None);
+    }
     use super::*;
     use crate::provider_status::{Advisory, Auth, Installed, ProviderStatus};
 

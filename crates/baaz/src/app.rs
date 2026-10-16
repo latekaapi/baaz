@@ -1483,12 +1483,17 @@ impl Harness {
         // pointed at exactly this path, so a second window keeping another
         // window's name shows up here rather than as a silent misroute.
         crate::baaz_log!("terminal service socket: {}", terminal_service.socket_path().display());
+        // The person's last pick while it can still start a session; else
+        // the first connected provider (docs/50 P1) — never Muse by default.
         let new_provider = if args.provider_explicit {
             args.provider.clone()
         } else {
+            let statuses = crate::provider_status::live_statuses();
             crate::providers::read_last_provider()
-                .map(|id| id.as_str().to_owned())
-                .unwrap_or_else(|| args.provider.clone())
+                .filter(|id| crate::settings_providers::usable_provider(&statuses, *id))
+                .unwrap_or_else(crate::settings_providers::live_default_new_provider)
+                .as_str()
+                .to_owned()
         };
         // Z7a, read once at boot: captures (`--screenshot`) and tests run the
         // scripted browser page — a native view never appears in a gpui
@@ -1897,7 +1902,14 @@ impl Harness {
             == crate::connect::LaunchDecision::Connect;
         this.connect_statuses = crate::connect::initial_connect_statuses();
         this.connect_cache_mtime = crate::connect::cache_mtime();
-        this.connect(cx);
+        // Muse is one provider among three (docs/50 P1): it starts only when
+        // the person has it on and it was not found missing. Otherwise the
+        // shell settles on the local and provider records at once.
+        if crate::provider_status::muse_wanted() {
+            this.connect(cx);
+        } else {
+            this.muse_unavailable("Muse is off or not installed".into(), cx);
+        }
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
         // bundle opened from Finder, where `boot_projects` declined to adopt
@@ -2123,18 +2135,61 @@ impl Harness {
                 cx.notify();
             }
             Err(error) => {
-                this.wire = Wire::Down(error.to_string());
-                this.set_dialog(cx, Dialog {
-                    title: "Muse could not be started".into(),
-                    detail: error.to_string(),
-                    kind: DialogKind::Error,
-                    primary: "Try again",
-                    action: DialogAction::Reconnect,
-                    archive_target: None,
-                });
-                cx.notify();
+                // A Muse the probe found installed failing to start is a
+                // fault worth a dialog; an absent or unprobed one is just
+                // a provider this person does not use.
+                if crate::provider_status::muse_known_installed() {
+                    this.set_dialog(cx, Dialog {
+                        title: "Muse could not be started".into(),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Try again",
+                        action: DialogAction::Reconnect,
+                        archive_target: None,
+                    });
+                } else {
+                    crate::baaz_log!("muse not started: {error}");
+                }
+                this.muse_unavailable(error.to_string(), cx);
             }
         });
+    }
+
+    /// Muse is not running (off, missing, or failed to start): the sidebar
+    /// settles on what the local and provider records hold instead of
+    /// waiting for a `session/list` that will never come, and the other
+    /// providers' rows show at once.
+    /// Scripted chrome (`--no-connect` / `--replay` with no client):
+    /// provider lanes open over the scripted stand-in instead of spawning a
+    /// child. A missing Muse client alone no longer means "scripted" — that
+    /// handed a person with no Muse (or a click before Muse connected) a
+    /// Claude Code or Codex lane that never sent anything (docs/50 P1).
+    /// Tests that install a client keep reaching the real lane path.
+    pub(crate) fn scripted_chrome(&self) -> bool {
+        (self.args.offline || self.args.replay.is_some()) && self.client.is_none()
+    }
+
+    /// Whether the whole-window login screen is up: only offline and replay
+    /// captures boot into it now; a live launch never gates on Muse.
+    pub(crate) fn login_screen_up(&self) -> bool {
+        !matches!(self.auth, Auth::SignedIn(_)) && (self.args.offline || self.args.replay.is_some()) && !self.show_connect
+    }
+
+    /// Whether the shell is on screen: not behind the connect screen or the
+    /// capture-only login screen. What links from other apps wait for.
+    pub(crate) fn shell_up(&self) -> bool {
+        !self.show_connect && !self.login_screen_up()
+    }
+
+    pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.wire = Wire::Down(reason);
+        if !self.sessions_loaded {
+            self.sessions_loaded = true;
+            self.merge_provider_rows();
+            self.invalidate_list();
+            let _ = self.sync_sidebar_pane(cx);
+        }
+        cx.notify();
     }
 
     /// Observe the provider stream alongside the legacy pump: the legacy
@@ -4786,13 +4841,18 @@ impl Harness {
 
     /// The reconnect banner, above everything in the centre column.
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Muse's connection is Muse's business: a Claude Code or Codex
+        // session (or no session) never wears its banner (docs/50 P1).
+        let muse_session = self.active.as_ref().is_some_and(|view| !view.read(cx).is_provider_lane());
+        if !muse_session {
+            return None;
+        }
         let (kind, text) = match &self.wire {
             Wire::Reconnecting => (BannerKind::Waiting, "Muse disconnected, reconnecting\u{2026}".to_owned()),
             Wire::Connecting => (BannerKind::Waiting, "Starting Muse\u{2026}".to_owned()),
             Wire::Down(reason) => (BannerKind::Error, format!("Muse is not running: {reason}")),
             Wire::Ready => return None,
         };
-        let _ = cx;
         Some(
             div()
                 .w_full()
@@ -5829,16 +5889,36 @@ impl Harness {
     /// chip — never by a live session, which keeps the lane it was created
     /// on. Remembered in the store, so the next launch starts where the
     /// person last chose.
+    /// Start Muse when it is wanted and not running: a launch that left it
+    /// off (not installed then, or switched off) brings it up the first time
+    /// the person reaches for it, instead of handing them a dead draft.
+    pub(crate) fn ensure_muse_started(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_some() || self.scripted_chrome() || self.args.offline || self.args.replay.is_some() {
+            return;
+        }
+        if matches!(self.wire, Wire::Connecting | Wire::Reconnecting) {
+            return;
+        }
+        if !crate::provider_status::provider_enabled(ProviderId::Muse) {
+            return;
+        }
+        self.wire = Wire::Connecting;
+        self.connect(cx);
+    }
+
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         // A disabled provider is never the default for new sessions: fall
         // back to the first enabled one (Muse when none is).
         let id = if crate::settings_providers::live_visible_provider_ids().contains(&id) {
             id
         } else {
-            crate::settings_providers::live_first_visible().unwrap_or(ProviderId::Muse)
+            crate::settings_providers::live_default_new_provider()
         };
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
+        if id == ProviderId::Muse {
+            self.ensure_muse_started(cx);
+        }
         cx.notify();
     }
 
@@ -6141,7 +6221,7 @@ impl Harness {
         // Deferred, not built here: `on_frame` runs inside render, and the
         // point is that no frame constructs a webview. Waits for an active
         // session so it warms that session's browser, not a home one.
-        if !self.browser_idle_warmed && matches!(self.auth, Auth::SignedIn(_)) && self.active.is_some() {
+        if !self.browser_idle_warmed && self.shell_up() && self.active.is_some() {
             self.browser_idle_warmed = true;
             if !self.browser.fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
                 self.defer_browser_prewarm(cx);
@@ -7275,7 +7355,11 @@ impl Harness {
         if self.dismiss_browse_popovers(cx) {
             return;
         }
-        if !matches!(self.auth, Auth::SignedIn(_)) {
+        // Escape belongs to a login only while one is on screen — the
+        // capture-only login screen or the Muse sign-in sheet. A signed-out
+        // Muse used to take every press, so nothing else ever got Escape
+        // on a machine that does not use Muse (docs/50 P1).
+        if self.login_screen_up() || self.muse_sheet {
             self.login_escape(window, cx);
             return;
         }
