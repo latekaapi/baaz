@@ -73,6 +73,12 @@ pub(crate) enum PendingControlKind {
     /// mode, which is what moves the chip; error restores nothing (nothing
     /// moved) and banners the CLI's reason.
     SetPermissionMode(PermissionMode),
+    /// The Read-only deny layer going on (the mode is Read-only) or off
+    /// (the mode being left for) over `apply_flag_settings`: error
+    /// banners and records a resume relaunch, whose argv carries the layer
+    /// exactly when the mode the child then reports is Read-only — a
+    /// refused layer never leaves Read-only quietly unenforced.
+    ApplyReadOnly(PermissionMode),
 }
 
 /// One host→child control request awaiting its `control_response`.
@@ -115,9 +121,10 @@ pub struct ControlHub {
     pub(crate) effort: Arc<Mutex<Option<String>>>,
     /// The held session id, for scoping refusal banners.
     pub(crate) session_id: Arc<Mutex<Option<String>>>,
-    /// An effort relaunch the next `SubmitInput` must perform: recorded
-    /// when an `apply_flag_settings` refusal arrives (the pump owns no
-    /// spawn), consumed by the adapter arm that already owns the spawn.
+    /// A relaunch the next `SubmitInput` must perform: recorded when an
+    /// `apply_flag_settings` refusal (effort, or the Read-only layer)
+    /// arrives (the pump owns no spawn), consumed by the adapter arm that
+    /// already owns the spawn.
     pub(crate) effort_relaunch_due: Mutex<Option<SessionLaunch>>,
     /// Which child's stream is the session's: each spawn takes the next
     /// epoch, and a deliberate hang-up (relaunch, close, quit) moves past
@@ -356,6 +363,33 @@ impl ControlHub {
                         wanted.label()
                     ),
                 );
+            }
+            PendingControlKind::ApplyReadOnly(wanted) => {
+                let session_id = self.session_id.lock().expect("session mutex").clone();
+                let what = if wanted == PermissionMode::DenyUnmatched { "add" } else { "remove" };
+                match session_id {
+                    Some(session_id) => {
+                        let model = self.model.lock().expect("model mutex").clone();
+                        let effort = self.effort.lock().expect("effort mutex").clone();
+                        // No mode on the launch: the adapter's relaunch
+                        // fills in the mode the child last reported, and
+                        // the deny layer follows that mode.
+                        let launch = argv_for_resume(&session_id, model.as_deref(), None, effort.as_deref());
+                        *self.effort_relaunch_due.lock().expect("relaunch mutex") = Some(launch);
+                        self.emit_card(
+                            CONTROL_MODE_REJECTED_CARD,
+                            format!(
+                                "Claude Code refused to {what} the Read-only rules ({reason}); falling back to a resume relaunch."
+                            ),
+                        );
+                    }
+                    None => {
+                        self.emit_card(
+                            CONTROL_MODE_REJECTED_CARD,
+                            format!("Claude Code refused to {what} the Read-only rules ({reason})."),
+                        );
+                    }
+                }
             }
             PendingControlKind::ApplyEffort => {
                 let wanted = pending.wanted_effort.clone().unwrap_or_default();

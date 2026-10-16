@@ -104,10 +104,16 @@ pub struct ClaudeCodeAdapter {
     /// 2026-10-16 — any other answers "the session was not launched with
     /// --dangerously-skip-permissions").
     bypass_capable: Mutex<bool>,
-    /// A Full access pick the running child cannot take live: the next
-    /// `SubmitInput` relaunches with `--resume` and the mode flag first,
-    /// the way a cleared effort does. A later live pick clears it.
+    /// A mode pick the running child cannot take live — Full access on a
+    /// child not launched in it, or any way out of Read-only on a child
+    /// launched in it (its `--settings` deny layer cannot be shed live):
+    /// the next `SubmitInput` relaunches with `--resume` and the mode flag
+    /// first, the way a cleared effort does. A later live pick clears it.
     mode_relaunch_due: Mutex<Option<PermissionMode>>,
+    /// Where the running child's Read-only deny layer
+    /// ([`argv::read_only_settings`]) came from, which decides how a pick
+    /// away from Read-only sheds it.
+    read_only_layer: Mutex<ReadOnlyLayer>,
     /// The confirmation hub: pending host control requests, matched by
     /// `request_id` when the child's answers arrive on the pump. The pump
     /// holds the same [`Arc`], so confirmation runs on arrival — never on
@@ -195,6 +201,31 @@ pub fn set_permission_mode_control_request(request_id: &str, mode: PermissionMod
     .to_string()
 }
 
+/// `apply_flag_settings` carrying the Read-only deny layer onto the live
+/// child (`on`), or nulling it back off (probed 2026-10-16: the rules show
+/// in `list_permission_rules` from the answer on, and are gone after the
+/// clear, while the owner's own rules stand throughout).
+pub fn apply_read_only_control_request(request_id: &str, on: bool) -> String {
+    let settings = if on { argv::read_only_settings() } else { argv::read_only_settings_cleared() };
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "apply_flag_settings", "settings": settings},
+    })
+    .to_string()
+}
+
+/// Where the running child's Read-only deny layer came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadOnlyLayer {
+    /// None in force.
+    Off,
+    /// Rode `--settings` at launch: only a relaunch sheds it.
+    Launched,
+    /// Applied live with `apply_flag_settings`: a live clear sheds it.
+    Live,
+}
+
 /// Where the terminal relay lives: the bridge to spawn and the socket to
 /// point it at, plus where its per-session MCP config files land.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +276,7 @@ impl ClaudeCodeAdapter {
             model,
             effort,
             bypass_capable: Mutex::new(false),
+            read_only_layer: Mutex::new(ReadOnlyLayer::Off),
             mode_relaunch_due: Mutex::new(None),
             hub,
             control_seq: Mutex::new(1),
@@ -566,6 +598,26 @@ impl ClaudeCodeAdapter {
         self.send_control(&set_permission_mode_control_request(&request_id, mode), pending)
     }
 
+    /// The `apply_flag_settings` line putting the Read-only deny layer on
+    /// the live child (`wanted` is Read-only) or taking it off (`wanted` is
+    /// the mode being left for). A refusal banners and records a resume
+    /// relaunch, which carries the layer exactly when the mode does.
+    fn send_apply_read_only(&self, wanted: PermissionMode) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::ApplyReadOnly(wanted),
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        };
+        let on = wanted == PermissionMode::DenyUnmatched;
+        self.send_control(&apply_read_only_control_request(&request_id, on), pending)
+    }
+
     /// Record the mode a child was launched in: the chip shows it until the
     /// child's own report (the `initialize` answer, then each `init`)
     /// confirms or corrects it, and only a child launched in Full access
@@ -574,6 +626,13 @@ impl ClaudeCodeAdapter {
     fn note_launch_mode(&self, launch: &SessionLaunch) {
         let bypass = launch.permission_mode == Some(PermissionMode::AllowAll);
         *self.bypass_capable.lock().expect("bypass mutex") = bypass;
+        // A fresh child holds only the layer its argv gave it: one applied
+        // live died with the child it was applied to.
+        *self.read_only_layer.lock().expect("read-only mutex") = if argv::carries_read_only_settings(launch) {
+            ReadOnlyLayer::Launched
+        } else {
+            ReadOnlyLayer::Off
+        };
         // A child launched in Full access already owes no relaunch into it.
         if bypass {
             *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
@@ -877,6 +936,20 @@ impl ClaudeCodeAdapter {
         )))
     }
 
+    /// Every relaunch is the same session: one built without a mode flag
+    /// (an effort swap, a revive, a refused-layer fallback) keeps the mode
+    /// the child was in rather than dropping back to the CLI's default —
+    /// and with Read-only, its deny layer on `--settings`. Pure — no spawn.
+    fn with_session_mode(&self, launch: SessionLaunch) -> SessionLaunch {
+        match launch.permission_mode {
+            Some(_) => launch,
+            None => {
+                let mode = self.fold.lock().expect("fold mutex").permission_mode();
+                argv::with_permission_mode(launch, mode)
+            }
+        }
+    }
+
     /// Swap the running child for `launch`: hang up the old one first, then
     /// spawn. The old child's pump ends with its stdout; its folded
     /// transcript stays on the adapter. The relay rides along: an
@@ -889,17 +962,7 @@ impl ClaudeCodeAdapter {
         *self.child.lock().expect("child mutex") = None;
         // Requests the old child never answered die with it (Y1b review).
         self.hub.forget_pending();
-        let launch = self.with_mcp_config(launch.clone())?;
-        // Every relaunch is the same session: one built without a mode
-        // flag (an effort swap) keeps the mode the child was in, rather
-        // than dropping back to the CLI's default.
-        let launch = match launch.permission_mode {
-            Some(_) => launch,
-            None => {
-                let mode = self.fold.lock().expect("fold mutex").permission_mode();
-                argv::with_permission_mode(launch, mode)
-            }
-        };
+        let launch = self.with_session_mode(self.with_mcp_config(launch.clone())?);
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
         let home_env = self.home_env_for(&launch.session_id);
@@ -1323,8 +1386,33 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     }
                     return Ok(Ack::Accepted);
                 }
+                // Read-only is `dontAsk` plus its deny layer (see
+                // `argv::read_only_settings`): the layer goes on live with
+                // the switch in, and comes off live only when it went on
+                // live — a layer that rode `--settings` sheds by relaunch,
+                // admitted and shown now like Full access above.
+                let into_read_only = mode == PermissionMode::DenyUnmatched;
+                let layer = *self.read_only_layer.lock().expect("read-only mutex");
+                match (into_read_only, layer) {
+                    (true, ReadOnlyLayer::Off) => {
+                        self.send_apply_read_only(mode)?;
+                        *self.read_only_layer.lock().expect("read-only mutex") = ReadOnlyLayer::Live;
+                    }
+                    (false, ReadOnlyLayer::Launched) => {
+                        *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = Some(mode);
+                        if self.fold.lock().expect("fold mutex").note_permission_mode(mode) {
+                            let _ = self.tx.send(ProviderEvent::ApprovalModeChanged { session_id, mode });
+                        }
+                        return Ok(Ack::Accepted);
+                    }
+                    (false, ReadOnlyLayer::Live) => {
+                        self.send_apply_read_only(mode)?;
+                        *self.read_only_layer.lock().expect("read-only mutex") = ReadOnlyLayer::Off;
+                    }
+                    _ => {}
+                }
                 // Every other pick rides the control channel, and replaces
-                // a Full access pick still waiting on its relaunch.
+                // a pick still waiting on its relaunch.
                 *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
                 self.send_set_permission_mode(mode)?;
                 Ok(Ack::Accepted)
@@ -1365,8 +1453,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 if let Some(launch) = self.revive_launch(&session_id) {
                     self.relaunch(&launch)?;
                 }
-                // A Full access pick the old child could not take live:
-                // relaunch into it before the turn goes out.
+                // A mode pick the old child could not take live (Full
+                // access, or out of a launched Read-only): relaunch into it
+                // before the turn goes out.
                 if let Some(launch) = self.take_mode_relaunch(&session_id) {
                     self.check_session(&session_id)?;
                     self.relaunch(&launch)?;
@@ -2697,15 +2786,23 @@ mod tests {
                 mode: PermissionMode::DenyUnmatched,
             })
             .expect("a pick lands");
-        let line = adapter.sent_control_lines().pop().expect("one control line");
-        let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+        // Read-only's deny layer goes on first (see the layer tests below),
+        // then the mode switch.
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let layer: serde_json::Value = serde_json::from_str(&lines[0]).expect("json");
+        assert_eq!(layer["request"]["subtype"], "apply_flag_settings");
+        let value: serde_json::Value = serde_json::from_str(&lines[1]).expect("json");
         assert_eq!(value["request"]["subtype"], "set_permission_mode");
         assert_eq!(value["request"]["mode"], "dontAsk");
         assert!(mode_events(&drain_events(&adapter)).is_empty(), "nothing moves before the answer");
-        let id = pending_id(&adapter);
         adapter.ingest_child_line(&serde_json::json!({
             "type": "control_response",
-            "response": {"subtype": "success", "request_id": id, "response": {"mode": "dontAsk"}},
+            "response": {"subtype": "success", "request_id": layer["request_id"]},
+        }).to_string());
+        adapter.ingest_child_line(&serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": value["request_id"], "response": {"mode": "dontAsk"}},
         }).to_string());
         adapter.ingest_child_line(
             r#"{"type":"system","subtype":"status","status":null,"permissionMode":"dontAsk","session_id":"sess-1"}"#,
@@ -2815,6 +2912,132 @@ mod tests {
             .expect("a pick lands");
         assert_eq!(adapter.sent_control_lines().len(), 1, "a bypass child takes it live");
         assert!(adapter.take_mode_relaunch("sess-1").is_none());
+    }
+
+    /// The `apply_flag_settings` payload of one sent control line, when it
+    /// is one.
+    fn applied_settings(line: &str) -> Option<serde_json::Value> {
+        let value: serde_json::Value = serde_json::from_str(line).expect("json");
+        (value["request"]["subtype"] == "apply_flag_settings").then(|| value["request"]["settings"].clone())
+    }
+
+    fn pick(adapter: &ClaudeCodeAdapter, mode: PermissionMode) {
+        adapter
+            .dispatch(Command::SelectApprovalMode {
+                request_id: "r-pick".into(),
+                session_id: "sess-1".into(),
+                mode,
+            })
+            .expect("a pick lands");
+    }
+
+    /// Read-only picked live puts the deny layer on with
+    /// `apply_flag_settings` before the `dontAsk` switch, and a pick away
+    /// takes exactly that layer back off live — `null` per key, the probed
+    /// clear — before switching. Re-picking Read-only while it holds sends
+    /// no second layer.
+    #[test]
+    fn live_read_only_applies_the_deny_layer_and_leaving_clears_it() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        let lines = adapter.sent_control_lines();
+        assert_eq!(applied_settings(&lines[0]), Some(argv::read_only_settings()));
+        assert!(lines[1].contains("set_permission_mode"));
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 3, "no second layer: {lines:?}");
+        assert!(lines[2].contains("set_permission_mode"));
+        pick(&adapter, PermissionMode::PromptUnmatched);
+        let lines = adapter.sent_control_lines();
+        assert_eq!(applied_settings(&lines[3]), Some(argv::read_only_settings_cleared()));
+        assert!(lines[4].contains("\"mode\":\"manual\""), "{}", lines[4]);
+        assert!(adapter.take_mode_relaunch("sess-1").is_none(), "a live layer leaves live");
+        // Off now: another non-Read-only pick sends no clear.
+        pick(&adapter, PermissionMode::OnRequest);
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(applied_settings(&lines[5]).is_none());
+    }
+
+    /// A child launched Read-only carries its layer on `--settings`, which
+    /// `apply_flag_settings` cannot remove (probed): a pick away is
+    /// admitted and shown now, and owed as a `--resume` relaunch whose argv
+    /// has the new mode and no layer. Picking Read-only back before the
+    /// next turn cancels it and sends no second layer.
+    #[test]
+    fn leaving_a_launched_read_only_relaunches_without_the_layer() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let launch = argv::with_permission_mode(
+            adapter.launch_for_open("sess-1", None, None).expect("open launch"),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        assert!(argv::carries_read_only_settings(&launch));
+        adapter.note_launch_mode(&launch);
+        adapter.attach_session_for_tests("sess-1");
+        let _ = drain_events(&adapter);
+        pick(&adapter, PermissionMode::OnRequest);
+        assert!(adapter.sent_control_lines().is_empty(), "nothing the child could honour live");
+        assert_eq!(mode_events(&drain_events(&adapter)), vec![("sess-1".to_owned(), PermissionMode::OnRequest)]);
+        let relaunch = adapter.take_mode_relaunch("sess-1").expect("a relaunch is owed");
+        assert!(!argv::carries_read_only_settings(&relaunch), "{:?}", relaunch.argv);
+        let at = relaunch.argv.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+        assert_eq!(relaunch.argv[at + 1], "auto");
+
+        pick(&adapter, PermissionMode::OnRequest);
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        assert!(adapter.take_mode_relaunch("sess-1").is_none(), "back to Read-only cancels it");
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 1, "the launched layer still holds: {lines:?}");
+        assert!(lines[0].contains("set_permission_mode"));
+    }
+
+    /// Every relaunch of a Read-only session carries the layer again: a
+    /// launch built with no mode (an effort swap, a revive, a refused-layer
+    /// fallback) takes the session's mode, and with it `--settings`; the
+    /// relaunched child then counts as launched Read-only.
+    #[test]
+    fn a_read_only_relaunch_keeps_the_deny_layer() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::DenyUnmatched);
+        let relaunch = adapter.with_session_mode(argv::argv_for_resume("sess-1", None, None, Some("high")));
+        assert!(argv::carries_read_only_settings(&relaunch), "{:?}", relaunch.argv);
+        adapter.note_launch_mode(&relaunch);
+        assert_eq!(*adapter.read_only_layer.lock().expect("read-only mutex"), ReadOnlyLayer::Launched);
+        // Another mode's relaunch drops it, and the child holds none.
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::PromptUnmatched);
+        let relaunch = adapter.with_session_mode(argv::argv_for_resume("sess-1", None, None, None));
+        assert!(!argv::carries_read_only_settings(&relaunch));
+        adapter.note_launch_mode(&relaunch);
+        assert_eq!(*adapter.read_only_layer.lock().expect("read-only mutex"), ReadOnlyLayer::Off);
+    }
+
+    /// A refused layer never leaves Read-only quietly unenforced: the
+    /// refusal banners and records a resume relaunch, which takes the
+    /// session's mode — Read-only, so `--settings` rides it.
+    #[test]
+    fn a_refused_read_only_layer_banners_and_owes_a_relaunch_carrying_it() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        let lines = adapter.sent_control_lines();
+        let layer: serde_json::Value = serde_json::from_str(&lines[0]).expect("json");
+        let switch: serde_json::Value = serde_json::from_str(&lines[1]).expect("json");
+        adapter.ingest_child_line(&error_line(layer["request_id"].as_str().expect("id"), "flag settings refused"));
+        adapter.ingest_child_line(&serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": switch["request_id"], "response": {"mode": "dontAsk"}},
+        }).to_string());
+        let cards = control_cards(&drain_events(&adapter));
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].0, CONTROL_MODE_REJECTED_CARD);
+        assert!(cards[0].1.contains("flag settings refused"), "{:?}", cards[0].1);
+        let owed = adapter.hub.take_effort_relaunch().expect("a relaunch is owed");
+        assert!(owed.argv.contains(&"--resume".to_owned()));
+        let relaunch = adapter.with_session_mode(owed);
+        assert!(argv::carries_read_only_settings(&relaunch), "{:?}", relaunch.argv);
     }
 
     /// The `init` frame's `permissionMode` is the chip's truth: a child the
