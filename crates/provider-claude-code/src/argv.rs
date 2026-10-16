@@ -62,16 +62,84 @@ pub fn claude_permission_mode(mode: PermissionMode) -> &'static str {
 /// `system/status` `permissionMode`, `initialize`'s
 /// `current_permission_mode`, `set_permission_mode`'s `mode`). `default`
 /// and `manual` are one mode. `acceptEdits` still asks for anything but
-/// edits, so it reads as Auto; `plan` executes nothing, so it reads as
-/// Read-only. An unknown spelling folds to nothing rather than a guess.
+/// edits, so it reads as Auto. An unknown spelling folds to nothing rather
+/// than a guess.
+///
+/// `plan` folds to nothing too, so the chip keeps the mode Baaz set: plan
+/// mode is not Read-only's equal. It *asks* before a write rather than
+/// refusing it, and an owner allow rule is matched before its write check
+/// (2.1.276 source), so reading it as Read-only would claim a guarantee
+/// that only [`read_only_settings`] gives. Baaz never requests `plan`;
+/// when the model enters it from Read-only, the deny layer is still in
+/// force and the chip rightly stays Read-only.
 pub fn permission_mode_from_claude(wire: &str) -> Option<PermissionMode> {
     match wire {
         "bypassPermissions" => Some(PermissionMode::AllowAll),
         "auto" | "acceptEdits" => Some(PermissionMode::OnRequest),
         "default" | "manual" => Some(PermissionMode::PromptUnmatched),
-        "dontAsk" | "plan" => Some(PermissionMode::DenyUnmatched),
+        "dontAsk" => Some(PermissionMode::DenyUnmatched),
         _ => None,
     }
+}
+
+/// The tools Read-only denies outright: every built-in that writes or
+/// runs a shell, and Baaz's own MCP tools that act (the bridge's reading
+/// tools — `terminal_list/read/screen`, `browser_open/read/links/
+/// screenshot` — stay usable).
+///
+/// `dontAsk` alone is not Read-only: it refuses only what no rule allows,
+/// so an owner allow rule (`Bash(muse exec:*)` in the symlinked
+/// `~/.claude/settings.json`) still ran. A deny rule is checked before any
+/// allow rule, whatever its source — the 2.1.276 permission check returns
+/// on a whole-tool or content deny before it consults allow rules — so
+/// these hold against every owner rule. Bash is denied whole rather than
+/// sandboxed: the settings sandbox (`sandbox.enabled` with
+/// `filesystem.denyWrite`) is accepted by the CLI, but its write block
+/// could not be shown without running a turn, and the CLI itself warns
+/// that a live sandbox change "may not be fenced until the settings
+/// change is picked up".
+pub const READ_ONLY_DENIED_TOOLS: [&str; 6] = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/// The Baaz bridge tools Read-only denies (served as
+/// `mcp__baaz__<tool>`): those that type, run, open or close.
+pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 6] =
+    ["terminal_open", "terminal_run", "terminal_send", "terminal_close", "browser_click", "browser_type"];
+
+/// The settings layer that makes Read-only read-only: `permissions.deny`
+/// for [`READ_ONLY_DENIED_TOOLS`] and [`READ_ONLY_DENIED_BRIDGE_TOOLS`],
+/// plus `disableSkillShellExecution` so a skill's inline shell cannot run
+/// around the Bash deny. It rides `--settings` on every Read-only launch
+/// (see [`with_permission_mode`]) and `apply_flag_settings` on a live
+/// switch into Read-only.
+///
+/// The two carriers are different layers (probed 2026-10-16 with
+/// `list_permission_rules`/`get_settings`): an `apply_flag_settings`
+/// replaces its own earlier keys — `{"permissions": null}` drops the deny
+/// rules it set, and an `effortLevel` apply leaves them standing — but it
+/// cannot remove rules that rode `--settings`. So a child launched
+/// Read-only leaves it by relaunching, and one switched in live leaves it
+/// live with [`read_only_settings_cleared`].
+pub fn read_only_settings() -> serde_json::Value {
+    let mut deny: Vec<String> = READ_ONLY_DENIED_TOOLS.iter().map(|tool| (*tool).to_owned()).collect();
+    deny.extend(
+        READ_ONLY_DENIED_BRIDGE_TOOLS
+            .iter()
+            .map(|tool| format!("mcp__{}__{tool}", crate::terminal::SERVER_NAME)),
+    );
+    serde_json::json!({
+        "permissions": {"deny": deny},
+        "disableSkillShellExecution": true,
+    })
+}
+
+/// The `apply_flag_settings` payload that takes [`read_only_settings`]
+/// back off a child it was applied to live: `null` removes each key from
+/// the applied layer (the owner's own settings underneath stand).
+pub fn read_only_settings_cleared() -> serde_json::Value {
+    serde_json::json!({
+        "permissions": null,
+        "disableSkillShellExecution": null,
+    })
 }
 
 /// Add `--permission-mode <mode>` to a built launch, replacing any the
@@ -82,15 +150,34 @@ pub fn permission_mode_from_claude(wire: &str) -> Option<PermissionMode> {
 /// other refuses "the session was not launched with
 /// --dangerously-skip-permissions", which is why a mid-session pick of
 /// Full access relaunches instead.
+///
+/// Read-only also carries `--settings <read_only_settings>`, and every
+/// other mode strips it: the deny layer follows the mode through every
+/// open, resume, fork and relaunch built here.
 pub fn with_permission_mode(mut launch: SessionLaunch, mode: Option<PermissionMode>) -> SessionLaunch {
     let Some(mode) = mode else { return launch };
     if let Some(at) = launch.argv.iter().position(|arg| arg == "--permission-mode") {
         launch.argv.drain(at..(at + 2).min(launch.argv.len()));
     }
+    let layer = read_only_settings().to_string();
+    if let Some(at) = launch.argv.windows(2).position(|pair| pair[0] == "--settings" && pair[1] == layer) {
+        launch.argv.drain(at..at + 2);
+    }
     launch.argv.push("--permission-mode".into());
     launch.argv.push(claude_permission_mode(mode).to_owned());
+    if mode == PermissionMode::DenyUnmatched {
+        launch.argv.push("--settings".into());
+        launch.argv.push(layer);
+    }
     launch.permission_mode = Some(mode);
     launch
+}
+
+/// Whether a built launch carries the Read-only deny layer on `--settings`
+/// — a layer the child can only shed by relaunching.
+pub fn carries_read_only_settings(launch: &SessionLaunch) -> bool {
+    let layer = read_only_settings().to_string();
+    launch.argv.windows(2).any(|pair| pair[0] == "--settings" && pair[1] == layer)
 }
 
 /// The flags every session child carries.
@@ -557,6 +644,78 @@ mod tests {
         assert_eq!(bare.permission_mode, None);
     }
 
+    /// The `--settings` value on a launch, parsed.
+    fn settings_of(launch: &SessionLaunch) -> Option<serde_json::Value> {
+        let at = launch.argv.iter().position(|arg| arg == "--settings")?;
+        Some(serde_json::from_str(launch.argv.get(at + 1)?).expect("settings JSON"))
+    }
+
+    #[test]
+    fn read_only_carries_the_deny_layer_on_every_launch_shape_and_no_other_mode_does() {
+        for launch in [
+            argv_for_open("req-1", Some("/work"), None, None, None),
+            argv_for_resume("sess-9", None, None, None),
+            argv_for_fork("branch-2", "sess-9", None, None, None),
+        ] {
+            let read_only = with_permission_mode(launch.clone(), Some(PermissionMode::DenyUnmatched));
+            let settings = settings_of(&read_only).expect("Read-only rides --settings");
+            let deny: Vec<&str> = settings["permissions"]["deny"]
+                .as_array()
+                .expect("deny list")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "PowerShell"] {
+                assert!(deny.contains(&tool), "{tool} denied: {deny:?}");
+            }
+            for tool in ["terminal_run", "terminal_send", "terminal_open", "terminal_close", "browser_click", "browser_type"] {
+                assert!(deny.contains(&format!("mcp__baaz__{tool}").as_str()), "{tool} denied: {deny:?}");
+            }
+            // The reading bridge tools stay usable.
+            for tool in ["terminal_list", "terminal_read", "terminal_screen", "browser_read", "browser_screenshot"] {
+                assert!(!deny.contains(&format!("mcp__baaz__{tool}").as_str()), "{tool} stays allowed");
+            }
+            assert_eq!(settings["disableSkillShellExecution"], true);
+            // No allow list rides along: the layer only ever narrows.
+            assert!(settings["permissions"].get("allow").is_none());
+            assert!(carries_read_only_settings(&read_only));
+            // Still `dontAsk`, so whatever no rule names is refused unasked.
+            let at = read_only.argv.iter().position(|arg| arg == "--permission-mode").expect("flag");
+            assert_eq!(read_only.argv[at + 1], "dontAsk");
+            for mode in [PermissionMode::AllowAll, PermissionMode::OnRequest, PermissionMode::PromptUnmatched] {
+                let other = with_permission_mode(launch.clone(), Some(mode));
+                assert_eq!(settings_of(&other), None, "{mode:?} carries no deny layer");
+                assert!(!carries_read_only_settings(&other));
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_read_only_strips_the_layer_and_reentering_adds_it_once() {
+        let launch = with_permission_mode(
+            argv_for_resume("sess-9", None, None, None),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        let left = with_permission_mode(launch, Some(PermissionMode::PromptUnmatched));
+        assert!(!left.argv.iter().any(|arg| arg == "--settings"), "{:?}", left.argv);
+        let back = with_permission_mode(left, Some(PermissionMode::DenyUnmatched));
+        let back = with_permission_mode(back, Some(PermissionMode::DenyUnmatched));
+        assert_eq!(back.argv.iter().filter(|arg| *arg == "--settings").count(), 1, "{:?}", back.argv);
+    }
+
+    #[test]
+    fn the_live_clear_nulls_exactly_the_keys_the_layer_sets() {
+        let layer = read_only_settings();
+        let cleared = read_only_settings_cleared();
+        let keys = |value: &serde_json::Value| {
+            let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&layer), keys(&cleared));
+        assert!(cleared.as_object().expect("object").values().all(serde_json::Value::is_null));
+    }
+
     #[test]
     fn a_new_mode_replaces_the_old_flag() {
         let launch = with_permission_mode(
@@ -576,7 +735,9 @@ mod tests {
         // with `manual` (probed live 2026-10-16).
         assert_eq!(permission_mode_from_claude("default"), Some(PermissionMode::PromptUnmatched));
         assert_eq!(permission_mode_from_claude("acceptEdits"), Some(PermissionMode::OnRequest));
-        assert_eq!(permission_mode_from_claude("plan"), Some(PermissionMode::DenyUnmatched));
+        // Plan asks rather than refuses, and matches allow rules first: it
+        // folds to nothing so the chip never claims Read-only for it.
+        assert_eq!(permission_mode_from_claude("plan"), None);
         assert_eq!(permission_mode_from_claude("someday"), None, "unknown folds to nothing");
     }
 }
