@@ -5401,7 +5401,7 @@ impl Harness {
             .filter(|pack| {
                 crate::handoff::should_model_summary(
                     self.layout.handoff_model_summary,
-                    self.client.is_some(),
+                    self.utility_available(self.session_lane_provider(&source)),
                     pack,
                 )
             })
@@ -6732,6 +6732,48 @@ mod tests {
                 assert!(harness.shell_up(), "the shell is up in live mode with Muse signed out");
                 harness.args.offline = true;
             });
+        });
+        lane_restore(state);
+    }
+
+    /// docs/50 P2: a Codex session's title comes from Codex (through the
+    /// one-shot completer), never from a Muse side session.
+    #[gpui::test]
+    fn a_provider_sessions_title_comes_from_its_own_provider(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p2-title");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<crate::providers::ProviderId>::new()));
+        {
+            let asked = asked.clone();
+            crate::utility::set_test_completer(move |provider, _| {
+                asked.borrow_mut().push(provider);
+                Ok("Parser Panic Fix".into())
+            });
+        }
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.client = Some(dead_client());
+                z4_seed_stored_codex(harness, cx);
+                if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 0;
+                }
+                for entry in harness.sessions.iter_mut().filter(|e| e.id == "s-codex-old") {
+                    entry.turns = 0;
+                }
+                harness.layout.auto_title = true;
+                harness.maybe_start_title("s-codex-old", Some("why does the parser panic".into()), cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(*asked.borrow(), vec![crate::providers::ProviderId::Codex], "Codex wrote it, once");
+            assert_eq!(
+                harness.overrides.get("s-codex-old").and_then(|m| m.generated_title.clone()).as_deref(),
+                Some("Parser Panic Fix")
+            );
         });
         lane_restore(state);
     }

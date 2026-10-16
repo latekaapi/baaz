@@ -102,7 +102,7 @@ impl Harness {
         let turns = entry.map(|e| e.turns).unwrap_or(0);
         let eligible = titles::should_title(
             self.layout.auto_title,
-            self.client.is_some(),
+            self.utility_available(self.session_lane_provider(session_id)),
             self.overrides.get(session_id),
             turns,
             self.is_side_session(session_id),
@@ -142,6 +142,13 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
+        // The session's own provider writes its title (docs/50 P2): a
+        // Claude Code or Codex session never sends its prompt to Muse.
+        let provider = self.session_lane_provider(&real_id);
+        if provider != crate::providers::ProviderId::Muse {
+            self.run_title_on_provider(provider, real_id, first_message, tries, cx);
+            return;
+        }
         let Some(client) = self.client.clone() else { return };
         if !self.titles_pending.contains(&real_id) {
             return;
@@ -210,6 +217,69 @@ impl Harness {
                 } else {
                     this.fail_title(&real_id, &reason, cx);
                 }
+            }
+        });
+    }
+
+    /// The provider whose lane `session_id` rides: its provider record's,
+    /// else Muse.
+    pub(crate) fn session_lane_provider(&self, session_id: &str) -> crate::providers::ProviderId {
+        self.provider_sessions
+            .get(session_id)
+            .map(|record| crate::providers::ProviderId::parse(&record.provider))
+            .unwrap_or(crate::providers::ProviderId::Muse)
+    }
+
+    /// Whether `provider` can write a title, byline or summary now: Muse
+    /// through its connection, the others through their CLIs while enabled.
+    pub(crate) fn utility_available(&self, provider: crate::providers::ProviderId) -> bool {
+        match provider {
+            crate::providers::ProviderId::Muse => self.client.is_some(),
+            other => {
+                !self.scripted_chrome()
+                    && crate::utility::supports(other)
+                    && crate::provider_status::provider_enabled(other)
+            }
+        }
+    }
+
+    /// [`Self::run_title_attempt`] on a Claude Code or Codex session: one
+    /// completion on that provider's cheapest model, landed, retried once,
+    /// or given up exactly as the Muse route's harvest does.
+    fn run_title_on_provider(
+        &mut self,
+        provider: crate::providers::ProviderId,
+        real_id: String,
+        first_message: String,
+        tries: u8,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.titles_pending.contains(&real_id) {
+            return;
+        }
+        let prompt = titles::title_prompt(&first_message);
+        self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, result, cx| {
+            let late = !this.titles_pending.contains(&real_id);
+            let reason = match result.map(|text| titles::clean_title(&text)) {
+                Ok(Some(title)) => {
+                    let known = this.sessions.iter().any(|entry| entry.id == real_id);
+                    if late && (!known || !titles::should_land_late(this.overrides.get(&real_id))) {
+                        return;
+                    }
+                    this.land_title(&real_id, "", &title, cx);
+                    return;
+                }
+                Ok(None) => "empty reply".to_owned(),
+                Err(reason) => reason,
+            };
+            if late {
+                return;
+            }
+            if titles::should_retry_title(tries, false) {
+                crate::baaz_log!("auto-title for {real_id} on {} failed ({reason}); retrying once", provider.label());
+                this.run_title_on_provider(provider, real_id, first_message, tries + 1, cx);
+            } else {
+                this.fail_title(&real_id, &reason, cx);
             }
         });
     }
@@ -447,6 +517,19 @@ impl Harness {
         prompt: String,
         cx: &mut Context<Self>,
     ) {
+        // The source session's own provider writes the summary (docs/50
+        // P2): its transcript never leaves for another provider's model.
+        let provider = self.session_lane_provider(&source);
+        if provider != crate::providers::ProviderId::Muse {
+            self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
+            self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, reply, cx| {
+                let summary = reply.ok().and_then(|text| titles::clean_summary(&text));
+                if this.handoff_summary_waiting(&source, epoch) {
+                    this.resolve_handoff_summary(source, epoch, summary, cx);
+                }
+            });
+            return;
+        }
         let Some(client) = self.client.clone() else {
             // Signed out between the checkpoint's check and now: keep the
             // extractive text and open the destination.
@@ -721,11 +804,15 @@ impl Harness {
         // byline work and independent of the byline switch below. Runs
         // first so an early return never skips it.
         self.reconcile_pack_turns(cx);
-        if !self.layout.auto_summary || self.client.is_none() {
+        if !self.layout.auto_summary {
             return;
         }
         let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
+        // The session's own provider rewrites its byline (docs/50 P2).
+        if !self.utility_available(self.session_lane_provider(&session_id)) {
+            return;
+        }
         if self.is_side_session(&session_id) {
             return;
         }
@@ -785,6 +872,11 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
+        let provider = self.session_lane_provider(&real_id);
+        if provider != crate::providers::ProviderId::Muse {
+            self.run_byline_on_provider(provider, real_id, ask, result, tries, cx);
+            return;
+        }
         let Some(client) = self.client.clone() else { return };
         if self.byline_jobs.values().any(|job| job.real_id == real_id) {
             return;
@@ -906,6 +998,39 @@ impl Harness {
 
     /// The rewrite landed: both halves overwrite the free excerpt, and the
     /// row updates in place through the one-row rejoin.
+    /// [`Self::run_byline_attempt`] on a Claude Code or Codex session: one
+    /// completion on its own provider, parsed like the Muse harvest.
+    fn run_byline_on_provider(
+        &mut self,
+        provider: crate::providers::ProviderId,
+        real_id: String,
+        ask: String,
+        result: String,
+        tries: u8,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = byline::rewrite_prompt(&ask, &result);
+        self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, reply, cx| {
+            if !this.byline_live.contains(&real_id) {
+                return;
+            }
+            let reason = match reply.map(|text| byline::parse_rewrite(&text)) {
+                Ok(Some((new_ask, new_result))) => {
+                    this.land_byline(&real_id, "", &new_ask, &new_result, cx);
+                    return;
+                }
+                Ok(None) => "unparseable reply".to_owned(),
+                Err(reason) => reason,
+            };
+            if tries < titles::TITLE_MAX_ATTEMPTS {
+                crate::baaz_log!("auto-summary on {} failed ({reason}); retrying once", provider.label());
+                this.run_byline_on_provider(provider, real_id, ask, result, tries + 1, cx);
+            } else {
+                this.fail_byline(&real_id, &reason, cx);
+            }
+        });
+    }
+
     fn land_byline(&mut self, real_id: &str, side_id: &str, ask: &str, result: &str, cx: &mut Context<Self>) {
         let (ask, result) = (ask.to_owned(), result.to_owned());
         self.set_override(real_id, |meta| {
