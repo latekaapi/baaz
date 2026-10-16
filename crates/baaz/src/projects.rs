@@ -400,6 +400,13 @@ impl Projects {
         self.projects.iter().find(|p| canonical_path(&p.root) == canonical)
     }
 
+    /// [`Self::find_by_root`] for a root already in canonical spelling,
+    /// reading project roots through `cache` (one canonicalize per distinct
+    /// root per pass, rather than per row per project).
+    pub fn find_by_canonical_root(&self, canonical: &str, cache: &mut CanonicalCache) -> Option<&Project> {
+        self.projects.iter().find(|p| cache.get(p.root.to_string_lossy().as_ref()) == canonical)
+    }
+
     /// Forget the adoption. Sessions keep their rows — they resolve to
     /// Unfiled now — and a `current` pointing at it is cleared.
     /// Returns whether anything was forgotten.

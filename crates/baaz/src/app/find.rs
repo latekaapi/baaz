@@ -98,7 +98,18 @@ impl Harness {
     /// the matchable body. Pure over the harness state so tests can pin
     /// the rows without a window; [`Self::rebuild_search_index`] writes
     /// them to `search.db` (`docs/22-handoff.md` §8.4).
+    #[cfg(test)]
     pub(crate) fn search_session_rows(&self) -> Vec<crate::search::SessionRow> {
+        self.search_sync_rows().into_iter().map(|(row, _, _)| row).collect()
+    }
+
+    /// [`Self::search_session_rows`] with what [`crate::search::sync_sessions`]
+    /// needs beside each row: the index ids whose transcript text is the
+    /// body (fetched only when the row is written), and a fingerprint of
+    /// everything that decides what is written — the row's own words and
+    /// each body source's `updated_at_us`. No body text is read or cloned
+    /// here: this runs on the UI thread.
+    pub(crate) fn search_sync_rows(&self) -> Vec<(crate::search::SessionRow, Vec<String>, i64)> {
         use std::collections::HashMap;
         // One cache over the whole build: each distinct index root is
         // canonicalized once, not once per row.
@@ -128,9 +139,7 @@ impl Harness {
             // once rather than once per indexed session.
             let adopted = workspace
                 .as_deref()
-                .and_then(|root| {
-                    self.projects.projects.iter().find(|p| canon.get(&p.root.to_string_lossy()) == root)
-                })
+                .and_then(|root| self.projects.find_by_canonical_root(root, &mut canon))
                 .map(|p| p.name.clone());
             per_session.insert(
                 session_id.clone(),
@@ -170,7 +179,9 @@ impl Harness {
                 // keep their own rows rather than vanishing with it.
                 for member in members {
                     if let Some(row) = per_session.remove(&member) {
-                        out.push(row);
+                        let body_ids = vec![member.clone()];
+                        let fingerprint = self.search_fingerprint(&row, &body_ids);
+                        out.push((row, body_ids, fingerprint));
                     }
                 }
                 continue;
@@ -206,6 +217,17 @@ impl Harness {
                     }
                 }
             }
+            // The transcript sources, head first when it is indexed, then
+            // every other indexed member in id order.
+            let mut body_ids: Vec<String> = Vec::new();
+            if per_session.contains_key(&head) {
+                body_ids.push(head.clone());
+            }
+            for member in &members {
+                if member != &head {
+                    body_ids.push(member.clone());
+                }
+            }
             let mut base = match per_session.remove(&head) {
                 Some(row) => row,
                 // A provider-lane head carries no index entry: scaffold
@@ -226,11 +248,33 @@ impl Harness {
                 base.label.clone_from(&entry.label);
             }
             if !extra.is_empty() {
-                base.body = format!("{}\n{}", base.body, extra.join("\n"));
+                base.body = if base.body.is_empty() {
+                    extra.join("\n")
+                } else {
+                    format!("{}\n{}", base.body, extra.join("\n"))
+                };
             }
-            out.push(base);
+            let fingerprint = self.search_fingerprint(&base, &body_ids);
+            out.push((base, body_ids, fingerprint));
         }
         out
+    }
+
+    /// A stable hash of what a search row would write: its words and each
+    /// body source's last activity. Never 0, which means "always write".
+    fn search_fingerprint(&self, row: &crate::search::SessionRow, body_ids: &[String]) -> i64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&row.session_id, &row.label, &row.title, &row.first_prompt, &row.body, &row.project, &row.workspace)
+            .hash(&mut hasher);
+        for id in body_ids {
+            id.hash(&mut hasher);
+            self.index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
+        }
+        match hasher.finish() as i64 {
+            0 => 1,
+            fingerprint => fingerprint,
+        }
     }
 
     /// How many times [`Self::rebuild_search_index`] ran in this process.
@@ -263,13 +307,9 @@ impl Harness {
         #[cfg(test)]
         SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let at = std::time::Instant::now();
-        let rows = self.search_session_rows();
-        crate::log::boot_mark(&format!(
-            "search-rows-built rows={} in={}ms (per-row canonical_str N={})",
-            rows.len(),
-            at.elapsed().as_millis(),
-            rows.len()
-        ));
+        let rows = self.search_sync_rows();
+        crate::log::boot_mark(&format!("search-rows-built rows={} in={}ms", rows.len(), at.elapsed().as_millis()));
+        let index_path = crate::index::index_path();
         let work = move || {
             // One rebuild at a time: two overlapping ones fought over the
             // database lock (8 s and 20 s at boot), and the second now finds
@@ -281,11 +321,20 @@ impl Harness {
                 Ok(connection) => connection,
                 Err(_) => return,
             };
-            let wrote = crate::search::rebuild_sessions(&mut connection, &rows).unwrap_or(false);
+            let synced: Vec<crate::search::SyncRow<'_>> = rows
+                .iter()
+                .map(|(row, body_ids, fingerprint)| crate::search::SyncRow {
+                    row,
+                    body_ids,
+                    fingerprint: *fingerprint,
+                })
+                .collect();
+            let stats = crate::search::sync_sessions(&mut connection, &synced, &|ids| {
+                crate::index::read_bodies(&index_path, ids)
+            });
             crate::log::boot_mark(&format!(
-                "search-rebuild-done rows={} wrote={} in={}ms",
+                "search-sync-done rows={} {stats:?} in={}ms",
                 rows.len(),
-                wrote,
                 at.elapsed().as_millis()
             ));
         };

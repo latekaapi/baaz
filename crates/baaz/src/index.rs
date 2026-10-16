@@ -21,7 +21,7 @@ use rusqlite::{Connection, OpenFlags};
 const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// What the index knows about one session, beyond what the wire says.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexEntry {
     /// The session's own name, when someone gave it one.
     pub session_name: Option<String>,
@@ -29,7 +29,12 @@ pub struct IndexEntry {
     pub title: String,
     /// The first thing the person typed, which is the best fallback label.
     pub first_user_prompt: Option<String>,
-    /// Everything the index made searchable, for the search field.
+    /// Transcript text to index inline. [`read`] leaves it empty: Muse's
+    /// `search_text` averages 80 KB a row (210 MB over 2.6k sessions,
+    /// measured 2026-10-16), so the sidebar's read never carries it and the
+    /// search sync fetches bodies per changed session with [`read_bodies`].
+    /// Fixtures that never touch the database set it directly.
+    #[serde(skip)]
     pub search_text: String,
     /// Last activity, in epoch microseconds.
     pub updated_at_us: Option<i64>,
@@ -114,9 +119,9 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
         })
         .unwrap_or(false);
     let sql = if has_workspace {
-        "SELECT session_id, session_name, title, first_user_prompt, search_text, updated_at_us, workspace_root FROM sessions"
+        "SELECT session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us, workspace_root FROM sessions"
     } else {
-        "SELECT session_id, session_name, title, first_user_prompt, search_text, updated_at_us FROM sessions"
+        "SELECT session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us FROM sessions"
     };
     let mut statement = match connection.prepare(sql) {
         Ok(statement) => statement,
@@ -137,9 +142,9 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
                 session_name: row.get(1).ok(),
                 title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 first_user_prompt: row.get(3).ok(),
-                search_text: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                updated_at_us: row.get(5).ok(),
-                workspace_root: if has_workspace { row.get(6).ok() } else { None },
+                search_text: String::new(),
+                updated_at_us: row.get(4).ok(),
+                workspace_root: if has_workspace { row.get(5).ok() } else { None },
             },
         ))
     });
@@ -151,6 +156,153 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
         }
     };
     rows.filter_map(Result::ok).collect()
+}
+
+/// [`read_at`] without a table scan: the rows whose `updated_at_us` differs
+/// from `previous` (or that `previous` lacks) are read by key, the rest are
+/// carried over, and rows Muse no longer has drop out.
+///
+/// Why it exists: Muse's `sessions` row stores `search_text` (80 KB on
+/// average) before `updated_at_us` and `session_name`, so any scan of the
+/// table walks every row's overflow pages — 3.9 s cold, 0.27 s warm on a
+/// 700 MB index (measured 2026-10-16), and it ran at boot and after every
+/// finished turn. The stamps come from `idx_sessions_created`, which covers
+/// `(updated_at_us, session_id)`, so the scan touches the index alone.
+///
+/// `title` and `first_user_prompt` are cut to their first 1,000 characters,
+/// here and in [`read_at`]: a pasted prompt can be 128 KB, the two columns
+/// held 105 MB each across 2.6k sessions, and a label is one line. Their
+/// words stay searchable through `search_text`.
+///
+/// A change Muse makes without bumping `updated_at_us` is missed until the
+/// next full [`read`]; the app runs one in the background after boot.
+pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntry>) -> HashMap<String, IndexEntry> {
+    let Ok(connection) = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return HashMap::new();
+    };
+    let _ = connection.busy_timeout(BUSY_TIMEOUT);
+    let stamps: Vec<(String, Option<i64>)> = match connection.prepare("SELECT session_id, updated_at_us FROM sessions") {
+        Ok(mut statement) => match statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1).ok()))) {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(_) => return read_at(path),
+        },
+        // An index this build has never seen: the full read knows how to
+        // degrade.
+        Err(_) => return read_at(path),
+    };
+    let mut out = HashMap::with_capacity(stamps.len());
+    let mut need: Vec<String> = Vec::new();
+    for (id, updated) in stamps {
+        match previous.get(&id) {
+            Some(entry) if entry.updated_at_us == updated && updated.is_some() => {
+                out.insert(id, entry.clone());
+            }
+            _ => need.push(id),
+        }
+    }
+    if need.is_empty() {
+        return out;
+    }
+    let has_workspace = has_column(&connection, "workspace_root");
+    let columns = if has_workspace {
+        "session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us, workspace_root"
+    } else {
+        "session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us"
+    };
+    for chunk in need.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT {columns} FROM sessions WHERE session_id IN ({marks})");
+        let Ok(mut statement) = connection.prepare(&sql) else { return read_at(path) };
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                IndexEntry {
+                    session_name: row.get(1).ok(),
+                    title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    first_user_prompt: row.get(3).ok(),
+                    search_text: String::new(),
+                    updated_at_us: row.get(4).ok(),
+                    workspace_root: if has_workspace { row.get(5).ok() } else { None },
+                },
+            ))
+        });
+        if let Ok(rows) = rows {
+            out.extend(rows.filter_map(Result::ok));
+        }
+    }
+    out
+}
+
+/// Whether Muse's `sessions` table has `column`.
+fn has_column(connection: &Connection, column: &str) -> bool {
+    connection
+        .prepare("PRAGMA table_info(sessions)")
+        .and_then(|mut pragma| {
+            pragma
+                .query_map([], |row| row.get::<_, String>(1))
+                .map(|names| names.filter_map(Result::ok).any(|name| name == column))
+        })
+        .unwrap_or(false)
+}
+
+/// Where Baaz keeps its last read of the index: labels and stamps only, so
+/// the sidebar can paint from it before Muse's database is touched.
+pub fn cache_path() -> PathBuf {
+    crate::store::support_dir().join("index-cache.json")
+}
+
+/// The last saved read, or an empty map (no file yet, or one this build
+/// cannot parse — the next read rewrites it).
+pub fn load_cache(path: &std::path::Path) -> HashMap<String, IndexEntry> {
+    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+/// Save a read for the next boot. Blocking; call it off the UI thread.
+pub fn save_cache(path: &std::path::Path, index: &HashMap<String, IndexEntry>) {
+    if let Ok(bytes) = serde_json::to_vec(index) {
+        let _ = crate::store::write_atomic(path, &bytes);
+    }
+}
+
+/// Muse's `search_text` for `ids`, keyed by session id; ids with no row (or
+/// no text) are absent.
+///
+/// Blocking, so call it off the UI thread. This is the only read of the
+/// transcript text, and the search sync asks only for sessions whose
+/// fingerprint changed — after boot that is the session a turn just
+/// finished in, not all of them. Every failure mode is an empty map.
+pub fn read_bodies(path: &std::path::Path, ids: &[String]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    let Ok(connection) = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return out;
+    };
+    let _ = connection.busy_timeout(BUSY_TIMEOUT);
+    // SQLite's default bound on host parameters is 32 766; stay well under.
+    for chunk in ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT session_id, search_text FROM sessions WHERE session_id IN ({marks})");
+        let Ok(mut statement) = connection.prepare(&sql) else { return out };
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        });
+        if let Ok(rows) = rows {
+            for (id, text) in rows.filter_map(Result::ok) {
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
+                    out.insert(id, text);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every distinct `workspace_root` the index knows, newest first: the root,
@@ -264,5 +416,83 @@ mod tests {
         assert_eq!(placeholder.label(), None);
         let shout = IndexEntry { title: "NEW SESSION".into(), ..IndexEntry::default() };
         assert_eq!(shout.label(), None);
+    }
+
+    #[test]
+    fn the_sidebar_read_carries_no_bodies_and_bodies_come_per_id() {
+        let dir = std::env::temp_dir().join(format!("baaz-index-bodies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("bodies.db");
+        let _ = std::fs::remove_file(&path);
+        db_with(&path, true);
+        let index = read_at(&path);
+        assert!(index.values().all(|entry| entry.search_text.is_empty()), "no body rides the sidebar read");
+        let bodies = read_bodies(&path, &["s1".to_owned(), "s3".to_owned(), "missing".to_owned()]);
+        assert_eq!(bodies.len(), 2, "only the asked-for rows that exist");
+        assert_eq!(bodies["s1"], "body one");
+        assert_eq!(bodies["s3"], "body three");
+        assert!(read_bodies(&path, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_changed_read_refetches_only_rows_whose_stamp_moved() {
+        let dir = std::env::temp_dir().join(format!("baaz-index-changed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("changed.db");
+        let _ = std::fs::remove_file(&path);
+        db_with(&path, true);
+        let full = read_at(&path);
+        // A stale carried-over title proves s2 is not refetched; s1's stamp
+        // moved, so its fresh title comes back; s3 is gone from `previous`
+        // and is fetched.
+        let mut previous = full.clone();
+        previous.get_mut("s2").expect("s2").title = "carried over".into();
+        previous.get_mut("s1").expect("s1").updated_at_us = Some(1);
+        previous.get_mut("s1").expect("s1").title = "stale".into();
+        previous.remove("s3");
+        previous.insert("deleted".into(), IndexEntry { updated_at_us: Some(5), ..Default::default() });
+        let changed = read_changed(&path, &previous);
+        assert_eq!(changed.len(), 3, "rows Muse no longer has drop out");
+        assert_eq!(changed["s1"].title, "Fix the parser", "a moved stamp is refetched");
+        assert_eq!(changed["s2"].title, "carried over", "an unchanged stamp is carried, not read");
+        assert_eq!(changed["s3"], full["s3"], "a row the cache lacks is read");
+        let cache = dir.join("cache.json");
+        save_cache(&cache, &changed);
+        assert_eq!(load_cache(&cache), changed, "the cache round-trips");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Timing on a real copy (`BAAZ_PERF_INDEX`), not a gate.
+    #[test]
+    #[ignore]
+    fn perf_changed_read_against_a_real_copy() {
+        let Some(path) = std::env::var_os("BAAZ_PERF_INDEX") else { return };
+        let path = std::path::PathBuf::from(path);
+        let at = std::time::Instant::now();
+        let full = read_at(&path);
+        eprintln!("PERF full read rows={} in={:?}", full.len(), at.elapsed());
+        let at = std::time::Instant::now();
+        let cold = read_changed(&path, &HashMap::new());
+        eprintln!("PERF changed read, no cache rows={} in={:?}", cold.len(), at.elapsed());
+        let at = std::time::Instant::now();
+        let warm = read_changed(&path, &full);
+        eprintln!("PERF changed read, cache current rows={} in={:?}", warm.len(), at.elapsed());
+        let mut one_stale = full.clone();
+        if let Some(entry) = one_stale.values_mut().next() {
+            entry.updated_at_us = Some(1);
+        }
+        let at = std::time::Instant::now();
+        let _ = read_changed(&path, &one_stale);
+        eprintln!("PERF changed read, one row moved in={:?}", at.elapsed());
+        let cache = std::env::temp_dir().join("baaz-perf-index-cache.json");
+        let at = std::time::Instant::now();
+        save_cache(&cache, &full);
+        eprintln!("PERF save cache bytes={} in={:?}", std::fs::metadata(&cache).map(|m| m.len()).unwrap_or(0), at.elapsed());
+        let at = std::time::Instant::now();
+        let loaded = load_cache(&cache);
+        eprintln!("PERF load cache rows={} in={:?}", loaded.len(), at.elapsed());
+        assert_eq!(cold, full, "the changed read with no cache equals the full read");
+        assert_eq!(warm, full);
     }
 }
