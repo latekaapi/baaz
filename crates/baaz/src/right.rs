@@ -668,6 +668,56 @@ pub(crate) fn render(
     }
 }
 
+/// The screen's place on the strip (D6): Changes 0, Files 1, Page 2.
+pub(crate) fn screen_index(kind: RightKind) -> usize {
+    match kind {
+        RightKind::Changes | RightKind::Diff | RightKind::Git => 0,
+        RightKind::Files => 1,
+        RightKind::Browser => 2,
+    }
+}
+
+/// The glyph a screen wears in its row and toggle (docs/43 §2.2).
+pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
+    match kind {
+        RightKind::Changes | RightKind::Diff | RightKind::Git => IconName::Git,
+        RightKind::Files => IconName::Folder,
+        RightKind::Browser => IconName::Globe,
+    }
+}
+
+/// One screen on the strip (D6, docs/43 §2.2): its 32 px row — glyph,
+/// name, its own actions, ✕ — over its body, with the 24 px fade under the
+/// row. The pane is `complementary` "Right pane"; each screen a group named
+/// for itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_screen(
+    kind: RightKind,
+    cache: &RightCache,
+    project: Option<(PathBuf, String)>,
+    session_edits: &[String],
+    browser: BrowserPane<'_>,
+    pane_open: bool,
+    width: f32,
+    cx: &mut Context<Harness>,
+) -> AnyElement {
+    let _ = width;
+    let slug = kind.slug();
+    let close = cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx));
+    let row = aui::workbench::pane_row(SharedString::from(format!("right-row-{slug}")), screen_glyph(kind), kind.label()).on_close(close);
+    let body = render(kind, cache, project, session_edits, browser, pane_open, cx);
+    v_flex()
+        .id(SharedString::from(format!("right-screen-{slug}")))
+        .relative()
+        .size_full()
+        .role(gpui::Role::Complementary)
+        .aria_label(format!("Right pane: {}", kind.label()))
+        .child(row)
+        .child(div().flex_1().min_h(px(0.0)).child(body))
+        .child(aui::workbench::pane_row_fade(cx))
+        .into_any_element()
+}
+
 /// The file tree's Refresh action, the one wired action in the pane: ask the
 /// [`Harness`](crate::app::Harness) for a real re-read off the render path.
 /// Silent when the window is already gone.
@@ -1006,8 +1056,6 @@ fn files_action_name(action: &FileTreeAction) -> String {
     match action {
         FileTreeAction::Select(id) => format!("Select {id}"),
         FileTreeAction::Toggle(id) => format!("Toggle {id}"),
-        FileTreeAction::Search => "Search".to_string(),
-        FileTreeAction::Refresh => "Refresh".to_string(),
     }
 }
 
@@ -1158,7 +1206,6 @@ fn files_handler(
     root: PathBuf,
 ) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
     move |action, _window, cx| match action {
-        FileTreeAction::Refresh => refresh_files(harness.clone(), cx),
         FileTreeAction::Toggle(id) => {
             let id = id.to_string();
             let root = root.clone();
@@ -1166,9 +1213,6 @@ fn files_handler(
         }
         FileTreeAction::Select(id) => {
             select_file_preview(harness.clone(), root.clone(), id.to_string(), cx);
-        }
-        FileTreeAction::Search => {
-            inert("Files", &files_action_name(action), &notify, cx);
         }
     }
 }
@@ -2511,10 +2555,8 @@ fn files_pane_from(
     // edges is what the owner saw as "extra borders and rounded corners".
     // A B9 reveal scrolls its row into view through the library's
     // `scroll_to` (unknown ids are ignored there).
-    let mut tree = file_tree("right-files", nodes.to_vec())
-        .flush()
-        .header(name)
-        .footer(footer);
+    let _ = (name, footer);
+    let mut tree = file_tree("right-files", nodes.to_vec()).flush();
     if let Some((reveal, token)) = cache.reveal.get(root) {
         tree = tree.scroll_to(reveal.clone()).scroll_token(*token);
     }

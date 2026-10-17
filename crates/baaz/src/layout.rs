@@ -105,7 +105,8 @@ impl RightKind {
     /// The legacy aliases label as the view they load into.
     pub fn label(self) -> &'static str {
         match self {
-            RightKind::Browser => "Browser",
+            // D6: the session's one page (docs/43 §2.7); `browser` stays the slug.
+            RightKind::Browser => "Page",
             RightKind::Changes | RightKind::Diff | RightKind::Git => "Changes",
             RightKind::Files => "Files",
         }
@@ -130,7 +131,7 @@ impl RightKind {
     /// [`right_kind`] normalises an in-memory legacy value on read.)
     pub fn parse(s: &str) -> Option<RightKind> {
         match s {
-            "browser" => Some(RightKind::Browser),
+            "browser" | "page" => Some(RightKind::Browser),
             "changes" | "diff" | "git" => Some(RightKind::Changes),
             "files" => Some(RightKind::Files),
             _ => None,
