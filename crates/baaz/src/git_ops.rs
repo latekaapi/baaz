@@ -46,9 +46,17 @@ pub(crate) struct GitTree {
     /// Ignored paths git reports (`target/`, `.cargo/`): the Files tree
     /// draws them faint. Directories end in `/`.
     pub ignored: Vec<String>,
+    /// Untracked paths (`??`): in `files` as added, but the Files tree marks
+    /// them U, not A (docs/43 §2.4).
+    pub untracked: Vec<String>,
 }
 
 impl GitTree {
+    /// Whether `path` is an untracked file.
+    pub(crate) fn is_untracked(&self, path: &str) -> bool {
+        self.untracked.iter().any(|u| u == path)
+    }
+
     /// The change at `path`, if it changed.
     pub(crate) fn change(&self, path: &str) -> Option<&FileChange> {
         self.files.iter().find(|f| f.path == path)
@@ -205,7 +213,10 @@ pub(crate) fn parse_status_v2(raw: &str) -> GitTree {
                     tree.files.push(FileChange { path: cols[9].to_string(), change: ChangeKind::Modified, added: 0, removed: 0 });
                 }
             }
-            "?" => tree.files.push(FileChange { path: rest.to_string(), change: ChangeKind::Added, added: 0, removed: 0 }),
+            "?" => {
+                tree.files.push(FileChange { path: rest.to_string(), change: ChangeKind::Added, added: 0, removed: 0 });
+                tree.untracked.push(rest.to_string());
+            }
             "!" => tree.ignored.push(rest.to_string()),
             _ => {}
         }
@@ -562,6 +573,7 @@ mod tests {
         assert!(t.is_ignored("target/debug/baaz"));
         assert!(t.is_ignored(".cargo"));
         assert!(!t.is_ignored(".github"));
+        assert!(t.is_untracked("crates/baaz/src/panes/mod.rs") && !t.is_untracked("crates/baaz/src/right.rs"));
     }
 
     #[test]
