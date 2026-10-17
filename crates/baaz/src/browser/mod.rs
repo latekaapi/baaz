@@ -1965,6 +1965,9 @@ impl Harness {
                 }
             }
             WebviewIntent::Annotate(_) => {}
+            // D6 (docs/43 §2.7): the nav row's "open in Browse" carries the
+            // session's page into Browse, full width.
+            WebviewIntent::OpenInBrowse => self.carry_session_tab_to_browse(window, cx),
             WebviewIntent::SendAnnotations {
                 annotations,
                 screenshot,
@@ -2390,10 +2393,13 @@ impl Harness {
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
         // is the frame owner's active tab (or nothing while pending).
+        // D6 (docs/43 §3): while the pane's strip slides, the Page screen
+        // is a still picture (the cover technique) — the live page window
+        // shows again once the slide lands.
         let frame_live = browser_visible(BrowserVisibility {
             session_active: true,
             ..base
-        });
+        }) && !self.right_strip_moving;
         // B2a-H2b: in Browse the pane never shows a page — one tab, one
         // page — so the session page can neither share the centre's tab
         // nor paint behind the mode. The render path shows the Changes
