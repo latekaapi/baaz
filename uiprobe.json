@@ -3,7 +3,8 @@
   "cwd": ".",
   "verbs": {
     "shot": ["python3", "scripts/uiprobe.py", "--entry", "{entry}", "--probe-shot", "{out}"],
-    "idle": ["python3", "scripts/uiprobe.py", "--entry", "{entry}", "--probe-idle", "{ms}"]
+    "idle": ["python3", "scripts/uiprobe.py", "--entry", "{entry}", "--probe-idle", "{ms}"],
+    "budget": ["python3", "scripts/perf-budgets.py", "--json"]
   },
   "baseline_dir": "design/baseline",
   "idle_ms": 2000,

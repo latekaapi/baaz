@@ -1,0 +1,74 @@
+{
+  "about": "docs/51 step M. Budgets per build profile; `measured` is the median on the reference machine (the owner's MacBook, 2026-10-17, debug build, window behind other apps). Budgets carry headroom for run-to-run noise and catch order-of-magnitude regressions; where docs/51 sets a target (switch one frame, stream ≤ 1 frame, open < 50 ms, idle < 0.5 % and 0 renders) the budget IS the target. Raise a budget only in its own commit, with the reason.",
+  "profiles": {
+    "debug": {
+      "budgets": {
+        "store.index_refresh_unchanged_ms": {
+          "budget": 20,
+          "measured": 0.7
+        },
+        "store.index_refresh_one_ms": {
+          "budget": 20,
+          "measured": 0.85
+        },
+        "store.index_cache_load_ms": {
+          "budget": 50,
+          "measured": 1.1
+        },
+        "store.search_sync_unchanged_ms": {
+          "budget": 25,
+          "measured": 0.7
+        },
+        "store.search_sync_one_ms": {
+          "budget": 50,
+          "measured": 1.2
+        },
+        "store.search_query_ms": {
+          "budget": 20,
+          "measured": 0.3
+        },
+        "store.provider_bodies_ms": {
+          "budget": 150,
+          "measured": 23
+        },
+        "boot.first_frame_ms": {
+          "budget": 300,
+          "measured": 125
+        },
+        "open.replay_300_ms": {
+          "budget": 50,
+          "measured": 13.1
+        },
+        "switch.cached_300_ms": {
+          "budget": 16,
+          "measured": 4.8
+        },
+        "stream.to_render_p50_ms": {
+          "budget": 8,
+          "measured": 0.7
+        },
+        "stream.to_render_p99_ms": {
+          "budget": 16,
+          "measured": 1.6
+        },
+        "stream.fold_apply_p99_ms": {
+          "budget": 2,
+          "measured": 0.045
+        },
+        "idle.cpu_pct": {
+          "budget": 0.5,
+          "unit": "%",
+          "measured": 0.1
+        },
+        "idle.renders": {
+          "budget": 0,
+          "unit": "renders",
+          "measured": 0
+        }
+      }
+    },
+    "release": {
+      "budgets": {}
+    }
+  }
+}

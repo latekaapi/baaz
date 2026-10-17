@@ -503,6 +503,28 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
 
 /// `p50`/`p90`/… over a sorted sample: the element at `q * len`, clamped.
+/// An event whose next render is further away than this asked for none: a
+/// fold that changed nothing on screen (a usage frame, a duplicate) never
+/// notifies, and the next render belongs to a later event.
+const STREAM_LATENCY_CEILING: Duration = Duration::from_millis(250);
+
+/// Stream-to-render latency per streamed event, in microseconds: from the
+/// end of its fold to the first transcript render after it (`times` is in
+/// render order). Events with no render within [`STREAM_LATENCY_CEILING`]
+/// are left out — see there. Several events that land inside one frame all
+/// count, each to that frame, which is the latency each of them saw.
+fn stream_to_render_us(applied_at: &[Instant], times: &[Instant]) -> Vec<u128> {
+    applied_at
+        .iter()
+        .filter_map(|applied| {
+            let next = times.partition_point(|t| t < applied);
+            let render = times.get(next)?;
+            let gap = render.duration_since(*applied);
+            (gap <= STREAM_LATENCY_CEILING).then_some(gap.as_micros())
+        })
+        .collect()
+}
+
 fn percentile(sorted: &[u128], q: f64) -> u128 {
     if sorted.is_empty() {
         return 0;
@@ -620,6 +642,9 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         // The stream: one fold-apply per cadence tick, so streaming cost is
         // real, with the list driven per the scroll mode on the same update.
         let mut apply_us: Vec<u128> = Vec::with_capacity(total);
+        // When each event's fold finished: the stream-to-render latency
+        // below is the gap from each of these to the next transcript render.
+        let mut applied_at: Vec<Instant> = Vec::with_capacity(total);
         // `wheel` streams head-pinned too: an opened session arrives whole
         // and is scrolled to its tail with everything above unmeasured,
         // which is the state the instrument has to start its flick from.
@@ -628,7 +653,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         }
         for (index, event) in events.into_iter().enumerate() {
             let frac = sweep_frac(index, total);
-            let micros: u128 = cx.update(|cx| {
+            let (micros, done): (u128, Instant) = cx.update(|cx| {
                 view.update(cx, |view, cx| {
                     let start = Instant::now();
                     view.apply(event, cx);
@@ -644,10 +669,11 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                         // driven by real events after it, below.
                         BenchScroll::Wheel => view.bench_scroll_to(0.0, cx),
                     }
-                    micros
+                    (micros, Instant::now())
                 })
             });
             apply_us.push(micros);
+            applied_at.push(done);
             cx.background_executor().timer(opts.cadence).await;
         }
         // The wheel instrument runs after the stream, below, and its phases
@@ -718,6 +744,8 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         element.sort_unstable();
         apply_us.sort_unstable();
         let times = session::take_frame_times();
+        let mut stream_us = stream_to_render_us(&applied_at, &times);
+        stream_us.sort_unstable();
         let mut gaps_ms: Vec<u128> = times
             .windows(2)
             .map(|pair| pair[1].duration_since(pair[0]).as_micros() / 1000)
@@ -775,6 +803,14 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
             percentile(&gaps_ms, 0.9),
             percentile(&gaps_ms, 0.99),
             gaps_ms.last().copied().unwrap_or(0)
+        );
+        println!(
+            "bench-stream n={} p50={}us p90={}us p99={}us max={}us",
+            stream_us.len(),
+            percentile(&stream_us, 0.5),
+            percentile(&stream_us, 0.9),
+            percentile(&stream_us, 0.99),
+            stream_us.last().copied().unwrap_or(0)
         );
         println!("bench-frames frames={frames} fps={fps:.1} dropped={dropped} stream_secs={stream_secs:.1}");
         println!("bench-rss peak_mb={rss_mb:.1}");
@@ -884,6 +920,13 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                     "max_ms": gaps_ms.last().copied().unwrap_or(0),
                     "series_us": gaps_series_us,
                 },
+                "stream_to_render": {
+                    "n": stream_us.len(),
+                    "p50_us": percentile(&stream_us, 0.5),
+                    "p90_us": percentile(&stream_us, 0.9),
+                    "p99_us": percentile(&stream_us, 0.99),
+                    "max_us": stream_us.last().copied().unwrap_or(0),
+                },
                 "frames": frames,
                 "fps": fps,
                 "dropped": dropped,
@@ -919,6 +962,18 @@ mod tests {
         assert_eq!(percentile(&sorted, 0.9), 10);
         assert_eq!(percentile(&sorted, 0.99), 10);
         assert_eq!(percentile(&sorted, 0.0), 1);
+    }
+
+    #[test]
+    fn stream_latency_runs_to_the_next_render_and_skips_silent_events() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let applied = [at(0), at(5), at(40), at(600)];
+        let renders = [at(16), at(50), at(1_000)];
+        // 0 → 16, 5 → 16, 40 → 50; the event at 600 waits 400 ms, so it
+        // asked for no render and is left out.
+        assert_eq!(super::stream_to_render_us(&applied, &renders), vec![16_000, 11_000, 10_000]);
+        assert!(super::stream_to_render_us(&applied, &[]).is_empty());
     }
 
     #[test]

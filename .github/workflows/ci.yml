@@ -31,6 +31,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # docs/51 step M: the per-turn store costs (index refresh, search
+      # sync, provider transcript reads) on a synthetic 2,600-session store.
+      # Store only: the windowed budgets need a display and this machine's
+      # numbers; `--slack 3` allows for a shared runner.
+      - name: Performance budgets (store)
+        run: python3 scripts/perf-budgets.py --only store --slack 3
+
       - name: Doc
         run: cargo doc --workspace --no-deps
         env:
