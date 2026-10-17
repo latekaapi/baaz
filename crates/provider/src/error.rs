@@ -35,6 +35,10 @@ pub enum ProviderError {
     },
 }
 
+/// The prefix [`ProviderError::unknown_approval`] writes; the quoted id
+/// follows it.
+const UNKNOWN_APPROVAL: &str = "unknown approval ";
+
 impl ProviderError {
     /// The typed refusal: this provider cannot `capability`, and here is why.
     pub fn unsupported(capability: &str, reason: impl Into<String>) -> Self {
@@ -53,6 +57,22 @@ impl ProviderError {
     pub fn is_unsupported(&self) -> bool {
         matches!(self, Self::Unsupported { .. })
     }
+
+    /// The refusal a decision gets when the adapter holds no pending
+    /// request under `approval`: it was already answered, expired, or
+    /// belonged to a child that is gone. One shape for every adapter, so
+    /// the host can recognise it with [`Self::is_unknown_approval`] and
+    /// drop its own card instead of leaving it armed.
+    pub fn unknown_approval(approval: &str, detail: &str) -> Self {
+        Self::Rejected { reason: format!("{UNKNOWN_APPROVAL}{approval:?}: {detail}") }
+    }
+
+    /// Whether this is [`Self::unknown_approval`]'s refusal: the approval
+    /// is no longer pending on the provider's side, so nothing will ever
+    /// settle it there.
+    pub fn is_unknown_approval(&self) -> bool {
+        matches!(self, Self::Rejected { reason } if reason.strip_prefix(UNKNOWN_APPROVAL).is_some_and(|rest| rest.starts_with('"')))
+    }
 }
 
 impl fmt::Display for ProviderError {
@@ -68,3 +88,26 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host drops its card on exactly this refusal: an unknown id is
+    /// recognised, while an unknown *choice* for a known approval (which
+    /// leaves the request pending) and every other refusal are not.
+    #[test]
+    fn only_the_unknown_approval_refusal_reads_as_gone() {
+        let gone = ProviderError::unknown_approval("ap-1", "no pending request carries that id");
+        assert!(gone.is_unknown_approval());
+        assert_eq!(
+            gone.to_string(),
+            "provider refused the command: unknown approval \"ap-1\": no pending request carries that id"
+        );
+        let choice = ProviderError::Rejected {
+            reason: "unknown approval choice \"maybe\" for ap-1: offer \"allow\" or \"deny\"".into(),
+        };
+        assert!(!choice.is_unknown_approval());
+        assert!(!ProviderError::Unavailable { reason: "unknown approval \"ap-1\"".into() }.is_unknown_approval());
+    }
+}

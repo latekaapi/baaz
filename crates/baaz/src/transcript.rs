@@ -697,8 +697,20 @@ fn approval_folds(state: &ApprovalState) -> bool {
     matches!(state, ApprovalState::AllowedOnce { .. } | ApprovalState::AutoAllowed { .. })
 }
 
-/// B12: count one tool call's family for the fold summary.
+/// B12: count one tool call's family for the fold summary — only work
+/// that happened: a call that succeeded, or a command that ran and exited
+/// non-zero. A denied command or a write the mode refused did nothing,
+/// and the summary read `ran 1 command` / `edited 1` for them (live
+/// 2026-10-17); they stay visible as their own failed cards instead.
 fn count_call(plan: &mut FoldPlan, call: &ToolCall) {
+    let ran = match call.status {
+        ToolStatus::Success => true,
+        ToolStatus::Error => matches!(call.body, aui_protocol::ToolBody::Shell { exit_code: Some(_), .. }),
+        _ => false,
+    };
+    if !ran {
+        return;
+    }
     match &call.kind {
         ToolKind::Read => plan.reads += 1,
         ToolKind::Edit | ToolKind::Write => plan.edits += 1,
@@ -3696,8 +3708,8 @@ mod tests {
 
     /// Q1c: a denied command settles to exactly one visible item — the
     /// approval card — folded, expanded, and with folding off. The
-    /// covered call takes no row or card anywhere, but still counts in
-    /// the header (it was attempted).
+    /// covered call takes no row or card anywhere, and the header does not
+    /// count it: it never ran (live 2026-10-17, "ran 1 command" for a denial).
     #[test]
     fn a_denied_command_settles_to_only_its_approval_card() {
         let mut denied = shell_call("Denied", "echo hi");
@@ -3722,7 +3734,7 @@ mod tests {
             timestamp: None,
         };
         let plan = fold_plan(&turn).expect("tool activity folds");
-        assert_eq!(plan.commands, 1, "the attempted command still counts");
+        assert_eq!(plan.commands, 0, "a denied command never ran, so it is not counted");
         assert!(plan.folded.is_empty(), "the covered call folds nowhere");
         assert_eq!(plan.visible, vec![1], "only the denial stays visible");
         // Folded: header + the approval card.
@@ -3742,6 +3754,30 @@ mod tests {
         assert_eq!(turn_mapped_rows(&turn, true, &off, false), 1);
         assert!(matches!(turn_slot_at(&turn, true, &off, false, 0), Some(TurnSlot::Block(1))));
         assert_slots_match_count(&turn, true, &off, false);
+    }
+
+    /// Live 2026-10-17: the header counts only work that happened. A
+    /// Write the Read-only mode refused and a command denied before it ran
+    /// count nothing; a command that ran and exited non-zero still ran.
+    #[test]
+    fn the_fold_header_counts_only_work_that_ran() {
+        let mut refused = write_call(2);
+        refused.status = aui_protocol::ToolStatus::Error;
+        let mut denied = shell_call("Denied", "echo hi");
+        denied.status = aui_protocol::ToolStatus::Error;
+        denied.body = ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: false };
+        let mut failed = shell_call("Ran", "false");
+        failed.status = aui_protocol::ToolStatus::Error;
+        failed.body = ToolBody::Shell { output_lines: Vec::new(), exit_code: Some(1), live: false };
+        let turn = Turn::Assistant {
+            id: "turn-refused".to_owned(),
+            blocks: vec![Block::tool_call(refused), Block::tool_call(denied), Block::tool_call(failed)],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.edits, 0, "a refused Write edited nothing");
+        assert_eq!(plan.commands, 1, "only the command that ran counts");
     }
 
     /// Q1c: an approved command settles the same way — the approval card

@@ -963,9 +963,7 @@ impl ClaudeCodeAdapter {
         feedback: Option<&str>,
     ) -> Result<Ack, ProviderError> {
         if !self.has_pending(approval) {
-            return Err(ProviderError::Rejected {
-                reason: format!("unknown approval {approval:?}: no pending request carries that id"),
-            });
+            return Err(ProviderError::unknown_approval(approval, "no pending request carries that id"));
         }
         self.check_session(session_id)?;
         // Take-then-send: the removal is what claims the right to answer,
@@ -1020,9 +1018,7 @@ impl ClaudeCodeAdapter {
         let known = fold.pending_approvals().iter().any(|queued| queued.request_id == approval);
         let unknown = fold.pending_unknown().iter().any(|queued| queued.request_id == approval);
         if !known && !unknown {
-            return Err(ProviderError::Rejected {
-                reason: format!("unknown approval {approval:?}: no pending request carries that id"),
-            });
+            return Err(ProviderError::unknown_approval(approval, "no pending request carries that id"));
         }
         if choice != "allow" && choice != "deny" {
             return Err(ProviderError::Rejected {

@@ -92,12 +92,23 @@ pub struct ContextPack {
 /// The last line tells the destination to acknowledge rather than
 /// re-execute: without it the destination re-ran the original
 /// instruction instead of picking up the context.
+///
+/// The pack rides a user turn on every destination (the turn's start is
+/// what acknowledges the handoff), so the middle line says out loud that
+/// this message is Baaz's, not the person's: a Codex destination asked
+/// "what did I ask you before?" answered "You asked me to acknowledge the
+/// handoff context…" (live 2026-10-17) — the pack's own instruction read
+/// as the person's last ask. The person's asks are the quoted ones.
 pub fn pack_header(from: ProviderId) -> String {
     format!(
-        "Continuing a session handed off from {}. Context follows.\nReply with a one-sentence acknowledgement of this context and wait for the user's next message; do not re-execute the instructions being handed off.",
+        "Continuing a session handed off from {}. Context follows.\n{PACK_NOT_THE_USER}\nReply with a one-sentence acknowledgement of this context and wait for the user's next message; do not re-execute the instructions being handed off.",
         from.label()
     )
 }
+
+/// The pack header's framing line: the pack is the app's context
+/// transfer, never the person's request (see [`pack_header`]).
+pub const PACK_NOT_THE_USER: &str = "This message is a context transfer written by Baaz, the app, not a request from the user. The user's own requests are the ones quoted under \"Original goal\" and \"Recent turns\" below; if the user later asks what they asked before, answer from those and never from this message.";
 
 /// Build the pack from the folded transcript. Provider-neutral: only the
 /// goal, an extractive summary, verbatim recent turns within
@@ -1263,6 +1274,11 @@ mod tests {
             text.contains("one-sentence acknowledgement"),
             "the pack tells the destination to acknowledge and wait, not re-execute: {text}"
         );
+        // The pack is the app's message, never the person's last ask: the
+        // framing comes before the acknowledgement instruction it covers.
+        let framing = text.find(PACK_NOT_THE_USER).expect("the pack says it is not the user's request");
+        assert!(framing < text.find("one-sentence acknowledgement").expect("the ask"), "{text}");
+        assert!(text.lines().nth(1) == Some(PACK_NOT_THE_USER), "{text}");
         let bubble = display_text(&pack, ProviderId::Muse);
         assert!(bubble.len() < text.len());
         assert!(bubble.contains("Handed off from Muse"));

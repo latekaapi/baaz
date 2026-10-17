@@ -1051,9 +1051,7 @@ impl ProviderAdapter for CodexAdapter {
                 // the per-kind writer, which refuses a mismatched pairing.
                 let kind = self.with_child(|running| running.approval_kind(&approval))?;
                 let Some(kind) = kind else {
-                    return Err(ProviderError::Rejected {
-                        reason: format!("no pending approval {approval:?}: it may have resolved"),
-                    });
+                    return Err(ProviderError::unknown_approval(&approval, "it may have resolved"));
                 };
                 let answer = Self::decide(kind, &choice)?;
                 let answered = self
@@ -1062,9 +1060,7 @@ impl ProviderAdapter for CodexAdapter {
                         reason: format!("the session child is unreachable: {error}"),
                     })?;
                 if !answered {
-                    return Err(ProviderError::Rejected {
-                        reason: format!("no pending approval {approval:?}: it may have resolved"),
-                    });
+                    return Err(ProviderError::unknown_approval(&approval, "it may have resolved"));
                 }
                 // The press is on the wire: remember it so the completing
                 // item settles the card from what the person chose, not

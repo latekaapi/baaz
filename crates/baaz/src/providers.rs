@@ -675,21 +675,26 @@ impl Drop for TestEnvSandbox {
 /// The Claude Code models Baaz offers: aliases `--model` accepts, in
 /// picker order. No default is marked — no probe established one — so the
 /// current session model marks the active row instead.
+///
+/// Labels are the bare family names the child's own catalog uses
+/// (`displayName` "Haiku"), so the chip reads the same before and after
+/// the catalog folds — it read "Claude Haiku", then "Haiku" (live
+/// 2026-10-17) — and matches the full-id labels (`Haiku 4.5`).
 pub fn claude_code_models() -> [SuppliedModel; 3] {
     [
         SuppliedModel {
             id: "sonnet",
-            label: "Claude Sonnet",
+            label: "Sonnet",
             detail: "The everyday model (--model sonnet; full ids work too)",
         },
         SuppliedModel {
             id: "opus",
-            label: "Claude Opus",
+            label: "Opus",
             detail: "The largest model (--model opus; full ids work too)",
         },
         SuppliedModel {
             id: "haiku",
-            label: "Claude Haiku",
+            label: "Haiku",
             detail: "The fast model (--model haiku; full ids work too)",
         },
     ]
@@ -1198,9 +1203,9 @@ mod tests {
         assert_eq!(claude_code_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(claude_code_model_label("claude-fable-5-1[1m]"), "Fable 5.1 · 1M");
         assert_eq!(claude_code_model_label("fable"), "Fable");
-        assert_eq!(claude_code_model_label("opus"), "Claude Opus");
-        assert_eq!(claude_code_model_label("sonnet"), "Claude Sonnet");
-        assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");
+        assert_eq!(claude_code_model_label("opus"), "Opus");
+        assert_eq!(claude_code_model_label("sonnet"), "Sonnet");
+        assert_eq!(claude_code_model_label("haiku"), "Haiku");
         assert_eq!(claude_code_model_label("future-model-9"), "future-model-9");
         assert_eq!(claude_code_model_label("claude-unknownthing"), "claude-unknownthing");
     }

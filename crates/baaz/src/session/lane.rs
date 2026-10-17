@@ -1549,6 +1549,10 @@ mod tests {
         fail_submit: bool,
         fail_interrupt: bool,
         usage: Option<provider::UsageReport>,
+        /// Approvals already answered: a second decision for one of these
+        /// is refused as unknown, the way a live adapter refuses it once
+        /// its pending request is gone.
+        decided: std::collections::HashSet<String>,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -1639,6 +1643,7 @@ mod tests {
                     fail_submit: false,
                     fail_interrupt: false,
                     usage: None,
+                    decided: std::collections::HashSet::new(),
                 }),
                 tx,
                 rx,
@@ -1775,8 +1780,16 @@ mod tests {
                     Ok(provider::Ack::Accepted)
                 }
                 // No auto-resolve, ever: the card waits for the test's
-                // explicit resolution, per the no-optimism rule.
-                provider::Command::DecideApproval { .. } => Ok(provider::Ack::Accepted),
+                // explicit resolution, per the no-optimism rule. An id
+                // already answered is unknown here, as it is to a live
+                // adapter whose pending request is gone.
+                provider::Command::DecideApproval { approval, .. } => {
+                    let mut state = self.inner.state.lock().expect("recording mutex");
+                    if !state.decided.insert(approval.clone()) {
+                        return Err(provider::ProviderError::unknown_approval(&approval, "no pending request carries that id"));
+                    }
+                    Ok(provider::Ack::Accepted)
+                }
                 provider::Command::ListPending { .. } => {
                     let state = self.inner.state.lock().expect("recording mutex");
                     Ok(provider::Ack::PendingWork {
@@ -2949,7 +2962,7 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(
                 view.read(cx).model().as_ref(),
-                "Claude Sonnet",
+                "Sonnet",
                 "V1: no model known yet, so the chip names the CLI default, never the provider"
             );
         });
@@ -3119,7 +3132,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.model().as_ref(), "Claude Opus", "the chip still reads the pick");
+            assert_eq!(view.model().as_ref(), "Opus", "the chip still reads the pick");
             assert!(
                 view.history_model.is_none(),
                 "history keeps nothing of the sub-call, drew {:?}",
@@ -3186,7 +3199,7 @@ mod tests {
             );
             assert_eq!(
                 view.model().as_ref(),
-                "Claude Opus",
+                "Opus",
                 "the chip still reads the live pick while it stands"
             );
         });
@@ -3240,7 +3253,7 @@ mod tests {
                 "a Haiku pick's Haiku report is its own, drew {:?}",
                 view.history_model
             );
-            assert_eq!(view.model().as_ref(), "Claude Haiku", "the chip reads the Haiku pick");
+            assert_eq!(view.model().as_ref(), "Haiku", "the chip reads the Haiku pick");
         });
     }
 
@@ -3450,11 +3463,11 @@ mod tests {
             assert_eq!(view.mode_label(), "Ask");
             assert_eq!(
                 view.banner_text(),
-                Some("Auto is not available for Claude Haiku; Claude Code will ask before acting.")
+                Some("Auto is not available for Haiku; Claude Code will ask before acting.")
             );
             assert_eq!(
                 view.mode_unavailable(PermissionMode::OnRequest).as_deref(),
-                Some("Not available for Claude Haiku")
+                Some("Not available for Haiku")
             );
         });
         let asked = asked(&handle);
@@ -3834,7 +3847,7 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(
                 view.read(cx).model().to_string(),
-                "Claude Sonnet",
+                "Sonnet",
                 "the chip names a model before the first turn, never the provider"
             );
         });
@@ -4332,5 +4345,301 @@ mod tests {
             assert!(!view.read(cx).busy(), "the finished pack turn drops the stop button");
         });
         assert_eq!(user_turns(&view, vc).len(), 1, "the finish keeps the one bubble");
+    }
+
+    // ------------------------------------- live 2026-10-17: a settled field
+
+    /// A bootable [`crate::Args`] for a [`crate::app::Harness`] root in a
+    /// hermetic state dir, mirroring the helper in `dialogs.rs`'s tests
+    /// (which this module cannot import).
+    fn harness_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
+        }
+    }
+
+    /// A window whose root is the real application, with the bound keymap,
+    /// showing a provider lane over the recording double — so keys travel
+    /// the real dispatch path: the composer holder's key context, the
+    /// `SendTurn` / `ConfirmField` bindings and their handlers.
+    fn keyed_lane<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        sandbox: &crate::providers::TestEnvSandbox,
+        provider_id: &str,
+    ) -> (
+        &'a mut gpui::VisualTestContext,
+        Entity<SessionView>,
+        futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>,
+        RecordingHandle,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let args = harness_args(sandbox.state_dir());
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+        });
+        vc.run_until_parked();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", provider_id, adapter);
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| {
+            // Past the login screen to the shell, which draws the centre.
+            harness.args.login = crate::LoginSample::SignedIn;
+            harness.apply_login_sample(window, cx);
+            harness.active = Some(view.clone());
+            cx.notify();
+        }));
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        (vc, view, tx, handle)
+    }
+
+    /// The pending card of the live repro: a command whose Deny opens the
+    /// "Why not?" field, plus the tap the provider parks beside it.
+    fn deliver_deny_with_reason_card(
+        tx: &futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>,
+        vc: &mut gpui::VisualTestContext,
+    ) {
+        use aui_protocol::Delta;
+        let mut deltas = pending_write_deltas();
+        if let Some(Delta::BlockAdded { block: Block::Approval { choices, .. }, .. }) = deltas.get_mut(1) {
+            choices[1].accepts_feedback = true;
+        }
+        tx.unbounded_send(provider::ProviderEvent::Deltas { session_id: Some("s-1".to_owned()), deltas })
+            .expect("the lane channel is open");
+        tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+            session_id: "s-1".to_owned(),
+            approval_id: "ap-1".to_owned(),
+            headline: "/tmp/probe/note.txt".to_owned(),
+        })
+        .expect("the lane channel is open");
+        vc.run_until_parked();
+    }
+
+    /// The provider settles the denial and finishes the turn, as Claude
+    /// Code does after a deny: the card leaves `Pending`, the turn ends.
+    fn settle_denied(
+        tx: &futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>,
+        vc: &mut gpui::VisualTestContext,
+    ) {
+        use aui_protocol::{ApprovalState, Delta};
+        let mut card = write_card(ApprovalState::Denied);
+        if let Block::Approval { choices, .. } = &mut card {
+            choices[1].accepts_feedback = true;
+        }
+        tx.unbounded_send(provider::ProviderEvent::Deltas {
+            session_id: Some("s-1".to_owned()),
+            deltas: vec![
+                Delta::BlockUpdated { turn_id: "a-1".to_owned(), block_index: 0, block: card },
+                Delta::TurnFinished { turn_id: "a-1".to_owned(), meta: aui_protocol::TurnMeta::default() },
+            ],
+        })
+        .expect("the lane channel is open");
+        vc.run_until_parked();
+    }
+
+    fn submitted_texts(handle: &RecordingHandle) -> Vec<String> {
+        handle
+            .commands_of("submit-input")
+            .into_iter()
+            .filter_map(|command| match command {
+                provider::Command::SubmitInput { parts, .. } => Some(
+                    parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            provider::SubmissionPart::Text(text) => Some(text.clone()),
+                            provider::SubmissionPart::Image { .. } => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decisions(handle: &RecordingHandle) -> Vec<(String, Option<String>)> {
+        handle
+            .received()
+            .into_iter()
+            .filter_map(|command| match command {
+                provider::Command::DecideApproval { choice, feedback, .. } => Some((choice, feedback)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Live 2026-10-17 (Claude Code, Ask): Deny opened "Why not?", ⏎ in
+    /// the empty field sent the denial — and the field stayed armed, so
+    /// every later ⏎ in the composer re-sent that settled decision
+    /// ("unknown approval …") instead of the typed message. With real
+    /// keys through the application's keymap: the field's ⏎ decides once
+    /// and closes the field, and the next message ⏎ sends. Codex rides
+    /// the same provider-lane path, so it runs the same script.
+    #[gpui::test]
+    fn claude_deny_with_reason_by_enter_then_the_next_enter_sends(cx: &mut gpui::TestAppContext) {
+        deny_with_reason_by_enter_then_the_next_enter_sends(cx, "claude-code");
+    }
+
+    /// [`claude_deny_with_reason_by_enter_then_the_next_enter_sends`] on
+    /// the Codex lane, which shares the inline-card decision path.
+    #[gpui::test]
+    fn codex_deny_with_reason_by_enter_then_the_next_enter_sends(cx: &mut gpui::TestAppContext) {
+        deny_with_reason_by_enter_then_the_next_enter_sends(cx, "codex");
+    }
+
+    fn deny_with_reason_by_enter_then_the_next_enter_sends(cx: &mut gpui::TestAppContext, provider_id: &str) {
+        {
+            let sandbox = crate::providers::TestEnvSandbox::enter(&format!("deny-reason-{provider_id}"));
+            let (vc, view, tx, handle) = keyed_lane(cx, &sandbox, provider_id);
+            deliver_deny_with_reason_card(&tx, vc);
+            // Deny: the card's first press opens the field and focuses it.
+            vc.update(|window, cx| {
+                view.update(cx, |view, cx| view.toggle_feedback("ap-1".to_owned(), Some("decline".to_owned()), window, cx));
+            });
+            vc.run_until_parked();
+            assert!(vc.update(|_, cx| view.read(cx).card_field_open()), "{provider_id}: Deny opens the reason field");
+            vc.simulate_keystrokes("enter");
+            vc.run_until_parked();
+            assert_eq!(decisions(&handle), [("decline".to_owned(), None)], "{provider_id}: ⏎ in the empty field denies once");
+            vc.update(|window, cx| {
+                let view = view.read(cx);
+                assert!(!view.card_field_open(), "{provider_id}: the decision closes the field");
+                assert!(view.composer_focused(window, cx), "{provider_id}: the keyboard is back in the composer");
+            });
+            settle_denied(&tx, vc);
+            // The live repro's next step: a new message, ⏎.
+            vc.simulate_input("next message");
+            vc.simulate_keystrokes("enter");
+            vc.run_until_parked();
+            assert_eq!(submitted_texts(&handle), ["next message"], "{provider_id}: ⏎ in the composer sends the message");
+            assert_eq!(decisions(&handle).len(), 1, "{provider_id}: the settled approval is never decided again");
+            vc.update(|_, cx| {
+                let view = view.read(cx);
+                assert_eq!(view.draft_text(cx), "", "{provider_id}: the sent words leave the composer");
+                assert!(view.banner.is_none(), "{provider_id}: no refusal banner, drew {:?}", view.banner);
+                assert!(!view.card_has_keys(cx), "{provider_id}: a settled card holds no keys");
+            });
+            drop(sandbox);
+        }
+    }
+
+    /// ⏎ in the composer with words in it always sends, even while a card
+    /// field stands open (the reader clicked back into the composer), and
+    /// a field whose card settled without the press closing it (a
+    /// resolution from elsewhere) is dropped rather than left armed.
+    #[gpui::test]
+    fn enter_in_the_composer_sends_with_a_card_field_open(cx: &mut gpui::TestAppContext) {
+        let sandbox = crate::providers::TestEnvSandbox::enter("composer-wins-enter");
+        let (vc, view, tx, handle) = keyed_lane(cx, &sandbox, "claude-code");
+        deliver_deny_with_reason_card(&tx, vc);
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| view.toggle_feedback("ap-1".to_owned(), Some("decline".to_owned()), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.simulate_input("words first");
+        vc.simulate_keystrokes("enter");
+        vc.run_until_parked();
+        assert_eq!(submitted_texts(&handle), ["words first"], "⏎ in the composer sends, field open or not");
+        assert!(decisions(&handle).is_empty(), "the composer's ⏎ never answers the card");
+        // The card settles from elsewhere: its field cannot outlive it.
+        settle_denied(&tx, vc);
+        assert!(!vc.update(|_, cx| view.read(cx).card_field_open()), "a settled card's field is dropped");
+        vc.simulate_input("and again");
+        vc.simulate_keystrokes("enter");
+        vc.run_until_parked();
+        assert_eq!(submitted_texts(&handle), ["words first", "and again"]);
+        assert!(decisions(&handle).is_empty());
+    }
+
+    /// A provider that answers a decision with "unknown approval" holds no
+    /// pending request under that id, so nothing will ever settle it: the
+    /// card drops locally (settled, no tap, no keys, no banner) instead of
+    /// staying armed for the next ⏎.
+    #[gpui::test]
+    fn an_unknown_approval_answer_drops_the_card(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::ApprovalState;
+        let sandbox = crate::providers::TestEnvSandbox::enter("unknown-approval-drop");
+        let (vc, view, tx, handle) = keyed_lane(cx, &sandbox, "claude-code");
+        deliver_deny_with_reason_card(&tx, vc);
+        // The provider already forgot it (answered elsewhere, child gone).
+        handle.inner.state.lock().expect("recording mutex").decided.insert("ap-1".to_owned());
+        assert!(vc.update(|_, cx| view.read(cx).card_has_keys(cx)), "the pending card holds ⏎ on an empty composer");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.simulate_keystrokes("enter");
+        vc.run_until_parked();
+        assert_eq!(decisions(&handle), [("accept".to_owned(), None)], "⏎ on the empty composer answers the card");
+        assert_eq!(inline_approvals(&view, vc), [ApprovalState::Denied], "the unknown card settles locally");
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.external_approvals.get("ap-1").is_none(), "the parked tap is gone");
+            assert!(!view.card_has_keys(cx), "the dropped card holds no keys");
+            assert!(view.banner.is_none(), "no refusal banner, drew {:?}", view.banner);
+        });
+        vc.simulate_input("after");
+        vc.simulate_keystrokes("enter");
+        vc.run_until_parked();
+        assert_eq!(submitted_texts(&handle), ["after"]);
+        assert_eq!(decisions(&handle).len(), 1, "nothing re-decides the dropped card");
+    }
+
+    #[gpui::test]
+    fn a_codex_turn_past_its_reply_never_reads_as_memory_reminders(cx: &mut gpui::TestAppContext) {
+        // "Finishing up… memory reminders" is Muse's `reminderChild` tail;
+        // a Codex turn open past a whole reply never reported one.
+        use aui_protocol::{Block, Delta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.run_until_parked();
+        drain_recording(&view, &tx, vc);
+        let turn_id = vc.update(|_, cx| view.read(cx).running.as_ref().expect("a running turn").turn_id.clone());
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![Delta::BlockAdded {
+                    turn_id,
+                    block: Block::Text { text: "done".to_owned(), streaming: false },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.busy(), "the turn is still open");
+            assert!(view.reply_complete_for_running_turn(), "the reply arrived whole");
+            assert!(!view.on_reminder_tail(), "only Muse reports a reminder tail");
+        });
     }
 }

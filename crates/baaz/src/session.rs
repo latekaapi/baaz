@@ -506,6 +506,13 @@ pub enum SessionEvent {
     },
 }
 
+/// The model chip while Muse starts under a draft.
+pub(crate) const MUSE_STARTING: &str = "Starting Muse…";
+/// The model menu's reason row while Muse starts under a draft.
+pub(crate) const MUSE_STARTING_MENU: &str = "Muse is starting — its models list in a moment…";
+/// The model menu's reason row when Muse did not come up under a draft.
+pub(crate) const MUSE_DOWN_MENU: &str = "Muse is not running, so it has no models to list";
+
 /// The billing guard's banner over the composer, as the
 /// application decided it.
 ///
@@ -813,6 +820,11 @@ pub struct SessionView {
     banner_is_mode_fallback: bool,
     /// The billing guard's banner, and whether it is refusing turns.
     tier_banner: Option<TierBanner>,
+    /// A live Muse draft opened while Muse itself is still starting (it
+    /// starts on demand, docs/50 P1): the chip and the model menu say so
+    /// instead of reading "Muse" over an empty menu. Set by the
+    /// application, which owns the connection.
+    muse_starting: bool,
     /// Which approval's feedback field is open, as `(approvalId, choiceId)`.
     feedback_open: Option<(String, String)>,
     /// The feedback field itself. The card never owns text; this does.
@@ -1181,6 +1193,7 @@ impl SessionView {
             banner_is_mode_fallback: false,
             banner_action: None,
             tier_banner: None,
+            muse_starting: false,
             feedback_open: None,
             feedback,
             clarify_open: None,
@@ -1551,12 +1564,51 @@ impl SessionView {
     /// humanised for display — never the bare provider id.
     fn muse_model_label(&self) -> String {
         let id = self.model_id();
+        // Nothing names a model yet while Muse (or this draft's session on
+        // it) is still starting: say so, never the bare lane name "Muse".
+        if self.muse_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
+            return MUSE_STARTING.to_owned();
+        }
         if let Some(label) =
             self.models.iter().find(|m| m.model_id == id).map(|m| m.display_label.clone())
         {
             return label;
         }
         Self::humanise_muse_model_id(&id)
+    }
+
+    /// A catalog row's label fit to show: muse 1.4.10's `model/list` sends
+    /// the wire id as `displayLabel` (`muse-wonder-full-1.0`), so a label
+    /// that is just the id reads humanised (`Muse Wonder Full 1.0`) — the
+    /// chip, the menu rows and the active tag then all name a model the
+    /// same way. A real display label passes through.
+    pub(crate) fn muse_row_label(model_id: &str, label: &str) -> String {
+        if label.is_empty() || label == model_id {
+            Self::humanise_muse_model_id(model_id)
+        } else {
+            label.to_owned()
+        }
+    }
+
+    /// Say whether Muse is still starting under this (live, local) draft.
+    pub(crate) fn set_muse_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
+        if self.muse_starting != starting {
+            self.muse_starting = starting;
+            if !starting && self.models_error.as_deref() == Some(MUSE_STARTING_MENU) {
+                self.models_error = Some(MUSE_DOWN_MENU.to_owned());
+            }
+            cx.notify();
+        }
+    }
+
+    /// Re-list an open model menu's rows for this view: a promoted draft
+    /// inherits the menu its stand-in opened, which listed nothing.
+    pub(crate) fn refresh_open_model_menu(&mut self, cx: &mut Context<Self>) {
+        let open = self.overlays.read(cx).menu.as_ref().is_some_and(|menu| menu.kind == MenuKind::Model);
+        if open {
+            self.load_models(cx);
+            self.sync_model_menu_check(cx);
+        }
     }
 
     /// A muse model id made fit for the chip: `muse-everyday` reads
@@ -1755,6 +1807,15 @@ impl SessionView {
             .is_some_and(|turn| reply_complete(turn))
     }
 
+    /// Whether the running turn is on Muse's `reminderChild` tail: its reply
+    /// is whole while the turn stays open. Only Muse reports that tail — a
+    /// Codex or Claude Code turn open past its reply is still working on
+    /// something the provider never named, so it never reads "Finishing
+    /// up… memory reminders" (seen on a Codex turn, 2026-10-17).
+    pub fn on_reminder_tail(&self) -> bool {
+        crate::providers::uses_legacy_pump(self.provider_kind()) && self.reply_complete_for_running_turn()
+    }
+
     /// Whether the composer is empty, which is what Escape branches on — and
     /// what the send button is enabled by, once a frame (finding
     /// `performance-8`).
@@ -1858,6 +1919,29 @@ impl SessionView {
             self.tier_banner = banner;
             cx.notify();
         }
+    }
+
+    /// "Send anyway" on the pay-as-you-go banner: the person accepts the
+    /// bill for this run (the application keeps that, on
+    /// [`SessionEvent::TierOverride`]) and the message the guard held back
+    /// leaves now — pressing the button is the send, never a second Enter
+    /// (2026-10-17: the draft stayed in the composer). The guard is lifted
+    /// here first because the application's banner push lands only after
+    /// this update; it would otherwise refuse the very send it allows.
+    pub(crate) fn send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(banner) = self.tier_banner.as_mut() {
+            banner.blocking = false;
+        }
+        cx.emit(SessionEvent::TierOverride);
+        // A refused send restores its words on the next frame; a press
+        // before that frame sends them from here rather than from an
+        // empty composer.
+        if let Some(text) = self.pending_prompt.take() {
+            self.dispatch_text(text, window, cx);
+        } else if !self.draft_is_empty(cx) || !self.images.is_empty() || !self.files.is_empty() {
+            self.send(window, cx);
+        }
+        cx.notify();
     }
 
     /// The floating composer band's painted height (see `bottom_inset`).
@@ -2188,6 +2272,12 @@ impl SessionView {
     /// Move the keyboard to the composer.
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    /// Whether the keyboard is in the composer: ⏎ there sends, whatever
+    /// card field stands open above it.
+    pub fn composer_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.composer.focus_handle(cx).is_focused(window)
     }
 
     /// The composer's focus handle, for the browser-focus tests.

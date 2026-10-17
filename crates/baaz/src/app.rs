@@ -758,6 +758,10 @@ pub struct Harness {
     /// project's draft session to exist so it can be moved in. Set by the
     /// project menu's retarget, consumed by `new_session_in`.
     pub(crate) pending_draft: Option<Draft>,
+    /// Muse just connected: on the next frame (where a window is at hand),
+    /// a live local Muse draft opened while it was starting becomes a real
+    /// Muse draft ([`Self::promote_local_draft`]).
+    pub(crate) promote_local_draft: bool,
     /// `(session id, root)` for a session started outside any project, held
     /// from `session/start` until the sessions list carries its row.
     ///
@@ -1541,6 +1545,7 @@ impl Harness {
             drafts: HashMap::new(),
             unsent: HashSet::new(),
             pending_draft: None,
+            promote_local_draft: false,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
@@ -2132,6 +2137,7 @@ impl Harness {
                 this.client = Some(connected.legacy.transport);
                 this.provider = Some(Arc::new(Mutex::new(connected.provider)));
                 this.wire = Wire::Ready;
+                this.promote_local_draft = true;
                 this.pump(connected.legacy.events, cx);
                 this.observe_provider(connected.events, cx);
                 this.probe_account(cx);
@@ -2186,6 +2192,10 @@ impl Harness {
 
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
         self.wire = Wire::Down(reason);
+        // A Muse draft waiting on the start stops saying "Starting Muse…".
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.set_muse_starting(false, cx));
+        }
         if !self.sessions_loaded {
             self.sessions_loaded = true;
             self.merge_provider_rows();
@@ -4784,7 +4794,12 @@ impl Harness {
         if self.skills.open {
             Some("Skills".to_owned())
         } else {
-            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
+            // A draft with no row yet (a Muse draft opened while Muse
+            // starts, before any list) still names itself, as its row will.
+            target.as_deref().and_then(|id| {
+                self.collapsed_head_label(id, cx)
+                    .or_else(|| self.drafts.values().any(|d| d == id).then(|| sidebar::UNNAMED.to_owned()))
+            })
         }
     }
 
@@ -5756,8 +5771,13 @@ impl Harness {
                 this.with_session(cx, |view, cx| view.prompt_for_image(cx));
             }))
             .on_action(cx.listener(|this, _: &ConfirmField, window, cx| {
+                // ⏎ in the composer is always the composer's, even with a
+                // card field open somewhere above: words typed there are a
+                // message, never the field's send.
                 this.with_session(cx, |view, cx| {
-                    view.confirm_field(window, cx);
+                    if view.composer_focused(window, cx) || !view.confirm_field(window, cx) {
+                        view.send(window, cx);
+                    }
                 });
             }))
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
@@ -6211,6 +6231,12 @@ impl Harness {
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_find_resync(window, cx);
+        // Deferred, not done here: `on_frame` runs inside render, and the
+        // promotion opens a session.
+        if self.promote_local_draft && self.client.is_some() {
+            self.promote_local_draft = false;
+            cx.defer_in(window, |this, window, cx| this.promote_local_draft(window, cx));
+        }
         // The overlay window (Browse menus over the native page) follows
         // what is open and where.
         self.sync_overlay(window, cx);
