@@ -69,6 +69,7 @@ mod overlays;
 mod plan;
 mod project_menu;
 mod projects;
+mod provider_search;
 mod provider_sessions;
 mod provider_status;
 mod providers;

@@ -154,6 +154,42 @@ impl Harness {
                 },
             );
         }
+        // Claude Code and Codex sessions (docs/50 P3): Baaz's own registry
+        // names them, and their words come from their stored transcripts
+        // ([`crate::provider_search`]) when the row is written. A session
+        // both stores know (never expected) keeps its index row.
+        for (session_id, record) in &self.provider_sessions {
+            if per_session.contains_key(session_id) || self.is_side_session(session_id) {
+                continue;
+            }
+            let meta = self.overrides.get(session_id);
+            let trimmed = |text: Option<&String>| text.map(|t| t.trim()).filter(|t| !t.is_empty()).map(str::to_owned);
+            let title = trimmed(record.title.as_ref()).unwrap_or_default();
+            let first_prompt = trimmed(record.first_prompt.as_ref()).unwrap_or_default();
+            let label = trimmed(meta.and_then(|m| m.name.as_ref()))
+                .or_else(|| trimmed(meta.and_then(|m| m.derived_title.as_ref())))
+                .or_else(|| trimmed(record.handoff_title.as_ref()))
+                .or_else(|| (!title.is_empty()).then(|| title.clone()))
+                .or_else(|| (!first_prompt.is_empty()).then(|| first_prompt.clone()))
+                .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
+            let workspace = record.workspace.as_deref().map(|root| canon.get(root));
+            let adopted = workspace
+                .as_deref()
+                .and_then(|root| self.projects.find_by_canonical_root(root, &mut canon))
+                .map(|p| p.name.clone());
+            per_session.insert(
+                session_id.clone(),
+                crate::search::SessionRow {
+                    session_id: session_id.clone(),
+                    label,
+                    title,
+                    first_prompt,
+                    body: String::new(),
+                    project: crate::search::project_terms(workspace.as_deref(), adopted.as_deref()),
+                    workspace,
+                },
+            );
+        }
         // One row per chain: indexed members share the head's row, so a
         // three-member chain is one palette hit under the head id. The
         // head keeps its own label, title and first prompt; every other
@@ -163,6 +199,10 @@ impl Harness {
         // One cached index build serves every head lookup below, never
         // a walk per indexed session (Y2a3).
         let chain_index = self.chain_index();
+        // The sidebar's labels by id: one pass, not a scan of the list per
+        // head (2,600 heads × 2,600 rows).
+        let labels: HashMap<&str, &String> =
+            self.sessions.iter().map(|entry| (entry.id.as_str(), &entry.label)).collect();
         let mut by_head: HashMap<String, Vec<String>> = HashMap::new();
         for id in per_session.keys() {
             let head = chain_index.head(id);
@@ -202,23 +242,8 @@ impl Harness {
                     }
                 }
             }
-            // Provider-lane members carry no index entry: their ack title
-            // and first prompt still name the chain.
-            for member in chain_index.members(&head) {
-                if member == head || per_session.contains_key(&member) || self.is_side_session(&member) {
-                    continue;
-                }
-                if let Some(record) = self.provider_sessions.get(&member) {
-                    for text in [&record.title, &record.first_prompt].into_iter().flatten() {
-                        let text = text.trim();
-                        if !text.is_empty() {
-                            extra.push(text.to_owned());
-                        }
-                    }
-                }
-            }
-            // The transcript sources, head first when it is indexed, then
-            // every other indexed member in id order.
+            // The transcript sources, head first when it has a row, then
+            // every other member in id order.
             let mut body_ids: Vec<String> = Vec::new();
             if per_session.contains_key(&head) {
                 body_ids.push(head.clone());
@@ -230,13 +255,13 @@ impl Harness {
             }
             let mut base = match per_session.remove(&head) {
                 Some(row) => row,
-                // A provider-lane head carries no index entry: scaffold
-                // its row from the first indexed member, renamed to the
+                // A head neither store knows (its record is gone):
+                // scaffold its row from the first member, renamed to the
                 // head (its words already joined `extra` above).
                 None => {
                     let first = members[0].clone();
                     let mut row =
-                        per_session.remove(&first).expect("chain groups derive from indexed ids");
+                        per_session.remove(&first).expect("chain groups derive from rowed ids");
                     row.session_id.clone_from(&head);
                     row
                 }
@@ -244,8 +269,8 @@ impl Harness {
             // The chain's display title: the collapsed sidebar row when
             // the list has one, else the head's own index label (boot
             // orders vary).
-            if let Some(entry) = self.sessions.iter().find(|entry| entry.id == head) {
-                base.label.clone_from(&entry.label);
+            if let Some(label) = labels.get(head.as_str()) {
+                base.label.clone_from(label);
             }
             if !extra.is_empty() {
                 base.body = if base.body.is_empty() {
@@ -270,6 +295,9 @@ impl Harness {
         for id in body_ids {
             id.hash(&mut hasher);
             self.index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
+            // A provider transcript grows with each settled exchange, which
+            // moves its record's turn count and stamp.
+            self.provider_sessions.get(id).map(|record| (record.turns, record.updated_ms)).hash(&mut hasher);
         }
         match hasher.finish() as i64 {
             0 => 1,
@@ -310,6 +338,7 @@ impl Harness {
         let rows = self.search_sync_rows();
         crate::log::boot_mark(&format!("search-rows-built rows={} in={}ms", rows.len(), at.elapsed().as_millis()));
         let index_path = crate::index::index_path();
+        let provider_of = self.search_body_owners();
         let work = move || {
             // One rebuild at a time: two overlapping ones fought over the
             // database lock (8 s and 20 s at boot), and the second now finds
@@ -330,7 +359,7 @@ impl Harness {
                 })
                 .collect();
             let stats = crate::search::sync_sessions(&mut connection, &synced, &|ids| {
-                crate::index::read_bodies(&index_path, ids)
+                search_bodies(&index_path, &provider_of, ids)
             });
             crate::log::boot_mark(&format!(
                 "search-sync-done rows={} {stats:?} in={}ms",
@@ -341,6 +370,16 @@ impl Harness {
         self.wire_call(cx, work, |this: &mut Self, (), cx| {
             this.refresh_search(cx);
         });
+    }
+
+    /// Which search body ids are provider-lane sessions, and whose: their
+    /// words come from their stored transcripts, never from Muse's index.
+    pub(crate) fn search_body_owners(&self) -> std::collections::HashMap<String, String> {
+        self.provider_sessions
+            .iter()
+            .filter(|(id, _)| !self.index.contains_key(*id))
+            .map(|(id, record)| (id.clone(), record.provider.clone()))
+            .collect()
     }
 
     /// The badge a search row wears: its project's display name, or the
@@ -387,4 +426,25 @@ impl Harness {
         }
         rows
     }
+}
+
+/// The transcript words for `ids`, whichever provider holds each: Muse's
+/// from its index's `search_text`, Claude Code's and Codex's from their
+/// stored transcripts (`provider_of`, from [`Harness::search_body_owners`]).
+/// Blocking; the search sync calls it off the UI thread, for changed rows
+/// only.
+pub(crate) fn search_bodies(
+    index_path: &std::path::Path,
+    provider_of: &std::collections::HashMap<String, String>,
+    ids: &[String],
+) -> std::collections::HashMap<String, String> {
+    let (lanes, muse): (Vec<&String>, Vec<&String>) = ids.iter().partition(|id| provider_of.contains_key(*id));
+    let muse: Vec<String> = muse.into_iter().cloned().collect();
+    let mut bodies = crate::index::read_bodies(index_path, &muse);
+    let sources: Vec<crate::provider_search::BodySource> = lanes
+        .into_iter()
+        .map(|id| crate::provider_search::BodySource { session_id: id.clone(), provider: provider_of[id].clone() })
+        .collect();
+    bodies.extend(crate::provider_search::read_bodies(&sources));
+    bodies
 }

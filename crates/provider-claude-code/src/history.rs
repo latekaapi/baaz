@@ -102,6 +102,103 @@ pub fn stored_session_ids(dir: &Path) -> Vec<String> {
     ids.into_iter().map(|(_, id)| id).collect()
 }
 
+/// Bytes of transcript text [`search_text`] keeps: the words a person
+/// searches for are in the prompts and answers, and a session that ran for
+/// days must not put megabytes into the search index.
+pub const SEARCH_TEXT_LIMIT: usize = 256 * 1024;
+
+/// The searchable words of one stored transcript (`<session-id>.jsonl`):
+/// every user prompt and every assistant text block, in order, one per line.
+///
+/// Tool calls, tool results, thinking, attachments and Claude Code's own
+/// bookkeeping lines (`ai-title`, `last-prompt`, `queue-operation`, …) are
+/// left out, as are `isMeta` lines and user text that is a tag block
+/// (`<command-name>`, `<local-command-stdout>`, `<system-reminder>`): what a
+/// person remembers is what they asked and what they were told. A line that
+/// does not parse is skipped, never fatal. Cut at [`SEARCH_TEXT_LIMIT`].
+pub fn search_text(transcript: &str) -> String {
+    let mut out = String::new();
+    for line in transcript.lines() {
+        if out.len() >= SEARCH_TEXT_LIMIT {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = value.get("type").and_then(|v| v.as_str());
+        if !matches!(kind, Some("user" | "assistant")) {
+            continue;
+        }
+        if value.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        let Some(content) = value.get("message").and_then(|m| m.get("content")) else { continue };
+        let mut push = |text: &str| {
+            let text = text.trim();
+            if text.is_empty() || (kind == Some("user") && text.starts_with('<')) {
+                return;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        };
+        match content {
+            serde_json::Value::String(text) => push(text),
+            serde_json::Value::Array(blocks) => {
+                for block in blocks {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            push(text);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    cut_at_char_boundary(&mut out, SEARCH_TEXT_LIMIT);
+    out
+}
+
+/// Truncate `text` to at most `limit` bytes on a char boundary.
+fn cut_at_char_boundary(text: &mut String, limit: usize) {
+    if text.len() <= limit {
+        return;
+    }
+    let mut at = limit;
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text.truncate(at);
+}
+
+/// Every stored transcript under one config dir, by session id: one walk
+/// of `<config-dir>/projects/*/`, so a search sync that needs many bodies
+/// lists the directories once rather than once per session. A session id
+/// stored under two slugs keeps the newer file.
+pub fn stored_transcripts(config_dir: &Path) -> std::collections::HashMap<String, PathBuf> {
+    let mut out: std::collections::HashMap<String, (Option<std::time::SystemTime>, PathBuf)> =
+        std::collections::HashMap::new();
+    let Ok(slugs) = std::fs::read_dir(config_dir.join("projects")) else { return Default::default() };
+    for slug in slugs.filter_map(|entry| entry.ok()) {
+        let Ok(files) = std::fs::read_dir(slug.path()) else { continue };
+        for file in files.filter_map(|entry| entry.ok()) {
+            let path = file.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else { continue };
+            let modified = file.metadata().and_then(|m| m.modified()).ok();
+            match out.get(&id) {
+                Some((seen, _)) if *seen >= modified => {}
+                _ => {
+                    out.insert(id, (modified, path));
+                }
+            }
+        }
+    }
+    out.into_iter().map(|(id, (_, path))| (id, path)).collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -252,5 +349,46 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn search_text_keeps_prompts_and_answers_only() {
+        let transcript = [
+            r#"{"type":"user","message":{"role":"user","content":"why does the parser panic"}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta caveat"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret plan"},{"type":"text","text":"Because the lexer returns None."}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"path":"x"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file body"}]}}"#,
+            r#"{"type":"ai-title","title":"Parser panic"}"#,
+            "not json",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"thanks, fix it"}]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(search_text(&transcript), "why does the parser panic\nBecause the lexer returns None.\nthanks, fix it");
+    }
+
+    #[test]
+    fn search_text_is_capped_on_a_char_boundary() {
+        let long = "é".repeat(SEARCH_TEXT_LIMIT);
+        let line = serde_json::json!({"type":"user","message":{"content": long}}).to_string();
+        let text = search_text(&line);
+        assert!(text.len() <= SEARCH_TEXT_LIMIT);
+        assert!(text.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn stored_transcripts_walks_every_slug_once() {
+        let dir = tmp("stored-transcripts");
+        for (slug, id) in [("-work-a", "sess-a"), ("-work-b", "sess-b")] {
+            let slug = dir.join("projects").join(slug);
+            std::fs::create_dir_all(&slug).expect("slug");
+            std::fs::write(slug.join(format!("{id}.jsonl")), "{}\n").expect("plant");
+            std::fs::write(slug.join("notes.txt"), "x").expect("plant other");
+        }
+        let found = stored_transcripts(&dir);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found["sess-b"], dir.join("projects").join("-work-b").join("sess-b.jsonl"));
+        assert!(stored_transcripts(&dir.join("absent")).is_empty());
     }
 }

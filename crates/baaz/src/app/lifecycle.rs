@@ -4860,6 +4860,7 @@ impl Harness {
                             .count() as u64
                     })
                     .unwrap_or(0);
+                let counted_before = self.provider_sessions.get(&session_id).map(|record| record.turns);
                 if crate::provider_sessions::note_settled_turn_counted(
                     &mut self.provider_sessions,
                     &session_id,
@@ -4868,6 +4869,13 @@ impl Harness {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
                 self.rejoin_provider_row(&session_id);
+                // A new exchange is new searchable words (docs/50 P3): the
+                // sync re-reads this one transcript and skips every other
+                // row on its fingerprint. A replayed settle counts nothing
+                // and syncs nothing.
+                if self.provider_sessions.get(&session_id).map(|record| record.turns) != counted_before {
+                    self.rebuild_search_index(cx);
+                }
                 self.sync_row_live(&session_id, false, cx);
                 self.record_last_summary(cx);
                 self.title_from_transcript(cx);
@@ -11628,6 +11636,113 @@ done
                 let hits = crate::search::query_sessions(&connection, "cormorant", crate::search::LIMIT);
                 assert_eq!(hits.len(), 1, "the first member's words find the chain");
                 assert_eq!(hits[0].session_id, "search-new", "a match in an early member returns the head");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// P3 (docs/50): Claude Code and Codex sessions are search rows of their
+    /// own, and their transcript words — read from each provider's stored
+    /// files — find them, beside a Muse session found through its index.
+    /// A settled exchange moves only that row's fingerprint.
+    #[gpui::test]
+    fn p3_search_finds_every_providers_sessions_by_their_words(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p3-search");
+        let workspace = state.2.join("work");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        // Claude Code's stored transcript, under Baaz's own claude-home.
+        let slug = state.2.join("claude-home").join("projects").join("-work");
+        std::fs::create_dir_all(&slug).expect("claude slug");
+        std::fs::write(
+            slug.join("cc-search-1.jsonl"),
+            [
+                serde_json::json!({"type":"user","message":{"role":"user","content":"audit the kestrel migration"}}),
+                serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The quillwort table needs an index."}]}}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .expect("claude transcript");
+        // Codex's rollout, under Baaz's own codex-home.
+        let codex_id = "01a14915-3803-7303-aa91-189ad43310e1";
+        let day = state.2.join("codex-home").join("sessions").join("2026").join("10").join("17");
+        std::fs::create_dir_all(&day).expect("codex day");
+        std::fs::write(
+            day.join(format!("rollout-2026-10-17T14-28-09-{codex_id}.jsonl")),
+            [
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>marram</environment_context>"},{"type":"input_text","text":"why is the tamarisk build slow"}]}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The samphire cache is cold."}]}}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .expect("codex rollout");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let root = Some(workspace.to_string_lossy().into_owned());
+                crate::provider_sessions::upsert_open(
+                    &mut harness.provider_sessions,
+                    "claude-code",
+                    "cc-search-1",
+                    root.clone(),
+                    None,
+                    Some("Kestrel audit".into()),
+                );
+                crate::provider_sessions::upsert_open(&mut harness.provider_sessions, "codex", codex_id, root, None, None);
+                crate::provider_sessions::note_first_prompt(&mut harness.provider_sessions, codex_id, "why is the tamarisk build slow");
+                harness.index.insert(
+                    "muse-search-1".into(),
+                    IndexEntry {
+                        title: "Harbour ledger".into(),
+                        search_text: "cormorant crossing".into(),
+                        updated_at_us: Some(7),
+                        ..Default::default()
+                    },
+                );
+                let rows = harness.search_sync_rows();
+                let ids: Vec<&str> = rows.iter().map(|(row, _, _)| row.session_id.as_str()).collect();
+                assert_eq!(ids.len(), 3, "one row per session, every provider: {ids:?}");
+                let codex_row = rows.iter().find(|(row, _, _)| row.session_id == codex_id).expect("codex row");
+                assert_eq!(codex_row.0.label, "why is the tamarisk build slow", "a title-less row reads its first prompt");
+                let claude_row = rows.iter().find(|(row, _, _)| row.session_id == "cc-search-1").expect("claude row");
+                assert_eq!(claude_row.0.label, "Kestrel audit");
+                assert_eq!(claude_row.1, vec!["cc-search-1".to_owned()], "its body comes from its own transcript");
+
+                let owners = harness.search_body_owners();
+                assert_eq!(owners.len(), 2, "muse ids are never read from provider files");
+                let index_path = state.2.join("no-muse-index.db");
+                let mut connection =
+                    crate::search::open_at(std::path::Path::new(":memory:")).expect("in-memory search db");
+                let sync = |connection: &mut rusqlite::Connection, rows: &[(crate::search::SessionRow, Vec<String>, i64)]| {
+                    let synced: Vec<crate::search::SyncRow<'_>> = rows
+                        .iter()
+                        .map(|(row, body_ids, fingerprint)| crate::search::SyncRow { row, body_ids, fingerprint: *fingerprint })
+                        .collect();
+                    crate::search::sync_sessions(connection, &synced, &|ids| {
+                        crate::app::find::search_bodies(&index_path, &owners, ids)
+                    })
+                    .expect("sync")
+                };
+                assert_eq!(sync(&mut connection, &rows).written, 3);
+                let find = |query: &str| -> Vec<String> {
+                    crate::search::query_sessions(&connection, query, crate::search::LIMIT)
+                        .into_iter()
+                        .map(|hit| hit.session_id)
+                        .collect()
+                };
+                assert_eq!(find("quillwort"), vec!["cc-search-1"], "a Claude answer finds its session");
+                assert_eq!(find("kestrel"), vec!["cc-search-1"], "a Claude prompt finds its session");
+                assert_eq!(find("samphire"), vec![codex_id], "a Codex answer finds its session");
+                assert!(find("marram").is_empty(), "injected context is not searchable");
+
+                // One Claude exchange settles: only its row is rewritten.
+                crate::provider_sessions::note_settled_turn_counted(&mut harness.provider_sessions, "cc-search-1", 1);
+                let after = harness.search_sync_rows();
+                let stats = sync(&mut connection, &after);
+                assert_eq!((stats.written, stats.unchanged), (1, 2), "{stats:?}");
             });
         });
         lane_restore(state);
