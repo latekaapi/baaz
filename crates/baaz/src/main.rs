@@ -79,6 +79,7 @@ mod resize;
 mod right;
 mod right_changes;
 mod right_files;
+mod right_page;
 mod right_views;
 mod right_watch;
 mod utility;

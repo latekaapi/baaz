@@ -57,7 +57,14 @@ pub(crate) enum OverlayKind {
     /// keyboard, so it never closes on a resign: it lives while it has
     /// something to show.
     Corner,
+    /// D6 (docs/43 §2.7): what floats over the right pane's native page —
+    /// the agent pill while the agent acts, the notes panel while
+    /// annotating. Never takes the keyboard, like the corner.
+    PageFloat,
 }
+
+/// A notes-panel click, run on the main window.
+type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
 
 /// The site-information panel's width: FF's dropdown `w-80`, 320.
 const SITE_INFO_WIDTH: f32 = scale::SP_7 * 10.0;
@@ -111,7 +118,7 @@ fn drop_native_chrome(window: &Window, kind: OverlayKind) {
             return;
         }
         let _: () = msg_send![ns_window, setHasShadow: false];
-        if kind == OverlayKind::Corner {
+        if matches!(kind, OverlayKind::Corner | OverlayKind::PageFloat) {
             // The corner never closes on a resign, so it must not float
             // over other apps: it hides with Baaz and returns with it.
             let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
@@ -194,6 +201,9 @@ impl Render for OverlayView {
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
+        }
+        if kind == OverlayKind::PageFloat {
+            return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_center().children(content);
         }
         let baaz = self.baaz.clone();
         div()
@@ -461,6 +471,158 @@ impl Harness {
         .detach();
     }
 
+    /// What the Page screen floats over its native page (docs/43 §2.7),
+    /// and where, in screen space: the notes panel 8 in from the page's
+    /// foot while annotating, else the agent pill 16 above it while the
+    /// agent acts. `None` when the pane is not on a native page, the strip
+    /// is moving, or nothing floats.
+    fn wanted_page_float(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
+        if self.mode != crate::layout::Mode::Sessions || !self.layout.right_open || self.right_strip_moving || self.settings_page.open {
+            return None;
+        }
+        if crate::layout::right_kind(&self.layout) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
+            return None;
+        }
+        let state = self.existing_browser(cx)?;
+        let page = state.read(cx);
+        if !page.is_native() || page.obscured() {
+            return None;
+        }
+        let rect = page.page_rect()?;
+        let pad = gpui::px(SHADOW_PAD);
+        let origin = window.bounds().origin;
+        if page.annotating() {
+            let rows = page.annotations().len() as f32;
+            let height = gpui::px(12.0 + 48.0 * rows + 40.0) + pad * 2.0;
+            let width = rect.size.width - gpui::px(16.0) + pad * 2.0;
+            let bottom = rect.bottom() - gpui::px(8.0) + pad;
+            let left = rect.left() + gpui::px(8.0) - pad;
+            let print = 1 + page.annotations().len() as u64 * 7;
+            return Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), print));
+        }
+        let session = self.active.as_ref()?.read(cx).session_id.clone();
+        let label = self.terminal_service.browser_activity(&session)?;
+        let width = gpui::px((70.0 + 7.2 * label.chars().count() as f32).min(f32::from(rect.size.width) - 16.0)) + pad * 2.0;
+        let height = gpui::px(32.0) + pad * 2.0;
+        let bottom = rect.bottom() - gpui::px(16.0) + pad;
+        let left = rect.left() + (rect.size.width - width) / 2.0;
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        label.hash(&mut h);
+        Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
+    }
+
+    /// Open, move or close the Page float window (the corner's dance).
+    pub(crate) fn sync_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.wanted_page_float(window, cx);
+        let current = self.page_float.as_ref().map(|o| o.bounds).or(self.page_float_pending);
+        if wanted.map(|w| w.0) == current {
+            if let (Some((_, print)), Some(float)) = (wanted, self.page_float.as_mut()) {
+                if float.print != print {
+                    float.print = print;
+                    let handle = float.handle;
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.refresh());
+                    });
+                }
+            }
+            return;
+        }
+        if let Some(old) = self.page_float.take() {
+            let handle = old.handle;
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+        self.page_float_pending = wanted.map(|w| w.0);
+        let Some((bounds, print)) = wanted else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        never_main_panels();
+        let baaz = cx.entity().downgrade();
+        cx.spawn(async move |this, cx| {
+            let opened = cx.update(|cx| {
+                let options = WindowOptions {
+                    titlebar: None,
+                    focus: false,
+                    show: true,
+                    kind: WindowKind::PopUp,
+                    is_movable: false,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    ..Default::default()
+                };
+                cx.open_window(options, move |window, cx| {
+                    drop_native_chrome(window, OverlayKind::PageFloat);
+                    cx.new(|cx| OverlayView { baaz, kind: OverlayKind::PageFloat, focus: cx.focus_handle(), seen_active: false })
+                })
+            });
+            let _ = this.update(cx, |this, cx| {
+                match opened {
+                    Ok(handle) if this.page_float_pending == Some(bounds) => {
+                        this.page_float_pending = None;
+                        this.page_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::PageFloat, bounds, print });
+                    }
+                    Ok(handle) => {
+                        let handle: AnyWindowHandle = handle.into();
+                        cx.defer(move |cx| {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        });
+                    }
+                    Err(_) => this.page_float_pending = None,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Page float's content: the notes panel or the agent pill. Their
+    /// clicks run on the main window, where the page's state lives.
+    fn render_page_float(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.existing_browser(cx)?;
+        let page = state.read(cx);
+        let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
+        let name = agent.map(|p| p.label()).unwrap_or("Muse");
+        if page.annotating() {
+            let notes: Vec<aui::workbench::PageNote> = page
+                .annotations()
+                .iter()
+                .map(|a| aui::workbench::PageNote { index: a.index, selector: a.selector.clone(), note: a.note.clone() })
+                .collect();
+            let weak = cx.weak_entity();
+            let main = self.main_window;
+            let act = |action: aui::workbench::AnnotatorAction| -> NotesClick {
+                let state = state.clone();
+                let baaz = weak.clone();
+                std::rc::Rc::new(move |_, _, cx: &mut App| {
+                    let state = state.clone();
+                    let baaz = baaz.clone();
+                    if let Some(main) = main {
+                        let _ = main.update(cx, move |_, window, cx| {
+                            let intent = state.update(cx, |s, cx| s.annotator_action(action, cx));
+                            if let Some(intent) = intent {
+                                let _ = baaz.update(cx, |h, cx| h.handle_browser_intent(intent, window, cx));
+                            }
+                        });
+                    }
+                })
+            };
+            let clear = act(aui::workbench::AnnotatorAction::Clear);
+            let send = act(aui::workbench::AnnotatorAction::Send);
+            return Some(aui::workbench::notes_panel("page-float-notes", &notes, name, Some(clear), Some(send), cx).into_any_element());
+        }
+        let session = self.active.as_ref()?.read(cx).session_id.clone();
+        let label = self.terminal_service.browser_activity(&session)?;
+        let mark = match agent {
+            Some(crate::providers::ProviderId::ClaudeCode) => aui_icons::Provider::Claude,
+            Some(crate::providers::ProviderId::Codex) => aui_icons::Provider::Codex,
+            _ => aui_icons::Provider::Muse,
+        };
+        Some(aui::workbench::agent_pill("page-float-pill", mark, format!("{name} is {label}"), cx).into_any_element())
+    }
+
     /// A fingerprint of what the corner shows: the toasts, and the
     /// feedback slot's phase, count, arm and flash.
     fn corner_print(&self, cx: &App) -> u64 {
@@ -569,6 +731,7 @@ impl Harness {
                 self.hosting_overlay = false;
                 stack
             }
+            OverlayKind::PageFloat => self.render_page_float(cx),
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
@@ -884,7 +1047,7 @@ impl Harness {
         trace(format_args!("close {kind:?}"));
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
-            OverlayKind::Corner => {}
+            OverlayKind::Corner | OverlayKind::PageFloat => {}
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {

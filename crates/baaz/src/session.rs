@@ -250,6 +250,16 @@ pub struct SessionHost {
     pub terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
 }
 
+/// Where the quote bar hangs: the selection's two ends as pressed and
+/// released (window coordinates) and the transcript's scroll offset then,
+/// so the bar rides with the text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QuoteAnchor {
+    pub start: gpui::Point<Pixels>,
+    pub end: gpui::Point<Pixels>,
+    pub scroll_y: Pixels,
+}
+
 /// A shell block's output now: lines, running, exit, and a fetched full
 /// output (lines, capped) when one landed.
 pub type ToolOutputNow = (Vec<String>, bool, Option<i32>, Option<(Vec<String>, bool)>);
@@ -775,6 +785,12 @@ pub struct SessionView {
     /// scrolling mid-drag.
     span_held: Rc<HashMap<String, (String, aui::transcript::MessageSelection)>>,
     span_sessions: HashMap<String, aui::transcript::SpanSession>,
+    /// The quote flow (docs/43 §0): where the last press in the transcript
+    /// landed, and the bar's anchor after a release that left a selection.
+    quote_press: Option<gpui::Point<Pixels>>,
+    quote_anchor: Option<QuoteAnchor>,
+    /// The transcript box in window coordinates (the bar's frame).
+    transcript_bounds: Option<gpui::Bounds<Pixels>>,
     /// The turn whose copy button shows the success check, if any: set on
     /// the copy intent and cleared after the library's `COPY_HOLD`, so the
     /// tick reads as a confirmation and then the copy glyph returns.
@@ -1189,6 +1205,9 @@ impl SessionView {
             stack_h: Rc::new(std::cell::Cell::new(0.0)),
             span_held: Rc::new(HashMap::new()),
             span_sessions: HashMap::new(),
+            quote_press: None,
+            quote_anchor: None,
+            transcript_bounds: None,
             copied_turn: None,
             last_tick_secs: None,
             running: None,

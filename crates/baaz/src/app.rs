@@ -1179,6 +1179,9 @@ pub struct Harness {
     pub(crate) corner: Option<crate::overlay::Overlay>,
     /// The corner window being opened, until it lands.
     pub(crate) corner_pending: Option<gpui::Bounds<gpui::Pixels>>,
+    /// D6: the Page screen's float (pill, notes panel) over its native page.
+    pub(crate) page_float: Option<crate::overlay::Overlay>,
+    pub(crate) page_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
@@ -1737,6 +1740,8 @@ impl Harness {
             overlay_pending: None,
             corner: None,
             corner_pending: None,
+            page_float: None,
+            page_float_pending: None,
             main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
@@ -6255,6 +6260,7 @@ impl Harness {
         // what is open and where.
         self.sync_overlay(window, cx);
         self.sync_corner(window, cx);
+        self.sync_page_float(window, cx);
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once
@@ -6670,6 +6676,9 @@ impl Render for Harness {
                     self.right_strip_moving = moving;
                 }
                 let visible = aui::workbench::strip_visible(pos, 3);
+                if visible(2) && self.right_cache.page_address.is_none() {
+                    self.ensure_page_address(window, cx);
+                }
                 let agent = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id).label()).unwrap_or("Muse");
                 let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
                 for (i, screen_kind) in layout::RightKind::ALL.into_iter().enumerate() {
