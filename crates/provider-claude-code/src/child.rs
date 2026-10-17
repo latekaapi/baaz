@@ -107,12 +107,100 @@ impl StdinWriter {
     }
 }
 
+/// Whether `BAAZ_TRACE=1` is set: the child's argv and stderr are echoed
+/// to Baaz's own stderr. Read once.
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BAAZ_TRACE").is_ok_and(|v| v == "1"))
+}
+
+/// How many of the child's last stderr lines an exit card quotes.
+const STDERR_TAIL_LINES: usize = 6;
+
+/// The child's stderr, drained by its own thread into a short tail: the
+/// CLI's own reason when it exits ("No conversation found…", a refused
+/// flag), which the exit card quotes. Draining also keeps a chatty child
+/// from blocking on a full stderr pipe.
+#[derive(Clone, Default)]
+pub(crate) struct StderrTail {
+    lines: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    done: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl StderrTail {
+    /// Drain `stderr` on a fresh thread until it closes.
+    pub(crate) fn spawn(stderr: impl Read + Send + 'static) -> std::io::Result<Self> {
+        let tail = Self::default();
+        let sink = tail.clone();
+        std::thread::Builder::new()
+            .name("provider-claude-code-stderr".into())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(line) = line else { break };
+                    sink.push(&line);
+                }
+                sink.close();
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(tail)
+    }
+
+    /// Keep one stderr line (blank ones are dropped).
+    pub(crate) fn push(&self, line: &str) {
+        if trace_enabled() {
+            eprintln!("baaz: claude stderr: {line}");
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let mut lines = self.lines.lock().expect("stderr tail mutex");
+        if lines.len() == STDERR_TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line.to_owned());
+    }
+
+    /// The stream closed: nothing more will land.
+    pub(crate) fn close(&self) {
+        let (closed, ready) = &*self.done;
+        *closed.lock().expect("stderr done mutex") = true;
+        ready.notify_all();
+    }
+
+    /// The tail joined into one line, once stderr has closed or `wait` has
+    /// passed (stdout and stderr close in either order); `None` when the
+    /// child said nothing there.
+    pub(crate) fn settled_text(&self, wait: std::time::Duration) -> Option<String> {
+        let (closed, ready) = &*self.done;
+        let guard = closed.lock().expect("stderr done mutex");
+        drop(ready.wait_timeout_while(guard, wait, |closed| !*closed).expect("stderr done mutex"));
+        let lines = self.lines.lock().expect("stderr tail mutex");
+        (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join(" "))
+    }
+}
+
+/// The end-of-stream reason for a child whose stderr said `stderr`: the
+/// CLI's own words lead, and the resume hint follows.
+pub(crate) fn exit_reason(stderr: Option<&str>) -> String {
+    match stderr {
+        Some(said) => format!("the Claude Code process exited: {said}; send again to resume the session"),
+        None => CHILD_EXITED_REASON.to_owned(),
+    }
+}
+
+/// How long the pump waits, after stdout closes, for the child's stderr to
+/// close too before it cards the exit with whatever tail it has.
+const STDERR_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Pump one child's stdout into the hub, gated to its epoch, until the
 /// stream ends: the same per-line ingest the scripted-frame tests drive.
+/// The end-of-stream card quotes `stderr`'s tail when the child left one.
 pub(crate) fn spawn_pump(
     stdout: impl Read + Send + 'static,
     hub: &Arc<ControlHub>,
     epoch: u64,
+    stderr: Option<StderrTail>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let pump_hub = Arc::clone(hub);
     std::thread::Builder::new()
@@ -125,7 +213,8 @@ pub(crate) fn spawn_pump(
             // A turn the child never finished ends here, carded, and
             // the lane learns the connection is gone — unless Baaz
             // hung up on purpose (`shutdown` retired the epoch).
-            pump_hub.ingest_end_of_stream(epoch, CHILD_EXITED_REASON);
+            let said = stderr.and_then(|tail| tail.settled_text(STDERR_SETTLE));
+            pump_hub.ingest_end_of_stream(epoch, &exit_reason(said.as_deref()));
         })
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
@@ -209,7 +298,7 @@ impl RunningChild {
             .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         provider::child_env::scrub_command(&mut command);
         if let Some(home) = claude_home {
             for (key, value) in crate::home::child_env(home) {
@@ -219,12 +308,16 @@ impl RunningChild {
         if let Some(cwd) = &launch.cwd {
             command.current_dir(cwd);
         }
+        if trace_enabled() {
+            eprintln!("baaz: claude spawn: {program} {} (cwd {:?})", launch.argv.join(" "), launch.cwd);
+        }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = StderrTail::spawn(child.stderr.take().expect("stderr piped"))?;
         let epoch = hub.begin_child();
         let stdin = StdinWriter::spawn(child.stdin.take().expect("stdin piped"), hub, epoch)?;
         hub.attach_stdin(epoch, stdin.clone());
-        let pump = spawn_pump(stdout, hub, epoch)?;
+        let pump = spawn_pump(stdout, hub, epoch, Some(stderr))?;
         Ok(Self { child, stdin, pump: Some(pump), hub: std::sync::Arc::clone(hub), epoch })
     }
 
@@ -403,7 +496,7 @@ mod tests {
             bytes: std::io::Cursor::new(format!("{answer}\n").into_bytes()),
             drained: Arc::clone(&drained),
         };
-        let pump = spawn_pump(stdout, &hub, epoch).expect("pump");
+        let pump = spawn_pump(stdout, &hub, epoch, None).expect("pump");
         assert!(wait_until(|| drained.load(Ordering::SeqCst)), "the pump drained stdout while the prompt was blocked");
         // Only now does the child read its stdin.
         open.store(true, Ordering::SeqCst);

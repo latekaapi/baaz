@@ -1754,6 +1754,37 @@ impl ClaudeFold {
         }
     }
 
+    /// The person's own bubble for a line about to go to an idle child,
+    /// drawn on the submit rather than on the CLI's echo of it: a child
+    /// that dies before echoing (it exited on launch, say) still leaves
+    /// what was sent on screen. The echo that follows repeats `uuid` and
+    /// adds nothing. Only when nothing is open or waiting — a line queued
+    /// behind a running turn bubbles on its echo as before, since drawing
+    /// it now would close the turn still running. Call it before
+    /// [`Self::note_submission_line`]; [`Self::retract_submitted_user_turn`]
+    /// undoes it for a line that never reached the child.
+    pub fn submitted_user_turn(
+        &mut self,
+        uuid: &str,
+        text: &str,
+        images: &[crate::frame::UserImage],
+    ) -> Vec<Delta> {
+        if !self.submissions.is_empty() || !self.open.is_empty() || self.assistant_turn.is_some() {
+            return Vec::new();
+        }
+        self.apply_user_text(uuid, text, images)
+    }
+
+    /// Undo [`Self::submitted_user_turn`] for a line the child never got:
+    /// the bubble leaves the transcript, and the uuid may bubble again.
+    /// Nothing drawn, nothing to undo.
+    pub fn retract_submitted_user_turn(&mut self, uuid: &str) -> Vec<Delta> {
+        if !self.user_echoes.remove(uuid) {
+            return Vec::new();
+        }
+        vec![Delta::TurnRemoved { turn_id: uuid.to_owned() }]
+    }
+
     /// The echoed prompt (`--replay-user-messages`) as the person's own
     /// turn: the bubble the pre-replay CLI never sent. Exactly once per
     /// echo uuid — a replayed fixture must not mint the bubble twice.
