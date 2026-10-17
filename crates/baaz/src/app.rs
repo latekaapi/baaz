@@ -1230,6 +1230,8 @@ pub struct Harness {
     /// Side session id → the generation it serves. Harvested off
     /// `turn/completed`, reaped by the watchdog.
     pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
+    /// D6: Muse side sessions drafting a commit message or PR description.
+    pub(crate) draft_jobs: HashMap<String, crate::right_changes::DraftJob>,
     /// Side session id → the byline rewrite it serves.
     pub(crate) byline_jobs: HashMap<String, titles::BylineJob>,
     /// Real session ids with a rewrite in flight: late answers for a
@@ -1669,6 +1671,7 @@ impl Harness {
             titles_pending: HashSet::new(),
             side_sessions: HashSet::new(),
             title_jobs: HashMap::new(),
+            draft_jobs: HashMap::new(),
             byline_jobs: HashMap::new(),
             byline_live: HashSet::new(),
             byline_last_start: HashMap::new(),
@@ -2361,6 +2364,8 @@ impl Harness {
                         self.harvest_title(&side_id, cx);
                     } else if self.byline_jobs.contains_key(&side_id) {
                         self.harvest_byline(&side_id, cx);
+                    } else if self.draft_jobs.contains_key(&side_id) {
+                        self.harvest_draft(&side_id, cx);
                     }
                 }
             }
