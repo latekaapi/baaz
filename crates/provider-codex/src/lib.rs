@@ -22,6 +22,7 @@ pub mod fold;
 pub mod frame;
 pub mod home;
 pub mod probe;
+pub mod rollout;
 pub mod terminal;
 
 use std::collections::HashMap;

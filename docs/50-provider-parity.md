@@ -110,3 +110,33 @@ committed**, on a branch cut from it. P1/P2 touch `login.rs`, `sidebar_view.rs`,
 3. **Provider screens** (first run, Settings › Providers: typed states, diagnostics, install/sign-in): **redesigned in
    the D5 Fable session**; the build follows that spec.
 4. **Start now:** performance M + P0 in a worktree (`perf/measure-p0`); provider work after the running session commits.
+
+## 7. Progress
+
+**P1 + P2** merged 2026-10-17 (main 5d2c755).
+
+**P3 · one registry + search (2026-10-17, branch `foundations/m-p3`).** What was already one path, checked before
+building: every Claude Code / Codex session Baaz opened is in `provider-sessions.json` (W5), listed in the sidebar beside
+Muse's `session/list` rows, and every row — sidebar click, `⌘K` Resume, search hit — opens through `Harness::resume`,
+which routes a provider record to `reopen_provider` and a Muse id to `session/resume`. What was not: **search**. The
+palette's `search.db` was fed only from Muse's index, so a Claude/Codex session was findable only as a member of a
+handoff chain with a Muse session, and only by its title.
+
+Now:
+- Each adapter says what its stored transcript's searchable words are — `provider_claude_code::history::search_text`
+  (user prompts + assistant text; no tool calls/results, thinking, `isMeta`, `<command-…>` blocks) and
+  `provider_codex::rollout::search_text` (user/assistant `response_item` messages; no developer instructions, tool
+  output or injected `<environment_context>`), both capped at 256 KB — and how to find them
+  (`history::stored_transcripts`, `rollout::stored_rollouts`: one walk per home).
+- `crate::provider_search` reads them for the sync, Baaz's own homes first, the owner's `~/.claude` / `~/.codex` only
+  for ids not found there (legacy unmigrated sessions).
+- `search_sync_rows` gives every provider record its own row (label ladder: rename → generated title → handoff title →
+  ack title → first prompt), chains still collapse under their head whatever provider each member is, and the
+  fingerprint covers a record's turn count + stamp — so a settled exchange rewrites that one row (the settle now
+  triggers the sync) and every other row is skipped. The P0 incremental sync is unchanged.
+- Measured: 120 transcripts' words read in 23 ms (debug), budgeted in `scripts/perf-budgets.py`.
+- Tests: adapter extraction (both), home walks (both), Baaz dispatch + owner-home fallback, and a Harness test that
+  syncs Muse + Claude + Codex rows into one `search.db` and finds each by its own transcript words.
+
+Not done in P3 (still P4): Muse's `session/list` is still the Muse half of the list, and Muse rows are not in Baaz's own
+registry file; the registry is two stores read as one, not one store.
