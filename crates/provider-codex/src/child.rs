@@ -101,6 +101,9 @@ pub fn elicitation_is_tool_approval(params: &Value) -> bool {
 /// here refuses them outright, like every other unmatched action, while a
 /// read-only-annotated tool never asks and still runs. `None` for any
 /// other request or mode.
+///
+/// `mode` is the one the running turn is under ([`mcp_gate_mode`]), not
+/// the chip's: a pick the turn has not taken yet must not open it.
 pub fn read_only_mcp_answer(
     id: &Value,
     method: &str,
@@ -111,6 +114,47 @@ pub fn read_only_mcp_answer(
         && method == "mcpServer/elicitation/request"
         && elicitation_is_tool_approval(params))
     .then(|| json!({"id": id, "result": elicitation_action_result(McpElicitationAction::Decline)}))
+}
+
+/// The approval mode the thread's turns run under, as the wire set it:
+/// the mode the last `thread/start`, `thread/resume` or `turn/start`
+/// carried (a `turn/start` override sticks for later turns), and the one
+/// the server confirmed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WireModes {
+    /// The mode the last mode-carrying request asked for, answered or not.
+    pub attempted: Option<PermissionMode>,
+    /// The mode the server took: a thread answer's own report, or a
+    /// mode-carrying request it answered with success.
+    pub in_force: Option<PermissionMode>,
+}
+
+/// The mode a client→server frame sets for the thread's turns, when it is
+/// a `thread/start`, `thread/resume` or `turn/start` carrying one.
+pub fn frame_mode(wire: &Value) -> Option<PermissionMode> {
+    let method = wire.get("method").and_then(Value::as_str)?;
+    if !matches!(method, "thread/start" | "thread/resume" | "turn/start") {
+        return None;
+    }
+    let params = wire.get("params")?;
+    permission_mode_from_codex(
+        params.get("approvalPolicy")?,
+        params.get("sandbox").or_else(|| params.get("sandboxPolicy")),
+    )
+}
+
+/// The mode an MCP tool-call elicitation is judged under: Read-only when
+/// the running turn is under it — the mode the wire put in force, or one
+/// asked for and not yet answered — or when the chip shows it. Failing
+/// closed both ways: a turn started Read-only stays refused after a pick
+/// away it has not taken, and a pick into Read-only refuses at once.
+pub fn mcp_gate_mode(chip: Option<PermissionMode>, wire: WireModes) -> Option<PermissionMode> {
+    let read_only = Some(PermissionMode::DenyUnmatched);
+    if wire.in_force == read_only || wire.attempted == read_only || chip == read_only {
+        read_only
+    } else {
+        wire.in_force.or(chip)
+    }
 }
 
 impl ApprovalKind {
@@ -214,6 +258,8 @@ struct Shared {
     /// Question requests already refused with "cannot serve", by prompt id.
     /// Kept so [`RunningChild::pending_questions`] can surface them.
     questions: HashMap<String, PendingQuestion>,
+    /// The mode the thread's turns run under (see [`mcp_gate_mode`]).
+    modes: WireModes,
 }
 
 /// Fail every in-flight request waiter: the child's stdout ended, so no
@@ -1100,7 +1146,11 @@ impl RunningChild {
                         Frame::Request { id, method, params } => {
                             // Read-only refuses an MCP tool call outright:
                             // declined here, never carded as askable.
-                            let mode = fold.lock().ok().and_then(|fold| fold.permission_mode());
+                            // Judged by the mode the running turn is
+                            // under, not only the chip's.
+                            let chip = fold.lock().ok().and_then(|fold| fold.permission_mode());
+                            let wire = pump_shared.lock().map(|shared| shared.modes).unwrap_or_default();
+                            let mode = mcp_gate_mode(chip, wire);
                             if let Some(answer) = read_only_mcp_answer(&id, &method, &params, mode) {
                                 let _ = write_value(&pump_stdin, &answer);
                                 continue;
@@ -1330,11 +1380,18 @@ impl RunningChild {
         timeout: Duration,
     ) -> Result<Value, RequestError> {
         let (tx, rx): (Sender<Answer>, Receiver<Answer>) = unbounded();
+        let sets_mode = frame_mode(&wire);
+        let thread_frame = matches!(method, "thread/start" | "thread/resume");
         {
             let mut shared = self.shared.lock().map_err(|_| RequestError {
                 reason: "the session state lock is poisoned".into(),
             })?;
             shared.waiters.insert(key.clone(), tx);
+            // Before the write: a request the turn raises can arrive
+            // before this answer does.
+            if sets_mode.is_some() {
+                shared.modes.attempted = sets_mode;
+            }
         }
         if let Err(error) = write_value(&self.stdin, &wire) {
             let _ = self
@@ -1345,7 +1402,13 @@ impl RunningChild {
             return Err(RequestError { reason: format!("the session child is unreachable: {error}") });
         }
         match rx.recv_timeout(timeout) {
-            Ok(Ok(result)) => Ok(result),
+            Ok(Ok(result)) => {
+                let took = if thread_frame { reported_mode(&result).or(sets_mode) } else { sets_mode };
+                if let (Some(took), Ok(mut shared)) = (took, self.shared.lock()) {
+                    shared.modes.in_force = Some(took);
+                }
+                Ok(result)
+            }
             Ok(Err(message)) => {
                 Err(RequestError { reason: format!("{method} errored: {message}") })
             }
@@ -2059,6 +2122,31 @@ mod tests {
         );
         // A missing required field decodes to nothing, never a default.
         assert_eq!(PermissionsApprovalParams::decode(&json!({"itemId": "perm-1"})), None);
+    }
+
+    /// An MCP elicitation is judged by the mode the running turn is under:
+    /// a turn started Read-only still declines after the chip moved to Ask
+    /// (the pick rides the NEXT `turn/start`), a thread launched Read-only
+    /// declines with no turn override sent, a Read-only override not yet
+    /// answered declines, and the chip's own Read-only declines at once.
+    /// Only with nothing Read-only anywhere does the request ask.
+    #[test]
+    fn mcp_elicitations_are_judged_by_the_running_turns_mode() {
+        let gate = json!({"_meta": {"codex_approval_kind": "mcp_tool_call"}});
+        let method = "mcpServer/elicitation/request";
+        let ro = Some(PermissionMode::DenyUnmatched);
+        let ask = Some(PermissionMode::PromptUnmatched);
+        let declines = |chip, wire| read_only_mcp_answer(&json!(1), method, &gate, mcp_gate_mode(chip, wire)).is_some();
+        let turn = turn_start_request(3, "t", "m", "hi", None, ro);
+        assert_eq!(frame_mode(&turn), ro);
+        assert!(declines(ask, WireModes { attempted: ro, in_force: ro }), "turn started Read-only, chip moved");
+        let launched = thread_start_request(2, "/w", "m", ro);
+        assert!(declines(ask, WireModes { attempted: frame_mode(&launched), in_force: None }), "launched Read-only, unanswered");
+        assert!(declines(ask, WireModes { attempted: None, in_force: ro }), "launched Read-only, no override since");
+        assert!(declines(ro, WireModes { attempted: ask, in_force: ask }), "the chip's Read-only refuses at once");
+        assert!(!declines(ask, WireModes { attempted: ask, in_force: ask }));
+        assert!(!declines(None, WireModes::default()));
+        assert_eq!(frame_mode(&turn_start_request(3, "t", "m", "hi", None, None)), None, "no override, no change");
     }
 
     /// Feed one server question request through `serve_server_request` with a

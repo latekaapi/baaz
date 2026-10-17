@@ -1268,6 +1268,11 @@ pub struct Harness {
     /// earned an id.
     pub(crate) provider_open_error: Option<ProviderOpenError>,
     pub(crate) provider_open_epoch: u64,
+    /// Set by quit ([`Self::shutdown_provider_views`]): a provider draft's
+    /// open still on the background executor hangs its child up the
+    /// moment it answers, instead of handing it to a window that is going
+    /// away.
+    pub(crate) provider_opens_cancelled: Arc<std::sync::atomic::AtomicBool>,
     /// A one-shot: the next `finish_provider_open` lands its view with the
     /// disabled-provider banner instead of a live child start having
     /// happened (set when opening on a disabled provider, which routes
@@ -1635,6 +1640,7 @@ impl Harness {
             starts_in_flight: HashSet::new(),
             provider_open_error: None,
             provider_open_epoch: 0,
+            provider_opens_cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_disabled_notice: None,
             switch_claim: None,
             switch_epoch: 0,
@@ -5742,7 +5748,12 @@ impl Harness {
     /// [`Drop`](crate::session::SessionView), but quit should not rely on
     /// teardown order. Quitting with a switch pending cancels it too, so an
     /// open that lands after teardown is discarded instead of activating.
+    ///
+    /// A provider draft still opening has no child in any view yet: its
+    /// open (`provider_open_work`) is told to hang the child up as soon as
+    /// it answers, on the background thread, so no window is needed.
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
+        self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, _| view.shutdown_lane());

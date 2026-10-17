@@ -10,6 +10,12 @@ use super::*;
 /// too, so a parked view's own fold never grows past it either).
 const SESSION_CACHE_LIMIT: usize = 8;
 
+/// How long a provider draft drawn on the click waits for its child to
+/// answer `OpenSession` before its view fails, visibly. The handshakes
+/// measured 7 ms (Claude Code) to 1.7 s (Codex); this is for a child that
+/// hangs.
+const PROVIDER_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What `new_session_in` does about the target project's draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DraftDecision {
@@ -100,6 +106,7 @@ fn provider_open_work(
     project: Option<String>,
     workspace: String,
     epoch: u64,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<ProviderOpen, provider::ProviderError> {
     let provider = factory(provider_id)?;
     #[cfg(not(test))]
@@ -118,7 +125,15 @@ fn provider_open_work(
     // Tests drain after the send, synchronously on the test
     // executor: no forwarding thread ever wakes the lane task.
     #[cfg(test)]
-    let (provider, events) = conn::gate_sync(provider);
+    let (mut provider, events) = conn::gate_sync(provider);
+    #[cfg(not(test))]
+    let mut provider = provider;
+    // The app quit while this open was on the wire: its child would
+    // outlive every view, so it is hung up here, on this thread.
+    if cancelled.is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::SeqCst)) {
+        provider.shutdown();
+        return Err(provider::ProviderError::Unavailable { reason: "Baaz is quitting".into() });
+    }
     match ack {
         provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
             provider_id,
@@ -2734,8 +2749,9 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
+        let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch)
+            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch, Some(cancelled))
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
@@ -3044,9 +3060,11 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
         let epoch = self.provider_open_epoch;
+        let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch)
+            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch, Some(cancelled))
         };
+        let timed = request_id.clone();
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
                 this.terminal_service.alias_session(&request_id, &open.session_id);
@@ -3057,6 +3075,51 @@ impl Harness {
                 this.fail_provider_draft(&request_id, error.to_string(), cx);
             }
         });
+        // A child that never answers must not leave the view opening
+        // forever: past the timeout it fails, visibly, and a late answer
+        // finds no opening view and is hung up (`land_provider_draft`).
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROVIDER_OPEN_TIMEOUT).await;
+            let _ = this.update(cx, |this, cx| this.expire_provider_open(&timed, provider_id, cx));
+        });
+        self.wire_tasks().push(task);
+    }
+
+    /// A provider draft's open outlived [`PROVIDER_OPEN_TIMEOUT`]: fail
+    /// its view the way a refused open does, when it is still opening.
+    pub(crate) fn expire_provider_open(&mut self, provisional: &str, provider_id: ProviderId, cx: &mut Context<Self>) {
+        let opening = self.find_view(provisional, cx).is_some_and(|view| view.read(cx).is_starting());
+        if !opening || !self.starts_in_flight.contains(provisional) {
+            return;
+        }
+        crate::baaz_log!("provider open timed out ({}) session={provisional}", provider_id.label());
+        self.fail_provider_draft(
+            provisional,
+            format!(
+                "{} did not answer within {}s; start a new session to try again",
+                provider_id.label(),
+                PROVIDER_OPEN_TIMEOUT.as_secs()
+            ),
+            cx,
+        );
+    }
+
+    /// Forget everything the window keyed by a provider draft's provisional
+    /// id once its view is gone without landing (closed, replaced,
+    /// evicted, or its open answered too late): the draft and unsent
+    /// names — so ⌘N never reopens a dead view — the scripted-verb wait,
+    /// the terminal provider, and any per-session override a toggle
+    /// persisted meanwhile.
+    fn forget_provisional(&mut self, provisional: &str) {
+        self.starts_in_flight.remove(provisional);
+        self.drafts.retain(|_, id| id != provisional);
+        self.unsent.remove(provisional);
+        self.terminal_providers.remove(provisional);
+        self.right_kind_migrate.remove(provisional);
+        if self.overrides.remove(provisional).is_some() {
+            crate::sessions::write(&self.overrides);
+            self.invalidate_list();
+        }
     }
 
     /// The child behind a provider draft answered: attach it to the view
@@ -3082,8 +3145,7 @@ impl Harness {
                 provider_id.as_str()
             );
             provider.shutdown();
-            self.drafts.retain(|_, id| id != provisional);
-            self.unsent.remove(provisional);
+            self.forget_provisional(provisional);
             return;
         };
         if session_id != provisional {
@@ -3141,6 +3203,8 @@ impl Harness {
         if self.unsent.remove(old) {
             self.unsent.insert(new.to_owned());
         }
+        // The landing registers the real id; the provisional one goes.
+        self.terminal_providers.remove(old);
         for id in [&mut self.pending_id, &mut self.reveal] {
             if id.as_deref() == Some(old) {
                 *id = Some(new.to_owned());
@@ -3915,6 +3979,12 @@ impl Harness {
         // switch: the in-flight open lands stale (child shut down, nothing
         // parked or persisted) and the close proceeds normally.
         self.cancel_pending_switch(cx);
+        // A provider draft that never landed (opening, or its open failed)
+        // takes its provisional names with it.
+        let never_landed = self.find_view(session_id, cx).is_some_and(|view| view.read(cx).is_opening_lane());
+        if never_landed {
+            self.forget_provisional(session_id);
+        }
         // The next `activate` re-points the event subscription at the new
         // view; the dropped view's subscription fires nothing after this,
         // so this only hangs up children and forgets handles — never while
@@ -4098,6 +4168,9 @@ impl Harness {
             });
         }
         old_view.update(cx, |v, _| v.shutdown_lane());
+        if new_id != old_id && old_view.read(cx).is_opening_lane() {
+            self.forget_provisional(old_id);
+        }
         if let Some(cached) = self.cache_take(old_id) {
             // A stale parked copy under the same id never survives the swap
             // — unless it IS the replacement (shared scripted id in tests),
@@ -4305,13 +4378,27 @@ impl Harness {
             self.session_cache.retain(|(id, _)| *id != session_id);
             self.session_cache.insert(0, (session_id, view));
             // Views named in `drafts` are never evicted from the MRU: the
-            // draft outlives whatever else was parked since.
-            let draft_ids: std::collections::HashSet<String> =
-                self.drafts.values().cloned().collect();
+            // draft outlives whatever else was parked since. Nor is a view
+            // still starting — a provider draft whose child has not
+            // answered (project-less ones are in no `drafts`) holds the
+            // sends queued meanwhile, which eviction would lose.
+            let mut kept: std::collections::HashSet<String> = self.drafts.values().cloned().collect();
+            kept.extend(
+                self.session_cache.iter().filter(|(_, view)| view.read(cx).is_starting()).map(|(id, _)| id.clone()),
+            );
             let ids: Vec<String> =
                 self.session_cache.iter().map(|(id, _)| id.clone()).collect();
-            let surviving = evict_parked(&ids, &draft_ids, SESSION_CACHE_LIMIT);
+            let surviving = evict_parked(&ids, &kept, SESSION_CACHE_LIMIT);
+            let failed_drafts: Vec<String> = self
+                .session_cache
+                .iter()
+                .filter(|(id, view)| !surviving.contains(id) && view.read(cx).is_opening_lane())
+                .map(|(id, _)| id.clone())
+                .collect();
             self.session_cache.retain(|(id, _)| surviving.contains(id));
+            for id in failed_drafts {
+                self.forget_provisional(&id);
+            }
         }
     }
 
@@ -7981,6 +8068,158 @@ done
         vc.update(|_, cx| {
             let view = baaz.read(cx).active.clone().expect("the view stays");
             assert_eq!(view.read(cx).draft_text(cx), "hi", "a send with nowhere to go keeps its words");
+        });
+        lane_restore(state);
+    }
+
+    /// A provider draft that lands moves everything its provisional id
+    /// held — the override a toggle persisted meanwhile, the terminal
+    /// provider — and keeps showing the mode the open asked for until the
+    /// provider reports one: the double reports none, so the chip must
+    /// not fall back to the fold's seeded default.
+    #[gpui::test]
+    fn a_landed_provider_draft_moves_its_keys_and_keeps_the_requested_mode(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early-rekey");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        let provisional = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.args.approval_mode = Some(muse_client::schema::ApprovalMode::DenyUnmatched);
+                harness.new_session(window, cx);
+                let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
+                harness.overrides.entry(id.clone()).or_default();
+                crate::sessions::write(&harness.overrides);
+                assert!(harness.terminal_providers.contains_key(&id));
+                id
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the draft");
+            assert_eq!(view.read(cx).session_id, "s-open");
+            assert!(!harness.overrides.contains_key(&provisional), "the override moved");
+            assert!(harness.overrides.contains_key("s-open"));
+            assert!(!crate::sessions::read().contains_key(&provisional), "on disk too");
+            assert!(!harness.terminal_providers.contains_key(&provisional), "the terminal provider moved");
+            assert!(harness.terminal_providers.contains_key("s-open"));
+            assert_eq!(
+                view.read(cx).mode_label(),
+                aui_protocol::PermissionMode::DenyUnmatched.label(),
+                "the chip keeps the requested mode until the provider reports one"
+            );
+        });
+        lane_restore(state);
+    }
+
+    /// Closing a provider draft before its child answers forgets the
+    /// provisional names at once — ⌘N starts fresh rather than reopening
+    /// a dead view — and the late answer is hung up, recording nothing.
+    #[gpui::test]
+    fn closing_an_opening_provider_draft_forgets_it_and_drops_the_late_child(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early-close");
+        let (factory, commands) = recording_resumable_factory();
+        let (baaz, vc, project) = provider_draft_window(cx, &state.2, factory);
+        let closed = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
+                harness.close_view(&id, cx);
+                assert!(!harness.drafts.contains_key(&project), "no draft names the closed view");
+                assert!(!harness.unsent.contains(&id));
+                assert!(!harness.starts_in_flight.contains(&id), "scripted verbs stop waiting on it");
+                assert!(!harness.terminal_providers.contains_key(&id));
+                id
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(!harness.provider_sessions.contains_key(&closed), "the late child is recorded nowhere");
+            assert!(!harness.drafts.values().any(|id| *id == closed), "⌘N cannot reopen the closed view");
+            assert!(harness.find_view(&closed, cx).is_none());
+        });
+        assert!(
+            !commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::SubmitInput { .. })),
+            "nothing was sent to it"
+        );
+        lane_restore(state);
+    }
+
+    /// A child that never answers fails its view visibly past the open
+    /// timeout, the captured send back in the composer, and its names
+    /// forgotten; an answer arriving after that is hung up, not attached.
+    #[gpui::test]
+    fn a_provider_open_past_its_timeout_fails_the_view(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early-timeout");
+        let (factory, commands) = recording_resumable_factory();
+        let (baaz, vc, project) = provider_draft_window(cx, &state.2, factory);
+        let provisional = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                harness.active.clone().expect("the draft").read(cx).session_id.clone()
+            })
+        });
+        type_unparked(vc, &["h", "i", "enter"]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.expire_provider_open(&provisional, ProviderId::Codex, cx));
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the view stays");
+            assert!(!view.read(cx).is_starting(), "the open settled as failed");
+            let banner = view.read(cx).banner_text().unwrap_or_default().to_owned();
+            assert!(banner.contains("did not answer"), "the banner says why: {banner}");
+            assert_eq!(view.read(cx).draft_text(cx), "hi", "the send is back in the composer");
+            assert!(!harness.drafts.contains_key(&project));
+            assert!(harness.starts_in_flight.is_empty());
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the view stays");
+            assert_eq!(view.read(cx).session_id, provisional, "the late answer never attached");
+            assert!(harness.provider_sessions.is_empty());
+        });
+        assert!(!commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::SubmitInput { .. })));
+        lane_restore(state);
+    }
+
+    /// A provider draft still opening is never evicted from the parked
+    /// views, even one no `drafts` entry protects (a project-less open):
+    /// it holds the sends queued for its child.
+    #[gpui::test]
+    fn an_opening_provider_draft_is_never_evicted(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early-evict");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
+                // As a project-less open: no `drafts` entry names it.
+                harness.drafts.clear();
+                let workspace = harness.workspace();
+                for n in 0..=SESSION_CACHE_LIMIT {
+                    let host = SessionHost {
+                        provider_id: ProviderId::Muse.as_str().to_owned(),
+                        workspace: workspace.clone(),
+                        overlays: harness.overlays.clone(),
+                        capture: crate::shot::CaptureToken::default(),
+                        terminal_host: None,
+                    };
+                    let other = cx.new(|cx| SessionView::new(format!("s-park-{n}"), None, host, window, cx));
+                    harness.park_active(cx);
+                    harness.active = Some(other);
+                }
+                harness.park_active(cx);
+                assert!(
+                    harness.session_cache.iter().any(|(parked, _)| *parked == id),
+                    "the opening draft survives {} later parks",
+                    SESSION_CACHE_LIMIT + 1
+                );
+                assert!(harness.session_cache.len() <= SESSION_CACHE_LIMIT + 1);
+            })
         });
         lane_restore(state);
     }
