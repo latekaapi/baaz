@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>D6 · Full output</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400&display=swap">
+<style>
+body{margin:0}
+.z{font-family:"Inter",-apple-system,"SF Pro Text","Helvetica Neue",sans-serif;color:var(--fg);-webkit-font-smoothing:antialiased;font-size:14.3px;line-height:22px;position:relative;overflow:hidden;background:var(--l0)}
+.z *{box-sizing:border-box}
+.z .mono{font-family:"Geist Mono",ui-monospace,Menlo,monospace}
+.z button{font-family:inherit;color:inherit}
+.z .sheet2{position:absolute;background:var(--l1);border-radius:8px;box-shadow:var(--edge);overflow:hidden}
+/* pane chrome */
+.pn{position:absolute;inset:0;display:flex;flex-direction:column}
+.ph2{height:32px;flex:none;display:flex;align-items:center;gap:2px;padding:0 6px;position:relative;z-index:2;background:var(--l1)}
+.pfade{position:absolute;left:0;right:0;top:32px;height:24px;background:linear-gradient(var(--l1),rgb(from var(--l1) r g b / 0));z-index:2;pointer-events:none}
+.tab{height:28px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:inline-flex;align-items:center;gap:6px;padding:0 10px 0 8px;font-size:14.3px;white-space:nowrap}
+.tab:hover,.tab.hov{background:var(--hov);color:var(--fg)}
+.tab.on{background:var(--sel);color:var(--fg)}
+.tab.ic{width:28px;padding:0;justify-content:center}
+.ib2{width:28px;height:28px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;flex:none;padding:0}
+.ib2:hover,.ib2.hov{background:var(--hov);color:var(--fg)}
+.ib2.on{background:var(--sel);color:var(--fg)}
+.ib2.off{color:var(--faint);opacity:.6}
+.pt{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1;padding-left:2px}
+.pt b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:none;max-width:100%}
+.pt span{color:var(--muted);font-size:13.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pb{flex:1;position:relative;overflow:hidden}
+.sp{flex:1}
+/* rows */
+.rows{padding:4px 6px 12px}
+.fr{height:28px;display:flex;align-items:center;gap:6px;border-radius:6px;padding-right:8px;white-space:nowrap;color:var(--fg)}
+.fr:hover,.fr.hov{background:var(--hov)}
+.fr.sel{background:var(--sel)}
+.fr.kbd{box-shadow:inset 0 0 0 1px rgba(127,127,140,.45)}
+.fr .cv{width:16px;flex:none;display:flex;justify-content:center;color:var(--muted)}
+.fr .gl{width:14px;flex:none;display:flex;color:var(--muted)}
+.fr .nm{overflow:hidden;text-overflow:ellipsis}
+.fr .ign{color:var(--faint)}
+.fr .bd{margin-left:auto;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;width:14px;text-align:center;flex:none}
+.cap2{height:32px;display:flex;align-items:flex-end;padding:0 8px 6px;font-size:13.2px;line-height:18px;color:var(--muted);gap:6px}
+.cap2 .n{color:var(--faint);font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px}
+.note2{font-size:13.2px;line-height:18px;color:var(--faint);padding:8px 8px}
+/* changes */
+.cr2{height:32px;display:flex;align-items:center;gap:8px;border-radius:6px;padding:0 8px 0 0;white-space:nowrap}
+.cr2:hover,.cr2.hov{background:var(--hov)}
+.cr2 .cv{width:16px;flex:none;display:flex;justify-content:center;color:var(--muted);margin-left:4px}
+.cr2 .st2{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;width:12px;flex:none;text-align:center}
+.cr2 .nm{flex:none}
+.cr2 .dir{color:var(--muted);font-size:13.2px;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cr2 .dl{margin-left:auto;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;display:inline-flex;gap:6px;flex:none}
+.cr2 .op{margin-left:4px}
+.diff2{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;line-height:20px;margin:2px -6px 6px;white-space:pre;overflow:hidden}
+.diff2 .hh{height:24px;line-height:24px;background:var(--l2h);color:var(--muted);padding:0 12px}
+.diff2 .ln{display:grid;grid-template-columns:36px 14px 1fr;padding-right:12px}
+.diff2 .ln .n{color:var(--faint);text-align:right;padding-right:8px}
+.diff2 .ln .s{color:var(--faint)}
+.diff2 .a{background:var(--addbg)}.diff2 .a .s{color:var(--succ)}
+.diff2 .d{background:var(--delbg)}.diff2 .d .s{color:var(--dang)}
+.diff2 .gap{height:24px;line-height:24px;color:var(--muted);font-family:"Inter",sans-serif;font-size:13.2px;padding-left:22px;display:flex;align-items:center;gap:6px}
+/* commit foot */
+.foot2{position:absolute;left:0;right:0;bottom:0;padding:8px;background:var(--l1);z-index:3}
+.foot2::before{content:"";position:absolute;left:0;right:0;top:-24px;height:24px;background:linear-gradient(rgb(from var(--l1) r g b / 0),var(--l1));pointer-events:none}
+.cbx{background:var(--l2);border-radius:10px;box-shadow:var(--edge);padding:8px;display:flex;flex-direction:column;gap:6px}
+.cbx.focus{box-shadow:var(--focus)}
+.cbx .msg{padding:2px 4px;font-size:14.3px;line-height:22px;min-height:44px}
+.cbx .msg .t1{font-weight:600}
+.cbx .msg .ph3{color:var(--muted)}
+.cbx .row3{display:flex;align-items:center;gap:6px;height:28px}
+.br{display:inline-flex;align-items:center;gap:5px;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;color:var(--muted);white-space:nowrap;overflow:hidden;min-width:0}
+.br .f{color:var(--faint)}
+.btn{height:28px;border:0;border-radius:6px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;font-size:14.3px;white-space:nowrap;flex:none}
+.btn.pri{background:var(--pri);color:var(--prifg);font-weight:600}
+.btn.sec{background:var(--l2h);box-shadow:var(--edge);color:var(--fg)}
+.btn.txt{background:transparent;color:var(--muted)}.btn.txt:hover,.btn.txt.hov{background:var(--hov);color:var(--fg)}
+.btn.dis{opacity:.45}
+.spin2{width:12px;height:12px;border-radius:50%;border:1.5px solid rgba(157,157,166,.35);border-top-color:var(--muted);flex:none;display:inline-block}
+.btn.pri .spin2{border-color:rgba(127,127,127,.35);border-top-color:var(--prifg)}
+.errb{border-radius:8px;background:var(--l2);box-shadow:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgb(from var(--dang) r g b / .7);padding:8px 10px;display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+.errb .t{font-weight:600;display:flex;align-items:center;gap:8px}
+.errb pre{margin:0;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;line-height:18px;color:var(--muted);white-space:pre-wrap}
+.prc{background:var(--l2);border-radius:10px;box-shadow:var(--edge);padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.prc .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prc .m{font-size:13.2px;color:var(--muted);display:flex;align-items:center;gap:8px;white-space:nowrap}
+.dotc{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+/* code view */
+.cv2{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.65px;line-height:20px;white-space:pre;padding:8px 0 16px}
+.cv2 .l{display:grid;grid-template-columns:48px 1fr;column-gap:12px;padding-right:12px}
+.cv2 .l .n{color:var(--faint);text-align:right}
+.cv2 .l.b{background:var(--band)}.cv2 .l.b .n{color:var(--fg)}
+.cv2 .k{color:var(--kw)}.cv2 .y{color:var(--ty)}.cv2 .c{color:var(--cm)}.cv2 .s{color:var(--st)}
+/* reading in the pane */
+.rd2{padding:16px 20px 24px;font-size:16px;line-height:26px}
+.rd2 h1{font-size:24px;line-height:32px;font-weight:600;margin:0 0 12px}
+.rd2 h2{font-size:20px;line-height:28px;font-weight:600;margin:28px 0 10px}
+.rd2 p{margin:0 0 16px}
+.rd2 .ic{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:14px;background:var(--sel);border-radius:4px;padding:1px 5px}
+.rd2 pre{margin:0 0 16px;background:var(--l2);box-shadow:var(--edge);border-radius:8px;padding:10px 12px;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.65px;line-height:20px;white-space:pre;overflow:hidden}
+/* well output */
+.out{position:absolute;inset:32px 0 0 0;background:var(--well);font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.65px;line-height:20px;white-space:pre;padding:12px 16px 40px;overflow:hidden}
+.out .g{color:var(--succ)}.out .r{color:var(--dang)}.out .f{color:var(--faint)}.out .w{color:var(--warn)}
+.outfoot{position:absolute;left:0;right:0;bottom:0;height:28px;display:flex;align-items:center;padding:0 16px;font-size:12.1px;color:var(--faint);background:var(--well);border-top:1px solid var(--line)}
+/* empty states */
+.emp{position:absolute;inset:32px 0 0 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:0 32px;text-align:center}
+.emp .tl{width:40px;height:40px;border-radius:10px;background:var(--l2);box-shadow:var(--edge);display:flex;align-items:center;justify-content:center;color:var(--muted);margin-bottom:6px}
+.emp .h{font-weight:600}
+.emp .s{font-size:13.2px;line-height:18px;color:var(--muted);max-width:260px}
+.sk{height:10px;border-radius:5px;background:var(--sel)}
+/* page */
+.addr2{height:28px;flex:1;min-width:0;border-radius:6px;background:var(--well);box-shadow:var(--edge);display:flex;align-items:center;gap:6px;padding:0 8px;font-size:13.2px;white-space:nowrap;overflow:hidden}
+.addr2 .h{color:var(--fg)}.addr2 .p{color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+.pgw{position:absolute;left:0;right:0;top:32px;bottom:0;background:#FFFFFF;overflow:hidden}
+.prog{position:absolute;left:0;top:0;height:2px;background:var(--muted)}
+.apill{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);height:32px;border-radius:999px;background:#2C2C32;color:#F2F2F4;box-shadow:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.06),0 8px 24px -10px rgba(0,0,0,.4);display:inline-flex;align-items:center;gap:8px;padding:0 14px 0 10px;font-size:13.2px;white-space:nowrap}
+.mk2{width:16px;height:16px;border-radius:4px;color:#fff;font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none;background:#3B6DF2}
+.outl{position:absolute;border:1.5px solid #3B6DF2;border-radius:4px;background:rgba(59,109,242,.06)}
+.pin2{position:absolute;width:20px;height:20px;border-radius:50%;background:#18181B;color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px #fff}
+.notes2{position:absolute;left:8px;right:8px;bottom:8px;background:var(--l3);border-radius:10px;box-shadow:var(--float);padding:6px}
+.notes2 .r{display:flex;gap:8px;padding:6px 6px;font-size:13.2px;line-height:18px;border-radius:6px}
+.notes2 .r .n{width:18px;height:18px;border-radius:50%;background:var(--sel);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none}
+.notes2 .r .sel3{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;color:var(--muted)}
+.notes2 .ft3{display:flex;align-items:center;gap:6px;padding:6px 4px 2px;border-top:1px solid var(--line);margin-top:4px}
+/* image view */
+.iv{position:absolute;inset:32px 0 0 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px}
+.iv img{max-width:100%;max-height:calc(100% - 40px);border-radius:6px;box-shadow:var(--edge);display:block;object-fit:contain}
+.iv .m{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.1px;color:var(--faint)}
+/* form */
+.fm{padding:12px 12px 0;display:flex;flex-direction:column;gap:12px}
+.fl{display:flex;flex-direction:column;gap:6px}
+.fl label{font-size:13.2px;color:var(--muted)}
+.inp{min-height:32px;border-radius:6px;background:var(--well);box-shadow:var(--edge);padding:5px 10px;font-size:14.3px;line-height:22px}
+.inp.focus{box-shadow:var(--focus)}
+.inp.ta{min-height:150px}
+.pick{height:32px;border-radius:6px;background:var(--l2h);box-shadow:var(--edge);display:inline-flex;align-items:center;gap:8px;padding:0 10px;font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.65px}
+.chk3{width:16px;height:16px;border-radius:4px;box-shadow:inset 0 0 0 1.5px var(--muted);flex:none}
+/* transcript, themed (light screens) */
+.tz{font-size:16px;line-height:26px}
+.tz .ub{margin-left:auto;max-width:78%;background:var(--l2);border-radius:12px;box-shadow:var(--edge);padding:8px 13px;width:fit-content}
+.tz .qr{height:32px;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:14.3px;margin:0 -8px;padding:0 8px;border-radius:6px}
+.tz .chip2{font-family:"Geist Mono",ui-monospace,Menlo,monospace;font-size:12.65px;display:inline-flex;gap:5px}
+.tz p{margin:0}
+/* composer, themed */
+.cfz{background:var(--l2);border-radius:12px;box-shadow:var(--edge),0 8px 20px -8px var(--shade);min-height:50px;padding:12px 48px 12px 13px;position:relative;color:var(--muted);font-size:16px;line-height:26px}
+.cfz .snd{position:absolute;right:6px;bottom:11px;width:28px;height:28px;border-radius:999px;background:var(--l3);box-shadow:var(--edge);display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.crz{height:28px;display:flex;align-items:center;gap:4px;padding:0 4px;margin-top:6px;color:var(--muted);font-size:14.3px}
+.crz .c{display:inline-flex;align-items:center;gap:6px;padding:0 8px;height:28px}
+.lbl2{font-size:12px;line-height:17px;color:var(--muted)}
+.lbl2 b{display:block;color:var(--fg);font-weight:600;font-size:13px;margin-bottom:2px}
+</style>
+</helmet>
+<div class="z" style="width:1440px;height:900px;--l0:#121215;--l1:#1B1B1F;--l2:#232328;--l2h:#2A2A30;--l3:#2C2C32;--well:#151518;--fg:#F2F2F4;--muted:#9D9DA6;--faint:#6E6E78;--hov:rgba(255,255,255,.05);--sel:rgba(255,255,255,.09);--line:rgba(255,255,255,.07);--succ:#86EFAC;--warn:#FCD34D;--dang:#FCA5A5;--edge:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.06);--float:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.06),0 8px 24px -10px rgba(0,0,0,.4);--focus:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.22);--addbg:rgba(134,239,172,.10);--delbg:rgba(252,165,165,.10);--band:rgba(255,255,255,.07);--pri:#F2F2F4;--prifg:#121215;--kw:#B88DEA;--ty:#7AA4EF;--st:#A8D8A0;--cm:#6E6E78;--shade:rgba(0,0,0,.16);"><span style="position:absolute;left:12px;top:16px;display:flex;gap:8px;z-index:4" aria-hidden="true"><i style="width:12px;height:12px;border-radius:999px;background:#FF5F57;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#FEBC2E;display:block"></i><i style="width:12px;height:12px;border-radius:999px;background:#28C840;display:block"></i></span><button class="ib2" aria-label="Hide sidebar" style="position:absolute;left:84px;top:8px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/></svg></button><div style="position:absolute;left:184px;top:10px;display:flex;height:24px;padding:2px;border-radius:6px;background:var(--hov)"><span style="width:28px;height:20px;border-radius:4px;background:var(--l3);box-shadow:var(--edge);display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h7"/></svg></span><span style="width:28px;height:20px;display:flex;align-items:center;justify-content:center;color:var(--muted)"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg></span></div><div style="position:absolute;left:0;top:51px;width:256px"><div style="height:32px;display:flex;align-items:center;gap:12px;padding:0 20px"><span style="color:var(--muted);display:flex"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></span>Search</div><div style="height:32px;display:flex;align-items:center;gap:12px;padding:0 20px"><span style="color:var(--muted);display:flex"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></span>New session</div><div style="height:32px;display:flex;align-items:center;gap:12px;padding:0 20px"><span style="color:var(--muted);display:flex"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4a1 1 0 0 1 1-1h3l2 2h5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg></span>Add project</div><div style="height:30px;display:flex;align-items:flex-end;padding:0 16px 4px;font-size:13.2px;color:var(--muted)">Today</div><div style="margin:0 8px;height:44px;border-radius:6px;background:var(--sel);display:flex;align-items:center;gap:10px;padding:0 10px 0 8px"><span style="width:7px;height:7px;border-radius:50%;box-shadow:inset 0 0 0 1px var(--muted);flex:none"></span><div style="min-width:0;flex:1"><div style="font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Merge the Diff and Git…</div><div style="font-size:13.2px;line-height:17px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Changes is one view now…</div></div><span style="font-size:13.2px;color:var(--muted)">2 m</span></div></div><div style="position:absolute;left:0;bottom:0;width:256px;height:48px;display:flex;align-items:center;gap:10px;padding:0 16px;font-weight:600"><span style="width:24px;height:24px;border-radius:6px;background:#C9444C;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center">H</span>harness</div><div class="sheet2" style="left:262px;top:6px;width:766px;bottom:6px"><div style="position:absolute;left:40px;top:84px;width:686px" class="tz"><div style="display:flex;flex-direction:column;gap:14px"><div class="ub">Merge the Diff and Git kinds into one Changes view.</div><div style="height:14px"></div><div class="qr"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg><span>Worked for 2 m 14 s · edited 3</span><span class="chip2"><span style="color:var(--succ)">+243</span><span style="color:var(--dang)">−16</span></span></div><p>Changes is one view now: this session’s files on top, the rest of the working tree below, and the commit at its foot. The old Diff and Git kinds read as Changes, so a saved layout still opens.</p><p>Run <span class="mono" style="font-size:14px;background:var(--sel);border-radius:4px;padding:1px 5px">cargo test -p baaz right::</span> before you commit; the headings test changed.</p></div></div><div style="position:absolute;left:0;right:0;bottom:0;height:150px;background:linear-gradient(rgb(from var(--l1) r g b / 0),var(--l1) 56px)"></div><div style="position:absolute;left:0;right:0;top:0;height:32px;background:var(--l1);display:flex;align-items:center;padding:0 10px 0 16px;z-index:2"><span style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Merge the Diff and Git kinds into one Changes view.</span><span class="sp"></span><button class="ib2 on" aria-label="Changes"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="4" r="1.6"/><circle cx="5" cy="12" r="1.6"/><circle cx="11" cy="6" r="1.6"/><path d="M5 5.6v4.8M11 7.6c0 2-2 2.4-4.6 3.2"/></svg></button><button class="ib2 " aria-label="Files"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4a1 1 0 0 1 1-1h3l2 2h5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg></button><button class="ib2 " aria-label="Page"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg></button><button class="ib2 " aria-label="Terminal"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l4 4-4 4M8 12h5"/></svg></button><span style="width:1px;height:16px;background:var(--line);margin:0 4px"></span><button class="ib2 " aria-label="Session menu"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="3" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="13" cy="8" r="1.3"/></svg></button></div><div style="position:absolute;left:0;right:0;top:32px;height:24px;background:linear-gradient(var(--l1),rgb(from var(--l1) r g b / 0));z-index:2"></div><div style="position:absolute;left:40px;width:686px;bottom:20px"><div class="cfz">Ask Muse, or type / for commands<span class="snd"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4"/></svg></span></div><div class="crz"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span class="c" style="color:var(--fg)"><span class="mk2" style="width:14px;height:14px;font-size:9px">M</span>Muse<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></span><span style="display:inline-flex;align-items:center;gap:6px;margin-left:6px"><span style="width:12px;height:12px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--line)"></span><span class="mono" style="font-size:11px;color:var(--faint)">0 tokens</span></span><span class="sp"></span><span class="c">Muse Spark 1.3<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></span><span class="c">Auto<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></span><span class="c">Default<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></span></div></div></div><div class="sheet2" style="left:1034px;top:6px;width:400px;bottom:6px" role="complementary" aria-label="Right pane"><div class="pn"><div class="ph2"><button class="ib2 " aria-label="Back"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg></button><div class="pt"><b><span class="mono" style="font-weight:400;font-size:12.65px">$ cargo test --workspace</span></b></div><span class="mono" style="font-size:12.1px;color:var(--dang)">exit 101</span><span class="mono" style="font-size:12.1px;color:var(--faint);margin:0 6px">43.8 s</span><button class="ib2 " aria-label="Copy the output"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V4a1 1 0 0 1 1-1h7"/></svg></button><button class="ib2 " aria-label="Close the pane"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div><div class="pfade"></div><div class="out"><span class="f">$ cargo test --workspace</span>
+   Compiling baaz v0.1.0 (crates/baaz)
+    Finished `test` profile [unoptimized + debuginfo] in 41.2s
+     Running unittests src/main.rs
+
+running 1 204 tests
+test right::tests::a_binary_file_diff_parses_without_rows ... <span class="g">ok</span>
+test right::tests::a_rename_parses_under_its_new_path ... <span class="g">ok</span>
+test right::tests::session_files_come_first_in_edit_order ... <span class="g">ok</span>
+test right::tests::the_changes_headings_name_their_counts_once ... <span class="r">FAILED</span>
+test right::tests::long_paths_middle_truncate ... <span class="g">ok</span>
+test right::tests::unified_text_renders_every_hunk_with_marks ... <span class="g">ok</span>
+test right::tests::porcelain_letters_map_to_kinds ... <span class="g">ok</span>
+test right::tests::numstat_counts_binary_files_as_zero ... <span class="g">ok</span>
+test layout::tests::legacy_kinds_normalise_to_changes ... <span class="g">ok</span>
+test layout::tests::right_width_clamps_into_range ... <span class="g">ok</span>
+test terminal::service::tests::unknown_sessions_are_refused ... <span class="w">ignored</span>
+
+failures:
+
+---- right::tests::the_changes_headings_name_their_counts_once stdout ----
+thread 'main' panicked at crates/baaz/src/right.rs:3326:9:
+assertion `left == right` failed
+  left: "Other changes · 5"
+ right: "Other changes"
+
+test result: <span class="r">FAILED</span>. 1 202 passed; 1 failed; 1 ignored; 0 measured
+</div><div class="outfoot">1 204 lines · capped at 10 000</div></div></div></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
