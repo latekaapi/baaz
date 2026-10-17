@@ -250,15 +250,21 @@ pub struct SessionHost {
     pub terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
 }
 
+/// A shell block's output now: lines, running, exit, and a fetched full
+/// output (lines, capped) when one landed.
+pub type ToolOutputNow = (Vec<String>, bool, Option<i32>, Option<(Vec<String>, bool)>);
+
 /// One quotation in the composer (D4): the words and their source turn.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QuoteDraft {
-    /// The chip's id.
+    /// The block's id.
     pub id: String,
-    /// The quoted words.
+    /// The quoted text, as Markdown for a cross-block prose quote.
     pub text: String,
-    /// The turn they were quoted from.
-    pub source: String,
+    /// The turn it was quoted from (none for a hook's output).
+    pub source: Option<String>,
+    /// A code quote: its language (may be empty) and line count.
+    pub code: Option<(String, usize)>,
 }
 
 /// An unsent composer's content: the text plus the images and files waiting
@@ -504,6 +510,10 @@ pub enum SessionEvent {
         /// 1-based lines to band, end exclusive (`42..43` is line 42).
         highlight: Option<std::ops::Range<u32>>,
     },
+    /// D6: a shell card's full output, for the pane's output view.
+    OpenOutput(crate::transcript::OutputOpen),
+    /// D6: an image (a sent tile, a Markdown image) for the image view.
+    OpenImage(PathBuf),
 }
 
 /// The model chip while Muse starts under a draft.
@@ -945,6 +955,8 @@ pub struct SessionView {
     /// Quotations waiting to go out with the next turn (D4): the words and
     /// the turn they were quoted from.
     quotes: Vec<QuoteDraft>,
+    /// The next quote block's number (ids stay unique per view).
+    quote_seq: u64,
     /// A Browse annotation batch waiting to go out with the next turn.
     annotation_draft: Option<crate::sent::SentAnnotations>,
     /// What each sent turn carried (D4, `crate::sent`), in send order.
@@ -1232,6 +1244,7 @@ impl SessionView {
             file_seq: 0,
             failed_chips: Vec::new(),
             quotes: Vec::new(),
+            quote_seq: 0,
             annotation_draft: None,
             sent_items,
             sent_pairs: Rc::new(HashMap::new()),
@@ -1287,6 +1300,38 @@ impl SessionView {
             None => crate::transcript::edited_paths_cache_key(&[]),
         };
         (self.cached_session_edits_key == Some(key)).then(|| self.cached_session_edits.clone())
+    }
+
+    /// D6: a shell block's current output — lines, still running, exit —
+    /// and the fetched full output when one landed, for the output view.
+    pub fn tool_output(&self, block_id: &str) -> Option<ToolOutputNow> {
+        let fetched = match self.full_outputs.get(block_id) {
+            Some(crate::full_output::Fetch::Ready { lines, capped }) => Some((lines.clone(), *capped)),
+            _ => None,
+        };
+        let session = self.session()?;
+        for turn in &session.turns {
+            let aui::protocol::Turn::Assistant { blocks, .. } = turn else { continue };
+            for block in blocks {
+                let calls: Vec<aui::protocol::ToolCall> = match block {
+                    aui::protocol::Block::ToolGroup { calls, .. } => calls.clone(),
+                    other => other.as_tool_call().into_iter().collect(),
+                };
+                for call in &calls {
+                    if call.id == block_id {
+                        if let aui::protocol::ToolBody::Shell { output_lines, exit_code, live, .. } = &call.body {
+                            return Some((output_lines.clone(), *live, *exit_code, fetched));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// D6: the files turn `turn_id` edited (its fold chip's files).
+    pub fn turn_edits(&self, turn_id: &str) -> Vec<String> {
+        self.session().map(|s| crate::transcript::turn_edited_paths(&s.turns, turn_id)).unwrap_or_default()
     }
 
     /// B8c: recompute the Changes-pane edit list, store it with its key, and
@@ -2267,6 +2312,24 @@ impl SessionView {
             state.set_cursor_position(position, window, cx);
         });
         self.note_draft(cx);
+    }
+
+    /// The quote flow (docs/43 §0): add a quote block above the composer's
+    /// text — quoting text already quoted adds nothing — and give the field
+    /// the keyboard with the caret after any draft.
+    pub(crate) fn add_quote(&mut self, text: String, source: Option<String>, code: Option<(String, usize)>, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.trim_end().to_string();
+        if text.is_empty() || self.quotes.iter().any(|q| q.text == text) {
+            self.focus_composer(window, cx);
+            return;
+        }
+        self.quote_seq += 1;
+        self.quotes.push(QuoteDraft { id: format!("quote-{}", self.quote_seq), text, source, code });
+        let draft = self.draft_text(cx);
+        let end = position_of(&draft, draft.len());
+        self.composer.update(cx, |state, cx| state.set_cursor_position(end, window, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     /// Move the keyboard to the composer.

@@ -5003,7 +5003,7 @@ mod tests {
             })
         });
         let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target));
-        assert_eq!(subtitle, "Button · in Header · Browser pane");
+        assert_eq!(subtitle, "Button · in Header · Page pane");
         restore_state(state);
     }
 

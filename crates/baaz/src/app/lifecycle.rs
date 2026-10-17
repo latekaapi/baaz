@@ -5181,9 +5181,14 @@ impl Harness {
             // Per-turn checkpoints do not exist yet, so the chip opens the
             // session-scoped surface rather than pretending a scope. The
             // id is kept for that filter — read here so the shape stays.
+            // D6 (docs/43 §2.9–2.10, §4): the views the transcript opens.
+            SessionEvent::OpenOutput(out) => self.open_tool_output(out.clone(), cx),
+            SessionEvent::OpenImage(path) => self.show_image(path.clone(), cx),
+            // D6 (docs/43 §4): the chip opens Changes on that turn's files,
+            // open, scrolled to, flashing once.
             SessionEvent::OpenTurnChanges { turn_id } => {
-                let _ = turn_id.as_str();
-                self.select_right(crate::layout::RightKind::Changes, cx);
+                let files = self.active.as_ref().map(|view| view.read(cx).turn_edits(turn_id)).unwrap_or_default();
+                self.open_turn_changes(files, cx);
             }
         }
         cx.notify();

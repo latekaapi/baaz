@@ -16,21 +16,18 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aui::data::button;
 use aui::transcript::code_block;
-use aui::util::{interaction_flags, TrackInteraction};
 use aui::workbench::{
-    doc_pane, file_card, file_tree, pr_form, ArtifactKind, DocBlock, DocPage, FileNode,
-    FileTreeAction, GitAction, PrAction, PrDescription,
+    doc_pane, file_card, file_tree, ArtifactKind, DocBlock, DocPage, FileNode,
+    FileTreeAction, GitBadge,
 };
-use aui_icons::{icon, FileType, IconName};
+use aui_icons::{FileType, IconName};
 use aui_protocol::{ChangeKind, Diff, DiffKind, DiffLine, FileChange, Hunk};
-use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{
     div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, ScrollHandle, SharedString,
     WeakEntity, Window,
@@ -38,18 +35,15 @@ use gpui::{
 use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
-use crate::browser::{StripTab, TabId};
+use crate::browser::StripTab;
 use crate::layout::RightKind;
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
 /// entries must not be read into the pane; the footer names the cap.
 pub(crate) const FILE_WALK_CAP: usize = 300;
-/// How many files of a working-tree diff reach the Diff pane.
-pub(crate) const DIFF_FILES_CAP: usize = 16;
-/// How many body lines of one file reach the Diff pane.
-pub(crate) const DIFF_LINES_PER_FILE_CAP: usize = 500;
-/// One read-only git invocation may take this long before it counts as hung.
-const GIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// D6: the whole tree's safety cap (each folder shows at most
+/// [`FILE_WALK_CAP`] entries and says so; docs/43 §2.4).
+pub(crate) const FILE_TREE_TOTAL_CAP: usize = 5000;
 /// Directory names never walked into, so a naive walk stays small.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 /// A preview reads at most this much: anything larger gets the summary card
@@ -108,7 +102,7 @@ pub(crate) fn reset_io_count() {
 
 /// Count one blocking read toward [`io_count`] in test builds; nothing in
 /// production, where the counter does not exist.
-fn note_io() {
+pub(crate) fn note_io() {
     #[cfg(test)]
     RENDER_IO_COUNT.fetch_add(1, Ordering::Relaxed);
 }
@@ -205,6 +199,8 @@ struct CachedDir {
     entries: Vec<(String, bool)>,
     /// Whether the directory held more than `cap` entries when read.
     dir_truncated: bool,
+    /// How many entries it held (counted past the cap, never stored).
+    total: usize,
 }
 
 /// The file walk's per-directory listing cache: one stamped entry per
@@ -233,10 +229,24 @@ impl DirListCache {
 
 #[derive(Default)]
 pub(crate) struct RightCache {
-    /// The last git status read, by root.
-    pub git: Option<Stamped<Option<GitStatus>>>,
-    /// The last working-tree diff parsed, by root.
-    pub diffs: Option<Stamped<ParsedDiffs>>,
+    /// The last git status read, by root (`Some(None)`: not a repo).
+    pub git: Option<Stamped<Option<crate::git_ops::GitTree>>>,
+    /// D6: each opened row's diff, read when the row opens and dropped
+    /// whenever the tree changes (docs/51 P1 #8: never the whole tree).
+    /// `None` while the read is out.
+    pub file_diffs: HashMap<String, Option<std::sync::Arc<Diff>>>,
+    /// D6: unchanged runs a diff row expanded: (path, hunk index) → lines.
+    pub gap_lines: HashMap<(String, usize), std::sync::Arc<Vec<String>>>,
+    /// D6: the Changes screen's commit box, PR and form state.
+    pub changes: crate::right_changes::ChangesUi,
+    /// D6: Files' filter and keyboard state.
+    pub files_ui: crate::right_files::FilesUi,
+    /// D6: an image file previewed at 100 % instead of fitted.
+    pub files_image_actual: bool,
+    /// D6: a view pushed on a screen (by strip index): full output, image.
+    pub pushed: HashMap<usize, crate::right_views::Pushed>,
+    /// When each pushed view went on (its 160 ms slide-in).
+    pub pushed_at: HashMap<usize, Instant>,
     /// The last file-tree listing and whether the cap cut it, by root.
     pub files: Option<Stamped<(Vec<FileNode>, bool)>>,
     /// Directory ids standing open, per project root: the session's
@@ -265,28 +275,18 @@ pub(crate) struct RightCache {
     /// project root. Transient view state, never persisted: a re-read keeps
     /// the expansion, a restart does not.
     pub changes_expanded: HashMap<PathBuf, HashSet<String>>,
-    /// B8b: whether the Changes pane's "Commit or open a PR…" row stands
-    /// open, per project root. Transient like [`Self::changes_expanded`].
-    pub changes_commit_open: HashMap<PathBuf, bool>,
 }
 
 impl RightCache {
     /// The cached git status for `root`: `None` when never fetched for it,
     /// `Some(None)` when fetched and not a repo.
-    pub(crate) fn git_for(&self, root: &Path) -> Option<Option<GitStatus>> {
+    pub(crate) fn git_for(&self, root: &Path) -> Option<Option<crate::git_ops::GitTree>> {
         self.git
             .as_ref()
             .filter(|slot| slot.root == root)
             .map(|slot| slot.value.clone())
     }
 
-    /// The cached parsed diff for `root`, or `None` when never fetched for it.
-    pub(crate) fn diffs_for(&self, root: &Path) -> Option<ParsedDiffs> {
-        self.diffs
-            .as_ref()
-            .filter(|slot| slot.root == root)
-            .map(|slot| slot.value.clone())
-    }
 
     /// The cached file listing and cap flag for `root`, or `None` when never
     /// fetched for it.
@@ -338,11 +338,6 @@ impl RightCache {
         self.changes_expanded.get(root).cloned().unwrap_or_default()
     }
 
-    /// B8b: whether the Changes pane's commit row stands open for `root`.
-    pub(crate) fn changes_commit_open_for(&self, root: &Path) -> bool {
-        self.changes_commit_open.get(root).copied().unwrap_or(false)
-    }
-
     /// B8b: flip one file's inline-diff expansion, returning whether it
     /// stands open now.
     pub(crate) fn flip_changes_file(&mut self, root: &Path, path: &str) -> bool {
@@ -353,16 +348,6 @@ impl RightCache {
             open.insert(path.to_string());
             true
         }
-    }
-
-    /// B8b: flip the commit row, returning whether it stands open now.
-    pub(crate) fn flip_changes_commit(&mut self, root: &Path) -> bool {
-        let open = self
-            .changes_commit_open
-            .entry(root.to_path_buf())
-            .or_insert(false);
-        *open = !*open;
-        *open
     }
 
     /// When the slot backing `kind` last landed for `root`, if it ever did.
@@ -395,15 +380,17 @@ impl RightCache {
             self.dir_lists = DirListCache::default();
         }
         let root = snapshot.root.clone();
+        // A changed tree (or another root) makes every read diff stale: the
+        // open rows read theirs again.
+        let same = self.git.as_ref().is_some_and(|slot| slot.root == root && slot.value == snapshot.git);
+        if !same {
+            self.file_diffs.clear();
+            self.gap_lines.clear();
+        }
         self.git = Some(Stamped {
             root: root.clone(),
             at,
             value: snapshot.git,
-        });
-        self.diffs = Some(Stamped {
-            root: root.clone(),
-            at,
-            value: snapshot.diffs,
         });
         self.files = Some(Stamped {
             root,
@@ -440,10 +427,8 @@ impl RightCache {
 pub(crate) struct RightSnapshot {
     /// The root everything was read for.
     pub root: PathBuf,
-    /// The status read, or `None` when the root is not a git checkout.
-    pub git: Option<GitStatus>,
-    /// The parsed working-tree diff (empty when there is nothing to review).
-    pub diffs: ParsedDiffs,
+    /// The working tree, or `None` when the root is not a git checkout.
+    pub git: Option<crate::git_ops::GitTree>,
     /// The file-tree listing.
     pub files: Vec<FileNode>,
     /// Whether [`FILE_WALK_CAP`] cut the listing short.
@@ -487,33 +472,16 @@ pub(crate) fn read_snapshot_for_cached(
         return RightSnapshot {
             root: root.to_path_buf(),
             git: Some(fixture_git_status()),
-            diffs: ParsedDiffs {
-                diffs: vec![fixture_diff()],
-                truncated: false,
-            },
             files,
             files_truncated,
         };
     }
-    let read = read_git_and_diff(root, true);
-    let git = read.as_ref().map(|(status, _)| status.clone());
-    let diffs = match read {
-        Some((status, Some((raw, cut)))) if !status.files.is_empty() => {
-            let mut parsed = parse_unified_diff(&raw);
-            parsed.truncated |= cut;
-            parsed
-        }
-        _ => ParsedDiffs {
-            diffs: Vec::new(),
-            truncated: false,
-        },
-    };
+    let git = crate::git_ops::read_tree(root);
     let (files, files_truncated) =
         walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
     RightSnapshot {
         root: root.to_path_buf(),
         git,
-        diffs,
         files,
         files_truncated,
     }
@@ -569,6 +537,7 @@ pub(crate) struct BrowserPane<'a> {
     pub carry: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     kind: RightKind,
     cache: &RightCache,
@@ -576,9 +545,10 @@ pub(crate) fn render(
     session_edits: &[String],
     browser: BrowserPane<'_>,
     pane_open: bool,
+    width: f32,
+    agent: &str,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
-    let notify = toast_sink(cx.weak_entity());
     let harness = cx.weak_entity();
     match kind {
         RightKind::Browser => match browser_placeholder_for(pane_open, browser.state.is_some()) {
@@ -598,49 +568,8 @@ pub(crate) fn render(
             BrowserPlaceholder::Closed => closed_browser_state(),
         },
         RightKind::Changes | RightKind::Diff | RightKind::Git => match project {
-            Some((root, _)) => match cache.git_for(&root) {
-                None => loading_state(
-                    "right-changes-loading",
-                    "Changes",
-                    "Loading changes",
-                    "The pane re-reads the repository in the background and fills in on its own.",
-                ),
-                Some(None) => empty_state(
-                    "right-changes-empty",
-                    "Changes",
-                    "Not a git repository",
-                    "This project's folder is not a git checkout, so there are no changes to show.",
-                ),
-                Some(Some(status)) => {
-                    if status.files.is_empty() {
-                        empty_state(
-                            "right-changes-clean",
-                            "Changes",
-                            "No unstaged changes",
-                            "The working tree is clean — there is nothing to review.",
-                        )
-                    } else {
-                        let expanded = cache.changes_expanded_for(&root);
-                        let pane_in = ChangesPane {
-                            status: &status,
-                            parsed: cache.diffs_for(&root),
-                            session_edits,
-                            expanded: &expanded,
-                            commit_open: cache.changes_commit_open_for(&root),
-                            root: &root,
-                            harness: &harness,
-                            notify: &notify,
-                        };
-                        changes_pane_from(&pane_in)
-                    }
-                }
-            },
-            None => empty_state(
-                "right-changes-empty",
-                "Changes",
-                "No project is open",
-                "Open or adopt a project and its uncommitted changes will be listed here.",
-            ),
+            Some((root, _)) => crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx).1,
+            None => empty_state("right-changes-empty", "Changes", "No project is open", "Open or adopt a project and its uncommitted changes will be listed here."),
         },
         RightKind::Files => {
             match project {
@@ -653,8 +582,8 @@ pub(crate) fn render(
                     ),
                     Some((nodes, truncated)) => {
                         let selected = cache.selected_for(&root);
-                        let nodes = mark_selected(nodes, selected.as_deref());
-                        files_pane_from(&nodes, truncated, &name, &root, cache, &notify, harness)
+                        let nodes = decorate_nodes(mark_selected(nodes, selected.as_deref()), cache.git_for(&root).flatten().as_ref());
+                        files_pane_from(&nodes, truncated, &name, &root, cache, harness)
                     }
                 },
                 None => empty_state(
@@ -699,30 +628,63 @@ pub(crate) fn render_screen(
     browser: BrowserPane<'_>,
     pane_open: bool,
     width: f32,
+    agent: &str,
+    files_focus: &gpui::FocusHandle,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
-    let _ = width;
     let slug = kind.slug();
+    let screen = screen_index(kind);
     let close = cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx));
-    let row = aui::workbench::pane_row(SharedString::from(format!("right-row-{slug}")), screen_glyph(kind), kind.label()).on_close(close);
-    let body = render(kind, cache, project, session_edits, browser, pane_open, cx);
+    let pane_row = || aui::workbench::pane_row(SharedString::from(format!("right-row-{slug}")), screen_glyph(kind), kind.label());
+    if cache.pushed.contains_key(&screen) && cache.pushed_at.get(&screen).is_some_and(|at| at.elapsed().as_secs_f32() < 0.16) {
+        browser.window.request_animation_frame();
+    }
+    let (row, body, pushed): (AnyElement, AnyElement, bool) = if let Some(view) = cache.pushed.get(&screen) {
+        let (row, body) = crate::right_views::pushed_screen(screen, view, width, browser.window, cx);
+        (row, body, true)
+    } else {
+        match (kind, project) {
+            (RightKind::Changes | RightKind::Diff | RightKind::Git, Some((root, _))) => {
+                let (row, body) = crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx);
+                let pushed = row.is_some();
+                (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
+            }
+            (RightKind::Files, project) => {
+                let (row, body) = crate::right_files::files_screen(cache, project.clone(), width, files_focus, browser.window, cx);
+                let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
+                (row, body, pushed)
+            }
+            (RightKind::Changes | RightKind::Diff | RightKind::Git, None) => (
+                pane_row().on_close(close).into_any_element(),
+                aui::workbench::state_block("right-changes-noproject", IconName::Git, "No project").line("Open or add a project to see its changes.").into_any_element(),
+                false,
+            ),
+            (kind, project) => (pane_row().on_close(close).into_any_element(), render(kind, cache, project, session_edits, browser, pane_open, width, agent, cx), false),
+        }
+    };
+    // A pushed view slides 8 px in from the right and fades in, 160 ms
+    // ease-out (docs/43 §3).
+    let body = if pushed {
+        let since = cache.pushed_at.get(&screen).map(|at| at.elapsed().as_secs_f32() / 0.16).unwrap_or(1.0).min(1.0);
+        let eased = 1.0 - (1.0 - since).powi(3);
+        div().size_full().relative().left(px(8.0 * (1.0 - eased))).opacity(eased).child(body).into_any_element()
+    } else {
+        body
+    };
     v_flex()
         .id(SharedString::from(format!("right-screen-{slug}")))
         .relative()
         .size_full()
         .role(gpui::Role::Complementary)
         .aria_label(format!("Right pane: {}", kind.label()))
+        .key_context("RightPane")
+        .on_action(cx.listener(move |this: &mut Harness, _: &crate::app::RightBack, _, cx| {
+            this.pop_right_view(screen, cx);
+        }))
         .child(row)
         .child(div().flex_1().min_h(px(0.0)).child(body))
         .child(aui::workbench::pane_row_fade(cx))
         .into_any_element()
-}
-
-/// The file tree's Refresh action, the one wired action in the pane: ask the
-/// [`Harness`](crate::app::Harness) for a real re-read off the render path.
-/// Silent when the window is already gone.
-pub(crate) fn refresh_files(harness: WeakEntity<Harness>, cx: &mut App) {
-    let _ = harness.update(cx, |this, cx| this.refresh_right_now(cx));
 }
 
 impl Harness {
@@ -837,20 +799,6 @@ impl Harness {
         closed
     }
 
-
-    /// B8b: expand or collapse one file's inline diff in the Changes pane:
-    /// transient view state, kept across re-reads, never persisted.
-    pub(crate) fn toggle_changes_file(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) {
-        self.right_cache.flip_changes_file(root, path);
-        cx.notify();
-    }
-
-    /// B8b: open or close the Changes pane's commit row. Transient like
-    /// [`Self::toggle_changes_file`].
-    pub(crate) fn toggle_changes_commit(&mut self, root: &Path, cx: &mut Context<Self>) {
-        self.right_cache.flip_changes_commit(root);
-        cx.notify();
-    }
 
     /// Open the right pane on the Browser kind because the agent navigated
     /// `session_id` there (Z7b): like a person's click would — the pane
@@ -982,158 +930,6 @@ fn empty_state(
 
 // ── the inert-action path ────────────────────────────────────────────────
 
-/// The exact stderr line [`inert`] emits, split out so tests can assert it
-/// without capturing stderr.
-fn inert_text(pane: &'static str, action: &str) -> String {
-    format!("right pane: {pane} action {action} is not wired yet")
-}
-
-/// Record of every [`inert`] call, test builds only: the app's stderr log
-/// cannot be asserted from a test, so the message is also pushed here.
-#[cfg(test)]
-fn inert_log_store() -> &'static std::sync::Mutex<Vec<String>> {
-    static LOG: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
-    LOG.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-/// What [`inert`] recorded so far, oldest first.
-#[cfg(test)]
-pub(crate) fn inert_log() -> Vec<String> {
-    inert_log_store()
-        .lock()
-        .map(|log| log.clone())
-        .unwrap_or_default()
-}
-
-/// Forget what [`inert`] recorded.
-#[cfg(test)]
-pub(crate) fn clear_inert_log() {
-    if let Ok(mut log) = inert_log_store().lock() {
-        log.clear();
-    }
-}
-
-/// How an inert action raises its toast: the title and body, plus the app to
-/// raise it in. A closure over [`toast_sink`] in production, a recording stub
-/// in tests.
-type ToastSink = Rc<dyn Fn(String, String, &mut App)>;
-
-/// Build the production [`ToastSink`]: upgrade the weak `Harness` at click
-/// time — when no update borrow is held — and toast through its overlays.
-/// Nothing happens when the window is already gone, apart from the log line.
-fn toast_sink(weak: WeakEntity<Harness>) -> ToastSink {
-    Rc::new(move |title, body, cx| {
-        if let Some(harness) = weak.upgrade() {
-            harness.update(cx, |this, cx| {
-                this.overlays
-                    .update(cx, |overlays, _| overlays.toast(title, body));
-            });
-        }
-    })
-}
-
-/// The one shared inert handler: log the attempt on stderr and raise the
-/// app's existing toast naming the action. Returns the log line so tests can
-/// see it. Never shells out, never mutates: Commit and Push land here too.
-fn inert(pane: &'static str, action: &str, notify: &ToastSink, cx: &mut App) -> String {
-    let line = inert_text(pane, action);
-    crate::baaz_log!("{line}");
-    #[cfg(test)]
-    if let Ok(mut log) = inert_log_store().lock() {
-        log.push(line.clone());
-    }
-    notify(
-        "Not wired yet".to_string(),
-        format!("{action} in the {pane} pane is not wired yet, so nothing happened."),
-        cx,
-    );
-    line
-}
-
-/// Exhaustive action names: no `_` arm, so the compiler tells the next
-/// person when the library adds a variant.
-fn files_action_name(action: &FileTreeAction) -> String {
-    match action {
-        FileTreeAction::Select(id) => format!("Select {id}"),
-        FileTreeAction::Toggle(id) => format!("Toggle {id}"),
-    }
-}
-
-fn git_action_name(action: &GitAction) -> String {
-    match action {
-        GitAction::Toggle(path) => format!("Toggle {path}"),
-        GitAction::Regenerate => "Regenerate".to_string(),
-        GitAction::Amend => "Amend".to_string(),
-        GitAction::Commit => "Commit".to_string(),
-        GitAction::Push => "Push".to_string(),
-    }
-}
-
-fn pr_action_name(action: &PrAction) -> String {
-    match action {
-        PrAction::PickBase => "PickBase".to_string(),
-        PrAction::Cancel => "Cancel".to_string(),
-        PrAction::Create => "Create".to_string(),
-        PrAction::Linear => "Linear".to_string(),
-    }
-}
-
-/// B8b: how many characters of a changed path one Changes row shows before
-/// middle-truncating: a ~400 px pane fits about this much mono text beside
-/// the status letter and the `+N −M` counts.
-pub(crate) const CHANGES_PATH_CHARS: usize = 48;
-
-/// B8b: a changed path for one narrow-pane row: the full relative path when
-/// it fits, else the head and tail joined with `…`. The row's accessible
-/// label always carries the whole path, so nothing is lost.
-pub(crate) fn middle_truncate(path: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= max_chars || max_chars < 5 {
-        return path.to_owned();
-    }
-    let keep = max_chars - 1;
-    let head = keep.div_ceil(2);
-    let tail = keep - head;
-    format!(
-        "{}…{}",
-        chars[..head].iter().collect::<String>(),
-        chars[chars.len() - tail..].iter().collect::<String>()
-    )
-}
-
-/// B8b: one file's `+N −M` counts, with the design's minus sign (not a
-/// hyphen), and nothing at all for a side that did not change.
-fn file_delta(change: &FileChange) -> String {
-    match (change.added, change.removed) {
-        (0, 0) => String::new(),
-        (added, 0) => format!("+{added}"),
-        (0, removed) => format!("−{removed}"),
-        (added, removed) => format!("+{added} −{removed}"),
-    }
-}
-
-/// B8b: one parsed diff as unified text for the inline expanded row: every
-/// hunk header plus its rows, `+`/`-`/space prefixed. The parse already caps
-/// files and lines per file, so this renders the whole stored diff.
-pub(crate) fn unified_text(diff: &Diff) -> String {
-    let mut out = String::new();
-    for hunk in &diff.hunks {
-        out.push_str(&hunk.header);
-        out.push('\n');
-        for line in &hunk.lines {
-            let mark = match line.kind {
-                DiffKind::Add => '+',
-                DiffKind::Del => '-',
-                DiffKind::Context => ' ',
-            };
-            out.push(mark);
-            out.push_str(&line.text);
-            out.push('\n');
-        }
-    }
-    out
-}
-
 /// B8c: whether a working-tree path is one of the session's edited paths: an
 /// exact match, or the edit target made relative to `root` matching exactly
 /// (fold targets may be absolute while `git status` paths are root-relative).
@@ -1152,9 +948,8 @@ fn edit_covers(status_path: &str, edit: &str, root: &Path) -> bool {
         .is_some_and(|relative| !relative.is_empty() && status_path == relative)
 }
 
-/// B8b: working-tree files with their staged flags, as [`GitStatus`] carries
-/// them: one list per Changes section.
-pub(crate) type ChangeFiles = Vec<(FileChange, bool)>;
+/// B8b: working-tree files, one list per Changes section.
+pub(crate) type ChangeFiles = Vec<FileChange>;
 
 /// B8b: split the working tree into this session's files first, everything
 /// else below. Session files follow the session's edit order; the rest keep
@@ -1163,7 +958,7 @@ pub(crate) type ChangeFiles = Vec<(FileChange, bool)>;
 /// [`edit_covers`]): absolute edit targets are relativized against `root`,
 /// the project root the status paths are relative to.
 pub(crate) fn partition_session_files(
-    files: &[(FileChange, bool)],
+    files: &[FileChange],
     session_edits: &[String],
     root: &Path,
 ) -> (ChangeFiles, ChangeFiles) {
@@ -1175,7 +970,7 @@ pub(crate) fn partition_session_files(
             continue;
         }
         let mut found = None;
-        for (index, (change, _)) in files.iter().enumerate() {
+        for (index, change) in files.iter().enumerate() {
             if !taken[index] && edit_covers(&change.path, edit, root) {
                 found = Some(index);
                 break;
@@ -1201,7 +996,6 @@ pub(crate) fn partition_session_files(
 /// than inline closures) so tests can invoke the exact handler the pane
 /// wires up.
 fn files_handler(
-    notify: ToastSink,
     harness: WeakEntity<Harness>,
     root: PathBuf,
 ) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
@@ -1217,225 +1011,8 @@ fn files_handler(
     }
 }
 
-fn git_handler(notify: ToastSink) -> impl Fn(GitAction, &mut Window, &mut App) + 'static {
-    move |action, _window, cx| {
-        inert("Changes", &git_action_name(&action), &notify, cx);
-    }
-}
-
-fn pr_handler(notify: ToastSink) -> impl Fn(PrAction, &mut Window, &mut App) + 'static {
-    move |action, _window, cx| {
-        inert("Pull request", &pr_action_name(&action), &notify, cx);
-    }
-}
-
-/// Expand (`true`) or collapse one Changes file's inline diff, then redraw.
-/// Silent when the window is already gone.
-fn toggle_changes_file(harness: &WeakEntity<Harness>, root: &Path, path: &str, cx: &mut App) {
-    let _ = harness.update(cx, |this, cx| this.toggle_changes_file(root, path, cx));
-}
-
-/// Open or close the Changes pane's commit row, then redraw. Silent when the
-/// window is already gone.
-fn toggle_changes_commit(harness: &WeakEntity<Harness>, root: &Path, cx: &mut App) {
-    let _ = harness.update(cx, |this, cx| this.toggle_changes_commit(root, cx));
-}
-
 // ── read-only git ────────────────────────────────────────────────────────
 
-/// Run one read-only git command in `root`, giving up after [`GIT_TIMEOUT`].
-/// `None` covers everything that can go wrong: no git binary, not a repo,
-/// a hung subprocess. The pane degrades to an empty state instead.
-#[cfg(test)]
-fn run_git(root: &Path, args: &[&str]) -> Option<String> {
-    spawn_git(root, args, GIT_OUTPUT_CAP)?.finish(std::time::Instant::now() + GIT_TIMEOUT).map(|(text, _)| text)
-}
-
-/// The most of one git command's output the pane reads: a diff past it is
-/// shown truncated instead of read whole (a large lockfile diff used to be
-/// re-read on every refresh, and one that missed the timeout vanished).
-const GIT_OUTPUT_CAP: usize = 4 * 1024 * 1024;
-
-/// One git command started in the background (see [`spawn_git`]).
-struct GitJob {
-    child: std::process::Child,
-    output: std::sync::mpsc::Receiver<(Vec<u8>, bool)>,
-}
-
-/// Start a read-only git command without waiting for it, so several run at
-/// once. `--no-optional-locks`: a read never takes `.git/index.lock`, so the
-/// pane never contends with the agent's own git commands.
-fn spawn_git(root: &Path, args: &[&str], cap: usize) -> Option<GitJob> {
-    note_io();
-    let mut child = Command::new("git")
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, output) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read as _;
-        let mut bytes = Vec::new();
-        let read = (&mut stdout).take(cap as u64 + 1).read_to_end(&mut bytes);
-        let truncated = bytes.len() > cap;
-        bytes.truncate(cap);
-        // Past the cap, keep draining so the child can exit.
-        if truncated {
-            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-        }
-        let _ = tx.send(if read.is_ok() { (bytes, truncated) } else { (Vec::new(), false) });
-    });
-    Some(GitJob { child, output })
-}
-
-impl GitJob {
-    /// The output (and whether it was cut at the cap) once the command
-    /// succeeds before `deadline`; on timeout the child is killed, never
-    /// left running.
-    fn finish(mut self, deadline: std::time::Instant) -> Option<(String, bool)> {
-        let wait = deadline.saturating_duration_since(std::time::Instant::now());
-        let Ok((bytes, truncated)) = self.output.recv_timeout(wait) else {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            return None;
-        };
-        let status = self.child.wait().ok()?;
-        if !status.success() {
-            return None;
-        }
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            // A cut at the cap can split a character: keep what is whole.
-            Err(error) if truncated => {
-                let valid = error.utf8_error().valid_up_to();
-                let mut bytes = error.into_bytes();
-                bytes.truncate(valid);
-                String::from_utf8(bytes).ok()?
-            }
-            Err(_) => return None,
-        };
-        Some((text, truncated))
-    }
-}
-
-/// The branch and ahead/behind from `git status --branch`'s `## …` header:
-/// `## main...origin/main [ahead 1, behind 2]`, `## main`, `## HEAD (no
-/// branch)`, `## No commits yet on main`.
-fn parse_branch_header(line: &str) -> Option<(String, u32, u32)> {
-    let rest = line.strip_prefix("## ")?;
-    if let Some(name) = rest.strip_prefix("No commits yet on ") {
-        return Some((name.trim().to_string(), 0, 0));
-    }
-    let (head, tracking) = match rest.split_once(' ') {
-        Some((head, tracking)) => (head, tracking),
-        None => (rest, ""),
-    };
-    let branch = head.split("...").next().unwrap_or(head);
-    let branch = if branch == "HEAD" || head.starts_with("HEAD") { "HEAD" } else { branch };
-    let mut ahead = 0;
-    let mut behind = 0;
-    if let Some(inner) = tracking.strip_prefix('[').and_then(|t| t.split(']').next()) {
-        for part in inner.split(',') {
-            let part = part.trim();
-            if let Some(n) = part.strip_prefix("ahead ") {
-                ahead = n.trim().parse().unwrap_or(0);
-            } else if let Some(n) = part.strip_prefix("behind ") {
-                behind = n.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    Some((branch.to_string(), ahead, behind))
-}
-
-/// Strip one layer of C-style quoting from a git pathname.
-fn unquote(path: &str) -> &str {
-    let path = path.trim();
-    if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
-        &path[1..path.len() - 1]
-    } else {
-        path
-    }
-}
-
-/// One porcelain v1 line into `(path, staged, kind)`. `staged` is whether the
-/// index column is non-space. Renames report the new path. `None` for lines
-/// with nothing to show (ignored files, blank lines, malformed rows).
-fn parse_porcelain_line(line: &str) -> Option<(String, bool, ChangeKind)> {
-    let bytes = line.as_bytes();
-    if bytes.len() < 4 || bytes[2] != b' ' {
-        return None;
-    }
-    let index = bytes[0] as char;
-    let worktree = bytes[1] as char;
-    if index == '!' {
-        return None;
-    }
-    let raw = line[3..].split(" -> ").last().unwrap_or(&line[3..]);
-    let path = unquote(raw);
-    if path.is_empty() {
-        return None;
-    }
-    let staged = index != ' ' && index != '?';
-    let kind = if index == 'A' || worktree == 'A' || index == '?' || worktree == '?' {
-        ChangeKind::Added
-    } else if index == 'D' || worktree == 'D' {
-        ChangeKind::Deleted
-    } else {
-        ChangeKind::Modified
-    };
-    Some((path.to_string(), staged, kind))
-}
-
-/// One `--numstat` output into path → (added, removed). Binary files report
-/// `- -` and count as no line changes.
-fn parse_numstat(text: &str) -> HashMap<String, (u32, u32)> {
-    let mut counts = HashMap::new();
-    for line in text.lines() {
-        let mut fields = line.split('\t');
-        let (Some(added), Some(removed), Some(path)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let path = path.split(" => ").last().unwrap_or(path);
-        let path = unquote(path).to_string();
-        if path.is_empty() {
-            continue;
-        }
-        let pair = match (added.parse::<u32>(), removed.parse::<u32>()) {
-            (Ok(added), Ok(removed)) => (added, removed),
-            _ => (0, 0),
-        };
-        counts.insert(path, pair);
-    }
-    counts
-}
-
-/// Parse `rev-list --count --left-right upstream...HEAD`: the left count is
-/// behind, the right count is ahead. `None` when there is no upstream, which
-/// the caller falls back to `(0, 0)`.
-#[cfg(test)]
-fn parse_ahead_behind(text: &str) -> Option<(u32, u32)> {
-    let mut fields = text.split_whitespace();
-    let behind: u32 = fields.next()?.parse().ok()?;
-    let ahead: u32 = fields.next()?.parse().ok()?;
-    Some((ahead, behind))
-}
-
-/// Everything the Git pane reads, or `None` when the project is not a git
-/// repo at all.
-#[derive(Clone, Debug)]
-pub(crate) struct GitStatus {
-    files: Vec<(FileChange, bool)>,
-    branch: String,
-    ahead: u32,
-    behind: u32,
-}
 
 /// A fixed working tree for deterministic captures.
 ///
@@ -1445,165 +1022,62 @@ pub(crate) struct GitStatus {
 /// for ever and teach everyone to ignore them. Under `BAAZ_DETERMINISTIC`
 /// they read this instead, so the baseline pins how the pane RENDERS rather
 /// than what the repository happens to contain today.
-fn fixture_git_status() -> GitStatus {
-    let files = vec![
-        (
-            FileChange {
-                path: "crates/baaz/src/right.rs".into(),
-                change: ChangeKind::Modified,
-                added: 148,
-                removed: 12,
-            },
-            false,
-        ),
-        (
-            FileChange {
-                path: "crates/baaz/src/layout.rs".into(),
-                change: ChangeKind::Modified,
-                added: 31,
-                removed: 4,
-            },
-            true,
-        ),
-        (
-            FileChange {
-                path: "docs/02-app.md".into(),
-                change: ChangeKind::Modified,
-                added: 22,
-                removed: 9,
-            },
-            false,
-        ),
-        (
-            FileChange {
-                path: "crates/baaz/src/panes/mod.rs".into(),
-                change: ChangeKind::Added,
-                added: 64,
-                removed: 0,
-            },
-            false,
-        ),
-        (
-            FileChange {
-                path: "scripts/old_probe.py".into(),
-                change: ChangeKind::Deleted,
-                added: 0,
-                removed: 37,
-            },
-            false,
-        ),
-    ];
-    GitStatus {
-        files,
+fn fixture_git_status() -> crate::git_ops::GitTree {
+    let file = |path: &str, change: ChangeKind, added: u32, removed: u32| FileChange { path: path.into(), change, added, removed };
+    crate::git_ops::GitTree {
+        files: vec![
+            file("crates/baaz/src/layout.rs", ChangeKind::Modified, 31, 4),
+            file("crates/baaz/src/panes/mod.rs", ChangeKind::Added, 64, 0),
+            file("crates/baaz/src/right.rs", ChangeKind::Modified, 148, 12),
+            file("docs/02-app.md", ChangeKind::Modified, 22, 9),
+            file("scripts/old_probe.py", ChangeKind::Deleted, 0, 37),
+        ],
         branch: "right-pane".into(),
+        upstream: Some("origin/right-pane".into()),
         ahead: 2,
         behind: 1,
+        ignored: vec![".cargo/".into(), ".claude/".into(), ".dev.env".into(), ".relay/".into(), "target/".into()],
     }
 }
 
-/// The diff the fixture's first file shows. Small on purpose: a capture wants
-/// a legible hunk, not a realistic one.
-fn fixture_diff() -> Diff {
-    let line = |kind, old_no, new_no, text: &str| DiffLine {
-        kind,
-        old_no,
-        new_no,
-        text: text.to_string(),
-    };
+/// The diff the fixture's `right.rs` shows (canvas v49 `D6Changes`): two
+/// hunks with an unchanged run between them. Small on purpose: a capture
+/// wants a legible diff, not a realistic one.
+pub(crate) fn fixture_diff_for(path: &str) -> Diff {
+    let line = |kind, old_no, new_no, text: &str| DiffLine { kind, old_no, new_no, text: text.to_string() };
+    use DiffKind::{Add, Context, Del};
     Diff {
-        path: "crates/baaz/src/right.rs".into(),
-        hunks: vec![Hunk {
-            header: "@@ -41,7 +41,9 @@ fn render(kind: RightKind)".into(),
-            lines: vec![
-                line(
-                    DiffKind::Context,
-                    Some(41),
-                    Some(41),
-                    "    let notify = toast_sink(cx.weak_entity());",
-                ),
-                line(DiffKind::Del, Some(42), None, "    match kind {"),
-                line(DiffKind::Add, None, Some(42), "    match kind {"),
-                line(
-                    DiffKind::Add,
-                    None,
-                    Some(43),
-                    "        RightKind::Browser => browser_pane(&notify),",
-                ),
-                line(
-                    DiffKind::Context,
-                    Some(43),
-                    Some(44),
-                    "        RightKind::Files => files_pane(root, &notify),",
-                ),
-            ],
-        }],
-        added: 2,
-        removed: 1,
-    }
-}
-
-#[cfg(test)]
-fn read_git_status(root: &Path) -> Option<GitStatus> {
-    read_git_and_diff(root, false).map(|(status, _)| status)
-}
-
-/// The status (branch and ahead/behind included) and, when `with_diff`, the
-/// full worktree diff: four git commands started together rather than six
-/// one after another (perf audit 2026-10-16). `None` when `root` is not a
-/// repo.
-fn read_git_and_diff(root: &Path, with_diff: bool) -> Option<(GitStatus, Option<(String, bool)>)> {
-    if crate::clock::deterministic() {
-        return Some((fixture_git_status(), None));
-    }
-    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
-    let status = spawn_git(root, &["status", "--porcelain=v1", "--branch", "--untracked-files=normal"], GIT_OUTPUT_CAP);
-    let unstaged = spawn_git(root, &["diff", "--numstat"], GIT_OUTPUT_CAP);
-    let staged = spawn_git(root, &["diff", "--cached", "--numstat"], GIT_OUTPUT_CAP);
-    let diff = if with_diff {
-        spawn_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"], GIT_OUTPUT_CAP)
-    } else {
-        None
-    };
-    let porcelain = status?.finish(deadline).map(|(text, _)| text);
-    let unstaged = unstaged.and_then(|job| job.finish(deadline)).map(|(out, _)| parse_numstat(&out)).unwrap_or_default();
-    let staged = staged.and_then(|job| job.finish(deadline)).map(|(out, _)| parse_numstat(&out)).unwrap_or_default();
-    let diff = diff.and_then(|job| job.finish(deadline));
-    let porcelain = porcelain?;
-    let mut branch = "unknown".to_string();
-    let (mut ahead, mut behind) = (0, 0);
-    let mut files = Vec::new();
-    for line in porcelain.lines() {
-        if line.starts_with("## ") {
-            if let Some((name, a, b)) = parse_branch_header(line) {
-                if !name.is_empty() {
-                    branch = name;
-                }
-                ahead = a;
-                behind = b;
-            }
-            continue;
-        }
-        let Some((path, is_staged, kind)) = parse_porcelain_line(line) else {
-            continue;
-        };
-        let counts = if is_staged {
-            staged.get(&path).or_else(|| unstaged.get(&path))
-        } else {
-            unstaged.get(&path)
-        };
-        let (file_added, file_removed) = counts.copied().unwrap_or((0, 0));
-        files.push((
-            FileChange {
-                path,
-                change: kind,
-                added: file_added,
-                removed: file_removed,
+        path: path.into(),
+        hunks: vec![
+            Hunk {
+                header: "@@ -2820,10 +2820,12 @@ fn changes_heading".into(),
+                lines: vec![
+                    line(Context, Some(2820), Some(2820), "fn changes_heading(id: &'static str, label: SharedString) -> AnyElement {"),
+                    line(Context, Some(2821), Some(2821), "    div()"),
+                    line(Context, Some(2822), Some(2822), "        .id(id)"),
+                    line(Del, Some(2823), None, "        .px(px(16.0))"),
+                    line(Del, Some(2824), None, "        .pt(px(12.0))"),
+                    line(Add, None, Some(2823), "        .h(px(32.0))"),
+                    line(Add, None, Some(2824), "        .px(px(8.0))"),
+                    line(Add, None, Some(2825), "        .text_color(cx.theme().muted)"),
+                    line(Add, None, Some(2826), "        .text_size(rems(TEXT_CAPTION))"),
+                    line(Context, Some(2825), Some(2827), "        .child(label)"),
+                ],
             },
-            is_staged,
-        ));
+            Hunk {
+                header: "@@ -2853,7 +2852,9 @@ fn session_file_row".into(),
+                lines: vec![
+                    line(Context, Some(2853), Some(2852), "fn session_file_row("),
+                    line(Context, Some(2854), Some(2853), "    change: &FileChange,"),
+                    line(Del, Some(2855), None, "    open: bool,"),
+                    line(Add, None, Some(2854), "    open: bool, hovered: bool,"),
+                    line(Add, None, Some(2855), "    theme: &Theme,"),
+                ],
+            },
+        ],
+        added: 148,
+        removed: 12,
     }
-    files.sort_by(|a, b| a.0.path.cmp(&b.0.path));
-    Some((GitStatus { files, branch, ahead, behind }, diff))
 }
 
 // ── the file walk ────────────────────────────────────────────────────────
@@ -1709,7 +1183,7 @@ fn walk_level_cached(
     nodes: &mut Vec<FileNode>,
     truncated: &mut bool,
 ) {
-    if nodes.len() >= cap {
+    if nodes.len() >= FILE_TREE_TOTAL_CAP {
         *truncated = true;
         return;
     }
@@ -1722,6 +1196,7 @@ fn walk_level_cached(
             note_cache_hit();
             let entries = hit.entries.clone();
             let dir_truncated = hit.dir_truncated;
+            let total = hit.total;
             append_cached_entries(
                 root,
                 dir,
@@ -1730,7 +1205,7 @@ fn walk_level_cached(
                 expanded,
                 dir_cache,
                 &entries,
-                dir_truncated,
+                (dir_truncated, total),
                 nodes,
                 truncated,
             );
@@ -1744,6 +1219,7 @@ fn walk_level_cached(
     // the old sort-and-truncate showed.
     let mut entries: Vec<(String, bool)> = Vec::new();
     let mut dir_truncated = false;
+    let mut total = 0usize;
     match std::fs::read_dir(dir) {
         Ok(read) => {
             for entry in read.filter_map(Result::ok) {
@@ -1751,13 +1227,14 @@ fn walk_level_cached(
                 if SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
+                total += 1;
                 if entries.len() <= cap {
                     let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
                     entries.push((name, is_dir));
                     note_collected();
                 } else {
+                    // Past the cap: counted for the folder's line, not kept.
                     dir_truncated = true;
-                    break;
                 }
             }
         }
@@ -1775,6 +1252,7 @@ fn walk_level_cached(
             cap,
             entries: entries.clone(),
             dir_truncated,
+            total,
         },
     );
     append_cached_entries(
@@ -1785,7 +1263,7 @@ fn walk_level_cached(
         expanded,
         dir_cache,
         &entries,
-        dir_truncated,
+        (dir_truncated, total),
         nodes,
         truncated,
     );
@@ -1803,7 +1281,7 @@ fn append_cached_entries(
     expanded: &HashSet<String>,
     dir_cache: &mut DirListCache,
     entries: &[(String, bool)],
-    dir_truncated: bool,
+    (dir_truncated, dir_total): (bool, usize),
     nodes: &mut Vec<FileNode>,
     truncated: &mut bool,
 ) {
@@ -1811,7 +1289,7 @@ fn append_cached_entries(
         *truncated = true;
     }
     for (name, is_dir) in entries {
-        if nodes.len() >= cap {
+        if nodes.len() >= FILE_TREE_TOTAL_CAP {
             *truncated = true;
             return;
         }
@@ -1845,10 +1323,54 @@ fn append_cached_entries(
             nodes.push(FileNode::file(id, name.clone(), kind).depth(depth));
         }
     }
+    // A capped folder ends with one faint line (docs/43 §2.4).
+    if dir_truncated && nodes.len() < FILE_TREE_TOTAL_CAP {
+        let dir_id = dir.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        nodes.push(FileNode::note(
+            format!("{dir_id}/:capped"),
+            format!("Showing the first {cap} of {} in this folder. Filter to find the rest.", aui::workbench::group_thousands(dir_total)),
+            depth,
+        ));
+    }
+}
+
+/// D6 (docs/43 §2.4): the tree's git letters and faint ignored paths, from
+/// the working tree. A folder carries the letter of what changed under it
+/// (one kind → its letter, a mix → M).
+pub(crate) fn decorate_nodes(nodes: Vec<FileNode>, tree: Option<&crate::git_ops::GitTree>) -> Vec<FileNode> {
+    let Some(tree) = tree else { return nodes };
+    let letter = |kind: ChangeKind| match kind {
+        ChangeKind::Added => GitBadge::A,
+        ChangeKind::Deleted => GitBadge::D,
+        _ => GitBadge::M,
+    };
+    nodes
+        .into_iter()
+        .map(|node| {
+            let id = node.id.to_string();
+            let ignored = tree.is_ignored(&id);
+            let badge = if node.is_dir() {
+                let prefix = format!("{id}/");
+                let mut kinds = tree.files.iter().filter(|f| f.path.starts_with(&prefix)).map(|f| letter(f.change));
+                kinds.next().map(|first| if kinds.all(|k| k == first) { first } else { GitBadge::M })
+            } else {
+                tree.change(&id).map(|f| letter(f.change))
+            };
+            let node = node.ignored(ignored);
+            match badge {
+                Some(b) => node.badge(b),
+                None => node,
+            }
+        })
+        .collect()
 }
 
 /// Mark the node carrying `selected` (a root-relative id) selected: what
 /// the tree draws after the preview closes.
+pub(crate) fn mark_selected_pub(nodes: Vec<FileNode>, selected: Option<&str>) -> Vec<FileNode> {
+    mark_selected(nodes, selected)
+}
+
 fn mark_selected(nodes: Vec<FileNode>, selected: Option<&str>) -> Vec<FileNode> {
     let Some(selected) = selected else {
         return nodes;
@@ -1912,6 +1434,11 @@ fn is_markdown(name: &str) -> bool {
 }
 
 /// Whether `name` previews as an image card rather than as code.
+/// Whether a path names an image the image view shows.
+pub(crate) fn is_image_path(path: &str) -> bool {
+    is_image(path)
+}
+
 fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".png")
@@ -2342,183 +1869,6 @@ fn markdown_blocks(text: &str) -> Vec<DocBlock> {
 
 // ── the unified-diff parser ──────────────────────────────────────────────
 
-/// What [`parse_unified_diff`] kept, and whether the caps cut anything.
-#[derive(Clone, Debug)]
-pub(crate) struct ParsedDiffs {
-    diffs: Vec<Diff>,
-    truncated: bool,
-}
-
-/// Parse `@@ -old[,len] +new[,len] @@` into its two start lines.
-fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
-    let mut fields = header.split_whitespace();
-    if fields.next()? != "@@" {
-        return None;
-    }
-    let old = fields.next()?.strip_prefix('-')?;
-    let new = fields.next()?.strip_prefix('+')?;
-    let old_start: u32 = old.split(',').next()?.parse().ok()?;
-    let new_start: u32 = new.split(',').next()?.parse().ok()?;
-    Some((old_start, new_start))
-}
-
-/// Strip the `a/` or `b/` prefix git puts on diff paths.
-fn strip_diff_prefix(path: &str) -> &str {
-    path.strip_prefix("b/")
-        .or_else(|| path.strip_prefix("a/"))
-        .unwrap_or(path)
-}
-
-/// Parse a working-tree `git diff` into per-file [`Diff`]s, capped at
-/// [`DIFF_FILES_CAP`] files and [`DIFF_LINES_PER_FILE_CAP`] body lines each.
-/// Defensive throughout: binary diffs, renames, new empty files and missing
-/// trailing newlines all parse without panicking.
-fn parse_unified_diff(text: &str) -> ParsedDiffs {
-    let mut diffs: Vec<Diff> = Vec::new();
-    let mut truncated = false;
-    let mut path: Option<String> = None;
-    let mut hunks: Vec<Hunk> = Vec::new();
-    let mut added = 0_u32;
-    let mut removed = 0_u32;
-    let mut kept_lines = 0_usize;
-    let mut old_no = 1_u32;
-    let mut new_no = 1_u32;
-
-    // The per-file M/A/D kind is re-derived from porcelain, not from the
-    // diff: `new file mode` / `deleted file mode` lines carry no rows, and
-    // the `--- /dev/null` / `+++ /dev/null` markers below only disambiguate
-    // paths, so neither is tracked here.
-    let finish_file = |path: &mut Option<String>,
-                       hunks: &mut Vec<Hunk>,
-                       added: &mut u32,
-                       removed: &mut u32,
-                       kept_lines: &mut usize,
-                       diffs: &mut Vec<Diff>| {
-        if let Some(path) = path.take() {
-            diffs.push(Diff {
-                path,
-                hunks: std::mem::take(hunks),
-                added: *added,
-                removed: *removed,
-            });
-        }
-        *added = 0;
-        *removed = 0;
-        *kept_lines = 0;
-    };
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            finish_file(
-                &mut path,
-                &mut hunks,
-                &mut added,
-                &mut removed,
-                &mut kept_lines,
-                &mut diffs,
-            );
-            if diffs.len() >= DIFF_FILES_CAP {
-                truncated = true;
-                break;
-            }
-            let mut sides = rest.split(' ');
-            let old_side = sides.next().unwrap_or("");
-            let new_side = sides.next().unwrap_or("");
-            let next = if new_side == "/dev/null" {
-                old_side
-            } else {
-                new_side
-            };
-            let next = strip_diff_prefix(next);
-            if !next.is_empty() {
-                path = Some(next.to_string());
-            }
-        } else if line.starts_with("new file mode") || line.starts_with("deleted file mode") {
-            // Kind only; the rows below carry the content.
-        } else if let Some(rest) = line.strip_prefix("rename to ") {
-            path = Some(strip_diff_prefix(rest.trim()).to_string());
-        } else if line.starts_with("Binary files ") {
-            // Nothing follows for this file: zero hunks, zero counts.
-        } else if line.starts_with("--- ") {
-            // `/dev/null` here means a new file; the path came from `diff --git`.
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            let side = rest.trim();
-            if side != "/dev/null" && path.is_none() {
-                path = Some(strip_diff_prefix(side).to_string());
-            }
-        } else if line.starts_with("@@") {
-            if path.is_none() {
-                continue;
-            }
-            let (old_start, new_start) = parse_hunk_header(line).unwrap_or((1, 1));
-            old_no = old_start;
-            new_no = new_start;
-            hunks.push(Hunk {
-                header: line.to_string(),
-                lines: Vec::new(),
-            });
-        } else if line.starts_with('\\') {
-            // `\ No newline at end of file`: a marker, not a row.
-        } else if path.is_some() && !hunks.is_empty() {
-            let (kind, text) = if let Some(rest) = line.strip_prefix('+') {
-                (DiffKind::Add, rest)
-            } else if let Some(rest) = line.strip_prefix('-') {
-                (DiffKind::Del, rest)
-            } else if let Some(rest) = line.strip_prefix(' ') {
-                (DiffKind::Context, rest)
-            } else if line.is_empty() {
-                // A context row whose trailing space did not survive.
-                (DiffKind::Context, line)
-            } else {
-                // `index …`, `similarity …`, mode lines: not rows.
-                continue;
-            };
-            if kept_lines >= DIFF_LINES_PER_FILE_CAP {
-                truncated = true;
-                continue;
-            }
-            kept_lines += 1;
-            let (old, new) = match kind {
-                DiffKind::Context => {
-                    let pair = (Some(old_no), Some(new_no));
-                    old_no += 1;
-                    new_no += 1;
-                    pair
-                }
-                DiffKind::Add => {
-                    added += 1;
-                    let pair = (None, Some(new_no));
-                    new_no += 1;
-                    pair
-                }
-                DiffKind::Del => {
-                    removed += 1;
-                    let pair = (Some(old_no), None);
-                    old_no += 1;
-                    pair
-                }
-            };
-            if let Some(hunk) = hunks.last_mut() {
-                hunk.lines.push(DiffLine {
-                    kind,
-                    old_no: old,
-                    new_no: new,
-                    text: text.to_string(),
-                });
-            }
-        }
-    }
-    finish_file(
-        &mut path,
-        &mut hunks,
-        &mut added,
-        &mut removed,
-        &mut kept_lines,
-        &mut diffs,
-    );
-    ParsedDiffs { diffs, truncated }
-}
-
 // ── the four panes ───────────────────────────────────────────────────
 
 /// The file tree, real: one level of the project root plus a level per open
@@ -2535,7 +1885,6 @@ fn files_pane_from(
     name: &str,
     root: &Path,
     cache: &RightCache,
-    notify: &ToastSink,
     harness: WeakEntity<Harness>,
 ) -> AnyElement {
     if let Some(preview) = cache.preview_for(root) {
@@ -2549,7 +1898,7 @@ fn files_pane_from(
     } else {
         format!("{count} files and folders")
     };
-    let handler = files_handler(notify.clone(), harness, root.to_path_buf());
+    let handler = files_handler(harness, root.to_path_buf());
     // Flush: these are panes and stacked panels, not cards floating on a
     // surface. Their own rounded border inside a column that already has
     // edges is what the owner saw as "extra borders and rounded corners".
@@ -2714,516 +2063,14 @@ fn browser_pane(
                 });
             }
         });
-    let mut column = v_flex()
+    let column = v_flex()
         .id("right-browser-pane")
         .role(gpui::Role::Group)
         .aria_label("Browser")
         .size_full();
-    if !tabs.is_empty() {
-        column = column.child(browser_tab_strip(tabs, carry, &strip_harness, window, cx));
-    }
+    // D6: the session has one page — no tab strip in the pane.
+    let _ = (tabs, carry, &strip_harness, window);
     column.child(pane).into_any_element()
-}
-
-/// How many title chars a strip tab shows before the ellipsis. The row
-/// itself also clips, so a wide pane never stretches the strip.
-const TAB_TITLE_CHARS: usize = 24;
-
-/// The pane's one-line tab strip (B2a-H1): a 30 px row above the page
-/// listing the shown owner's tabs — an initial tile, an ellipsized title,
-/// a close × on hover/active, and a `+` at the end. Clicking selects,
-/// middle-click closes, `+` opens a blank tab with the address focused.
-fn browser_tab_strip(
-    tabs: &[StripTab],
-    carry: bool,
-    harness: &WeakEntity<Harness>,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let p = cx.aui().colors;
-    let mut row = h_flex()
-        .id("right-browser-tabs")
-        .h(px(30.0))
-        .items_center()
-        .px(px(4.0))
-        .gap(px(2.0))
-        .bg(p.surface_1)
-        .border_b_1()
-        .border_color(p.line);
-    for tab in tabs {
-        row = row.child(browser_strip_tab(tab, harness, p, window, cx));
-    }
-    row = row.child(browser_new_tab(harness, p));
-    // "Browse" beside the pane's tab strip (B2a-H4): the session's active
-    // tab shows full-width in Browse mode with the ↩ chip. Only for
-    // session owners — person tabs already live in Browse.
-    if carry {
-        let go = harness.clone();
-        row = row.child(
-            div()
-                .id("right-browser-carry")
-                .flex_none()
-                .role(gpui::Role::Button)
-                .aria_label("Browse full width")
-                .cursor_pointer()
-                .on_click(move |_, window, cx| {
-                    let _ = go.update(cx, |this, cx| this.carry_session_tab_to_browse(window, cx));
-                })
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .px(px(6.0))
-                        .h(px(22.0))
-                        .rounded(px(scale::R_SM))
-                        .text_color(p.ink_2)
-                        .ui(scale::FS_12)
-                        .child("↗")
-                        .child("Browse"),
-                ),
-        );
-    }
-    row.into_any_element()
-}
-
-/// One strip tab: the tile, the title, and the close × while hovered or
-/// active. Selecting a tab that closed meanwhile is a no-op (the model
-/// guards it), so a × click racing the row's own select never resurrects
-/// the tab.
-fn browser_strip_tab(
-    tab: &StripTab,
-    harness: &WeakEntity<Harness>,
-    p: aui_tokens::Palette,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let id: ElementId = format!("right-browser-tab:{}", tab.id.0).into();
-    let (tracked, flags) = interaction_flags(id.clone(), window, cx);
-    let ground = if tab.active {
-        p.surface_3
-    } else if flags.hovered {
-        p.surface_2
-    } else {
-        p.surface_1
-    };
-    let ink = if tab.active { p.ink } else { p.ink_2 };
-    let select = harness.clone();
-    let press = harness.clone();
-    let middle = harness.clone();
-    let id_tab = tab.id;
-    // The visible text: the ellipsized title the row draws. Both aria
-    // labels below read this same string, never the untruncated title.
-    let title = ellipsize_tab_title(&tab.title);
-    let mut row = h_flex()
-        .id(id)
-        .flex_1()
-        .min_w(px(0.0))
-        .items_center()
-        .h(px(22.0))
-        .px(px(6.0))
-        .gap(px(6.0))
-        .rounded(px(scale::R_SM))
-        .bg(ground)
-        .text_color(ink)
-        .ui(scale::FS_12)
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .cursor_pointer()
-        .track_interaction(&tracked)
-        .child(
-            div()
-                .size(px(16.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(scale::R_XS))
-                .border_1()
-                .border_color(p.line_strong)
-                .text_color(p.ink_2)
-                .ui(scale::FS_11)
-                .child(tab.initial.clone()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(title.clone()),
-        )
-        .role(gpui::Role::Tab)
-        // Named again beside the click for the a11y ratchet's window.
-        .aria_label(format!("{} tab", title))
-        .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
-        // Middle-click closes only when the press AND the release land on
-        // this same tab: the down records the pressed tab, the up closes
-        // when it matches — and every middle up clears the press either
-        // way, so no press survives its release.
-        .on_mouse_down(gpui::MouseButton::Middle, move |_, _, cx| {
-            middle_press_action(&press, id_tab, cx);
-        })
-        .on_mouse_up(gpui::MouseButton::Middle, move |_, window, cx| {
-            middle_release_action(&middle, id_tab, window, cx);
-        });
-    if tab.active || flags.hovered {
-        let close = harness.clone();
-        let label = format!("Close {}", title);
-        row = row.child(
-            div()
-                .id(format!("right-browser-tab-close:{}", id_tab.0))
-                .flex_none()
-                .p(px(2.0))
-                .rounded(px(scale::R_XS))
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .cursor_pointer()
-                .child(icon(IconName::X).size(px(12.0)).color(ink))
-                // The × stops propagation: the click must never also
-                // select the tab through the row's own handler.
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    close_tab_action(&close, id_tab, window, cx);
-                }),
-        );
-    }
-    row.into_any_element()
-}
-
-/// The strip's `+`: a blank tab with the address field focused.
-fn browser_new_tab(harness: &WeakEntity<Harness>, p: aui_tokens::Palette) -> AnyElement {
-    let plus = harness.clone();
-    div()
-        .id("right-browser-tab-new")
-        .flex_none()
-        .size(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(scale::R_SM))
-        .text_color(p.ink_2)
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        .aria_label("New tab")
-        .child(icon(IconName::Plus).size(px(12.0)).color(p.ink_2))
-        .on_click(move |_, window, cx| {
-            let _ = plus.update(cx, |this, cx| this.new_blank_tab(window, cx));
-        })
-        .into_any_element()
-}
-
-/// A strip title in at most [`TAB_TITLE_CHARS`] chars, ending in ….
-fn ellipsize_tab_title(title: &str) -> String {
-    if title.chars().count() <= TAB_TITLE_CHARS {
-        return title.to_owned();
-    }
-    let mut out: String = title.chars().take(TAB_TITLE_CHARS - 1).collect();
-    out.push('…');
-    out
-}
-
-/// The row's click: select the tab through the harness (which resolves
-/// the owner's key itself).
-fn select_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
-    let _ = harness.update(cx, |this, cx| this.select_browser_tab(id, window, cx));
-}
-
-/// The × or middle-click: close the tab through the harness.
-fn close_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
-    let _ = harness.update(cx, |this, cx| this.close_browser_tab(id, window, cx));
-}
-
-/// A middle press on the strip tab: record it for the release to compare.
-fn middle_press_action(harness: &WeakEntity<Harness>, id: TabId, cx: &mut App) {
-    let _ = harness.update(cx, |this, _| this.note_strip_middle_press(id));
-}
-
-/// A middle release on the strip tab: close it only when the press began
-/// on this same tab.
-fn middle_release_action(
-    harness: &WeakEntity<Harness>,
-    id: TabId,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let _ = harness.update(cx, |this, cx| {
-        this.close_strip_middle_release(id, window, cx)
-    });
-}
-
-/// One section heading inside the merged Changes view: a labelled row, so
-/// the two halves read as sections rather than two panes glued together.
-fn changes_heading(id: &'static str, label: SharedString) -> AnyElement {
-    div()
-        .id(id)
-        .role(gpui::Role::Label)
-        .aria_label(label.clone())
-        .px(px(16.0))
-        .pt(px(12.0))
-        .child(label)
-        .into_any_element()
-}
-
-/// B8c: the "Other changes" section heading, carrying its file count: the one
-/// heading for the section. The old `git_changes` card drew its own
-/// "Changes N" sub-header right below "Other changes" — one heading too
-/// many — so the count rides here and the card is gone.
-pub(crate) fn other_changes_label(count: usize) -> String {
-    format!("Other changes · {count}")
-}
-
-/// B8c: the empty "This session" line. The old "no edits yet" text only fits
-/// a session with no edit blocks at all; when its edits are all committed or
-/// reverted — edit blocks, but nothing still changed — it says so instead.
-pub(crate) fn session_empty_text(has_session_edits: bool) -> &'static str {
-    if has_session_edits {
-        "No uncommitted edits from this session."
-    } else {
-        "No edits in this session yet."
-    }
-}
-
-/// B8b: one "This session" file row: a labelled button naming the whole
-/// path with its `+N −M` counts (the visible text middle-truncates the
-/// path), expanding the file's unified diff inline below it when open.
-fn session_file_row(
-    change: &FileChange,
-    open: bool,
-    root: &Path,
-    harness: &WeakEntity<Harness>,
-) -> AnyElement {
-    let path = change.path.clone();
-    let toggle_path = path.clone();
-    let toggle_root = root.to_path_buf();
-    let toggle_harness = harness.clone();
-    let delta = file_delta(change);
-    let shown = middle_truncate(&path, CHANGES_PATH_CHARS);
-    let letter = match change.change {
-        ChangeKind::Added => "A",
-        ChangeKind::Deleted => "D",
-        ChangeKind::Modified => "M",
-    };
-    let text = if delta.is_empty() {
-        format!("{letter} {shown}")
-    } else {
-        format!("{letter} {shown}  {delta}")
-    };
-    button(format!("right-changes-file:{path}"), text)
-        .accessibility_label(format!(
-            "{} diff for {}",
-            if open { "Hide" } else { "Show" },
-            path
-        ))
-        .on_click(move |_, _, cx| {
-            toggle_changes_file(&toggle_harness, &toggle_root, &toggle_path, cx)
-        })
-        .into_any_element()
-}
-
-/// B8c: one "Other changes" file row: the status letter, the whole path and
-/// its `+N −M` counts, like a session row but never expanding. A press
-/// reaches [`git_handler`] — inert like every other unwired Changes verb.
-fn other_file_row(change: &FileChange, notify: &ToastSink) -> AnyElement {
-    let path = change.path.clone();
-    let toggle = path.clone();
-    let notify = notify.clone();
-    let delta = file_delta(change);
-    let shown = middle_truncate(&path, CHANGES_PATH_CHARS);
-    let letter = match change.change {
-        ChangeKind::Added => "A",
-        ChangeKind::Deleted => "D",
-        ChangeKind::Modified => "M",
-    };
-    let text = if delta.is_empty() {
-        format!("{letter} {shown}")
-    } else {
-        format!("{letter} {shown}  {delta}")
-    };
-    button(format!("right-changes-other:{path}"), text)
-        .accessibility_label(format!("Toggle {path}"))
-        .on_click(move |_, window, cx| {
-            git_handler(notify.clone())(
-                GitAction::Toggle(SharedString::from(toggle.clone())),
-                window,
-                cx,
-            );
-        })
-        .into_any_element()
-}
-
-/// The merged Changes view (B8b): this session's edits on top, the rest of
-/// the working tree below, in one scrollable view. The top section lists the
-/// files the active session's folded transcript shows it edited (each with
-/// its git diff, all hunks, collapsed per file with `+N −M`; clicking a file
-/// expands its unified diff inline); the bottom is today's Git changes list
-/// for every other changed file, with the PR form collapsed behind a
-/// "Commit or open a PR…" row. The old Diff review chrome — the This
-/// turn / Branch / Unstaged tabs, the Unified/Split toggle, Collapse all —
-/// is gone: the narrow pane draws unified only. There was no real branch
-/// comparison behind the Branch tab (it reached [`inert`] like every other
-/// verb), so no "Compare" menu carries one forward. Commit, Push and every
-/// other verb reach [`inert`] and never shell out. Status and parsed diff
-/// arrive already read; a clean tree never reaches here (the caller draws
-/// the clean empty state instead).
-/// B8b: the already-read inputs the merged Changes view draws from, bundled
-/// so the builder takes one argument.
-pub(crate) struct ChangesPane<'a> {
-    /// The working tree, already read.
-    pub status: &'a GitStatus,
-    /// The parsed unstaged diff, when it has landed.
-    pub parsed: Option<ParsedDiffs>,
-    /// The active session's edited paths, in edit order.
-    pub session_edits: &'a [String],
-    /// The files standing expanded, for `root`.
-    pub expanded: &'a HashSet<String>,
-    /// Whether the commit row stands open, for `root`.
-    pub commit_open: bool,
-    /// The project root (for the toggle closures).
-    pub root: &'a Path,
-    /// The application, for the toggle closures.
-    pub harness: &'a WeakEntity<Harness>,
-    /// The inert-action toast sink.
-    pub notify: &'a ToastSink,
-}
-
-fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
-    let status = pane_in.status;
-    let (session_files, other_files) =
-        partition_session_files(&status.files, pane_in.session_edits, pane_in.root);
-    let diffs: HashMap<&str, &Diff> = pane_in
-        .parsed
-        .as_ref()
-        .map(|parsed| {
-            parsed
-                .diffs
-                .iter()
-                .map(|diff| (diff.path.as_str(), diff))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut pane = v_flex()
-        .id("right-changes-pane")
-        .role(gpui::Role::Group)
-        .aria_label("Changes")
-        .size_full()
-        .overflow_y_scroll()
-        .child(changes_heading(
-            "right-changes-session-heading",
-            "This session".into(),
-        ));
-    if pane_in
-        .parsed
-        .as_ref()
-        .is_some_and(|parsed| parsed.truncated)
-    {
-        pane = pane.child(
-            div()
-                .id("right-changes-truncated")
-                .role(gpui::Role::Label)
-                .aria_label("Diff limits")
-                .px(px(16.0))
-                .py(px(4.0))
-                .child(format!(
-                    "Showing the first {DIFF_FILES_CAP} files, {DIFF_LINES_PER_FILE_CAP} lines each."
-                )),
-        );
-    }
-    if session_files.is_empty() {
-        pane = pane.child(
-            div()
-                .id("right-changes-session-empty")
-                .role(gpui::Role::Label)
-                .aria_label("No session edits")
-                .p(px(16.0))
-                .child(session_empty_text(!pane_in.session_edits.is_empty())),
-        );
-    }
-    for (change, _) in &session_files {
-        let open = pane_in.expanded.contains(&change.path);
-        pane = pane.child(session_file_row(
-            change,
-            open,
-            pane_in.root,
-            pane_in.harness,
-        ));
-        if open {
-            let text = diffs
-                .get(change.path.as_str())
-                .map(|diff| unified_text(diff))
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| "No diff available for this file yet.".to_owned());
-            pane = pane.child(
-                code_block(
-                    format!("right-changes-diff:{}", change.path),
-                    change.path.clone(),
-                    text,
-                )
-                .language("diff".to_owned())
-                .into_any_element(),
-            );
-        }
-    }
-    pane = pane.child(changes_heading(
-        "right-changes-tree-heading",
-        other_changes_label(other_files.len()).into(),
-    ));
-    if other_files.is_empty() {
-        pane = pane.child(
-            div()
-                .id("right-changes-other-empty")
-                .role(gpui::Role::Label)
-                .aria_label("No other changes")
-                .p(px(16.0))
-                .child("No other changes."),
-        );
-    } else {
-        for (change, _) in &other_files {
-            pane = pane.child(other_file_row(change, pane_in.notify));
-        }
-        // The sync row the old `git_changes` card carried below its rows:
-        // branch plus ahead/behind, text-only (its Push reached `inert`).
-        pane = pane.child(
-            div()
-                .id("right-changes-sync")
-                .role(gpui::Role::Label)
-                .aria_label("Branch sync status")
-                .px(px(16.0))
-                .py(px(4.0))
-                .child(format!(
-                    "{} ↑{} ↓{}",
-                    status.branch, status.ahead, status.behind
-                )),
-        );
-    }
-    let commit_root = pane_in.root.to_path_buf();
-    let commit_harness = pane_in.harness.clone();
-    let commit_open = pane_in.commit_open;
-    pane = pane.child(
-        button("right-changes-commit-row", "Commit or open a PR…")
-            .accessibility_label(format!(
-                "{} the commit form",
-                if commit_open { "Hide" } else { "Show" }
-            ))
-            .on_click(move |_, _, cx| toggle_changes_commit(&commit_harness, &commit_root, cx))
-            .into_any_element(),
-    );
-    if commit_open {
-        pane = pane.child(
-            pr_form(
-                "right-changes-pr",
-                "main",
-                "",
-                vec![PrDescription::Text(SharedString::from(format!(
-                    "Head branch: {}",
-                    status.branch
-                )))],
-                Vec::new(),
-            )
-            .flush()
-            .on_action(pr_handler(pane_in.notify.clone())),
-        );
-    }
-    pane.into_any_element()
 }
 
 #[cfg(test)]
@@ -3277,106 +2124,10 @@ mod tests {
         root
     }
 
-    // ── the diff parser's four defensive shapes ──
-
-    #[test]
-    fn a_binary_file_diff_parses_without_rows() {
-        let text = "diff --git a/img.png b/img.png\nnew file mode 100644\nindex 0000000..e69de29\nBinary files /dev/null and b/img.png differ\n";
-        let parsed = parse_unified_diff(text);
-        assert!(!parsed.truncated);
-        assert_eq!(parsed.diffs.len(), 1);
-        assert_eq!(parsed.diffs[0].path, "img.png");
-        assert!(parsed.diffs[0].hunks.is_empty());
-        assert_eq!((parsed.diffs[0].added, parsed.diffs[0].removed), (0, 0));
-    }
-
-    #[test]
-    fn a_rename_parses_under_its_new_path() {
-        let text = "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\nindex 1234567..89abcde 100644\n--- a/old.rs\n+++ b/new.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n";
-        let parsed = parse_unified_diff(text);
-        assert!(!parsed.truncated);
-        assert_eq!(parsed.diffs.len(), 1);
-        assert_eq!(parsed.diffs[0].path, "new.rs");
-        assert_eq!(parsed.diffs[0].hunks.len(), 1);
-        assert_eq!((parsed.diffs[0].added, parsed.diffs[0].removed), (1, 1));
-        let lines = &parsed.diffs[0].hunks[0].lines;
-        assert_eq!(lines.len(), 3);
-        assert_eq!(
-            (lines[0].kind, lines[0].old_no, lines[0].new_no),
-            (DiffKind::Context, Some(1), Some(1))
-        );
-        assert_eq!(
-            (lines[1].kind, lines[1].old_no, lines[1].new_no),
-            (DiffKind::Del, Some(2), None)
-        );
-        assert_eq!(lines[1].text, "old");
-        assert_eq!(
-            (lines[2].kind, lines[2].old_no, lines[2].new_no),
-            (DiffKind::Add, None, Some(2))
-        );
-        assert_eq!(lines[2].text, "new");
-    }
-
-    #[test]
-    fn a_new_empty_file_parses_without_hunks() {
-        let text =
-            "diff --git a/empty.txt b/empty.txt\nnew file mode 100644\nindex 0000000..e69de29\n";
-        let parsed = parse_unified_diff(text);
-        assert!(!parsed.truncated);
-        assert_eq!(parsed.diffs.len(), 1);
-        assert_eq!(parsed.diffs[0].path, "empty.txt");
-        assert!(parsed.diffs[0].hunks.is_empty());
-    }
-
-    #[test]
-    fn a_missing_trailing_newline_leaves_no_marker_row() {
-        let text = "diff --git a/a.txt b/a.txt\nindex 1234567..89abcde 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
-        let parsed = parse_unified_diff(text);
-        assert_eq!(parsed.diffs.len(), 1);
-        let lines = &parsed.diffs[0].hunks[0].lines;
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "old");
-        assert_eq!(lines[1].text, "new");
-        assert_eq!((parsed.diffs[0].added, parsed.diffs[0].removed), (1, 1));
-    }
-
-    #[test]
-    fn the_diff_caps_files_and_lines_per_file() {
-        let mut text = String::new();
-        for index in 0..(DIFF_FILES_CAP + 4) {
-            text.push_str(&format!("diff --git a/f{index}.txt b/f{index}.txt\n--- a/f{index}.txt\n+++ b/f{index}.txt\n@@ -1 +1 @@\n-x\n+y\n"));
-        }
-        let parsed = parse_unified_diff(&text);
-        assert_eq!(parsed.diffs.len(), DIFF_FILES_CAP);
-        assert!(parsed.truncated);
-
-        let mut one = String::from(
-            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1 +1 @@\n",
-        );
-        for _ in 0..(DIFF_LINES_PER_FILE_CAP + 50) {
-            one.push_str("+y\n");
-        }
-        let parsed = parse_unified_diff(&one);
-        assert_eq!(parsed.diffs.len(), 1);
-        assert_eq!(
-            parsed.diffs[0].hunks[0].lines.len(),
-            DIFF_LINES_PER_FILE_CAP
-        );
-        assert!(parsed.truncated);
-    }
-
     // ── B8b: this session first, the rest below ──
 
-    fn status_file(path: &str, added: u32, removed: u32) -> (FileChange, bool) {
-        (
-            FileChange {
-                path: path.to_owned(),
-                change: ChangeKind::Modified,
-                added,
-                removed,
-            },
-            false,
-        )
+    fn status_file(path: &str, added: u32, removed: u32) -> FileChange {
+        FileChange { path: path.to_owned(), change: ChangeKind::Modified, added, removed }
     }
 
     #[test]
@@ -3393,11 +2144,11 @@ mod tests {
         let (session, other) = partition_session_files(&files, &edits, root);
         let session_paths: Vec<&str> = session
             .iter()
-            .map(|(change, _)| change.path.as_str())
+            .map(|change| change.path.as_str())
             .collect();
         let other_paths: Vec<&str> = other
             .iter()
-            .map(|(change, _)| change.path.as_str())
+            .map(|change| change.path.as_str())
             .collect();
         assert_eq!(session_paths, vec!["src/b.rs", "src/a.rs"]);
         assert_eq!(other_paths, vec!["docs/guide.md"]);
@@ -3450,114 +2201,6 @@ mod tests {
         assert_eq!(other.len(), 1);
     }
 
-    #[test]
-    fn the_changes_headings_name_their_counts_once() {
-        // B8c: one "Other changes · N" heading, never "Other changes" plus a
-        // "Changes N" sub-header.
-        assert_eq!(other_changes_label(5), "Other changes · 5");
-        assert_eq!(other_changes_label(0), "Other changes · 0");
-        // The empty "This session" line names the committed-or-reverted
-        // case; only a session with no edits at all keeps the old text.
-        assert_eq!(session_empty_text(false), "No edits in this session yet.");
-        assert_eq!(
-            session_empty_text(true),
-            "No uncommitted edits from this session."
-        );
-    }
-
-    #[test]
-    fn long_paths_middle_truncate_and_short_ones_pass_through() {
-        assert_eq!(middle_truncate("src/a.rs", 48), "src/a.rs");
-        let path = "crates/baaz/src/session/render/tests/long_name.rs";
-        let shown = middle_truncate(path, 26);
-        assert_eq!(shown.chars().count(), 26);
-        assert!(shown.contains('…'));
-        assert!(shown.ends_with("long_name.rs"));
-        assert!(shown.starts_with("crates/baaz/"));
-    }
-
-    #[test]
-    fn unified_text_renders_every_hunk_with_marks() {
-        let diff = fixture_diff();
-        let text = unified_text(&diff);
-        assert!(text.starts_with("@@ -41,7 +41,9 @@"));
-        assert!(text.contains(" match kind {"));
-        assert!(text.contains("-    match kind {"));
-        assert!(text.contains("+        RightKind::Browser => browser_pane(&notify),"));
-        // An empty diff renders nothing, so the row falls back to its
-        // "no diff yet" line instead of an empty block.
-        let empty = Diff {
-            path: "x.rs".into(),
-            hunks: Vec::new(),
-            added: 0,
-            removed: 0,
-        };
-        assert!(unified_text(&empty).is_empty());
-    }
-
-    // ── porcelain, numstat and the fallbacks ──
-
-    #[test]
-    fn porcelain_letters_map_to_kinds_and_staged_flags() {
-        let (path, staged, kind) = parse_porcelain_line("M  src/a.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("src/a.rs", true, ChangeKind::Modified)
-        );
-        let (path, staged, kind) = parse_porcelain_line(" M src/b.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("src/b.rs", false, ChangeKind::Modified)
-        );
-        let (path, staged, kind) = parse_porcelain_line("A  new.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("new.rs", true, ChangeKind::Added)
-        );
-        let (path, staged, kind) = parse_porcelain_line("?? untracked.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("untracked.rs", false, ChangeKind::Added)
-        );
-        let (path, staged, kind) = parse_porcelain_line(" D gone.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("gone.rs", false, ChangeKind::Deleted)
-        );
-        let (path, staged, kind) = parse_porcelain_line("R  old.rs -> new.rs").unwrap();
-        assert_eq!(
-            (path.as_str(), staged, kind),
-            ("new.rs", true, ChangeKind::Modified)
-        );
-        assert!(parse_porcelain_line("").is_none());
-        assert!(parse_porcelain_line("!! ignored.rs").is_none());
-    }
-
-    #[test]
-    fn numstat_counts_binary_files_as_zero() {
-        let counts = parse_numstat("10\t2\ta.rs\n-\t-\timg.png\n");
-        assert_eq!(counts.get("a.rs"), Some(&(10, 2)));
-        assert_eq!(counts.get("img.png"), Some(&(0, 0)));
-    }
-
-    #[test]
-    fn the_upstream_fallback_is_zero_and_zero() {
-        assert_eq!(parse_ahead_behind("3\t7\n"), Some((7, 3)));
-        assert_eq!(parse_ahead_behind(""), None);
-        assert_eq!(parse_ahead_behind("not a rev-list output"), None);
-        // The pane's own fallback when the upstream read fails.
-        let (ahead, behind) = parse_ahead_behind("").unwrap_or((0, 0));
-        assert_eq!((ahead, behind), (0, 0));
-    }
-
-    #[test]
-    fn a_non_repo_degrades_to_no_status() {
-        let root = temp_root("non-repo");
-        assert!(run_git(&root, &["status", "--porcelain"]).is_none());
-        assert!(read_git_status(&root).is_none());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     // ── the file walk ──
 
     #[test]
@@ -3605,7 +2248,9 @@ mod tests {
             std::fs::write(root.join(format!("f{index}.txt")), "x").unwrap();
         }
         let (nodes, truncated) = walk_root_capped(&root, 3);
-        assert_eq!(nodes.len(), 3);
+        // D6: the folder shows its first three, then its faint line.
+        assert_eq!(nodes.iter().filter(|n| !n.note).count(), 3);
+        assert!(nodes.last().is_some_and(|n| n.note && n.name.contains("first 3 of 5")), "{:?}", nodes.last());
         assert!(truncated);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3628,7 +2273,8 @@ mod tests {
             cache.dir_cache_for_root(&root),
         );
         assert!(truncated, "2000 entries over a 300 cap must truncate");
-        assert_eq!(nodes.len(), FILE_WALK_CAP);
+        assert_eq!(nodes.iter().filter(|n| !n.note).count(), FILE_WALK_CAP);
+        assert!(nodes.last().is_some_and(|n| n.note && n.name.contains("of 2 000")));
         assert!(
             walk_collected_count() <= FILE_WALK_CAP + 1,
             "the read must stay bounded, collected {}",
@@ -3658,7 +2304,8 @@ mod tests {
             cache.dir_cache_for_root(&root),
         );
         assert!(truncated);
-        assert_eq!(nodes.len(), FILE_WALK_CAP);
+        // `big` itself plus its first 300 (each folder caps on its own now).
+        assert_eq!(nodes.iter().filter(|n| !n.note).count(), FILE_WALK_CAP + 1);
         let first_reads = io_count();
         assert!(first_reads > 0, "the first refresh must read");
         let first_hits = cache_hit_count();
@@ -3688,7 +2335,7 @@ mod tests {
             cache.dir_cache_for_root(&root),
         );
         assert!(truncated);
-        assert_eq!(later.len(), FILE_WALK_CAP);
+        assert_eq!(later.iter().filter(|n| !n.note).count(), FILE_WALK_CAP + 1);
         assert!(
             io_count() > first_reads,
             "a changed directory must be re-read"
@@ -4013,33 +2660,11 @@ mod tests {
 
     // ── the inert handlers, invoked directly ──
 
-    /// A [`ToastSink`] that records titles and bodies instead of toasting.
-    /// The inert-action tests share one process-global log
-    /// ([`inert_log_store`]), and each clears it and then asserts an exact
-    /// length. Run concurrently they see each other's entries: filtered to
-    /// just those tests they failed every time, while the full suite passed
-    /// on lucky scheduling — which is how they shipped and how they later
-    /// failed a lane's gate for a change that had nothing to do with them.
-    ///
-    /// Taking this lock for the whole of each test is what makes the exact
-    /// length assertions mean anything.
-    fn inert_guard() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn test_sink(toasts: Rc<std::cell::RefCell<Vec<(String, String)>>>) -> ToastSink {
-        Rc::new(move |title, body, _| toasts.borrow_mut().push((title, body)))
-    }
-
     /// Select and Toggle no longer toast: they preview and expand through
     /// the exact handler the pane wires up, on a hermetic [`Harness`].
     /// Only Search stays inert.
     #[gpui::test]
     fn files_select_and_toggle_act_instead_of_toasting(cx: &mut TestAppContext) {
-        let _serial = inert_guard();
         let state = hermetic_harness_dir("files-actions");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -4066,10 +2691,8 @@ mod tests {
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
-        clear_inert_log();
-        let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
         vc.update(|window, cx| {
-            let handle = files_handler(test_sink(toasts.clone()), baaz.downgrade(), root.clone());
+            let handle = files_handler(baaz.downgrade(), root.clone());
             handle(
                 &FileTreeAction::Select(SharedString::from("note.md")),
                 window,
@@ -4080,8 +2703,6 @@ mod tests {
                 window,
                 cx,
             );
-            handle(&FileTreeAction::Search, window, cx);
-            handle(&FileTreeAction::Refresh, window, cx);
         });
         vc.run_until_parked();
         // Select opened the markdown preview (bytes land off the click),
@@ -4119,17 +2740,6 @@ mod tests {
                 .map(|node| node.id.to_string())
                 .collect::<Vec<_>>()
         );
-        // Only Search reached the toast.
-        let log = inert_log();
-        assert_eq!(log.len(), 1, "unexpected inert actions: {log:?}");
-        assert!(
-            log[0].contains("Files") && log[0].contains("Search"),
-            "unexpected: {}",
-            log[0]
-        );
-        let toasts = toasts.borrow();
-        assert_eq!(toasts.len(), 1);
-        assert!(toasts[0].1.contains("Search"));
         restore_harness_dir(state);
     }
 
@@ -4153,57 +2763,6 @@ mod tests {
             state.update(cx, |state, _| state.navigate("https://example.com"));
             assert_eq!(state.read(cx).url().as_ref(), "https://example.com");
         });
-    }
-
-    #[gpui::test]
-    fn git_and_pr_actions_all_reach_inert(cx: &mut TestAppContext) {
-        let _serial = inert_guard();
-        let vc = cx.add_empty_window();
-        clear_inert_log();
-        let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
-        vc.update(|window, cx| {
-            let git = git_handler(test_sink(toasts.clone()));
-            git(GitAction::Toggle(SharedString::from("a.rs")), window, cx);
-            git(GitAction::Regenerate, window, cx);
-            git(GitAction::Amend, window, cx);
-            git(GitAction::Commit, window, cx);
-            git(GitAction::Push, window, cx);
-            let pr = pr_handler(test_sink(toasts.clone()));
-            pr(PrAction::PickBase, window, cx);
-            pr(PrAction::Cancel, window, cx);
-            pr(PrAction::Create, window, cx);
-            pr(PrAction::Linear, window, cx);
-        });
-        let log = inert_log();
-        assert_eq!(log.len(), 9);
-        assert!(log
-            .iter()
-            .any(|line| line.contains("Changes") && line.contains("Commit")));
-        assert!(log
-            .iter()
-            .any(|line| line.contains("Changes") && line.contains("Push")));
-        assert!(log
-            .iter()
-            .any(|line| line.contains("Pull request") && line.contains("Create")));
-        assert_eq!(toasts.borrow().len(), 9);
-    }
-
-    #[test]
-    fn changes_expansion_and_commit_row_flip_and_start_closed() {
-        // B8b: file diffs start collapsed and the commit row starts closed;
-        // each flip toggles, per project root.
-        let root = std::path::PathBuf::from("/test-root");
-        let mut cache = RightCache::default();
-        assert!(!cache.changes_expanded_for(&root).contains("a.rs"));
-        assert!(!cache.changes_commit_open_for(&root));
-        assert!(cache.flip_changes_file(&root, "a.rs"));
-        assert!(cache.changes_expanded_for(&root).contains("a.rs"));
-        assert!(!cache.flip_changes_file(&root, "a.rs"));
-        assert!(cache.changes_expanded_for(&root).is_empty());
-        assert!(cache.flip_changes_commit(&root));
-        assert!(cache.changes_commit_open_for(&root));
-        assert!(!cache.flip_changes_commit(&root));
-        assert!(!cache.changes_commit_open_for(&root));
     }
 
     /// B9: `expand_to` stands every ancestor — and the folder itself —
@@ -4371,58 +2930,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn the_branch_header_carries_branch_and_ahead_behind() {
-        assert_eq!(parse_branch_header("## main...origin/main [ahead 1, behind 2]"), Some(("main".into(), 1, 2)));
-        assert_eq!(parse_branch_header("## main...origin/main [behind 3]"), Some(("main".into(), 0, 3)));
-        assert_eq!(parse_branch_header("## feature/x"), Some(("feature/x".into(), 0, 0)));
-        assert_eq!(parse_branch_header("## HEAD (no branch)"), Some(("HEAD".into(), 0, 0)));
-        assert_eq!(parse_branch_header("## No commits yet on main"), Some(("main".into(), 0, 0)));
-        assert_eq!(parse_branch_header(" M src/lib.rs"), None);
-    }
-
-    /// The parallel read against a real repo: branch, staged and unstaged
-    /// counts, an untracked file, and the worktree diff, in one pass.
-    #[test]
-    fn a_real_repo_reads_status_counts_and_diff_in_one_pass() {
-        let dir = std::env::temp_dir().join(format!("baaz-git-read-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("repo dir");
-        let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .output()
-                .expect("git runs")
-                .status
-                .success();
-            assert!(ok, "git {args:?}");
-        };
-        git(&["init", "-q"]);
-        std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("a");
-        std::fs::write(dir.join("b.txt"), "keep\n").expect("b");
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", "first"]);
-        std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").expect("edit a");
-        std::fs::write(dir.join("b.txt"), "keep\nstaged\n").expect("edit b");
-        git(&["add", "b.txt"]);
-        std::fs::write(dir.join("new.txt"), "fresh\n").expect("new");
-        let (status, diff) = read_git_and_diff(&dir, true).expect("a repo reads");
-        assert_eq!(status.branch, "main");
-        let find = |path: &str| status.files.iter().find(|(f, _)| f.path == path).cloned();
-        let (a, a_staged) = find("a.txt").expect("a listed");
-        assert!(!a_staged);
-        assert_eq!((a.added, a.removed), (2, 1));
-        let (b, b_staged) = find("b.txt").expect("b listed");
-        assert!(b_staged, "an added hunk in the index is staged");
-        assert_eq!((b.added, b.removed), (1, 0));
-        let (new, _) = find("new.txt").expect("untracked listed");
-        assert!(matches!(new.change, ChangeKind::Added));
-        let (raw, cut) = diff.expect("the worktree diff came back");
-        assert!(!cut);
-        assert!(raw.contains("+three"), "the unstaged edit is in the diff");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

@@ -160,6 +160,10 @@ actions!(
         ToggleTerminal,
         /// Toggle the right pane (⌘-backslash, from the library).
         ToggleRightPane,
+        /// D6: commit from the commit message (⌘⏎).
+        CommitMessage,
+        /// D6: pop the pane's pushed view (Esc, ⌘[).
+        RightBack,
         /// Show Changes in the right pane (⌘⇧D).
         ShowRightChanges,
         /// Show Files in the right pane (⌘⌥E; ⌘⇧E is the effort picker).
@@ -806,6 +810,11 @@ pub struct Harness {
     /// D6: the right pane's strip is between screens this frame (the Page
     /// screen's native view hides behind its still picture while it moves).
     pub(crate) right_strip_moving: bool,
+    /// D6: the Files screen's keyboard focus (↑ ↓ ← → ⏎, ⌘F, /, Esc).
+    pub(crate) right_files_focus: gpui::FocusHandle,
+    /// D6: a drafted PR description waiting for a frame with the window to
+    /// land in its editor.
+    pub(crate) pending_pr_body: Option<(gpui::Entity<gpui_kit::base::input::TextareaState>, String)>,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
     /// Whether the window's traffic lights are hidden now (closed sidebar,
@@ -1586,6 +1595,8 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             right_strip_moving: false,
+            right_files_focus: cx.focus_handle(),
+            pending_pr_body: None,
             peek_pinned: false,
             lights_hidden: false,
             right_save_epoch: 0,
@@ -3377,6 +3388,8 @@ impl Harness {
             if let Some(reload) = reload {
                 crate::right::apply_preview_reload(&mut self.right_cache, &root, reload);
             }
+            self.changes_after_snapshot(&root, cx);
+            self.reload_open_diffs(&root, cx);
             self.right_last_key = Some((true, kind, Some(root)));
             cx.notify();
             return;
@@ -3422,6 +3435,8 @@ impl Harness {
                 if let Some(reload) = reload {
                     crate::right::apply_preview_reload(&mut this.right_cache, &root, reload);
                 }
+                this.changes_after_snapshot(&root, cx);
+                this.reload_open_diffs(&root, cx);
                 // The 2 s refresh used to redraw the window even when git and
                 // the tree were exactly as before (perf audit 2026-10-16).
                 if reloaded || this.right_snapshot_print != Some(print) {
@@ -6637,6 +6652,14 @@ impl Render for Harness {
             // two-finger sideways swipe moves one screen. Browse keeps its
             // pane as it was (out of D6's scope): one body under the tabs.
             let strip_mode = !browse_mode && !pending_neutral;
+            if !self.right_cache.pushed.is_empty() {
+                self.sync_pushed_outputs(cx);
+            }
+            // A drafted PR description lands in its editor here, where the
+            // window is at hand (the draft came back on a background task).
+            if let Some((body, text)) = self.pending_pr_body.take() {
+                body.update(cx, |state, cx| state.set_value(&text, window, cx));
+            }
             let right = if pending_neutral {
                 v_flex().size_full().into_any_element()
             } else if strip_mode {
@@ -6647,6 +6670,7 @@ impl Render for Harness {
                     self.right_strip_moving = moving;
                 }
                 let visible = aui::workbench::strip_visible(pos, 3);
+                let agent = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id).label()).unwrap_or("Muse");
                 let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
                 for (i, screen_kind) in layout::RightKind::ALL.into_iter().enumerate() {
                     if !visible(i) {
@@ -6679,6 +6703,8 @@ impl Render for Harness {
                         crate::right::BrowserPane { state: page.as_ref(), tabs: &[], window: &mut *window, carry: false },
                         right_open,
                         self.right_resize.width,
+                        agent,
+                        &self.right_files_focus,
                         cx,
                     )));
                 }
@@ -6701,6 +6727,8 @@ impl Render for Harness {
                         carry,
                     },
                     right_open,
+                    self.right_resize.width,
+                    "Muse",
                     cx,
                 )
             };
@@ -9141,7 +9169,7 @@ mod tests {
         }
         assert_eq!(tabs[0].label.as_ref(), "Changes");
         assert_eq!(tabs[1].label.as_ref(), "Files");
-        assert_eq!(tabs[2].label.as_ref(), "Browser");
+        assert_eq!(tabs[2].label.as_ref(), "Page");
         assert!(!tabs.iter().any(|tab| tab.closable), "header tabs are fixed, never closable");
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
@@ -9328,6 +9356,8 @@ mod tests {
                                 carry: false,
                             },
                             true,
+                            400.0,
+                            "Muse",
                             cx,
                         );
                     });
@@ -9374,7 +9404,7 @@ mod tests {
         // Outside any `Harness` update, exactly like the pane's own action
         // dispatch: nesting an entity update inside one panics.
         vc.update(|_, cx| {
-            crate::right::refresh_files(baaz.downgrade(), cx);
+            baaz.update(cx, |this, cx| this.refresh_right_now(cx));
         });
         vc.run_until_parked();
         assert!(

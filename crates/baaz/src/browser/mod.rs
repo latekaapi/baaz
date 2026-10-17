@@ -361,14 +361,6 @@ pub(crate) fn annotations_draft_block(annotations: &[Annotation], url: &str) -> 
     out
 }
 
-/// Whether a middle release on `id` closes it: the press started on this
-/// same tab — never press-less, never after a press that began elsewhere.
-/// Pure so tests drive the pairing without a window; the row's release
-/// handler clears the recorded press either way.
-pub(crate) fn middle_release_closes(pressed: Option<TabId>, released: TabId) -> bool {
-    pressed == Some(released)
-}
-
 /// Whether `current` is a real navigation worth persisting: non-empty, not
 /// the blank default, and different from what is already stored. The poll
 /// drains many times a second; only a change writes `sessions.json`. Merely
@@ -1742,52 +1734,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Select the strip tab `id` (click): the shown owner's key resolves
-    /// here, through [`Self::select_tab`].
-    pub(crate) fn select_browser_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = self.browser_key(cx);
-        self.select_tab(&key, id, window, cx);
-    }
-
-    /// Close the strip tab `id` (× or middle-click), through
-    /// [`Self::close_tab`].
-    pub(crate) fn close_browser_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = self.browser_key(cx);
-        self.close_tab(&key, id, window, cx);
-    }
-
-    /// Record a middle press on the strip tab `id`: the release closes it
-    /// only when it lands on this same tab.
-    pub(crate) fn note_strip_middle_press(&mut self, id: TabId) {
-        self.browser.middle_pressed = Some(id);
-    }
-
-    /// A middle release on the strip tab `id`: close it when the press
-    /// started on this same tab, never when the press began elsewhere (or
-    /// never began — a press-less release closes nothing). Clears the
-    /// recorded press either way, so no press survives its release.
-    pub(crate) fn close_strip_middle_release(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pressed = self.browser.middle_pressed.take();
-        if middle_release_closes(pressed, id) {
-            self.close_browser_tab(id, window, cx);
-        }
-    }
-
     /// Close `id`: the closed page is dropped; only when the closed tab
     /// was its owner's active tab does anything else move — the model
     /// picks the neighbour to activate and the agent tools follow it (or
@@ -1875,21 +1821,6 @@ impl Harness {
             meta.right = Some(right);
         }
         self.schedule_overrides_write(cx);
-    }
-
-    /// Open a blank tab for the shown owner and focus its address field:
-    /// the strip's `+`.
-    pub(crate) fn new_blank_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        let owner = self.shown_tab_owner(cx);
-        let space = self.browse_space();
-        let after = self.browser.tabs.active_of(&owner, space.as_deref());
-        let id = self.browser.tabs.open(space, owner, BLANK, after);
-        self.schedule_tabs_write(cx);
-        let key = self.browser_key(cx);
-        let state = self.ensure_tab_page(&key, id, window, cx);
-        state.update(cx, |state, cx| state.begin_editing(window, cx));
-        cx.notify();
     }
 
     /// `tab-discard-now`: drop every hidden tab's live page at once,
@@ -4142,7 +4073,6 @@ pub(crate) struct BrowserRegistry {
     /// The strip tab holding a middle press: set on middle mouse down,
     /// compared on middle mouse up (only the same tab closes), cleared on
     /// every middle up. Never rendered — pure press/release pairing.
-    pub middle_pressed: Option<TabId>,
     /// The Browse centre page's rect, stored by `sync_browser` every
     /// frame: the mouse-down hand-back measures against this same rect
     /// (see `browse_centre_page_rect`), never a second computation.
@@ -4222,7 +4152,6 @@ impl BrowserRegistry {
             tabs_save_epoch: 0,
             tabs_save_pending: false,
             agent_tabs: HashMap::new(),
-            middle_pressed: None,
             centre_page_rect: None,
             progress_hole: Default::default(),
             holes_on: None,
@@ -4249,7 +4178,7 @@ impl BrowserRegistry {
 mod tests {
     use super::{
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
-        browser_session_active, browser_visible, initial_url, middle_release_closes,
+        browser_session_active, browser_visible, initial_url,
         should_release_keyboard_on_mouse_down, should_remember,
         terminal_covers_browser, terminal_dock_bounds, Annotation,
         BrowserVisibility, FakeWebBackend, WebviewState,
@@ -4434,24 +4363,6 @@ mod tests {
         assert_eq!(full.size.height, gpui::px(900.0 - 44.0));
     }
 
-
-    #[test]
-    fn middle_release_closes_only_its_own_press() {
-        let pressed = TabId(7);
-        let other = TabId(8);
-        assert!(
-            middle_release_closes(Some(pressed), pressed),
-            "press and release on the same tab close"
-        );
-        assert!(
-            !middle_release_closes(Some(pressed), other),
-            "a release on another tab closes nothing"
-        );
-        assert!(
-            !middle_release_closes(None, pressed),
-            "a press-less release closes nothing"
-        );
-    }
 
     /// One truth-table row: which input a case flips off (or on, for covers).
     type VisibilityFlip = fn(BrowserVisibility) -> BrowserVisibility;

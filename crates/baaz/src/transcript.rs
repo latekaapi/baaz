@@ -122,6 +122,10 @@ pub struct Folds {
     /// card never fetches itself — the app pages `item/readOutput` on a
     /// background task and replaces the body on the server's result.
     pub show_full_output: Option<CardHandler>,
+    /// D6 (docs/43 §2.9): a shell card's "N more lines" opens the full
+    /// output as a view pushed on the right pane, instead of unfolding in
+    /// place.
+    pub open_output: Option<OutputHandler>,
     /// Draw the cards settled rather than entering, for a `--screenshot` run
     /// that renders a few frames and quits.
     pub at_rest: bool,
@@ -411,6 +415,12 @@ pub fn edited_paths_cache_key(turns: &[Turn]) -> (usize, usize) {
     (turns.len(), last_blocks)
 }
 
+/// D6: the files one assistant turn edited (its fold row's `+N −M` chip
+/// opens these in Changes), in edit order.
+pub fn turn_edited_paths(turns: &[Turn], turn_id: &str) -> Vec<String> {
+    turns.iter().find(|t| t.id() == turn_id).map(|t| session_edited_paths(std::slice::from_ref(t))).unwrap_or_default()
+}
+
 pub fn session_edited_paths(turns: &[Turn]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ordered = Vec::new();
@@ -545,6 +555,26 @@ pub type PlanHandler = Rc<dyn Fn(String, PlanAction, &mut Window, &mut App)>;
 /// card is the whole argument, because which card it was is the only thing the
 /// app needs in order to know what to send.
 pub type CardHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+/// What the full-output view needs from a shell card.
+#[derive(Clone, Debug)]
+pub struct OutputOpen {
+    /// The tool block's id (the full output is fetched by it).
+    pub block_id: String,
+    /// The command as it ran.
+    pub command: String,
+    pub exit: Option<i32>,
+    pub duration_ms: Option<u64>,
+    /// The lines the card holds (the whole output unless truncated).
+    pub lines: Vec<String>,
+    /// Still running.
+    pub live: bool,
+    /// The provider holds more than the card does.
+    pub fetchable: bool,
+}
+
+/// Opens a card's full output.
+pub type OutputHandler = Rc<dyn Fn(OutputOpen, &mut Window, &mut App)>;
 
 /// An intent that names a card and a row inside it: `(block id, index)`.
 ///
@@ -2303,6 +2333,21 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
         .unwrap_or((false, false));
     let show = folds.show_full_output.clone();
+    let open_output = match (&call.body, folds.open_output.clone()) {
+        (ToolBody::Shell { output_lines, exit_code, live, .. }, Some(open)) => Some((
+            open,
+            OutputOpen {
+                block_id: block_id.clone(),
+                command: call.target.clone(),
+                exit: *exit_code,
+                duration_ms: call.duration_ms,
+                lines: output_lines.clone(),
+                live: *live,
+                fetchable,
+            },
+        )),
+        _ => None,
+    };
     // D51's terminal card: while the tab lives the body mirrors the
     // block's last lines from the frame's snapshot; once the tab is gone
     // (or under `--replay`, where the snapshot is empty) the card keeps
@@ -2343,6 +2388,11 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         let toggle = folds.toggle.clone();
         let key = key.to_owned();
         move |intent, window, cx| match intent {
+            ToolCardIntent::Unfold if open_output.is_some() => {
+                if let Some((open, out)) = &open_output {
+                    open(out.clone(), window, cx);
+                }
+            }
             ToolCardIntent::Unfold => {
                 if fetchable && idle {
                     if let Some(show) = &show {
@@ -3000,6 +3050,7 @@ mod tests {
             approval_host: None,
             full_output: Rc::new(HashMap::new()),
             show_full_output: None,
+            open_output: None,
             at_rest: true,
             now_ms: 0,
             copied: Rc::new(HashSet::new()),
