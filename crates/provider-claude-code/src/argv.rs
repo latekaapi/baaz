@@ -480,6 +480,39 @@ pub fn argv_for_fork(
     }
 }
 
+/// A `--resume` relaunch of a session the CLI never stored, as the fresh
+/// open it still is: `--session-id <id>` in `--resume`'s place, run in
+/// `cwd` so the transcript lands under the workspace's own slug. The CLI
+/// writes nothing until the first turn, so a session relaunched before it
+/// (a mode pick out of a launched Read-only, an effort clear) has no
+/// transcript, and `--resume` exits at once with "No conversation found
+/// with session ID" (2.1.276, reproduced live 2026-10-17). Any other
+/// launch is returned as built.
+pub fn as_fresh_open(mut launch: SessionLaunch, cwd: Option<&str>) -> SessionLaunch {
+    let Some(at) = launch.argv.iter().position(|arg| arg == "--resume") else { return launch };
+    if launch.argv.iter().any(|arg| arg == "--fork-session" || arg == "--session-id") {
+        return launch;
+    }
+    launch.argv[at] = "--session-id".into();
+    if launch.cwd.is_none() {
+        launch.cwd = cwd.map(str::to_owned);
+    }
+    launch
+}
+
+/// Whether `model` cannot run in Claude Code's `auto` permission mode:
+/// its catalog row says so (`supportsAutoMode` absent where the answer
+/// names it), or — no row to ask, as before the child's `initialize`
+/// answer lands — it is a Haiku, the one family 2.1.276's catalog lists
+/// without it. A row that says it can, or a model nothing says about,
+/// keeps Auto.
+pub fn model_lacks_auto(model: &str, row: Option<&crate::frame::CatalogModel>) -> bool {
+    match row.and_then(|row| row.supports_auto_mode) {
+        Some(supported) => !supported,
+        None => crate::frame::normalize_model_id(model).starts_with("haiku"),
+    }
+}
+
 /// One text-only user turn as NDJSON for the child's stdin (doc §1
 /// input frame). Text parts join in order; use [`user_content_line`] when
 /// the turn carries images.
@@ -949,5 +982,51 @@ mod tests {
         // folds to nothing so the chip never claims Read-only for it.
         assert_eq!(permission_mode_from_claude("plan"), None);
         assert_eq!(permission_mode_from_claude("someday"), None, "unknown folds to nothing");
+    }
+
+    /// A relaunch of a session the CLI never stored opens it fresh under
+    /// the same id, in the workspace; resume, fork and open launches that
+    /// are not `--resume` relaunches pass through untouched.
+    #[test]
+    fn a_never_stored_resume_relaunches_as_a_fresh_open() {
+        let resume = with_permission_mode(
+            argv_for_resume("sess-9", Some("haiku"), Some("/m.json"), None),
+            Some(PermissionMode::PromptUnmatched),
+        );
+        let fresh = as_fresh_open(resume, Some("/work"));
+        assert!(!fresh.argv.contains(&"--resume".to_owned()), "{:?}", fresh.argv);
+        let at = fresh.argv.iter().position(|arg| arg == "--session-id").expect("--session-id");
+        assert_eq!(fresh.argv[at + 1], "sess-9");
+        assert_eq!(fresh.cwd.as_deref(), Some("/work"));
+        assert_eq!(fresh.session_id, "sess-9");
+        for (flag, value) in [("--model", "haiku"), ("--mcp-config", "/m.json"), ("--permission-mode", "manual")] {
+            let at = fresh.argv.iter().position(|arg| arg == flag).expect(flag);
+            assert_eq!(fresh.argv[at + 1], value, "{flag} survives");
+        }
+        let open = argv_for_open("req-1", Some("/w"), None, None, None);
+        assert_eq!(as_fresh_open(open.clone(), Some("/elsewhere")), open);
+        let fork = argv_for_fork("branch-2", "sess-9", None, None, None);
+        assert_eq!(as_fresh_open(fork.clone(), Some("/w")), fork);
+    }
+
+    /// Auto is off for a model whose row says so, and for a Haiku before
+    /// any row is known; a row's own word wins over the family.
+    #[test]
+    fn haiku_and_rows_without_auto_lack_auto() {
+        let row = |supports: Option<bool>| crate::frame::CatalogModel {
+            value: "haiku".into(),
+            resolved_model: None,
+            display_name: "Haiku".into(),
+            description: None,
+            efforts: Vec::new(),
+            supports_auto_mode: supports,
+        };
+        assert!(model_lacks_auto("haiku", None));
+        assert!(model_lacks_auto("claude-haiku-4-5-20251001", None));
+        assert!(!model_lacks_auto("sonnet", None));
+        assert!(!model_lacks_auto("claude-opus-5[1m]", None));
+        assert!(model_lacks_auto("sonnet", Some(&row(Some(false)))));
+        assert!(!model_lacks_auto("haiku", Some(&row(Some(true)))));
+        assert!(model_lacks_auto("haiku", Some(&row(None))), "an answer silent on auto falls back to the family");
     }
 }

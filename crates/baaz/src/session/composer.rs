@@ -665,7 +665,17 @@ impl SessionView {
     /// when it can, or when nothing says otherwise.
     pub(crate) fn mode_unavailable(&self, mode: PermissionMode) -> Option<String> {
         let model = self.model_id();
-        if model.is_empty() || !Self::resolve_mode_limits(&model, &self.mode_limits).contains(&mode) {
+        // No catalog folded yet (a draft still opening, a child whose
+        // `initialize` has not answered): Claude Code's supplied list
+        // speaks for it, so a remembered Haiku never stands in Auto.
+        let supplied;
+        let limits = if self.mode_limits.is_empty() && self.provider_kind() == ProviderId::ClaudeCode {
+            supplied = crate::providers::claude_code_mode_limits();
+            &supplied
+        } else {
+            &self.mode_limits
+        };
+        if model.is_empty() || !Self::resolve_mode_limits(&model, limits).contains(&mode) {
             return None;
         }
         Some(format!("Not available for {}", self.model_label_for(&model)))

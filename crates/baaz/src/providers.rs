@@ -705,8 +705,32 @@ pub fn claude_code_catalog(current: Option<&str>) -> Vec<provider::ModelSummary>
             id: row.id.to_owned(),
             label: row.label.to_owned(),
             active: Some(row.id) == current,
+            unavailable_modes: claude_code_unavailable_modes(row.id),
             ..Default::default()
         })
+        .collect()
+}
+
+/// The approval modes a supplied Claude Code alias cannot run in, before
+/// the child's own catalog says: Auto on Haiku, the one row 2.1.276's
+/// `initialize` answer lists without `supportsAutoMode` (the CLI refuses
+/// `set_permission_mode{auto}` on it). The child's catalog replaces this
+/// the moment it folds.
+fn claude_code_unavailable_modes(id: &str) -> Vec<aui_protocol::PermissionMode> {
+    if provider_claude_code::argv::model_lacks_auto(id, None) {
+        vec![aui_protocol::PermissionMode::OnRequest]
+    } else {
+        Vec::new()
+    }
+}
+
+/// [`claude_code_unavailable_modes`] for every supplied alias that has
+/// any, keyed like a folded catalog's limits.
+pub fn claude_code_mode_limits() -> std::collections::HashMap<String, Vec<aui_protocol::PermissionMode>> {
+    claude_code_models()
+        .into_iter()
+        .map(|row| (row.id.to_owned(), claude_code_unavailable_modes(row.id)))
+        .filter(|(_, modes)| !modes.is_empty())
         .collect()
 }
 

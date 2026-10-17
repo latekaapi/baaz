@@ -3120,6 +3120,10 @@ impl Harness {
         if let Some(model) = remembered {
             view.update(cx, |view, cx| view.set_model(&model, cx));
         }
+        // The open asks for the mode the draft now stands on: a carried or
+        // project Auto on a remembered model without it already fell back
+        // to Ask above, and the child starts there rather than in Auto.
+        let mode = view.read(cx).draft_settings().0;
         // Named before the swap, so `activate` reads the project's name
         // for the empty state off the drafts map (no row exists yet), and
         // a repeated ⌘N while the child is still answering reopens this
@@ -8977,6 +8981,47 @@ done
         lane_restore(state);
     }
 
+    /// A Claude Code draft whose project remembers Haiku and defaults to
+    /// Auto opens in Ask — chip, banner and the open's own mode — before
+    /// any catalog has answered: Haiku has no Auto, and the CLI was being
+    /// launched (and relaunched) `--permission-mode auto` on it.
+    #[gpui::test]
+    fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("remembered-haiku");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, shared) = y2b2_factory();
+        let project = b2fix_project(vc, &baaz, "claude-code", &[("claude-code", "haiku")], &[]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let adopted = harness.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
+                adopted.defaults.approval_mode = Some(muse_client::schema::ApprovalMode::OnRequest);
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                harness.active = None;
+            });
+        });
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+        y2b2_drain_until_opens(vc, &shared, 1);
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the draft is drawn");
+            let view = view.read(cx);
+            assert_eq!(view.model_id(), "haiku");
+            assert_eq!(view.mode_label(), "Ask", "never Auto on Haiku");
+            assert_eq!(
+                view.banner_text(),
+                Some("Auto is not available for Claude Haiku; Claude Code will ask before acting.")
+            );
+        });
+        assert_eq!(
+            shared.inner.lock().expect("y2b2").modes,
+            [Some(aui_protocol::PermissionMode::PromptUnmatched)],
+            "the child is asked to start in Ask"
+        );
+        lane_restore(state);
+    }
+
     /// B2fix: with a muse view's catalog loaded, a Codex default is never
     /// checked against the muse catalog — the guarded helper filters muse
     /// starts only. Without the provider guard the valid Codex default
@@ -9333,6 +9378,8 @@ done
         opens: usize,
         created: Vec<String>,
         shutdowns: Vec<String>,
+        /// The mode each `OpenSession` asked for, in order.
+        modes: Vec<Option<aui_protocol::PermissionMode>>,
     }
 
     struct Y2b2Adapter {
@@ -9387,10 +9434,11 @@ done
                 return Err(provider::ProviderError::Unavailable { reason: "not connected".into() });
             }
             match command {
-                provider::Command::OpenSession { .. } => {
+                provider::Command::OpenSession { mode, .. } => {
                     let id = {
                         let mut shared = self.shared.inner.lock().expect("y2b2");
                         shared.opens += 1;
+                        shared.modes.push(mode);
                         let id = format!("y2b2-{}", shared.opens);
                         shared.created.push(id.clone());
                         id
@@ -9434,6 +9482,7 @@ done
                 opens: 0,
                 created: Vec::new(),
                 shutdowns: Vec::new(),
+                modes: Vec::new(),
             })),
         };
         let factory_shared = shared.clone();

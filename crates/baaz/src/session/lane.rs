@@ -428,6 +428,12 @@ impl SessionView {
                     self.sync_mode_menu_check(cx);
                     cx.notify();
                 }
+                // Auto reported on a model that cannot run it (a launch on
+                // the project's remembered model): ask for Ask, as a pick
+                // onto that model would have.
+                if mode == aui_protocol::PermissionMode::OnRequest {
+                    self.leave_auto_if_unsupported(cx);
+                }
             }
             // The level the session actually runs at (Codex: a resumed
             // thread's standing level, or a Default the backend could not
@@ -3408,6 +3414,52 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
         });
+    }
+
+    /// Auto reported on Haiku before any catalog has answered (a launch on
+    /// the project's remembered model): the lane asks for Ask at once and
+    /// the chip reads it, and Auto cannot be picked back on Haiku.
+    #[gpui::test]
+    fn auto_reported_on_haiku_falls_back_to_ask_without_a_catalog(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::PermissionMode;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::with_catalog(Vec::new());
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        let asked = |handle: &RecordingHandle| -> Vec<PermissionMode> {
+            handle
+                .received()
+                .into_iter()
+                .filter_map(|c| match c {
+                    provider::Command::SelectApprovalMode { mode, .. } => Some(mode),
+                    _ => None,
+                })
+                .collect()
+        };
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_model("haiku", cx)));
+        vc.run_until_parked();
+        let before = asked(&handle).len();
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-1".into(),
+            mode: PermissionMode::OnRequest,
+        })
+        .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.mode_label(), "Ask");
+            assert_eq!(
+                view.banner_text(),
+                Some("Auto is not available for Claude Haiku; Claude Code will ask before acting.")
+            );
+            assert_eq!(
+                view.mode_unavailable(PermissionMode::OnRequest).as_deref(),
+                Some("Not available for Claude Haiku")
+            );
+        });
+        let asked = asked(&handle);
+        assert_eq!(asked.len(), before + 1, "the report itself asks for Ask: {asked:?}");
+        assert!(asked.iter().all(|mode| *mode == PermissionMode::PromptUnmatched), "{asked:?}");
     }
 
     /// A mode report landing while the mode menu stands open moves its

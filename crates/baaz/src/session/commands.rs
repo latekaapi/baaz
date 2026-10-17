@@ -742,7 +742,12 @@ impl SessionView {
     /// switch and keeps reporting `auto`, so waiting showed a mode the
     /// model cannot run). The provider's own report still has the last
     /// word when it comes, and a later mode pick takes the banner down.
-    fn leave_auto_if_unsupported(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Also run wherever the chip's model or mode can come to rest on such
+    /// a pair without a pick: a catalog folding in (the child's own word on
+    /// which models lack Auto), and the provider reporting Auto (a launch
+    /// or resume in Auto on a remembered model).
+    pub(super) fn leave_auto_if_unsupported(&mut self, cx: &mut Context<Self>) {
         if crate::providers::uses_legacy_pump(self.provider_kind())
             || self.mode() != PermissionMode::OnRequest
             || self.mode_unavailable(PermissionMode::OnRequest).is_none()
@@ -889,6 +894,7 @@ impl SessionView {
         }
         self.models_error = None;
         self.sync_model_menu_check(cx);
+        self.leave_auto_if_unsupported(cx);
         cx.notify();
     }
 

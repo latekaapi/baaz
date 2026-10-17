@@ -77,11 +77,16 @@ fn complete_real(provider: ProviderId, prompt: &str) -> Result<String, String> {
     let _ = std::fs::create_dir_all(&scratch);
     let mut command = Command::new(&program);
     let mut out_file: Option<PathBuf> = None;
+    let home_env: Vec<(String, String)>;
     match provider {
         ProviderId::ClaudeCode => {
             let home = provider_claude_code::home::ensure_home(&owner, &state).map_err(|e| e.to_string())?;
+            // The session children's pair, not `CLAUDE_CONFIG_DIR` alone:
+            // without the empty secure-storage dir the CLI looks for a
+            // suffixed Keychain item that does not exist and exits "Not
+            // logged in" (every title failed so, reproduced 2026-10-17).
+            home_env = provider_claude_code::home::child_env(&home);
             command
-                .env("CLAUDE_CONFIG_DIR", home)
                 .args(["-p", "--model", CLAUDE_UTILITY_MODEL, "--output-format", "text"])
                 .args(["--tools", "", "--strict-mcp-config", "--setting-sources", ""])
                 .arg("--no-session-persistence");
@@ -89,8 +94,8 @@ fn complete_real(provider: ProviderId, prompt: &str) -> Result<String, String> {
         ProviderId::Codex => {
             let home = provider_codex::home::ensure_home(&owner, &state).map_err(|e| e.to_string())?;
             let last = scratch.join(format!("codex-last-{}.txt", unique()));
+            home_env = vec![("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())];
             command
-                .env("CODEX_HOME", home)
                 .args(["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only"])
                 .args(["-c", "model_reasoning_effort=\"minimal\"", "--color", "never", "-o"])
                 .arg(&last)
@@ -101,6 +106,8 @@ fn complete_real(provider: ProviderId, prompt: &str) -> Result<String, String> {
     }
     command.env("PATH", provider::env_path::login_path());
     provider::child_env::scrub_command(&mut command);
+    // After the scrub, which drops an inherited home of the same name.
+    command.envs(home_env);
     command.current_dir(&scratch).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().map_err(|e| format!("could not start {}: {e}", program.display()))?;
     if let Some(mut stdin) = child.stdin.take() {

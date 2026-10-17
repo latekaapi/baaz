@@ -600,11 +600,10 @@ impl ClaudeCodeAdapter {
             let fold = self.fold.lock().expect("fold mutex");
             (fold.permission_mode() == Some(PermissionMode::OnRequest), fold.catalog_row(model).cloned())
         };
-        let Some(row) = row.filter(|row| in_auto && row.supports_auto_mode == Some(false)) else {
+        if !in_auto || !argv::model_lacks_auto(model, row.as_ref()) {
             return;
-        };
-        let text =
-            format!("Auto is not available for {}; Claude Code will ask before acting.", row.display_name);
+        }
+        let text = auto_fallback_text(model, row.as_ref());
         let converted = {
             let mut due = self.mode_relaunch_due.lock().expect("mode relaunch mutex");
             let auto_due = *due == Some(PermissionMode::OnRequest);
@@ -628,6 +627,30 @@ impl ClaudeCodeAdapter {
         if self.send_set_permission_mode(PermissionMode::PromptUnmatched).is_ok() {
             self.hub.emit_card(CONTROL_MODE_FALLBACK_CARD, text);
         }
+    }
+
+    /// A launch asking for Auto on a model that cannot run it (see
+    /// [`argv::model_lacks_auto`]) launches in Ask instead — the mode the
+    /// switch onto that model would have fallen back to live — and hands
+    /// back the notice saying so, emitted once the child is noted. The
+    /// effective model is the launch's `--model`, else the session's
+    /// recorded pick. Every other launch is returned as built. Pure apart
+    /// from recording Ask as the requested mode.
+    fn launch_off_unsupported_auto(&self, launch: SessionLaunch) -> (SessionLaunch, Option<String>) {
+        if launch.permission_mode != Some(PermissionMode::OnRequest) {
+            return (launch, None);
+        }
+        let Some(model) = launch.model.clone().or_else(|| self.model.lock().expect("model mutex").clone()) else {
+            return (launch, None);
+        };
+        let text = {
+            let fold = self.fold.lock().expect("fold mutex");
+            let row = fold.catalog_row(&model);
+            argv::model_lacks_auto(&model, row).then(|| auto_fallback_text(&model, row))
+        };
+        let Some(text) = text else { return (launch, None) };
+        *self.requested_mode.lock().expect("requested mode mutex") = Some(PermissionMode::PromptUnmatched);
+        (argv::with_permission_mode(launch, Some(PermissionMode::PromptUnmatched)), Some(text))
     }
 
     /// The `apply_flag_settings` line raising the live child's effort from
@@ -839,6 +862,8 @@ impl ClaudeCodeAdapter {
     }
 
     fn spawn_launch(&self, launch: &SessionLaunch) -> Result<Ack, ProviderError> {
+        let (launch, fallback) = self.launch_off_unsupported_auto(launch.clone());
+        let launch = &launch;
         let mut child = self.child.lock().expect("child mutex");
         if child.is_some() {
             return Err(ProviderError::Rejected {
@@ -873,6 +898,10 @@ impl ClaudeCodeAdapter {
         // `ListModels` has nothing to serve but the offline fallback.
         self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
+        // Said once the session is named, so the notice reaches its view.
+        if let Some(text) = fallback {
+            self.hub.emit_card(CONTROL_MODE_FALLBACK_CARD, text);
+        }
         // The launch's `--model`, when one was requested: the fold learns
         // the rest from the `init` frame, but an alias never appears there
         // under its own spelling, so the request is remembered as stated.
@@ -1095,6 +1124,26 @@ impl ClaudeCodeAdapter {
     /// transcript stays on the adapter. The relay rides along: an
     /// effort-swap relaunch is still the same session, so the resumed child
     /// sees the same bridge the old one did.
+    /// What [`Self::relaunch`] spawns for `launch`: the bridge config and
+    /// the session's mode applied, Auto left for Ask on a model without it
+    /// (with the notice to show), and a `--resume` of a session the CLI
+    /// never stored — no turn reached it yet — opened fresh under its own
+    /// id instead ([`argv::as_fresh_open`]: `--resume` exits "No
+    /// conversation found"). Both run in the session's workspace. Pure
+    /// apart from the bridge config file — no spawn.
+    fn relaunch_launch(&self, launch: &SessionLaunch) -> Result<(SessionLaunch, Option<String>), ProviderError> {
+        let launch = self.with_session_mode(self.with_mcp_config(launch.clone())?);
+        let (launch, fallback) = self.launch_off_unsupported_auto(launch);
+        let workspace =
+            self.workspace.lock().expect("workspace mutex").as_ref().map(|path| path.to_string_lossy().into_owned());
+        let launch = if self.find_stored(&launch.session_id).is_none() {
+            argv::as_fresh_open(launch, workspace.as_deref())
+        } else {
+            SessionLaunch { cwd: launch.cwd.clone().or(workspace), ..launch }
+        };
+        Ok((launch, fallback))
+    }
+
     fn relaunch(&self, launch: &SessionLaunch) -> Result<(), ProviderError> {
         if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
             running.shutdown();
@@ -1107,7 +1156,7 @@ impl ClaudeCodeAdapter {
         // nothing else clears them, and a stale one would pair the new
         // child's next turn with an old ack.
         self.fold.lock().expect("fold mutex").forget_submissions();
-        let launch = self.with_session_mode(self.with_mcp_config(launch.clone())?);
+        let (launch, fallback) = self.relaunch_launch(launch)?;
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
         let home_env = self.home_env_for(&launch.session_id);
@@ -1129,6 +1178,10 @@ impl ClaudeCodeAdapter {
         self.cover_launched_mcp();
         self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
+        // Said once the session is named, so the notice reaches its view.
+        if let Some(text) = fallback {
+            self.hub.emit_card(CONTROL_MODE_FALLBACK_CARD, text);
+        }
         if let Some(model) = &launch.model {
             *self.model.lock().expect("model mutex") = Some(model.clone());
         }
@@ -1179,9 +1232,23 @@ impl ClaudeCodeAdapter {
         // opens after that echo is this submission's.
         let uuid = argv::line_uuid();
         let line = argv::user_content_line(text, images, Some(&uuid));
-        // Noted before the line goes out: the pump may fold the turn's
-        // first message before this thread locks the fold again.
-        self.fold.lock().expect("fold mutex").note_submission_line(&turn_id, &uuid);
+        // The bubble goes up now, not on the echo: a child that dies
+        // before echoing still leaves what was sent on screen. Noted
+        // before the line goes out: the pump may fold the turn's first
+        // message before this thread locks the fold again.
+        let bubble = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            let shown: Vec<frame::UserImage> = images
+                .iter()
+                .map(|image| frame::UserImage { media_type: image.media_type.clone(), data_len: image.base64_data.len() })
+                .collect();
+            let bubble = fold.submitted_user_turn(&uuid, text, &shown);
+            fold.note_submission_line(&turn_id, &uuid);
+            bubble
+        };
+        if !bubble.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id: Some(session_id.to_owned()), deltas: bubble });
+        }
         let sent = match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
@@ -1189,7 +1256,14 @@ impl ClaudeCodeAdapter {
             None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
         };
         if let Err(error) = sent {
-            self.fold.lock().expect("fold mutex").forget_submission(&turn_id);
+            let retracted = {
+                let mut fold = self.fold.lock().expect("fold mutex");
+                fold.forget_submission(&turn_id);
+                fold.retract_submitted_user_turn(&uuid)
+            };
+            if !retracted.is_empty() {
+                let _ = self.tx.send(ProviderEvent::Deltas { session_id: Some(session_id.to_owned()), deltas: retracted });
+            }
             return Err(error);
         }
         // The ack carries the submission handle: the CLI names the turn
@@ -1313,6 +1387,18 @@ impl ClaudeCodeAdapter {
         deltas.extend(fold.finish_stored_turns());
         Ok((deltas, fold.stored_model().map(str::to_owned)))
     }
+}
+
+/// The notice that `model` left Auto for Ask: its catalog name when a row
+/// names it, else "Haiku" for the family [`argv::model_lacks_auto`] knows
+/// without a row, else the id as given.
+fn auto_fallback_text(model: &str, row: Option<&frame::CatalogModel>) -> String {
+    let name = match row {
+        Some(row) => row.display_name.clone(),
+        None if frame::normalize_model_id(model).starts_with("haiku") => "Haiku".to_owned(),
+        None => model.to_owned(),
+    };
+    format!("Auto is not available for {name}; Claude Code will ask before acting.")
 }
 
 /// The human line behind a failed `--version`: the stream's first
@@ -3951,5 +4037,260 @@ mod tests {
             matches!(&error, ProviderError::Unavailable { reason } if reason.contains("respawn")),
             "the revive was attempted: {error:?}"
         );
+    }
+
+    /// A scratch dir unique to one test: removed first, created empty.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.canonicalize().expect("canonical scratch dir")
+    }
+
+    /// THE 2026-10-17 EXIT. A draft launched Read-only (`--settings`
+    /// layer), switched to another mode before its first turn, owes a
+    /// relaunch — and the CLI has stored nothing yet, so `--resume` exits
+    /// "No conversation found with session ID" before the turn. The
+    /// relaunch opens the session fresh under its own id, in its
+    /// workspace; once a transcript exists it resumes, still in the
+    /// workspace.
+    #[test]
+    fn a_relaunch_before_the_first_turn_opens_fresh_instead_of_resuming() {
+        let root = scratch_dir("fresh-relaunch");
+        let (config, work) = (root.join("home"), root.join("work"));
+        std::fs::create_dir_all(&work).expect("workspace");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(config.clone());
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.workspace.lock().expect("workspace mutex") = Some(work.clone());
+        let open = argv::argv_for_open("sess-1", Some(&work.to_string_lossy()), None, None, None);
+        adapter.note_launch_mode(&argv::with_permission_mode(open, Some(PermissionMode::DenyUnmatched)));
+        pick(&adapter, PermissionMode::PromptUnmatched);
+        let owed = adapter.take_mode_relaunch("sess-1").expect("leaving launched Read-only relaunches");
+        assert!(owed.argv.contains(&"--resume".to_owned()), "built as a resume: {:?}", owed.argv);
+        let (fresh, _) = adapter.relaunch_launch(&owed).expect("built");
+        assert!(!fresh.argv.contains(&"--resume".to_owned()), "never --resume a session never stored: {:?}", fresh.argv);
+        let at = fresh.argv.iter().position(|arg| arg == "--session-id").expect("--session-id");
+        assert_eq!(fresh.argv[at + 1], "sess-1", "the same id the open minted");
+        assert_eq!(fresh.cwd.as_deref(), Some(work.to_string_lossy().as_ref()));
+        let at = fresh.argv.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+        assert_eq!(fresh.argv[at + 1], "manual");
+        assert!(!argv::carries_read_only_settings(&fresh));
+
+        // The first turn stored the transcript: a later relaunch resumes it.
+        let slug = config.join("projects").join(history::slug_for_cwd(&work));
+        std::fs::create_dir_all(&slug).expect("slug dir");
+        std::fs::write(slug.join("sess-1.jsonl"), "{}\n").expect("transcript");
+        let (resumed, _) = adapter.relaunch_launch(&owed).expect("built");
+        let at = resumed.argv.iter().position(|arg| arg == "--resume").expect("--resume once stored");
+        assert_eq!(resumed.argv[at + 1], "sess-1");
+        assert!(!resumed.argv.contains(&"--session-id".to_owned()));
+        assert_eq!(resumed.cwd.as_deref(), Some(work.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// No launch carries `--permission-mode auto` on a model without Auto:
+    /// the launch's own `--model`, else the recorded pick, decides — by
+    /// its catalog row when one is known, by the Haiku family before —
+    /// and the launch goes out in Ask with the notice saying why.
+    #[test]
+    fn auto_never_launches_on_a_model_without_it() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        let auto = |model: Option<&str>| {
+            argv::with_permission_mode(
+                argv::argv_for_open("sess-1", None, model, None, None),
+                Some(PermissionMode::OnRequest),
+            )
+        };
+        let mode_of = |launch: &SessionLaunch| {
+            let at = launch.argv.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+            launch.argv[at + 1].clone()
+        };
+        let (kept, notice) = adapter.launch_off_unsupported_auto(auto(Some("sonnet")));
+        assert_eq!((mode_of(&kept).as_str(), notice), ("auto", None), "Sonnet keeps Auto");
+        let (kept, notice) = adapter.launch_off_unsupported_auto(auto(None));
+        assert_eq!((mode_of(&kept).as_str(), notice), ("auto", None), "the CLI's default keeps Auto");
+        for model in ["haiku", "claude-haiku-4-5-20251001"] {
+            let (asked, notice) = adapter.launch_off_unsupported_auto(auto(Some(model)));
+            assert_eq!(mode_of(&asked), "manual", "{model}: {:?}", asked.argv);
+            assert_eq!(asked.permission_mode, Some(PermissionMode::PromptUnmatched));
+            assert_eq!(
+                notice.as_deref(),
+                Some("Auto is not available for Haiku; Claude Code will ask before acting.")
+            );
+        }
+        // No `--model` on the launch: the recorded pick (a remembered
+        // model sent with `set_model`) decides — the mode relaunch above
+        // went out `--model haiku --permission-mode auto` live.
+        *adapter.model.lock().expect("model mutex") = Some("haiku".into());
+        let (asked, _) = adapter.launch_off_unsupported_auto(auto(None));
+        assert_eq!(mode_of(&asked), "manual");
+        assert_eq!(*adapter.requested_mode.lock().expect("requested mode mutex"), Some(PermissionMode::PromptUnmatched));
+        let (relaunch, notice) = adapter
+            .relaunch_launch(&argv::with_permission_mode(
+                argv::argv_for_resume("sess-1", Some("haiku"), None, None),
+                Some(PermissionMode::OnRequest),
+            ))
+            .expect("built");
+        assert_eq!(mode_of(&relaunch), "manual", "{:?}", relaunch.argv);
+        assert!(notice.is_some());
+        // Once the catalog is folded, its rows speak: Sonnet's says Auto.
+        fold_catalog(&adapter);
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        let (kept, _) = adapter.launch_off_unsupported_auto(auto(None));
+        assert_eq!(mode_of(&kept), "auto");
+    }
+
+    /// A confirmed switch onto Haiku while in Auto leaves for Ask even
+    /// before the child's catalog answered — the draft-open case, where
+    /// the remembered model's `set_model` goes out at the landing, ahead
+    /// of the `initialize` answer.
+    #[test]
+    fn a_confirmed_haiku_switch_leaves_auto_without_a_catalog() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::OnRequest);
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "haiku".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        adapter.ingest_child_line(&success_line(&pending_id(&adapter)));
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        let modes: Vec<String> =
+            adapter.sent_control_lines().into_iter().filter(|line| line.contains("set_permission_mode")).collect();
+        assert_eq!(modes.len(), 1, "{modes:?}");
+        assert!(modes[0].contains("\"manual\""), "{modes:?}");
+        let cards = control_cards(&drain_events(&adapter));
+        assert!(cards.iter().any(|(kind, _)| kind == CONTROL_MODE_FALLBACK_CARD), "{cards:?}");
+    }
+
+    /// The fake child for the exit path: `/bin/sh` printing what the CLI
+    /// prints on stderr, then exiting before any turn. The lost-connection
+    /// reason quotes it; a child that exits silently keeps the plain one.
+    #[test]
+    fn a_child_exit_names_the_clis_stderr_reason() {
+        for (script, expected) in [
+            (
+                "echo 'No conversation found with session ID: sess-1' >&2; exit 1",
+                "the Claude Code process exited: No conversation found with session ID: sess-1; send again to resume the session"
+                    .to_owned(),
+            ),
+            ("exit 0", crate::child::CHILD_EXITED_REASON.to_owned()),
+        ] {
+            let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+            let launch = SessionLaunch {
+                argv: vec!["-c".into(), script.into()],
+                cwd: None,
+                session_id: "sess-1".into(),
+                model: None,
+                effort: None,
+                permission_mode: None,
+            };
+            let _child = crate::child::RunningChild::spawn_legacy("/bin/sh", &launch, &adapter.hub).expect("sh runs");
+            let events = adapter.events();
+            let lost = loop {
+                match events.recv_timeout(std::time::Duration::from_secs(5)).expect("the exit is reported") {
+                    ProviderEvent::ConnectionLost { reason } => break reason,
+                    _ => continue,
+                }
+            };
+            assert_eq!(lost, expected, "{script}");
+        }
+    }
+
+    /// The person's message is on screen from the submit, not from the
+    /// CLI's echo: a child that never echoes (it died) still leaves it, the
+    /// echo that does come adds no second bubble, and a line that never
+    /// reached any child takes its bubble back down.
+    #[test]
+    fn the_sent_message_bubbles_on_the_submit() {
+        use aui_protocol::{Delta, Turn};
+        let user_turns = |events: &[ProviderEvent]| -> Vec<(String, String)> {
+            events
+                .iter()
+                .flat_map(|event| match event {
+                    ProviderEvent::Deltas { deltas, .. } => deltas.clone(),
+                    _ => Vec::new(),
+                })
+                .filter_map(|delta| match delta {
+                    Delta::TurnStarted { turn: Turn::User { id, text, .. } } => Some((id, text)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let removed = |events: &[ProviderEvent]| -> Vec<String> {
+            events
+                .iter()
+                .flat_map(|event| match event {
+                    ProviderEvent::Deltas { deltas, .. } => deltas.clone(),
+                    _ => Vec::new(),
+                })
+                .filter_map(|delta| match delta {
+                    Delta::TurnRemoved { turn_id } => Some(turn_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        let submit = |adapter: &ClaudeCodeAdapter| {
+            adapter.dispatch(Command::SubmitInput {
+                request_id: "t-1".into(),
+                session_id: "sess-1".into(),
+                parts: vec![provider::SubmissionPart::Text("say HI".into())],
+                display_text: None,
+                effort: None,
+            })
+        };
+
+        // No child to take it: the bubble goes up, then comes back down.
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        submit(&adapter).expect_err("no child");
+        let events = drain_events(&adapter);
+        let shown = user_turns(&events);
+        assert_eq!(shown.len(), 1, "{events:?}");
+        assert_eq!(shown[0].1, "say HI");
+        assert_eq!(removed(&events), vec![shown[0].0.clone()]);
+
+        // `cat` echoes the line back exactly as `--replay-user-messages`
+        // does, uuid and all — it folds as the echo — so one bubble, from
+        // the submit.
+        assert!(matches!(
+            frame::decode_line(&argv::user_content_line("say HI", &[], Some("u-1"))),
+            Ok(frame::Frame::UserText { uuid, .. }) if uuid == "u-1"
+        ));
+        let mut adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        let launch = SessionLaunch {
+            argv: Vec::new(),
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let cat = crate::child::RunningChild::spawn_legacy("/bin/cat", &launch, &adapter.hub).expect("cat runs");
+        *adapter.child.lock().expect("child mutex") = Some(cat);
+        let events = adapter.events();
+        submit(&adapter).expect("cat takes the line");
+        let first = events.recv_timeout(std::time::Duration::from_secs(5)).expect("the bubble");
+        let shown = user_turns(std::slice::from_ref(&first));
+        assert_eq!(shown.len(), 1, "the submit's own event is the bubble: {first:?}");
+        let echoed = adapter.fold.lock().expect("fold mutex").has_submissions();
+        assert!(echoed, "still waiting on its turn");
+        // Let the echo fold, then hang up.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        adapter.shutdown();
+        let mut rest = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            rest.push(event);
+        }
+        assert!(user_turns(&rest).is_empty(), "the echo adds no second bubble: {rest:?}");
+        assert!(removed(&rest).is_empty());
     }
 }
