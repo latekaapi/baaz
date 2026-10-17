@@ -97,11 +97,33 @@ pub fn load(session_id: &str) -> Vec<SentItem> {
 pub fn append(session_id: &str, item: SentItem) -> std::io::Result<()> {
     let mut items = load(session_id);
     items.push(item);
+    write_index(session_id, &items)
+}
+
+/// A session's id changed (a provider draft took the id its child
+/// minted): `items` — what was sent under `old` — join what `new` already
+/// holds, on disk and in the returned list, and `old`'s index goes.
+/// Pictures stay where they were saved; their paths ride the items.
+pub fn rekey(old: &str, new: &str, items: Vec<SentItem>) -> Vec<SentItem> {
+    let mut merged = load(new);
+    if items.is_empty() {
+        return merged;
+    }
+    merged.extend(items);
+    if let Err(error) = write_index(new, &merged) {
+        crate::baaz_log!("sent: could not move the turns sent while opening: {error}");
+    } else {
+        let _ = std::fs::remove_file(index_path(old));
+    }
+    merged
+}
+
+fn write_index(session_id: &str, items: &[SentItem]) -> std::io::Result<()> {
     let path = index_path(session_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec(&items).map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(items).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)
@@ -171,6 +193,23 @@ mod tests {
         assert_eq!(paired["u1"].attachments[0].name, "a.txt");
         assert_eq!(paired["u3"].attachments[0].name, "b.txt");
         assert!(!paired.contains_key("u2"));
+    }
+
+    /// A provider draft's sends while opening move to the id its child
+    /// minted, beside what that id already held — never dropped — and the
+    /// provisional index goes.
+    #[test]
+    fn rekey_moves_what_was_sent_while_opening() {
+        let _guard = crate::store::test_env_lock();
+        let (old, new) = ("sent-rekey-provisional", "sent-rekey-landed");
+        append(new, sent("earlier", "e.txt")).expect("seed");
+        append(old, sent("while opening", "w.txt")).expect("seed");
+        let merged = rekey(old, new, load(old));
+        let texts: Vec<_> = merged.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, ["earlier", "while opening"]);
+        assert_eq!(load(new), merged, "on disk too");
+        assert!(load(old).is_empty(), "the provisional index is gone");
+        let _ = std::fs::remove_file(index_path(new));
     }
 
     #[test]

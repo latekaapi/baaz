@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use aui_protocol::{Block, Delta, PermissionMode};
@@ -27,6 +27,7 @@ use crossbeam_channel::Sender;
 use provider::ProviderEvent;
 
 use crate::argv::{argv_for_resume, SessionLaunch};
+use crate::child::StdinWriter;
 use crate::fold::{step_line, ClaudeFold};
 
 /// How long a host control request waits for the child's `control_response`
@@ -34,6 +35,23 @@ use crate::fold::{step_line, ClaudeFold};
 /// for a local child answering a flag flip, and short enough that a
 /// rejected pick never poses as applied for long.
 pub const CONTROL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a Read-only turn waits for the child to confirm the deny layer
+/// on the owner's own MCP tools (the `mcp_status` answer, then the apply
+/// carrying its denies) before going out. Past it the turn goes out only
+/// over a layer the child already confirmed — at worst the
+/// [`MCP_WILDCARD_DENY`] that rides until the first answer — and is
+/// refused when there is none: failing closed, never open.
+pub const MCP_LAYER_HOLD: Duration = Duration::from_secs(3);
+
+/// The deny rule covering every MCP tool, whatever server serves it. The
+/// CLI glob-matches deny rules on the tool name (2.1.276: the deny check
+/// passes `globMatching: true`, and a rule with `*` becomes the regex
+/// `^mcp__.*$`), so this denies the owner's configured servers, late
+/// claude.ai connectors and dynamic ones alike. It is the Read-only
+/// layer's MCP deny until the child's first `mcp_status` answer names
+/// which tools may stay.
+pub const MCP_WILDCARD_DENY: &str = "mcp__*";
 
 /// The [`Block::Generic`] kind carrying a rejected model change: the
 /// session banner shows its text, and the app resyncs the chip from the
@@ -110,14 +128,13 @@ pub(crate) struct PendingControl {
     pub wanted_effort: Option<String>,
     /// The recorded effort before the optimistic raise, when this is one.
     pub previous_effort: Option<String>,
+    /// The MCP denies a Read-only layer going on carries, when this is
+    /// one: its success is what confirms them on the child.
+    pub wanted_mcp: Option<Vec<String>>,
     /// When the line went out: silence past
     /// [`CONTROL_CONFIRM_TIMEOUT`] refuses, loudly.
     pub sent_at: Instant,
 }
-
-/// A child's stdin as the hub holds it: shared with the child, one line
-/// per lock.
-pub(crate) type ChildStdinHandle = Arc<Mutex<dyn std::io::Write + Send>>;
 
 impl PendingControl {
     /// A request that records no model or effort to restore.
@@ -130,22 +147,56 @@ impl PendingControl {
             previous_fold_model: None,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         }
     }
 }
 
 /// Where the Read-only deny layer stands on the owner's own MCP tools.
+///
+/// Changed only under its own lock, and every layer line is queued (never
+/// waited on) under that same lock — so the pump's refresh and a mode
+/// pick's apply or clear are one step each, in one order on the wire: a
+/// refresh can never land between a clear and the state saying "off".
 #[derive(Debug, Default)]
 pub(crate) struct McpLayer {
     /// Whether the running child holds the Read-only layer (`--settings`
     /// at launch, or applied live): only then do MCP denies go out.
     pub(crate) layer_on: bool,
-    /// The denies the last `mcp_status` answer called for, Read-only or
-    /// not; `None` before any answer.
+    /// Whether the running child may serve the owner's own MCP servers
+    /// (launched without `--strict-mcp-config`): only then does the layer
+    /// need MCP denies before a turn, and only then does
+    /// [`MCP_WILDCARD_DENY`] stand in for an unknown list.
+    pub(crate) owner_mcp: bool,
+    /// The denies the current child's last `mcp_status` answer called
+    /// for, Read-only or not; `None` before any answer.
     pub(crate) known: Option<Vec<String>>,
-    /// The denies the child's live layer carries now.
-    pub(crate) applied: Vec<String>,
+    /// The layer apply on its way to the child: its `request_id` and the
+    /// MCP denies it carries, until the child answers it.
+    pub(crate) in_flight: Option<(String, Vec<String>)>,
+    /// The MCP denies the child CONFIRMED on its layer (its `success`
+    /// answer, or a `--settings` launch that needs none); `None` when no
+    /// confirmed layer covers MCP tools.
+    pub(crate) confirmed: Option<Vec<String>>,
+}
+
+impl McpLayer {
+    /// The MCP denies the layer should carry now: the last answer's, or
+    /// before any answer every MCP tool when the owner's servers may run.
+    pub(crate) fn target(&self) -> Vec<String> {
+        match &self.known {
+            Some(known) => known.clone(),
+            None if self.owner_mcp => vec![MCP_WILDCARD_DENY.to_owned()],
+            None => Vec::new(),
+        }
+    }
+
+    /// The denies the child holds or is about to: the apply in flight
+    /// wins over the confirmed one.
+    fn outstanding(&self) -> Option<&Vec<String>> {
+        self.in_flight.as_ref().map(|(_, denies)| denies).or(self.confirmed.as_ref())
+    }
 }
 
 /// The shared confirmation state: everything the pump thread needs to
@@ -185,11 +236,13 @@ pub struct ControlHub {
     /// resumes the session instead of writing into a dead stdin. A child
     /// that never spawned was never lost.
     pub(crate) child_lost: AtomicBool,
-    /// The current child's stdin, shared with its [`crate::child::RunningChild`]
-    /// so the pump can refresh the Read-only MCP denies the moment an
-    /// `mcp_status` answer lands — before the model can reach a tool —
-    /// rather than on the next dispatch. Tagged with the child's epoch.
-    pub(crate) stdin: Mutex<Option<(u64, ChildStdinHandle)>>,
+    /// The current child's stdin writer, shared with its
+    /// [`crate::child::RunningChild`] so the pump can queue the Read-only
+    /// MCP refresh the moment an `mcp_status` answer lands — before the
+    /// model can reach a tool — rather than on the next dispatch. Queued,
+    /// never waited on: the pump never blocks on stdin. Tagged with the
+    /// child's epoch.
+    pub(crate) stdin: Mutex<Option<(u64, StdinWriter)>>,
     /// `mcp_status` and MCP-refresh `apply_flag_settings` lines the hub
     /// addressed, in order (`baaz-mcp-…` ids), recorded whether or not a
     /// child took them — what tests read.
@@ -198,6 +251,10 @@ pub struct ControlHub {
     mcp_seq: AtomicU64,
     /// The Read-only layer's MCP state (see [`McpLayer`]).
     pub(crate) mcp: Mutex<McpLayer>,
+    /// Signalled whenever [`Self::mcp`] may have settled (an answer, a
+    /// refusal, a failed write, a lost child): what a held Read-only turn
+    /// waits on.
+    mcp_settled: Condvar,
 }
 
 impl ControlHub {
@@ -226,6 +283,7 @@ impl ControlHub {
             mcp_sent: Mutex::new(Vec::new()),
             mcp_seq: AtomicU64::new(0),
             mcp: Mutex::new(McpLayer::default()),
+            mcp_settled: Condvar::new(),
         }
     }
 
@@ -234,39 +292,54 @@ impl ControlHub {
     pub(crate) fn begin_child(&self) -> u64 {
         self.child_lost.store(false, Ordering::SeqCst);
         // A fresh child holds only the layer its argv gave it, and that
-        // one carries no MCP denies: the next answer re-applies them.
+        // one carries no MCP denies; its servers are its own, so the last
+        // child's answer no longer counts either.
         {
             let mut mcp = self.mcp.lock().expect("mcp mutex");
             mcp.layer_on = false;
-            mcp.applied.clear();
+            mcp.known = None;
+            mcp.in_flight = None;
+            mcp.confirmed = None;
         }
         self.child_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// The child of `epoch` writes through `stdin`: hub-initiated lines
-    /// (the MCP refresh) go to the same handle its turns do.
-    pub(crate) fn attach_stdin(&self, epoch: u64, stdin: ChildStdinHandle) {
+    /// (the MCP refresh) go to the same writer its turns do.
+    pub(crate) fn attach_stdin(&self, epoch: u64, stdin: StdinWriter) {
         *self.stdin.lock().expect("stdin mutex") = Some((epoch, stdin));
     }
 
-    /// Write one hub-initiated line to the current child, when one is
-    /// attached. A retired child's handle is never written to.
-    fn write_line(&self, line: &str) -> std::io::Result<()> {
-        let stdin = self.stdin.lock().expect("stdin mutex").clone();
-        match stdin {
-            Some((epoch, stdin)) if epoch == self.child_epoch.load(Ordering::SeqCst) => {
-                let mut stdin = stdin.lock().expect("child stdin mutex");
-                stdin.write_all(line.as_bytes())?;
-                stdin.write_all(b"\n")?;
-                stdin.flush()
-            }
-            _ => Ok(()),
+    /// The child of `epoch` is gone: drop the hub's handle on its writer.
+    /// A newer child's writer is left alone.
+    pub(crate) fn detach_stdin(&self, epoch: u64) {
+        let mut stdin = self.stdin.lock().expect("stdin mutex");
+        if stdin.as_ref().is_some_and(|(attached, _)| *attached == epoch) {
+            *stdin = None;
         }
     }
 
-    /// Record, track and deliver one hub-initiated control line; a failed
-    /// delivery untracks at once (no answer can come).
-    fn send_hub_control(&self, request: serde_json::Value, kind: PendingControlKind) {
+    /// The current child's writer, when one is attached. A retired
+    /// child's writer is never handed out.
+    fn current_writer(&self) -> Option<StdinWriter> {
+        match &*self.stdin.lock().expect("stdin mutex") {
+            Some((epoch, stdin)) if *epoch == self.child_epoch.load(Ordering::SeqCst) => Some(stdin.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record, track and queue one hub-initiated control line (never
+    /// waiting on the write — this runs on the pump). Returns its
+    /// `request_id` and whether it was queued: a writer that has stopped
+    /// untracks it at once (no answer can come). With no child attached
+    /// the line is recorded and tracked but not delivered, as the
+    /// adapter's own sends are.
+    fn send_hub_control(
+        &self,
+        request: serde_json::Value,
+        kind: PendingControlKind,
+        wanted_mcp: Option<Vec<String>>,
+    ) -> (String, bool) {
         let request_id = format!("baaz-mcp-{}", self.mcp_seq.fetch_add(1, Ordering::SeqCst));
         let line = serde_json::json!({
             "type": "control_request",
@@ -275,10 +348,17 @@ impl ControlHub {
         })
         .to_string();
         self.mcp_sent.lock().expect("mcp sent mutex").push(line.clone());
-        self.track(PendingControl::bare(kind, request_id.clone()));
-        if self.write_line(&line).is_err() {
+        let mut pending = PendingControl::bare(kind, request_id.clone());
+        pending.wanted_mcp = wanted_mcp;
+        self.track(pending);
+        let queued = match self.current_writer() {
+            Some(writer) => writer.enqueue(line, Some(request_id.clone())).is_ok(),
+            None => true,
+        };
+        if !queued {
             self.untrack(&request_id);
         }
+        (request_id, queued)
     }
 
     /// Ask the child for its MCP servers (`mcp_status`), unless a query is
@@ -293,47 +373,167 @@ impl ControlHub {
         if in_flight {
             return;
         }
-        self.send_hub_control(serde_json::json!({"subtype": "mcp_status"}), PendingControlKind::McpStatus);
+        self.send_hub_control(serde_json::json!({"subtype": "mcp_status"}), PendingControlKind::McpStatus, None);
+        self.mcp_settled.notify_all();
     }
 
-    /// The Read-only layer went on (`true`, carrying [`Self::known_mcp_denies`]
-    /// when applied live, nothing when it rode `--settings`) or came off.
-    pub(crate) fn note_read_only_layer(&self, on: bool, applied: Vec<String>) {
+    /// A child was launched: `launched` says its argv carried the
+    /// Read-only layer on `--settings`, `owner_mcp` that it may serve the
+    /// owner's own MCP servers. A `--settings` layer carries no MCP
+    /// denies, which is all a child that serves no owner servers needs —
+    /// so only that one counts as confirmed; one that does gets the live
+    /// layer from the adapter at once ([`Self::send_read_only_layer`]).
+    pub(crate) fn note_launched_layer(&self, launched: bool, owner_mcp: bool) {
         let mut mcp = self.mcp.lock().expect("mcp mutex");
-        mcp.layer_on = on;
-        mcp.applied = if on { applied } else { Vec::new() };
+        mcp.layer_on = launched;
+        mcp.owner_mcp = owner_mcp;
+        mcp.in_flight = None;
+        mcp.confirmed = (launched && !owner_mcp).then(Vec::new);
+        drop(mcp);
+        self.mcp_settled.notify_all();
     }
 
-    /// The MCP denies the last `mcp_status` answer called for (empty
-    /// before any answer).
-    pub(crate) fn known_mcp_denies(&self) -> Vec<String> {
-        self.mcp.lock().expect("mcp mutex").known.clone().unwrap_or_default()
+    /// Put the Read-only layer on live (`wanted` is Read-only, carrying
+    /// [`McpLayer::target`]) or take it off (`wanted` is the mode being
+    /// left for) as ONE step against the pump: the layer state moves and
+    /// the line is queued under the [`McpLayer`] lock, so an `mcp_status`
+    /// answer folding meanwhile either lands before (and is carried) or
+    /// after (and sees the new state) — never between the write and the
+    /// state change. Returns the line (for the adapter's record) and,
+    /// when a child is attached, where its write result lands: the caller
+    /// waits on it after this returns, never under the lock.
+    pub(crate) fn send_read_only_layer(
+        &self,
+        request_id: String,
+        wanted: PermissionMode,
+    ) -> (String, Option<crossbeam_channel::Receiver<std::io::Result<()>>>) {
+        let on = wanted == PermissionMode::DenyUnmatched;
+        let mut mcp = self.mcp.lock().expect("mcp mutex");
+        let denies = if on { mcp.target() } else { Vec::new() };
+        let line = crate::apply_read_only_control_request(&request_id, on, &denies);
+        let mut pending = PendingControl::bare(PendingControlKind::ApplyReadOnly(wanted), request_id.clone());
+        pending.wanted_mcp = on.then(|| denies.clone());
+        self.track(pending);
+        let reply = self.current_writer().map(|writer| writer.enqueue_with_reply(line.clone()));
+        mcp.layer_on = on;
+        mcp.confirmed = None;
+        mcp.in_flight = on.then_some((request_id, denies));
+        drop(mcp);
+        self.mcp_settled.notify_all();
+        (line, reply)
+    }
+
+    /// The layer line `request_id` never reached the child: untrack it and
+    /// put the state back to what the child still holds — no layer when
+    /// it was going on, the layer when it was coming off.
+    pub(crate) fn read_only_layer_unsent(&self, request_id: &str, on: bool) {
+        self.untrack(request_id);
+        let mut mcp = self.mcp.lock().expect("mcp mutex");
+        if mcp.in_flight.as_ref().is_some_and(|(id, _)| id == request_id) {
+            mcp.in_flight = None;
+        }
+        mcp.layer_on = !on;
+        drop(mcp);
+        self.mcp_settled.notify_all();
     }
 
     /// An `mcp_status` answer landed: remember the denies it calls for and,
-    /// while the Read-only layer is on and they moved, apply the layer
-    /// again carrying them (`apply_flag_settings` replaces the layer's
-    /// `permissions`, so the base rules ride along). A refusal falls back
-    /// like any refused layer: banner plus a relaunch carrying it.
+    /// while the Read-only layer is on and they differ from what the child
+    /// holds or is about to, apply the layer again carrying them
+    /// (`apply_flag_settings` replaces the layer's `permissions`, so the
+    /// base rules ride along). Decided and queued under the [`McpLayer`]
+    /// lock (see [`Self::send_read_only_layer`]); the denies count as held
+    /// only once the child answers `success`, so a write that fails — or a
+    /// refusal — leaves the next identical answer free to send again. A
+    /// refusal falls back like any refused layer: banner plus a relaunch
+    /// carrying it.
     fn refresh_mcp_denies(&self, servers: &[crate::argv::McpServerStatus]) {
         let denies = crate::argv::read_only_mcp_denies(servers);
-        let send = {
+        let unsent = {
             let mut mcp = self.mcp.lock().expect("mcp mutex");
             mcp.known = Some(denies.clone());
-            let send = mcp.layer_on && mcp.applied != denies;
-            if send {
-                mcp.applied = denies.clone();
+            if !mcp.layer_on || mcp.outstanding() == Some(&denies) {
+                None
+            } else {
+                let (request_id, queued) = self.send_hub_control(
+                    serde_json::json!({
+                        "subtype": "apply_flag_settings",
+                        "settings": crate::argv::read_only_settings_with(&denies),
+                    }),
+                    PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched),
+                    Some(denies.clone()),
+                );
+                if queued {
+                    mcp.in_flight = Some((request_id, denies));
+                    None
+                } else {
+                    Some(request_id)
+                }
             }
-            send
         };
-        if send {
-            self.send_hub_control(
-                serde_json::json!({
-                    "subtype": "apply_flag_settings",
-                    "settings": crate::argv::read_only_settings_with(&denies),
-                }),
-                PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched),
+        if let Some(request_id) = unsent {
+            self.refuse(
+                PendingControl::bare(PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched), request_id),
+                "the child's stdin writer has stopped",
             );
+        }
+    }
+
+    /// A hub-initiated line for the child of `epoch` failed to write: its
+    /// request can never be answered, so refuse it now (a refused layer
+    /// banners and owes a relaunch carrying it) rather than at its
+    /// timeout. A retired child's failures change nothing.
+    pub(crate) fn hub_write_failed(&self, epoch: u64, request_id: &str, reason: &str) {
+        if self.child_epoch.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        let pending = self.pending.lock().expect("pending mutex").remove(request_id);
+        if let Some(pending) = pending {
+            self.refuse(pending, &format!("could not write to the child: {reason}"));
+        }
+        self.mcp_settled.notify_all();
+    }
+
+    /// Hold a Read-only turn until the child confirmed the layer's MCP
+    /// denies: no `mcp_status` query open, no layer apply in flight, and
+    /// the confirmed denies the ones the last answer called for. Returns
+    /// at once when there is nothing to hold for — the layer is off, the
+    /// child serves no owner servers, or no child is attached to deliver
+    /// to. Past `timeout`, a layer the child confirmed earlier (at worst
+    /// [`MCP_WILDCARD_DENY`]) still lets the turn go; none refuses it,
+    /// failing closed.
+    pub(crate) fn await_mcp_layer(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let attached = self.current_writer().is_some();
+        let mut mcp = self.mcp.lock().expect("mcp mutex");
+        loop {
+            if !mcp.layer_on || !mcp.owner_mcp || !attached {
+                return Ok(());
+            }
+            if self.child_lost.load(Ordering::SeqCst) {
+                return Err("the Claude Code process exited before it confirmed the Read-only rules".into());
+            }
+            let asking = self
+                .pending
+                .lock()
+                .expect("pending mutex")
+                .values()
+                .any(|pending| pending.kind == PendingControlKind::McpStatus);
+            if !asking && mcp.in_flight.is_none() && mcp.confirmed.as_ref() == Some(&mcp.target()) {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return match mcp.confirmed {
+                    Some(_) => Ok(()),
+                    None => Err(format!(
+                        "Claude Code has not confirmed the Read-only rules for your MCP tools within {}s; \
+                         the turn was not sent",
+                        timeout.as_secs()
+                    )),
+                };
+            }
+            mcp = self.mcp_settled.wait_timeout(mcp, deadline - now).expect("mcp mutex").0;
         }
     }
 
@@ -360,6 +560,8 @@ impl ControlHub {
     /// pick it legitimately holds and bannering a stale failure.
     pub(crate) fn forget_pending(&self) {
         self.pending.lock().expect("pending mutex").clear();
+        self.mcp.lock().expect("mcp mutex").in_flight = None;
+        self.mcp_settled.notify_all();
     }
 
     /// Take a due effort relaunch, when a refusal recorded one. The take
@@ -421,6 +623,7 @@ impl ControlHub {
             let _ = self.tx.send(ProviderEvent::Deltas { session_id, deltas });
         }
         let _ = self.tx.send(ProviderEvent::ConnectionLost { reason: reason.to_owned() });
+        self.mcp_settled.notify_all();
     }
 
     /// Confirm every queued answer, then refuse every request the child
@@ -439,6 +642,7 @@ impl ControlHub {
             );
         }
         self.expire_timeouts();
+        self.mcp_settled.notify_all();
     }
 
     /// Confirm one answer against its pending request: `success` finalises
@@ -472,6 +676,15 @@ impl ControlHub {
                 PendingControlKind::McpStatus => {
                     if let Some(servers) = mcp_servers {
                         self.refresh_mcp_denies(&servers);
+                    }
+                }
+                PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched) => {
+                    // The child holds these denies now — the only moment
+                    // they count as held.
+                    let mut mcp = self.mcp.lock().expect("mcp mutex");
+                    if mcp.in_flight.as_ref().is_some_and(|(id, _)| *id == pending.request_id) {
+                        mcp.in_flight = None;
+                        mcp.confirmed = pending.wanted_mcp.clone();
                     }
                 }
                 _ => {}
@@ -565,6 +778,14 @@ impl ControlHub {
                 );
             }
             PendingControlKind::ApplyReadOnly(wanted) => {
+                // No answer will confirm it: the next `mcp_status` answer
+                // may send the same denies again.
+                {
+                    let mut mcp = self.mcp.lock().expect("mcp mutex");
+                    if mcp.in_flight.as_ref().is_some_and(|(id, _)| *id == pending.request_id) {
+                        mcp.in_flight = None;
+                    }
+                }
                 let session_id = self.session_id.lock().expect("session mutex").clone();
                 let what = if wanted == PermissionMode::DenyUnmatched { "add" } else { "remove" };
                 match session_id {

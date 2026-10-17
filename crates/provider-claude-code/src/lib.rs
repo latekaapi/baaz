@@ -47,7 +47,7 @@ use frame::ApprovalRequest;
 
 pub use controls::{
     CONTROL_CONFIRM_TIMEOUT, CONTROL_EFFORT_REJECTED_CARD, CONTROL_MODEL_REJECTED_CARD,
-    CONTROL_MODE_FALLBACK_CARD, CONTROL_MODE_REJECTED_CARD,
+    CONTROL_MODE_FALLBACK_CARD, CONTROL_MODE_REJECTED_CARD, MCP_LAYER_HOLD, MCP_WILDCARD_DENY,
 };
 pub use fold::CHILD_EXITED_CARD;
 
@@ -538,6 +538,7 @@ impl ClaudeCodeAdapter {
             previous_fold_model: None,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         };
         let _ = self.send_control(&initialize_control_request(&request_id), pending);
@@ -564,6 +565,7 @@ impl ClaudeCodeAdapter {
             previous_fold_model,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         };
         self.send_control(&set_model_control_request(&request_id, model), pending)
@@ -635,6 +637,7 @@ impl ClaudeCodeAdapter {
             previous_fold_model: None,
             wanted_effort: Some(level.to_owned()),
             previous_effort,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         };
         self.send_control(&apply_effort_control_request(&request_id, level), pending)
@@ -653,6 +656,7 @@ impl ClaudeCodeAdapter {
             previous_fold_model: None,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         };
         self.send_control(&set_permission_mode_control_request(&request_id, mode), pending)
@@ -662,24 +666,28 @@ impl ClaudeCodeAdapter {
     /// the live child (`wanted` is Read-only) or taking it off (`wanted` is
     /// the mode being left for). A refusal banners and records a resume
     /// relaunch, which carries the layer exactly when the mode does.
+    ///
+    /// The layer state and the line move as one step in the hub
+    /// ([`ControlHub::send_read_only_layer`]), so the pump's MCP refresh
+    /// can never interleave between them. Going on, the owner's own acting
+    /// MCP tools ride as last known — or every MCP tool
+    /// ([`MCP_WILDCARD_DENY`]) before any answer — and a fresh
+    /// `mcp_status` then refines them from the pump.
     fn send_apply_read_only(&self, wanted: PermissionMode) -> Result<(), ProviderError> {
         let request_id = self.next_control_id();
-        let pending = PendingControl {
-            kind: PendingControlKind::ApplyReadOnly(wanted),
-            request_id: request_id.clone(),
-            wanted_model: None,
-            previous_model: None,
-            previous_fold_model: None,
-            wanted_effort: None,
-            previous_effort: None,
-            sent_at: Instant::now(),
-        };
         let on = wanted == PermissionMode::DenyUnmatched;
-        // The owner's own acting MCP tools ride the layer as last known;
-        // a fresh `mcp_status` then refreshes them from the pump.
-        let mcp_denies = if on { self.hub.known_mcp_denies() } else { Vec::new() };
-        self.send_control(&apply_read_only_control_request(&request_id, on, &mcp_denies), pending)?;
-        self.hub.note_read_only_layer(on, mcp_denies);
+        let (line, reply) = self.hub.send_read_only_layer(request_id.clone(), wanted);
+        self.sent_control.lock().expect("sent control mutex").push(line);
+        let delivered = match reply {
+            Some(reply) => reply
+                .recv()
+                .unwrap_or_else(|_| Err(std::io::Error::other("the child's stdin writer has stopped"))),
+            None => Ok(()),
+        };
+        if let Err(error) = delivered {
+            self.hub.read_only_layer_unsent(&request_id, on);
+            return Err(ProviderError::Unavailable { reason: format!("the session child is unreachable: {error}") });
+        }
         if on {
             self.hub.query_mcp_status();
         }
@@ -702,9 +710,11 @@ impl ClaudeCodeAdapter {
         let launched = argv::carries_read_only_settings(launch);
         *self.read_only_layer.lock().expect("read-only mutex") =
             if launched { ReadOnlyLayer::Launched } else { ReadOnlyLayer::Off };
-        // The `--settings` layer carries no MCP denies: the `mcp_status`
-        // answer after `initialize` adds them live.
-        self.hub.note_read_only_layer(launched, Vec::new());
+        // The `--settings` layer carries no MCP denies: a child that may
+        // serve the owner's own servers gets them live at once (see
+        // `cover_launched_mcp`), refined by the `mcp_status` answer.
+        let owner_mcp = !launch.argv.iter().any(|arg| arg == "--strict-mcp-config");
+        self.hub.note_launched_layer(launched, owner_mcp);
         // A child launched in Full access already owes no relaunch into it.
         if bypass {
             *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
@@ -719,6 +729,24 @@ impl ClaudeCodeAdapter {
                 session_id: launch.session_id.clone(),
                 mode,
             });
+        }
+    }
+
+    /// A child launched Read-only that may serve the owner's own MCP
+    /// servers gets the live layer over its `--settings` one at once,
+    /// carrying every MCP tool ([`MCP_WILDCARD_DENY`]) until its first
+    /// `mcp_status` answer narrows it: nothing it serves is reachable
+    /// through an owner allow rule before the denies are known. Best
+    /// effort — a refusal banners and owes a relaunch, and a Read-only
+    /// turn is held until some MCP layer is confirmed
+    /// ([`ControlHub::await_mcp_layer`]).
+    fn cover_launched_mcp(&self) {
+        let (layer_on, owner_mcp) = {
+            let mcp = self.hub.mcp.lock().expect("mcp mutex");
+            (mcp.layer_on, mcp.owner_mcp)
+        };
+        if layer_on && owner_mcp {
+            let _ = self.send_apply_read_only(PermissionMode::DenyUnmatched);
         }
     }
 
@@ -832,6 +860,7 @@ impl ClaudeCodeAdapter {
         // Before `initialize` goes out: its answer reports the mode the
         // child really took, and must land after the launched one.
         self.note_launch_mode(launch);
+        self.cover_launched_mcp();
         // The catalog arrives on the child's answer to this: without it
         // `ListModels` has nothing to serve but the offline fallback.
         self.send_initialize();
@@ -1089,6 +1118,7 @@ impl ClaudeCodeAdapter {
         // A relaunched child restates the whole session, catalog included
         // — and its mode, which must land after the launched one.
         self.note_launch_mode(&launch);
+        self.cover_launched_mcp();
         self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
         if let Some(model) = &launch.model {
@@ -1603,6 +1633,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                         }
                     }
                 }
+                // Read-only with the owner's own MCP servers: the turn waits
+                // for the child to confirm the layer's MCP denies (this
+                // dispatch's `mcp_status` answer and the apply carrying
+                // it), failing closed (see `ControlHub::await_mcp_layer`).
+                // The CLI emits no frame when a server's tool list changes
+                // mid-turn (2.1.276 has none on stream-json), so a tool a
+                // server adds during a turn is covered from the next one.
+                self.hub
+                    .await_mcp_layer(MCP_LAYER_HOLD)
+                    .map_err(|reason| ProviderError::Unavailable { reason })?;
                 let (text, images) = Self::split_parts(&parts);
                 self.submit_parts(&session_id, &text, &images, request_id, display_text.as_deref())
             }
@@ -1987,6 +2027,7 @@ mod tests {
                 previous_fold_model: None,
                 wanted_effort: None,
                 previous_effort: None,
+                wanted_mcp: None,
                 sent_at: Instant::now(),
             });
             for line in text.lines() {
@@ -2577,6 +2618,7 @@ mod tests {
             previous_fold_model: None,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         });
         adapter.ingest_child_line(&catalog_line("init-1", "success", None));
@@ -2947,6 +2989,7 @@ mod tests {
             previous_fold_model: None,
             wanted_effort: None,
             previous_effort: None,
+            wanted_mcp: None,
             sent_at: Instant::now(),
         });
         adapter.ingest_child_line(&catalog_line("init-1", "success", None));
@@ -2998,6 +3041,7 @@ mod tests {
                 previous_fold_model: None,
                 wanted_effort: None,
                 previous_effort: None,
+                wanted_mcp: None,
                 sent_at: Instant::now(),
             });
         };
@@ -3433,6 +3477,178 @@ mod tests {
         let before = mcp_lines(&adapter).len();
         answer_mcp_status(&adapter, probe_servers("pending"));
         assert_eq!(mcp_lines(&adapter).len(), before, "the layer is off: nothing applied");
+    }
+
+    /// Attach a scripted stdin to the adapter's hub as a fresh child's:
+    /// its writer thread delivers every line the hub or a layer apply
+    /// queues, running `hook` on each.
+    fn attach_scripted_stdin(
+        adapter: &ClaudeCodeAdapter,
+        hook: Option<child::testing::LineHook>,
+    ) -> (Arc<Mutex<Vec<String>>>, Arc<std::sync::atomic::AtomicBool>) {
+        let stdin = child::testing::ScriptedStdin::new(hook);
+        let handles = (Arc::clone(&stdin.lines), Arc::clone(&stdin.fail));
+        let epoch = adapter.hub.child_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        let writer = child::StdinWriter::spawn(stdin, &adapter.hub, epoch).expect("writer");
+        adapter.hub.attach_stdin(epoch, writer);
+        handles
+    }
+
+    /// Answer the hub's last `apply_flag_settings` with success.
+    fn confirm_last_layer(adapter: &ClaudeCodeAdapter) {
+        let apply = mcp_lines(adapter)
+            .into_iter()
+            .rev()
+            .find(|line| line["request"]["subtype"] == "apply_flag_settings")
+            .expect("a layer apply");
+        adapter.ingest_child_line(&success_line(apply["request_id"].as_str().expect("id")));
+    }
+
+    /// A refresh whose write fails is never counted as held: the failure
+    /// refuses it at once (banner, plus a relaunch carrying the layer),
+    /// and the next identical answer sends the same denies again. Only
+    /// the child's `success` makes them held — after that an identical
+    /// answer sends nothing.
+    #[test]
+    fn a_refresh_that_never_reached_the_child_is_sent_again() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        let launch = argv::with_permission_mode(
+            argv::argv_for_resume("sess-1", None, None, None),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        adapter.hub.begin_child();
+        adapter.note_launch_mode(&launch);
+        let (written, fail) = attach_scripted_stdin(&adapter, None);
+        adapter.hub.query_mcp_status();
+        assert!(child::testing::wait_until(|| written.lock().expect("lines").len() == 1), "the query reached the child");
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        let applies = || mcp_lines(&adapter).iter().filter(|line| line["request"]["subtype"] == "apply_flag_settings").count();
+        assert_eq!(applies(), 1);
+        let mut cards = Vec::new();
+        assert!(
+            child::testing::wait_until(|| {
+                cards.extend(control_cards(&drain_events(&adapter)));
+                cards.iter().any(|(kind, text)| kind == CONTROL_MODE_REJECTED_CARD && text.contains("could not write"))
+            }),
+            "the failed write refuses the refresh: {cards:?}"
+        );
+        assert!(adapter.hub.mcp.lock().expect("mcp").in_flight.is_none());
+        assert!(adapter.hub.mcp.lock().expect("mcp").confirmed.as_deref() == Some(&[][..]), "still only the launch layer");
+        assert!(adapter.hub.take_effort_relaunch().is_some(), "a relaunch carrying the layer is owed");
+
+        // A pipe that broke stays broken; the relaunched child's writer
+        // takes lines again. The same answer: sent again, and it lands.
+        let (lines, _) = attach_scripted_stdin(&adapter, None);
+        adapter.hub.query_mcp_status();
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        assert_eq!(applies(), 2, "an identical answer resends what never landed");
+        confirm_last_layer(&adapter);
+        let held = adapter.hub.mcp.lock().expect("mcp").confirmed.clone();
+        assert_eq!(held, Some(vec!["mcp__later".to_owned(), "mcp__probe__poke".to_owned()]));
+        adapter.hub.query_mcp_status();
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        assert_eq!(applies(), 2, "held: nothing more to send");
+        assert!(child::testing::wait_until(|| lines.lock().expect("lines").iter().any(|line| line.contains("mcp__probe__poke"))));
+    }
+
+    /// Leaving a live Read-only is one step against the pump: an
+    /// `mcp_status` answer that folds while the clear is being written —
+    /// here, from inside the write itself — sees the layer already off and
+    /// sends nothing, so the last layer line the child gets is the clear.
+    /// (Before, the answer re-applied the layer after the clear.) Entering
+    /// is the mirror: the answer carries into the new layer.
+    #[test]
+    fn an_mcp_answer_racing_a_mode_pick_never_lands_on_the_wrong_side() {
+        let adapter = Arc::new(ClaudeCodeAdapter::new("claude-must-never-spawn"));
+        adapter.attach_session_for_tests("sess-1");
+        adapter.hub.begin_child();
+        let racing = Arc::clone(&adapter);
+        let hook: child::testing::LineHook = Box::new(move |line: &str| {
+            let value: serde_json::Value = serde_json::from_str(line).expect("json");
+            let settings = &value["request"]["settings"];
+            if value["request"]["subtype"] == "apply_flag_settings" && settings["permissions"].is_null() {
+                // The pump lands an answer exactly as the clear goes out.
+                racing.hub.query_mcp_status();
+                answer_mcp_status(&racing, probe_servers("pending"));
+            }
+        });
+        let (lines, _) = attach_scripted_stdin(&adapter, Some(hook));
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        answer_mcp_status(&adapter, probe_servers("failed"));
+        // The clear's write — the hook's racing answer included — is
+        // done when the pick returns: it waits on the write.
+        pick(&adapter, PermissionMode::PromptUnmatched);
+        let written = lines.lock().expect("lines").clone();
+        let layers: Vec<serde_json::Value> = written
+            .iter()
+            .filter_map(|line| applied_settings(line))
+            .collect();
+        assert_eq!(layers.last(), Some(&argv::read_only_settings_cleared()), "{layers:?}");
+        let sent_layers = mcp_lines(&adapter)
+            .iter()
+            .filter(|line| line["request"]["subtype"] == "apply_flag_settings")
+            .count();
+        assert_eq!(sent_layers, 1, "only the refresh while on; none after the clear");
+        assert!(!adapter.hub.mcp.lock().expect("mcp").layer_on);
+    }
+
+    /// The first Read-only turn with the owner's own MCP servers waits for
+    /// the child to confirm the layer: the launch applies every MCP tool
+    /// denied (`mcp__*`) live at once; the hold waits for the
+    /// `mcp_status` answer and for the apply carrying its denies; and with
+    /// no layer confirmed in time the turn is refused, never sent open.
+    #[test]
+    fn a_read_only_turn_waits_for_the_mcp_layer_and_fails_closed() {
+        let adapter = Arc::new(ClaudeCodeAdapter::new("claude-must-never-spawn"));
+        adapter.attach_session_for_tests("sess-1");
+        adapter.hub.begin_child();
+        let (_lines, _) = attach_scripted_stdin(&adapter, None);
+        // An owner-MCP launch (no `--strict-mcp-config`), Read-only.
+        let launch = argv::with_permission_mode(
+            argv::without_strict_mcp(argv::argv_for_resume("sess-1", None, None, None)),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        adapter.note_launch_mode(&launch);
+        adapter.cover_launched_mcp();
+        let first = applied_settings(&adapter.sent_control_lines()[0]).expect("the live layer");
+        assert!(deny_rules(&first).contains(&MCP_WILDCARD_DENY.to_owned()), "{first}");
+
+        // Nothing confirmed: the hold refuses the turn.
+        let refused = adapter.hub.await_mcp_layer(std::time::Duration::from_millis(30));
+        assert!(refused.is_err(), "{refused:?}");
+
+        // The wildcard confirmed, the answer and its apply still open: the
+        // hold waits for both, then lets the turn go.
+        let wildcard = serde_json::from_str::<serde_json::Value>(&adapter.sent_control_lines()[0]).expect("json");
+        adapter.ingest_child_line(&success_line(wildcard["request_id"].as_str().expect("id")));
+        let waiter = {
+            let adapter = Arc::clone(&adapter);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                (adapter.hub.await_mcp_layer(std::time::Duration::from_secs(4)), started.elapsed())
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!waiter.is_finished(), "still waiting on the apply's answer");
+        confirm_last_layer(&adapter);
+        let (held, waited) = waiter.join().expect("waiter");
+        assert!(held.is_ok(), "{held:?}");
+        assert!(waited < std::time::Duration::from_secs(3), "released by the answer, not the timeout: {waited:?}");
+
+        // A strict launch serves no owner servers: nothing to hold for.
+        let strict = argv::with_permission_mode(
+            argv::argv_for_resume("sess-1", None, None, None),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        adapter.hub.begin_child();
+        let _ = attach_scripted_stdin(&adapter, None);
+        adapter.note_launch_mode(&strict);
+        assert!(adapter.hub.await_mcp_layer(std::time::Duration::from_millis(1)).is_ok());
     }
 
     /// A child launched Read-only carries its layer on `--settings`, which

@@ -47,6 +47,12 @@ pub(super) struct OpeningLane {
 /// without moving it out of the view.
 pub(super) struct ProviderLane {
     provider: Arc<Mutex<provider::Provider>>,
+    /// The mode an opening view's open asked for, carried past the attach
+    /// until the provider reports one (`ApprovalModeChanged`): the session
+    /// runs in it meanwhile, so the chip keeps showing it rather than the
+    /// fold's seeded default — which could read less access than the
+    /// child has.
+    unreported_mode: Option<aui_protocol::PermissionMode>,
 }
 
 /// A question a new provider raised, waiting on the person. The full prompt
@@ -108,12 +114,21 @@ impl SessionView {
     }
 
     /// The mode an opening provider view's open asked for, while no child
-    /// has reported one (see [`OpeningLane`]).
+    /// has reported one (see [`OpeningLane`] and
+    /// [`ProviderLane::unreported_mode`]).
     pub(super) fn opening_mode(&self) -> Option<aui_protocol::PermissionMode> {
         match &self.lane {
             Lane::Opening(opening) => Some(opening.mode),
-            _ => None,
+            Lane::Provider(lane) => lane.unreported_mode,
+            Lane::Muse => None,
         }
+    }
+
+    /// Whether this view was drawn on the click and never got its child:
+    /// still opening, or its open failed. Such a view stands on a
+    /// provisional id nothing else outlives it with.
+    pub(crate) fn is_opening_lane(&self) -> bool {
+        matches!(self.lane, Lane::Opening(_))
     }
 
     /// Hang up the lane's provider child, if this view owns one. Idempotent:
@@ -190,10 +205,18 @@ impl SessionView {
             return;
         }
         if session_id != self.session_id {
-            self.session_id = session_id;
-            self.sent_items = crate::sent::load(&self.session_id);
+            let provisional = std::mem::replace(&mut self.session_id, session_id);
+            // What the person sent while opening was recorded under the
+            // provisional id: it moves to the real one, beside anything
+            // already recorded there, never dropped.
+            let made_while_opening = std::mem::take(&mut self.sent_items);
+            self.sent_items = crate::sent::rekey(&provisional, &self.session_id, made_while_opening);
         }
+        let requested = self.opening_mode();
         self.install_lane(provider, events, cx);
+        if let Lane::Provider(lane) = &mut self.lane {
+            lane.unreported_mode = requested;
+        }
         cx.notify();
     }
 
@@ -210,7 +233,7 @@ impl SessionView {
         let id = self.session_id.clone();
         let workspace = self.workspace.clone();
         self.fold.ensure_session(&id, agent, String::new(), workspace);
-        self.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)) });
+        self.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)), unreported_mode: None });
         // A (re)opened lane may have missed an approval or a question while
         // it was away: pull the pending set, the way the muse lane's
         // `reconnected` re-reads `approval/listPending` before trusting the
@@ -363,7 +386,12 @@ impl SessionView {
                 if session_id != self.session_id {
                     return;
                 }
-                if self.fold.set_session_mode(&session_id, mode) {
+                // The provider's word replaces the open's request.
+                let was_unreported = match &mut self.lane {
+                    Lane::Provider(lane) => lane.unreported_mode.take().is_some(),
+                    _ => false,
+                };
+                if self.fold.set_session_mode(&session_id, mode) || was_unreported {
                     cx.notify();
                 }
             }
