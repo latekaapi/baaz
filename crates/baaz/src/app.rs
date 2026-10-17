@@ -1307,6 +1307,9 @@ pub struct Harness {
     /// that lands after a cancel or a superseding switch never closes a
     /// view it did not replace. `None` outside a switch, like `replacing`.
     pub(crate) replacing_epoch: Option<u64>,
+    /// The replaced draft's approval mode and effort, which the switch's
+    /// replacement draft takes when it is drawn. `None` outside a switch.
+    pub(crate) switch_carry: Option<(aui_protocol::PermissionMode, Option<aui_protocol::ReasoningEffort>)>,
     /// One handoff run per source session: the machine in
     /// [`crate::handoff`]. The source view mirrors the run's card; this
     /// map is the authority the ack and cancel paths advance.
@@ -1648,6 +1651,7 @@ impl Harness {
             replacing_provider: None,
             replacing_draft_project: None,
             replacing_epoch: None,
+            switch_carry: None,
             handoffs: HashMap::new(),
             handoff_epoch: 0,
             pending_handoff: None,

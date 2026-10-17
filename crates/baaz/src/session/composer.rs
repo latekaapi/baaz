@@ -639,9 +639,25 @@ impl SessionView {
             self.close_menu(cx);
             return;
         }
+        // The person answered the Auto-fallback banner: it comes down.
+        self.dismiss_mode_fallback(cx);
         self.set_mode(mode, cx);
         cx.emit(SessionEvent::ModeSelected { mode: wire_mode(mode) });
         self.close_menu(cx);
+    }
+
+    /// Keep an open mode menu's check on the mode the chip reads. The check
+    /// is the menu's keyboard row, picked when it opened: a mode that moves
+    /// while it stands open (the provider's report landing, a model pick
+    /// leaving Auto) moves the check with it, never leaving it on a mode the
+    /// chip no longer names.
+    pub(super) fn sync_mode_menu_check(&mut self, cx: &mut Context<Self>) {
+        let checked = MODES.iter().position(|mode| *mode == self.mode()).unwrap_or(0);
+        self.overlays.update(cx, |overlays, _| {
+            if let Some(menu) = overlays.menu.as_mut().filter(|menu| menu.kind == MenuKind::Mode) {
+                menu.selected = checked;
+            }
+        });
     }
 
     /// Why `mode` cannot be picked on the chip's model — "Not available
@@ -652,14 +668,19 @@ impl SessionView {
         if model.is_empty() || !Self::resolve_mode_limits(&model, &self.mode_limits).contains(&mode) {
             return None;
         }
-        let label = match self.models.iter().find(|row| row.model_id == model) {
+        Some(format!("Not available for {}", self.model_label_for(&model)))
+    }
+
+    /// `model`'s human name: its catalog row's label, else Claude Code's
+    /// humanised id, else the id itself.
+    pub(super) fn model_label_for(&self, model: &str) -> String {
+        match self.models.iter().find(|row| row.model_id == model) {
             Some(row) => row.display_label.clone(),
             None if self.provider_kind() == ProviderId::ClaudeCode => {
-                crate::providers::claude_code_model_label(&model)
+                crate::providers::claude_code_model_label(model)
             }
-            None => model,
-        };
-        Some(format!("Not available for {label}"))
+            None => model.to_owned(),
+        }
     }
 
     /// The modes `model` cannot run in: its own catalog entry, else — the

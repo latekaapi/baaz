@@ -667,6 +667,7 @@ impl SessionView {
         if let Some(queue) = self.start_queue() {
             queue.model = Some(model_id.to_owned());
             self.apply_model_selected(model_id, cx);
+            self.leave_auto_if_unsupported(cx);
             return;
         }
         if !crate::providers::uses_legacy_pump(self.provider_kind()) {
@@ -705,6 +706,7 @@ impl SessionView {
             } else {
                 self.external_outbox.push(command);
             }
+            self.leave_auto_if_unsupported(cx);
             return;
         }
         let model = self.model_selection_for(model_id);
@@ -721,6 +723,52 @@ impl SessionView {
                 this.report(&error, cx);
             }
         });
+    }
+
+    /// A model pick onto a model the catalog says cannot run Auto, made
+    /// while the chip reads Auto: the requested mode becomes Ask at once —
+    /// the chip, the picker's check and the banner saying why all move on
+    /// the pick, not on the child's confirmation (Claude Code accepts the
+    /// switch and keeps reporting `auto`, so waiting showed a mode the
+    /// model cannot run). The provider's own report still has the last
+    /// word when it comes, and a later mode pick takes the banner down.
+    fn leave_auto_if_unsupported(&mut self, cx: &mut Context<Self>) {
+        if crate::providers::uses_legacy_pump(self.provider_kind())
+            || self.mode() != PermissionMode::OnRequest
+            || self.mode_unavailable(PermissionMode::OnRequest).is_none()
+        {
+            return;
+        }
+        let ask = PermissionMode::PromptUnmatched;
+        let text = format!(
+            "Auto is not available for {}; {} will ask before acting.",
+            self.model_label_for(&self.model_id()),
+            self.provider_kind().label()
+        );
+        self.show_mode_fallback(&text, cx);
+        if let Some(queue) = self.start_queue() {
+            queue.mode = Some(ask);
+            self.sync_mode_menu_check(cx);
+            cx.notify();
+            return;
+        }
+        if !self.is_provider_lane() {
+            return;
+        }
+        let previous = self.stand_on_mode(ask);
+        self.sync_mode_menu_check(cx);
+        let command = ProviderCommand::SelectApprovalMode {
+            request_id: new_command_id(),
+            session_id: self.session_id.clone(),
+            mode: ask,
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
+            if let Err(error) = result {
+                this.restore_unreported_mode(ask, previous);
+                this.report_provider_error(&error, cx);
+            }
+        });
+        cx.notify();
     }
 
     /// The `session/setModel` selection for `model_id`, from the catalog
@@ -830,7 +878,24 @@ impl SessionView {
             });
         }
         self.models_error = None;
+        self.sync_model_menu_check(cx);
         cx.notify();
+    }
+
+    /// Keep an open model menu's check on the row the chip names. The
+    /// menu's check is its keyboard row, an index picked when it opened —
+    /// and a catalog that folds while it stands open (the picker asks the
+    /// child for one on every open) reorders the rows under it: the supplied
+    /// three-alias list had no row for the CLI's `default`, so the check
+    /// sat past its end, at index 3, which the child's five-row catalog
+    /// names Sonnet while the chip read Default (recommended).
+    fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
+        let checked = self.model_menu_checked().unwrap_or(self.models.len());
+        self.overlays.update(cx, |overlays, _| {
+            if let Some(menu) = overlays.menu.as_mut().filter(|menu| menu.kind == MenuKind::Model) {
+                menu.selected = checked;
+            }
+        });
     }
 
     /// Record a model pick on the provider lane: the matching row marks
@@ -883,6 +948,10 @@ impl SessionView {
             return;
         }
         if self.is_provider_lane() {
+            // A request still standing unreported (the open's, or the
+            // fallback out of Auto) is superseded by this one: the chip
+            // reads the newest request until the provider reports.
+            let previous = self.opening_mode().and_then(|_| self.stand_on_mode(mode));
             let command = ProviderCommand::SelectApprovalMode {
                 request_id: new_command_id(),
                 session_id: self.session_id.clone(),
@@ -890,6 +959,9 @@ impl SessionView {
             };
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
+                    if previous.is_some() {
+                        this.restore_unreported_mode(mode, previous);
+                    }
                     this.report_provider_error(&error, cx);
                 }
             });

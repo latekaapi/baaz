@@ -808,6 +808,9 @@ pub struct SessionView {
     /// The banner's action, when the error is one the person can do something
     /// about: the label and what pressing it does.
     banner_action: Option<BannerAction>,
+    /// The banner shows the Auto-fallback notice (a model pick left Auto
+    /// for Ask), which a later mode pick takes down.
+    banner_is_mode_fallback: bool,
     /// The billing guard's banner, and whether it is refusing turns.
     tier_banner: Option<TierBanner>,
     /// Which approval's feedback field is open, as `(approvalId, choiceId)`.
@@ -1169,6 +1172,7 @@ impl SessionView {
             backfill_stale_retried: false,
             lease_notice: None,
             banner: None,
+            banner_is_mode_fallback: false,
             banner_action: None,
             tier_banner: None,
             feedback_open: None,
@@ -2119,6 +2123,27 @@ impl SessionView {
         self.on_draft_changed(cx);
     }
 
+    /// The approval mode and effort this unsent draft stands on — what a
+    /// provider switch carries into the draft that replaces it.
+    pub(crate) fn draft_settings(&self) -> (PermissionMode, Option<ReasoningEffort>) {
+        (self.mode(), self.effort)
+    }
+
+    /// Take a replaced draft's mode and effort (see [`Self::draft_settings`]):
+    /// a fresh view queues the mode for its start like any pick, and the
+    /// effort is the level the first turn asks for.
+    pub(crate) fn carry_draft_settings(
+        &mut self,
+        mode: PermissionMode,
+        effort: Option<ReasoningEffort>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode() != mode {
+            self.set_mode(mode, cx);
+        }
+        self.set_initial_effort(effort, cx);
+    }
+
     /// Whether a turn is in flight on this view: submitted and no
     /// `turn/started` yet, or the server says it runs. A sending view is no
     /// draft, even before its row exists.
@@ -2197,6 +2222,12 @@ impl SessionView {
             cx.notify();
             return;
         };
+        // A mode picked while opening (the fallback out of Auto among
+        // them) stands before the model replays, so the replayed model
+        // pick reads it rather than the open's request.
+        if let Some(mode) = queue.mode {
+            self.stand_on_mode(mode);
+        }
         if let Some(model) = queue.model {
             self.set_model(&model, cx);
         }

@@ -551,6 +551,14 @@ impl Harness {
     /// unknown payload records a step failure instead of capturing a
     /// window where nothing happened. Free: no turn, no wire.
     pub(crate) fn step_mode(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A bare `mode` is the session verb this window verb shadows: it
+        // opens the composer's approval-mode picker.
+        if rest.trim().is_empty() {
+            if let Some(view) = self.active.clone() {
+                view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx));
+                return;
+            }
+        }
         match crate::layout::Mode::parse(rest.trim()) {
             Some(mode) => self.set_mode(mode, window, cx),
             None => {
