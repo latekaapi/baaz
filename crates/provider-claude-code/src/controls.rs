@@ -85,6 +85,11 @@ pub(crate) enum PendingControlKind {
     /// exactly when the mode the child then reports is Read-only — a
     /// refused layer never leaves Read-only quietly unenforced.
     ApplyReadOnly(PermissionMode),
+    /// An `mcp_status` query (probed 2026-10-17): success reports the
+    /// owner's MCP servers and their tools' annotations, from which the
+    /// Read-only layer's MCP denies are refreshed; error or silence is
+    /// logged and changes nothing — the next dispatch asks again.
+    McpStatus,
 }
 
 /// One host→child control request awaiting its `control_response`.
@@ -108,6 +113,39 @@ pub(crate) struct PendingControl {
     /// When the line went out: silence past
     /// [`CONTROL_CONFIRM_TIMEOUT`] refuses, loudly.
     pub sent_at: Instant,
+}
+
+/// A child's stdin as the hub holds it: shared with the child, one line
+/// per lock.
+pub(crate) type ChildStdinHandle = Arc<Mutex<dyn std::io::Write + Send>>;
+
+impl PendingControl {
+    /// A request that records no model or effort to restore.
+    pub(crate) fn bare(kind: PendingControlKind, request_id: String) -> Self {
+        Self {
+            kind,
+            request_id,
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        }
+    }
+}
+
+/// Where the Read-only deny layer stands on the owner's own MCP tools.
+#[derive(Debug, Default)]
+pub(crate) struct McpLayer {
+    /// Whether the running child holds the Read-only layer (`--settings`
+    /// at launch, or applied live): only then do MCP denies go out.
+    pub(crate) layer_on: bool,
+    /// The denies the last `mcp_status` answer called for, Read-only or
+    /// not; `None` before any answer.
+    pub(crate) known: Option<Vec<String>>,
+    /// The denies the child's live layer carries now.
+    pub(crate) applied: Vec<String>,
 }
 
 /// The shared confirmation state: everything the pump thread needs to
@@ -147,6 +185,19 @@ pub struct ControlHub {
     /// resumes the session instead of writing into a dead stdin. A child
     /// that never spawned was never lost.
     pub(crate) child_lost: AtomicBool,
+    /// The current child's stdin, shared with its [`crate::child::RunningChild`]
+    /// so the pump can refresh the Read-only MCP denies the moment an
+    /// `mcp_status` answer lands — before the model can reach a tool —
+    /// rather than on the next dispatch. Tagged with the child's epoch.
+    pub(crate) stdin: Mutex<Option<(u64, ChildStdinHandle)>>,
+    /// `mcp_status` and MCP-refresh `apply_flag_settings` lines the hub
+    /// addressed, in order (`baaz-mcp-…` ids), recorded whether or not a
+    /// child took them — what tests read.
+    pub(crate) mcp_sent: Mutex<Vec<String>>,
+    /// The `baaz-mcp-…` request id sequence.
+    mcp_seq: AtomicU64,
+    /// The Read-only layer's MCP state (see [`McpLayer`]).
+    pub(crate) mcp: Mutex<McpLayer>,
 }
 
 impl ControlHub {
@@ -171,6 +222,10 @@ impl ControlHub {
             confirmed_model: Mutex::new(None),
             child_epoch: AtomicU64::new(0),
             child_lost: AtomicBool::new(false),
+            stdin: Mutex::new(None),
+            mcp_sent: Mutex::new(Vec::new()),
+            mcp_seq: AtomicU64::new(0),
+            mcp: Mutex::new(McpLayer::default()),
         }
     }
 
@@ -178,7 +233,108 @@ impl ControlHub {
     /// epoch its pump reports end of stream under.
     pub(crate) fn begin_child(&self) -> u64 {
         self.child_lost.store(false, Ordering::SeqCst);
+        // A fresh child holds only the layer its argv gave it, and that
+        // one carries no MCP denies: the next answer re-applies them.
+        {
+            let mut mcp = self.mcp.lock().expect("mcp mutex");
+            mcp.layer_on = false;
+            mcp.applied.clear();
+        }
         self.child_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The child of `epoch` writes through `stdin`: hub-initiated lines
+    /// (the MCP refresh) go to the same handle its turns do.
+    pub(crate) fn attach_stdin(&self, epoch: u64, stdin: ChildStdinHandle) {
+        *self.stdin.lock().expect("stdin mutex") = Some((epoch, stdin));
+    }
+
+    /// Write one hub-initiated line to the current child, when one is
+    /// attached. A retired child's handle is never written to.
+    fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let stdin = self.stdin.lock().expect("stdin mutex").clone();
+        match stdin {
+            Some((epoch, stdin)) if epoch == self.child_epoch.load(Ordering::SeqCst) => {
+                let mut stdin = stdin.lock().expect("child stdin mutex");
+                stdin.write_all(line.as_bytes())?;
+                stdin.write_all(b"\n")?;
+                stdin.flush()
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Record, track and deliver one hub-initiated control line; a failed
+    /// delivery untracks at once (no answer can come).
+    fn send_hub_control(&self, request: serde_json::Value, kind: PendingControlKind) {
+        let request_id = format!("baaz-mcp-{}", self.mcp_seq.fetch_add(1, Ordering::SeqCst));
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        })
+        .to_string();
+        self.mcp_sent.lock().expect("mcp sent mutex").push(line.clone());
+        self.track(PendingControl::bare(kind, request_id.clone()));
+        if self.write_line(&line).is_err() {
+            self.untrack(&request_id);
+        }
+    }
+
+    /// Ask the child for its MCP servers (`mcp_status`), unless a query is
+    /// already in flight. The answer refreshes the Read-only MCP denies.
+    pub(crate) fn query_mcp_status(&self) {
+        let in_flight = self
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .values()
+            .any(|pending| pending.kind == PendingControlKind::McpStatus);
+        if in_flight {
+            return;
+        }
+        self.send_hub_control(serde_json::json!({"subtype": "mcp_status"}), PendingControlKind::McpStatus);
+    }
+
+    /// The Read-only layer went on (`true`, carrying [`Self::known_mcp_denies`]
+    /// when applied live, nothing when it rode `--settings`) or came off.
+    pub(crate) fn note_read_only_layer(&self, on: bool, applied: Vec<String>) {
+        let mut mcp = self.mcp.lock().expect("mcp mutex");
+        mcp.layer_on = on;
+        mcp.applied = if on { applied } else { Vec::new() };
+    }
+
+    /// The MCP denies the last `mcp_status` answer called for (empty
+    /// before any answer).
+    pub(crate) fn known_mcp_denies(&self) -> Vec<String> {
+        self.mcp.lock().expect("mcp mutex").known.clone().unwrap_or_default()
+    }
+
+    /// An `mcp_status` answer landed: remember the denies it calls for and,
+    /// while the Read-only layer is on and they moved, apply the layer
+    /// again carrying them (`apply_flag_settings` replaces the layer's
+    /// `permissions`, so the base rules ride along). A refusal falls back
+    /// like any refused layer: banner plus a relaunch carrying it.
+    fn refresh_mcp_denies(&self, servers: &[crate::argv::McpServerStatus]) {
+        let denies = crate::argv::read_only_mcp_denies(servers);
+        let send = {
+            let mut mcp = self.mcp.lock().expect("mcp mutex");
+            mcp.known = Some(denies.clone());
+            let send = mcp.layer_on && mcp.applied != denies;
+            if send {
+                mcp.applied = denies.clone();
+            }
+            send
+        };
+        if send {
+            self.send_hub_control(
+                serde_json::json!({
+                    "subtype": "apply_flag_settings",
+                    "settings": crate::argv::read_only_settings_with(&denies),
+                }),
+                PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched),
+            );
+        }
     }
 
     /// The child of `epoch` is being hung up on purpose: its end of stream
@@ -274,7 +430,13 @@ impl ControlHub {
     pub fn drain_confirmations(&self) {
         let outcomes = self.fold.lock().expect("fold mutex").drain_control_outcomes();
         for outcome in outcomes {
-            self.confirm_outcome(&outcome.request_id, &outcome.subtype, outcome.error.as_deref(), outcome.models);
+            self.confirm_outcome(
+                &outcome.request_id,
+                &outcome.subtype,
+                outcome.error.as_deref(),
+                outcome.models,
+                outcome.mcp_servers,
+            );
         }
         self.expire_timeouts();
     }
@@ -290,6 +452,7 @@ impl ControlHub {
         subtype: &str,
         error: Option<&str>,
         models: Vec<crate::frame::CatalogModel>,
+        mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
     ) {
         let Some(pending) = self.pending.lock().expect("pending mutex").remove(request_id) else {
             return;
@@ -304,6 +467,11 @@ impl ControlHub {
                     let current = self.model.lock().expect("model mutex").clone();
                     if current.is_some() && current == pending.wanted_model {
                         *self.confirmed_model.lock().expect("confirmed model mutex") = current;
+                    }
+                }
+                PendingControlKind::McpStatus => {
+                    if let Some(servers) = mcp_servers {
+                        self.refresh_mcp_denies(&servers);
                     }
                 }
                 _ => {}
@@ -351,6 +519,12 @@ impl ControlHub {
             PendingControlKind::Initialize => {
                 eprintln!(
                     "[provider-claude-code] initialize {} refused ({}); keeping the fallback catalog",
+                    pending.request_id, reason
+                );
+            }
+            PendingControlKind::McpStatus => {
+                eprintln!(
+                    "[provider-claude-code] mcp_status {} refused ({}); the next dispatch asks again",
                     pending.request_id, reason
                 );
             }

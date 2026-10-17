@@ -5,7 +5,10 @@
 //! its whole life: it folds either `MuseEvent`s through `MuseFold::apply`
 //! (muse lane) or `ProviderEvent`s into the same `Session` model (provider
 //! lane), never both. The lane is fixed at construction — [`Lane`] has no
-//! setter — so no code path can attach a second writer.
+//! setter — so no code path can attach a second writer. The one transition
+//! is a new provider view opened on the click: it starts [`Lane::Opening`]
+//! and takes its provider exactly once, when the child's `OpenSession`
+//! answers ([`SessionView::attach_provider`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,6 +29,17 @@ pub(super) enum Lane {
     Muse,
     /// A provider task draining `ProviderEvent`s into `MuseFold::apply_deltas`.
     Provider(ProviderLane),
+    /// A new provider session drawn on the click while its child is still
+    /// answering `OpenSession`: a provider lane with no provider yet. It
+    /// becomes [`Lane::Provider`] once, in [`SessionView::attach_provider`],
+    /// and never goes back — so there is still only ever one writer.
+    Opening(OpeningLane),
+}
+
+/// What an opening provider view knows before its child answers: the mode
+/// the open asked for, which the chip reads until the child reports one.
+pub(super) struct OpeningLane {
+    pub(super) mode: aui_protocol::PermissionMode,
 }
 
 /// What a provider-lane view holds beyond the shared view state: the gated
@@ -90,7 +104,16 @@ impl SessionView {
     /// Whether this view rides the provider lane. The muse entry points
     /// (`apply`, `seed_session`, `load_replay`, `reconnected`) refuse on it.
     pub(crate) fn is_provider_lane(&self) -> bool {
-        matches!(self.lane, Lane::Provider(_))
+        matches!(self.lane, Lane::Provider(_) | Lane::Opening(_))
+    }
+
+    /// The mode an opening provider view's open asked for, while no child
+    /// has reported one (see [`OpeningLane`]).
+    pub(super) fn opening_mode(&self) -> Option<aui_protocol::PermissionMode> {
+        match &self.lane {
+            Lane::Opening(opening) => Some(opening.mode),
+            _ => None,
+        }
     }
 
     /// Hang up the lane's provider child, if this view owns one. Idempotent:
@@ -116,30 +139,91 @@ impl SessionView {
     pub fn new_on_provider(
         session_id: String,
         provider: provider::Provider,
-        mut events: UnboundedReceiver<provider::ProviderEvent>,
+        events: UnboundedReceiver<provider::ProviderEvent>,
         host: SessionHost,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let agent = provider.id();
-        let workspace = host.workspace.clone();
-        let id = session_id.clone();
         let mut this = Self::new_unowned(session_id, host, window, cx);
-        this.fold.ensure_session(&id, agent, String::new(), workspace);
-        this.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)) });
+        this.install_lane(provider, events, cx);
+        this
+    }
+
+    /// A new provider session's view drawn on the click, before its child
+    /// answers `OpenSession`: the composer, the pickers and the empty state
+    /// work at once, and what the person does meanwhile waits in the
+    /// [`StartQueue`](super::StartQueue) the muse path uses, replayed by
+    /// `start_landed` once [`Self::attach_provider`] hands over the child.
+    /// `session_id` is the open's request id — the session's own id for
+    /// Claude Code (`--session-id`), a provisional one for Codex until its
+    /// thread id lands.
+    pub fn new_provider_opening(
+        session_id: String,
+        mode: aui_protocol::PermissionMode,
+        host: SessionHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new_unowned(session_id, host, window, cx);
+        this.lane = Lane::Opening(OpeningLane { mode });
+        this.begin_start();
+        this
+    }
+
+    /// The opening view's child answered: take the session's real id (the
+    /// provisional one renames here and nowhere else in the view), then
+    /// the provider and its event stream, exactly once. A second attach —
+    /// or one on a view that never opened this way — hangs the child up
+    /// instead, so no view ever gains a second writer. The caller runs
+    /// `start_landed` next, which replays the queue.
+    pub(crate) fn attach_provider(
+        &mut self,
+        session_id: String,
+        provider: provider::Provider,
+        events: UnboundedReceiver<provider::ProviderEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.lane, Lane::Opening(_)) {
+            crate::baaz_log!("provider attach refused: session {} already has its lane", self.session_id);
+            let mut provider = provider;
+            provider.shutdown();
+            return;
+        }
+        if session_id != self.session_id {
+            self.session_id = session_id;
+            self.sent_items = crate::sent::load(&self.session_id);
+        }
+        self.install_lane(provider, events, cx);
+        cx.notify();
+    }
+
+    /// Record the session in the fold, take the provider as the lane, and
+    /// spawn the one task draining its events — shared by both provider
+    /// constructors.
+    fn install_lane(
+        &mut self,
+        provider: provider::Provider,
+        mut events: UnboundedReceiver<provider::ProviderEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = provider.id();
+        let id = self.session_id.clone();
+        let workspace = self.workspace.clone();
+        self.fold.ensure_session(&id, agent, String::new(), workspace);
+        self.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)) });
         // A (re)opened lane may have missed an approval or a question while
         // it was away: pull the pending set, the way the muse lane's
         // `reconnected` re-reads `approval/listPending` before trusting the
         // next frame. And the model menu lists what the child returns, so
         // the catalog is asked for on the same open.
-        this.request_provider_pending(cx);
-        this.request_provider_models(cx);
+        self.request_provider_pending(cx);
+        self.request_provider_models(cx);
         // A Claude Code lane outlives a lost child: its adapter resumes the
         // session (`--resume`) on the next send, and the resumed child's
         // events arrive on this same stream — so only that lane keeps
         // draining past a lost connection.
-        let revives = this.provider_kind() == ProviderId::ClaudeCode;
-        this.tasks.push(cx.spawn(async move |this, cx| {
+        let revives = self.provider_kind() == ProviderId::ClaudeCode;
+        self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
                 if this.update(cx, |view, cx| view.on_provider_event(event, cx)).is_err() {
@@ -153,7 +237,6 @@ impl SessionView {
                 }
             }
         }));
-        this
     }
 
 }
@@ -352,7 +435,7 @@ impl SessionView {
     fn test_provider(&self) -> Arc<Mutex<provider::Provider>> {
         match &self.lane {
             Lane::Provider(lane) => lane.provider.clone(),
-            Lane::Muse => panic!("a muse view has no provider lane"),
+            Lane::Muse | Lane::Opening(_) => panic!("this view has no provider attached"),
         }
     }
 
@@ -393,8 +476,13 @@ impl SessionView {
     pub(crate) fn lane_provider(&self) -> Option<SharedProvider> {
         match &self.lane {
             Lane::Provider(lane) => Some(lane.provider.clone()),
-            Lane::Muse => None,
+            Lane::Muse | Lane::Opening(_) => None,
         }
+    }
+
+    /// Whether a provider is attached: a provider lane past its opening.
+    pub(super) fn lane_attached(&self) -> bool {
+        matches!(self.lane, Lane::Provider(_))
     }
 
     /// The lane's latest usage reading, if any. A peek only — no wire
@@ -423,7 +511,20 @@ impl SessionView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, Result<provider::Ack, provider::ProviderError>, &mut Context<Self>) + 'static,
     ) {
-        let Some(provider) = self.lane_provider() else { return };
+        let Some(provider) = self.lane_provider() else {
+            // An opening view's picks and sends wait in the start queue
+            // before they get here; anything else says why it went nowhere
+            // rather than dropping silently.
+            if matches!(self.lane, Lane::Opening(_)) {
+                let reason = if self.is_starting() {
+                    "The session is still starting — try again in a moment."
+                } else {
+                    "This session did not start — open a new one."
+                };
+                self.set_banner(reason, None, cx);
+            }
+            return;
+        };
         self.provider_call(cx, provider, command, then);
     }
 

@@ -22,6 +22,15 @@ impl SessionView {
             cx.notify();
             return;
         }
+        // No session stands behind the view (its start failed): the words
+        // stay in the composer and the banner says why — the failure's own
+        // reason while it still stands — rather than leaving for nowhere.
+        if matches!(self.start, StartState::Failed) {
+            if self.banner.is_none() {
+                self.set_banner("This session did not start — open a new one.", None, cx);
+            }
+            return;
+        }
         let text = self.composer.read(cx).value().to_string();
         // The session is still starting: the words as they stand at this
         // Enter are what goes the moment the start lands (`start_landed`),
@@ -652,6 +661,14 @@ impl SessionView {
     /// with turns in it exactly as to a fresh one: model is switchable,
     /// provider is not, and nothing here counts turns.
     pub(crate) fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        // The session is not known yet (a muse start, or a provider child
+        // still answering its open): the latest pick waits for the start
+        // and goes when it lands; the chip reads it meanwhile.
+        if let Some(queue) = self.start_queue() {
+            queue.model = Some(model_id.to_owned());
+            self.apply_model_selected(model_id, cx);
+            return;
+        }
         if !crate::providers::uses_legacy_pump(self.provider_kind()) {
             let command = ProviderCommand::SelectModel {
                 request_id: new_command_id(),
@@ -688,13 +705,6 @@ impl SessionView {
             } else {
                 self.external_outbox.push(command);
             }
-            return;
-        }
-        // The server knows no session yet: the latest pick waits for the
-        // start and goes when it lands; the chip reads it meanwhile.
-        if let Some(queue) = self.start_queue() {
-            queue.model = Some(model_id.to_owned());
-            self.apply_model_selected(model_id, cx);
             return;
         }
         let model = self.model_selection_for(model_id);
@@ -865,6 +875,13 @@ impl SessionView {
     /// access relaunches on the next turn), Codex overrides on the next
     /// `turn/start`.
     pub(crate) fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        // The session is not known yet: the latest pick waits for the
+        // start, and the chip reads it meanwhile (see `mode`).
+        if let Some(queue) = self.start_queue() {
+            queue.mode = Some(mode);
+            cx.notify();
+            return;
+        }
         if self.is_provider_lane() {
             let command = ProviderCommand::SelectApprovalMode {
                 request_id: new_command_id(),
@@ -876,13 +893,6 @@ impl SessionView {
                     this.report_provider_error(&error, cx);
                 }
             });
-            return;
-        }
-        // The server knows no session yet: the latest pick waits for the
-        // start, and the chip reads it meanwhile (see `mode`).
-        if let Some(queue) = self.start_queue() {
-            queue.mode = Some(mode);
-            cx.notify();
             return;
         }
         self.pick_muse_mode(mode, None, cx);
@@ -1072,7 +1082,9 @@ impl SessionView {
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
         match self.provider_kind() {
             ProviderId::ClaudeCode => {
-                if self.is_provider_lane() {
+                // An opening lane lists Baaz's supplied aliases (below)
+                // until its child lands; the attach asks the child itself.
+                if self.lane_attached() {
                     self.request_provider_models(cx);
                     return;
                 }
@@ -1082,8 +1094,15 @@ impl SessionView {
                 self.apply_model_catalog(rows, &provider, cx);
             }
             ProviderId::Codex => {
-                if self.is_provider_lane() {
+                if self.lane_attached() {
                     self.request_provider_models(cx);
+                    return;
+                }
+                // The child is still answering its open, and attaching it
+                // asks for the catalog, so an open picker fills then.
+                if self.is_starting() {
+                    self.models_error = Some("Models list once the session has started…".to_owned());
+                    cx.notify();
                     return;
                 }
                 self.models_error = Some(
@@ -1207,6 +1226,13 @@ impl SessionView {
             } else {
                 self.plan_previous_mode.take().unwrap_or_default()
             };
+            // An opening lane has no child to ask yet: the mode waits in
+            // the start queue like a chip pick.
+            if let Some(queue) = self.start_queue() {
+                queue.mode = Some(restore);
+                cx.notify();
+                return;
+            }
             let command = ProviderCommand::SelectApprovalMode {
                 request_id: new_command_id(),
                 session_id: self.session_id.clone(),

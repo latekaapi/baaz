@@ -87,6 +87,32 @@ pub fn elicitation_is_tool_approval(params: &Value) -> bool {
         == Some("mcp_tool_call")
 }
 
+/// The answer Read-only gives an MCP tool-call elicitation by itself:
+/// a decline, written by the pump before anything is carded.
+///
+/// Read-only (`approvalPolicy: never` + the read-only sandbox) does not
+/// stop MCP tools on its own — MCP servers run outside the sandbox, and
+/// codex-cli 0.144.6 (`core/src/mcp_tool_call.rs`) still routes every tool
+/// not annotated `readOnlyHint: true` through this elicitation under
+/// `never`: `mcp_permission_prompt_is_auto_approved` only waives the prompt
+/// with full disk write, and `request_mcp_server_elicitation` never
+/// consults the policy. So the owner's own acting MCP tools (and Baaz's
+/// unannotated ones) would reach an Allow button in Read-only. Declining
+/// here refuses them outright, like every other unmatched action, while a
+/// read-only-annotated tool never asks and still runs. `None` for any
+/// other request or mode.
+pub fn read_only_mcp_answer(
+    id: &Value,
+    method: &str,
+    params: &Value,
+    mode: Option<PermissionMode>,
+) -> Option<Value> {
+    (mode == Some(PermissionMode::DenyUnmatched)
+        && method == "mcpServer/elicitation/request"
+        && elicitation_is_tool_approval(params))
+    .then(|| json!({"id": id, "result": elicitation_action_result(McpElicitationAction::Decline)}))
+}
+
 impl ApprovalKind {
     /// Classify a server→client method: the three known approval requests,
     /// or `Unknown` for a future `*requestApproval` kind. `None` means the
@@ -1072,6 +1098,13 @@ impl RunningChild {
                             }
                         }
                         Frame::Request { id, method, params } => {
+                            // Read-only refuses an MCP tool call outright:
+                            // declined here, never carded as askable.
+                            let mode = fold.lock().ok().and_then(|fold| fold.permission_mode());
+                            if let Some(answer) = read_only_mcp_answer(&id, &method, &params, mode) {
+                                let _ = write_value(&pump_stdin, &answer);
+                                continue;
+                            }
                             // Approval requests card their pending approval
                             // on the transcript first, through the same
                             // decode-and-fold the fixture tests exercise —
@@ -2143,6 +2176,31 @@ mod tests {
         assert_eq!(pending.kind, ApprovalKind::McpElicitation);
         assert_eq!(pending.request_id, json!(7), "the answer echoes this id");
         assert!(shared.questions.is_empty(), "no dead question row beside it");
+    }
+
+    #[test]
+    fn read_only_declines_an_mcp_tool_call_and_nothing_else() {
+        let gate = json!({"_meta": {"codex_approval_kind": "mcp_tool_call"}, "message": "Allow?"});
+        let method = "mcpServer/elicitation/request";
+        assert_eq!(
+            read_only_mcp_answer(&json!(7), method, &gate, Some(PermissionMode::DenyUnmatched)),
+            Some(json!({"id": 7, "result": {"action": "decline"}})),
+        );
+        for mode in [None, Some(PermissionMode::PromptUnmatched), Some(PermissionMode::OnRequest), Some(PermissionMode::AllowAll)] {
+            assert_eq!(read_only_mcp_answer(&json!(7), method, &gate, mode), None, "{mode:?} still asks");
+        }
+        // A genuine question, or any other request, is not ours to refuse here.
+        let form = json!({"message": "Fill the form"});
+        assert_eq!(read_only_mcp_answer(&json!(7), method, &form, Some(PermissionMode::DenyUnmatched)), None);
+        assert_eq!(
+            read_only_mcp_answer(
+                &json!(7),
+                "item/commandExecution/requestApproval",
+                &gate,
+                Some(PermissionMode::DenyUnmatched)
+            ),
+            None
+        );
     }
 
     #[test]

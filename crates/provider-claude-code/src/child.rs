@@ -17,7 +17,10 @@ use crate::controls::ControlHub;
 /// A running session child: stdin for turns, a pump thread for stdout.
 pub struct RunningChild {
     child: Child,
-    stdin: ChildStdin,
+    /// Shared with the hub ([`ControlHub::attach_stdin`]), which writes the
+    /// Read-only MCP refresh from the pump; one lock per line keeps turns
+    /// and control lines whole.
+    stdin: std::sync::Arc<std::sync::Mutex<ChildStdin>>,
     pump: Option<std::thread::JoinHandle<()>>,
     /// The hub and this child's epoch on it: a deliberate hang-up retires
     /// the epoch so the pump's end of stream reads as expected, not lost.
@@ -102,8 +105,9 @@ impl RunningChild {
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
-        let stdin = child.stdin.take().expect("stdin piped");
+        let stdin = std::sync::Arc::new(std::sync::Mutex::new(child.stdin.take().expect("stdin piped")));
         let epoch = hub.begin_child();
+        hub.attach_stdin(epoch, std::sync::Arc::clone(&stdin) as _);
         let pump_hub = std::sync::Arc::clone(hub);
         let pump = std::thread::Builder::new()
             .name("provider-claude-code-pump".into())
@@ -123,9 +127,10 @@ impl RunningChild {
 
     /// Write one NDJSON turn to the child's stdin.
     pub fn send_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.stdin.write_all(line.as_bytes())?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()
+        let mut stdin = self.stdin.lock().map_err(|_| std::io::Error::other("child stdin lock poisoned"))?;
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
     }
 
     /// Whether the child process has exited (reaped here when it has).
@@ -137,7 +142,9 @@ impl RunningChild {
     pub fn shutdown(&mut self) {
         // Deliberate: the pump's end of stream that follows is expected.
         self.hub.retire_child(self.epoch);
-        let _ = self.stdin.flush();
+        if let Ok(mut stdin) = self.stdin.lock() {
+            let _ = stdin.flush();
+        }
         // Detach, never join: the pump ends when stdout closes, which is
         // when the child exits after stdin closes.
         self.pump.take();

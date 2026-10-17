@@ -1633,10 +1633,14 @@ impl SessionView {
     }
 
     /// The approval mode the server says the session is in — or, while the
-    /// start is on the wire, the pick waiting to be applied when it lands.
+    /// start is on the wire, the pick waiting to be applied when it lands,
+    /// else the mode an opening provider view asked its child for.
     fn mode(&self) -> PermissionMode {
         if let StartState::Starting(StartQueue { mode: Some(mode), .. }) = &self.start {
             return *mode;
+        }
+        if let Some(mode) = self.opening_mode() {
+            return mode;
         }
         self.session().map(|s| s.mode).unwrap_or_default()
     }
@@ -2165,10 +2169,16 @@ impl SessionView {
         self.start = StartState::Starting(StartQueue::default());
     }
 
-    /// Whether this view's `session/start` is still on the wire.
-    #[cfg(test)]
+    /// Whether this view's `session/start` (or provider open) is still on
+    /// the wire.
     pub(crate) fn is_starting(&self) -> bool {
         matches!(self.start, StartState::Starting(_))
+    }
+
+    /// The banner's text, for tests that check what a failure said.
+    #[cfg(test)]
+    pub(crate) fn banner_text(&self) -> Option<&str> {
+        self.banner.as_deref()
     }
 
     /// The start's queue, while it is on the wire.

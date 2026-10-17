@@ -167,6 +167,30 @@ pub fn gate(id: ProviderId, capability: Capability) -> Option<String> {
     }
 }
 
+/// The mode picker's detail line for `mode` on `id`'s sessions: the
+/// protocol's own sentence, plus — on Read-only — what the provider still
+/// lets through, so the picker never claims more than the backend enforces.
+///
+/// Read-only reaches the owner's own MCP tools differently per provider.
+/// Claude Code denies every tool not annotated `readOnlyHint` (and every
+/// server whose tools are not known yet) on its deny layer, which beats
+/// any allow rule — nothing to add. Codex declines every MCP approval
+/// prompt, but a tool its own config sets to `approval_mode = "approve"`
+/// never prompts. Muse refuses an unmatched MCP call, but a tool the owner
+/// "always allowed" matches a persistent allow rule, and its protocol lets
+/// a client select a profile, never add a session deny.
+pub fn mode_description(id: ProviderId, mode: aui_protocol::PermissionMode) -> &'static str {
+    match (id, mode) {
+        (ProviderId::Codex, aui_protocol::PermissionMode::DenyUnmatched) => {
+            "Anything without a matching rule is refused. MCP tools your Codex config auto-approves still run."
+        }
+        (ProviderId::Muse, aui_protocol::PermissionMode::DenyUnmatched) => {
+            "Anything without a matching rule is refused. MCP tools you always allowed in Muse still run."
+        }
+        _ => mode.description(),
+    }
+}
+
 /// Whether this provider's sessions ride the legacy pump. `muse` does
 /// until the last view moves; every new provider rides the provider lane
 /// from its first session. Which lane serves a session is decided at
@@ -1064,6 +1088,22 @@ impl ExternalApprovalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read-only's detail line names what each backend still lets through
+    /// on the owner's own MCP tools; every other line is the protocol's.
+    #[test]
+    fn read_only_detail_never_claims_more_than_the_provider_enforces() {
+        use aui_protocol::PermissionMode;
+        let read_only = PermissionMode::DenyUnmatched;
+        assert_eq!(mode_description(ProviderId::ClaudeCode, read_only), read_only.description());
+        assert!(mode_description(ProviderId::Codex, read_only).contains("MCP tools your Codex config auto-approves still run"));
+        assert!(mode_description(ProviderId::Muse, read_only).contains("MCP tools you always allowed in Muse still run"));
+        for id in [ProviderId::ClaudeCode, ProviderId::Codex, ProviderId::Muse] {
+            for mode in [PermissionMode::AllowAll, PermissionMode::OnRequest, PermissionMode::PromptUnmatched] {
+                assert_eq!(mode_description(id, mode), mode.description());
+            }
+        }
+    }
 
     /// W4: the UI table is the adapter table — for all three providers.
     /// A fixture that upgrades a cell in any adapter crate fails here

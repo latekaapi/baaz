@@ -86,6 +86,56 @@ struct ProviderOpen {
     epoch: u64,
 }
 
+/// The background half of every fresh provider open: spawn the child
+/// through the factory and ask it for a session with `OpenSession`,
+/// carrying `request_id` (Claude Code's `--session-id`; Codex mints its
+/// own thread id). Blocks, so it runs inside `wire_call_in`.
+#[allow(clippy::too_many_arguments)]
+fn provider_open_work(
+    factory: crate::providers::ProviderFactory,
+    provider_id: ProviderId,
+    request_id: String,
+    workspace_bg: String,
+    mode: aui_protocol::PermissionMode,
+    project: Option<String>,
+    workspace: String,
+    epoch: u64,
+) -> Result<ProviderOpen, provider::ProviderError> {
+    let provider = factory(provider_id)?;
+    #[cfg(not(test))]
+    let (provider, events) = conn::gate(provider);
+    // `model: None` on purpose: the chip's display seed (env,
+    // `claude` settings, the last reported model) never reaches
+    // the child — no `--model` flag without a pick — so the CLI
+    // resolves its own default exactly as before.
+    let ack = provider.send(provider::Command::OpenSession {
+        request_id,
+        workspace: Some(workspace_bg),
+        model: None,
+        model_provider: None,
+        mode: Some(mode),
+    })?;
+    // Tests drain after the send, synchronously on the test
+    // executor: no forwarding thread ever wakes the lane task.
+    #[cfg(test)]
+    let (provider, events) = conn::gate_sync(provider);
+    match ack {
+        provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
+            provider_id,
+            provider,
+            events,
+            session_id,
+            project,
+            workspace,
+            title,
+            epoch,
+        }),
+        other => Err(provider::ProviderError::Rejected {
+            reason: format!("OpenSession answered {other:?} instead of a session"),
+        }),
+    }
+}
+
 /// What [`Harness::ensure_boot_session`] should do about the boot session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BootDecision {
@@ -1403,6 +1453,11 @@ impl Harness {
         // something else: the switch is cancelled (its open lands stale
         // and is discarded) and this opens as a normal new session on the
         // restored provider, the old draft staying with the old view.
+        // `BAAZ_TRACE=1`: the click every new-session mark measures from
+        // (`new-draft-shown` when the draft paints on it, `provider lane
+        // open` when a provider child answered first).
+        crate::log::trace_reset();
+        crate::log::trace_mark("new");
         let replaced = self.replacing.clone();
         let switch_cancelled = self.cancel_pending_switch(cx);
         // One session per `new`: a switch already in flight owns the next
@@ -1500,7 +1555,7 @@ impl Harness {
                 .and_then(|id| self.projects.find_available(id))
                 .map(|project| project.root.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.workspace());
-            self.open_on_provider(wanted, current.clone(), workspace, window, cx);
+            self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -1852,7 +1907,7 @@ impl Harness {
         // provider pick opens on the provider lane, never as `session/start`.
         let wanted = ProviderId::parse(&self.new_provider);
         if wanted != ProviderId::Muse {
-            self.open_on_provider(wanted, None, root.to_string_lossy().into_owned(), window, cx);
+            self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -2679,40 +2734,8 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
-        let work = move || -> Result<ProviderOpen, provider::ProviderError> {
-            let provider = factory(provider_id)?;
-            #[cfg(not(test))]
-            let (provider, events) = conn::gate(provider);
-            // `model: None` on purpose: the chip's display seed (env,
-            // `claude` settings, the last reported model) never reaches
-            // the child — no `--model` flag without a pick — so the CLI
-            // resolves its own default exactly as before.
-            let ack = provider.send(provider::Command::OpenSession {
-                request_id,
-                workspace: Some(workspace_bg),
-                model: None,
-                model_provider: None,
-                mode: Some(mode),
-            })?;
-            // Tests drain after the send, synchronously on the test
-            // executor: no forwarding thread ever wakes the lane task.
-            #[cfg(test)]
-            let (provider, events) = conn::gate_sync(provider);
-            match ack {
-                provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
-                    provider_id,
-                    provider,
-                    events,
-                    session_id,
-                    project,
-                    workspace,
-                    title,
-                    epoch,
-                }),
-                other => Err(provider::ProviderError::Rejected {
-                    reason: format!("OpenSession answered {other:?} instead of a session"),
-                }),
-            }
+        let work = move || {
+            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch)
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
@@ -2874,9 +2897,6 @@ impl Harness {
         // "reuse" whatever was clicked last — a handoff destination's row
         // reads zero turns, so it passed for unsent and ⌘N did nothing.
         let fresh = !self.provider_sessions.contains_key(&session_id);
-        if let Some(id) = project.clone() {
-            self.set_override(&session_id, |meta| meta.project = Some(id.clone()), cx);
-        }
         if fresh {
             match project.clone() {
                 Some(id) => {
@@ -2887,24 +2907,7 @@ impl Harness {
                 }
             }
         }
-        // The local record: `session/list` only knows muse sessions, so
-        // this row is what brings the lane back after a restart — the
-        // sidebar reads it, and the click reopens it. Written before the
-        // row below is built, so the two never disagree.
-        crate::provider_sessions::upsert_open(
-            &mut self.provider_sessions,
-            provider_id.as_str(),
-            &session_id,
-            Some(workspace.clone()),
-            project.clone(),
-            title,
-        );
-        crate::provider_sessions::write(&self.provider_sessions);
-        // No row with content yet: like a muse draft, the session earns
-        // its row on the first send (`ProviderTurnAccepted`), titled from
-        // the prompt — but the record above already exists, so a restart
-        // before that still reopens it.
-        self.merge_provider_rows();
+        self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         // The swap that makes it the visible session: parks the outgoing
         // view, points the event subscription at the new one, focuses the
         // composer — everything `open` does for muse.
@@ -2922,10 +2925,244 @@ impl Harness {
         // to prove the pick ended on a provider lane, not a muse session.
         // (`baaz_log!` already carries the `baaz: ` prefix; spelling it
         // here doubled it to `baaz: baaz:`.)
+        crate::log::trace_mark("provider lane open");
+        crate::log::trace_arm_first_frame();
         crate::baaz_log!(
             "provider lane open provider={} session={session_id}",
             provider_id.as_str()
         );
+    }
+
+    /// What a landed provider session leaves behind, wherever its view
+    /// opened: the project it files under, and the local record with its
+    /// (still empty) sidebar row.
+    fn record_provider_open(
+        &mut self,
+        provider_id: ProviderId,
+        session_id: &str,
+        project: Option<String>,
+        workspace: String,
+        title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = project.clone() {
+            self.set_override(session_id, |meta| meta.project = Some(id.clone()), cx);
+        }
+        // The local record: `session/list` only knows muse sessions, so
+        // this row is what brings the lane back after a restart — the
+        // sidebar reads it, and the click reopens it. Written before the
+        // row below is built, so the two never disagree.
+        crate::provider_sessions::upsert_open(
+            &mut self.provider_sessions,
+            provider_id.as_str(),
+            session_id,
+            Some(workspace),
+            project,
+            title,
+        );
+        crate::provider_sessions::write(&self.provider_sessions);
+        // No row with content yet: like a muse draft, the session earns
+        // its row on the first send (`ProviderTurnAccepted`), titled from
+        // the prompt — but the record above already exists, so a restart
+        // before that still reopens it.
+        self.merge_provider_rows();
+    }
+
+    /// "New session" on a provider pick (Claude Code / Codex). A plain new
+    /// session draws its view on the click, like a muse draft: the view
+    /// opens under the open's request id with no provider attached, and
+    /// the child is attached when `OpenSession` answers
+    /// ([`Self::land_provider_draft`]) — measured, the Codex handshake
+    /// alone took 0.3–1.7 s, and a `/` typed meanwhile was lost. Anything
+    /// else keeps the round trip first ([`Self::open_on_provider`]): a
+    /// switch holds its old view up until the replacement lands (Y2b), a
+    /// pending handoff submits its pack on the landing, and the scripted
+    /// and disabled lanes open synchronously anyway.
+    fn open_new_on_provider(
+        &mut self,
+        provider_id: ProviderId,
+        project: Option<String>,
+        workspace: String,
+        switch: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let early = switch.is_none()
+            && self.replacing.is_none()
+            && self.pending_handoff.is_none()
+            && self.client.is_some()
+            && crate::provider_status::provider_enabled(provider_id);
+        if !early {
+            self.open_on_provider(provider_id, project, workspace, window, cx);
+            return;
+        }
+        crate::log::boot_mark("new-draft-open");
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
+        // The request id is the view's id until the child answers: Claude
+        // Code takes it as `--session-id`, so it stays; Codex mints a
+        // thread id, and the landing renames everything keyed by this one
+        // (see `rekey_session`). Registered with the terminal relay before
+        // the open runs, like `open_on_provider` does.
+        let request_id = new_command_id();
+        self.register_terminal_session(
+            &request_id,
+            std::path::PathBuf::from(workspace.clone()),
+            provider_id.as_str(),
+        );
+        self.key_pending_ask(&request_id);
+        let host = SessionHost {
+            provider_id: provider_id.as_str().to_owned(),
+            workspace: workspace.clone(),
+            overlays: self.overlays.clone(),
+            capture: self.capture.clone(),
+            terminal_host: Some(self.terminal_host.clone()),
+        };
+        let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
+        let fold_on = self.layout.fold_finished_turns;
+        view.update(cx, |view, _| view.fold_finished_turns = fold_on);
+        // Named before the swap, so `activate` reads the project's name
+        // for the empty state off the drafts map (no row exists yet), and
+        // a repeated ⌘N while the child is still answering reopens this
+        // view instead of spawning a second child.
+        match project.clone() {
+            Some(id) => {
+                self.drafts.insert(id, request_id.clone());
+            }
+            None => {
+                self.unsent.insert(request_id.clone());
+            }
+        }
+        self.activate(view, false, window, cx);
+        // Scripted session verbs wait for the open (see `run_steps`), as
+        // they wait for a muse draft's start.
+        self.starts_in_flight.insert(request_id.clone());
+        crate::log::boot_mark("new-draft-shown");
+        crate::log::trace_mark("new-draft-shown");
+        crate::log::trace_arm_first_frame();
+        let factory = self.provider_factory.clone();
+        let workspace_bg = workspace.clone();
+        let opened = request_id.clone();
+        let epoch = self.provider_open_epoch;
+        let work = move || {
+            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch)
+        };
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(open) => {
+                this.terminal_service.alias_session(&request_id, &open.session_id);
+                this.land_provider_draft(&request_id, open, window, cx);
+            }
+            Err(error) => {
+                crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
+                this.fail_provider_draft(&request_id, error.to_string(), cx);
+            }
+        });
+    }
+
+    /// The child behind a provider draft answered: attach it to the view
+    /// drawn on the click — wherever that view is now, active or parked —
+    /// under the session's real id, record the session, then replay what
+    /// the person did meanwhile (`start_landed`). The view is never
+    /// re-activated: the person may have moved on. A draft that is gone (a
+    /// provider switch replaced it) leaves its child to nobody, so the
+    /// child is hung up.
+    fn land_provider_draft(
+        &mut self,
+        provisional: &str,
+        open: ProviderOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::log::boot_mark("provider open-reply early");
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, .. } = open;
+        self.starts_in_flight.remove(provisional);
+        let Some(view) = self.find_view(provisional, cx).filter(|view| view.read(cx).is_starting()) else {
+            crate::baaz_log!(
+                "provider draft gone before its open landed provider={} session={session_id}",
+                provider_id.as_str()
+            );
+            provider.shutdown();
+            self.drafts.retain(|_, id| id != provisional);
+            self.unsent.remove(provisional);
+            return;
+        };
+        if session_id != provisional {
+            self.rekey_session(provisional, &session_id, cx);
+        }
+        self.register_terminal_session(
+            &session_id,
+            std::path::PathBuf::from(workspace.clone()),
+            provider_id.as_str(),
+        );
+        view.update(cx, |view, cx| view.attach_provider(session_id.clone(), provider, events, cx));
+        // Recorded before the queue replays, so a send's acceptance finds
+        // the record it titles.
+        self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
+        view.update(cx, |view, cx| view.start_landed(window, cx));
+        crate::log::trace_mark("provider lane open");
+        crate::baaz_log!(
+            "provider lane open provider={} session={session_id}",
+            provider_id.as_str()
+        );
+    }
+
+    /// A provider draft's open failed: the view stays, saying why, and the
+    /// sends that waited go back in its composer (`start_failed`). The next
+    /// "New session" starts fresh rather than reusing it.
+    fn fail_provider_draft(&mut self, provisional: &str, reason: String, cx: &mut Context<Self>) {
+        self.starts_in_flight.remove(provisional);
+        self.drafts.retain(|_, id| id != provisional);
+        self.unsent.remove(provisional);
+        if let Some(view) = self.find_view(provisional, cx) {
+            view.update(cx, |view, cx| view.start_failed(reason, cx));
+        }
+        self.drop_pending_ask();
+        cx.notify();
+    }
+
+    /// Move everything the window keyed by a provider draft's provisional
+    /// id onto the id its child minted (Codex's thread id): the parked
+    /// view's slot, the drafts and unsent names, the selection and reveal,
+    /// the Ask waiting on it, a per-session override (the pane state a
+    /// toggle wrote meanwhile) and any session browser tabs. The view
+    /// renames itself in `attach_provider`. Nothing else can hold the id:
+    /// the draft has no row, no record and no turn until it lands.
+    fn rekey_session(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        for (id, _) in &mut self.session_cache {
+            if id == old {
+                *id = new.to_owned();
+            }
+        }
+        for id in self.drafts.values_mut() {
+            if id == old {
+                *id = new.to_owned();
+            }
+        }
+        if self.unsent.remove(old) {
+            self.unsent.insert(new.to_owned());
+        }
+        for id in [&mut self.pending_id, &mut self.reveal] {
+            if id.as_deref() == Some(old) {
+                *id = Some(new.to_owned());
+            }
+        }
+        if let Some(ask) = self.pending_ask_draft.as_mut().filter(|ask| ask.target.as_deref() == Some(old)) {
+            ask.target = Some(new.to_owned());
+        }
+        if let Some(meta) = self.overrides.remove(old) {
+            self.overrides.insert(new.to_owned(), meta);
+            crate::sessions::write(&self.overrides);
+            self.invalidate_list();
+        }
+        if self.right_kind_migrate.remove(old) {
+            self.right_kind_migrate.insert(new.to_owned());
+        }
+        let owner = crate::browser::Owner::Session(old.to_owned());
+        let tabs: Vec<_> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
+        for tab in tabs {
+            self.browser.tabs.move_to(tab, crate::browser::Owner::Session(new.to_owned()));
+        }
+        cx.notify();
     }
 
     /// The handoff chains over full storage, built once per storage
@@ -3710,10 +3947,13 @@ impl Harness {
     /// The session's project display name, for the empty state: the row's
     /// project resolved to a name, so a rename shows without reopening.
     pub(crate) fn project_name_for(&self, session_id: &str) -> Option<String> {
+        // A provider draft still opening has no row yet: the drafts map
+        // names its project.
         self.sessions
             .iter()
             .find(|e| e.id == session_id)
             .and_then(|e| e.project.as_deref())
+            .or_else(|| self.drafts.iter().find(|(_, id)| *id == session_id).map(|(project, _)| project.as_str()))
             .and_then(|id| self.projects.find(id))
             .map(|p| p.name.clone())
     }
@@ -7598,6 +7838,149 @@ done
             assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
             assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
             assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
+        });
+        lane_restore(state);
+    }
+
+    /// The Harness as the window's root view, so real keystrokes reach the
+    /// composer, on a Codex default whose child answers through `factory`.
+    /// The open is NOT run: nothing here parks the executor after the boot.
+    fn provider_draft_window<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+        factory: crate::providers::ProviderFactory,
+    ) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        // Past the login screen, so the session's composer is what paints.
+        let mut args = lane_args(dir);
+        args.login = crate::LoginSample::SignedIn;
+        let (baaz, vc) =
+            cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let project = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                let project = adopt_for_muse(harness, dir);
+                harness.new_provider = ProviderId::Codex.as_str().to_owned();
+                project
+            })
+        });
+        (baaz, vc, project)
+    }
+
+    /// Real keystrokes into the focused window, without parking the
+    /// executor: `simulate_input` parks after typing, which would land the
+    /// provider open these tests hold back.
+    fn type_unparked(vc: &mut gpui::VisualTestContext, keys: &[&str]) {
+        let window = vc.update(|window, _| window.window_handle());
+        for key in keys {
+            vc.cx.dispatch_keystroke(window, gpui::Keystroke::parse(key).expect("a keystroke"));
+        }
+    }
+
+    /// "New session" on a Codex default draws the draft in the click's own
+    /// update, like a muse draft: a provider-lane view, starting, with no
+    /// child asked yet. Keys typed before the child answers reach it — `/`
+    /// opens the command menu — and an Enter waits in the start queue: the
+    /// composer clears, and the words leave exactly once, after the child
+    /// lands, under the id the child minted. Restore the wait (open the
+    /// view in the landing) and the first block finds no view.
+    #[gpui::test]
+    fn a_new_provider_session_opens_on_the_click_and_sends_once_it_lands(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early");
+        let (factory, commands) = recording_resumable_factory();
+        let (baaz, vc, project) = provider_draft_window(cx, &state.2, factory);
+        let provisional = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                let view = harness.active.clone().expect("the draft is up in the click's own update");
+                assert!(view.read(cx).is_starting(), "the child has not answered");
+                assert!(view.read(cx).is_provider_lane(), "it rides the provider lane");
+                assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+                let id = view.read(cx).session_id.clone();
+                assert!(harness.starts_in_flight.contains(&id), "scripted verbs wait for it");
+                assert!(!harness.session_switch_pending, "a new session is no switch");
+                assert_eq!(harness.drafts.get(&project), Some(&id), "a second click reuses it");
+                id
+            })
+        });
+        assert!(commands.lock().expect("commands").is_empty(), "no child was asked yet");
+        type_unparked(vc, &["/"]);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.overlays.read(cx).menu.is_some(), "`/` opens the command menu before the child answers");
+            assert!(harness.active.clone().expect("the draft").read(cx).is_starting(), "still opening");
+        });
+        type_unparked(vc, &["backspace", "h", "e", "l", "l", "o", "enter"]);
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the draft");
+            assert!(view.read(cx).is_starting(), "the Enter came before the child answered");
+            assert_eq!(view.read(cx).draft_text(cx), "", "the send took the words, as any send does");
+        });
+        assert!(commands.lock().expect("commands").is_empty(), "nothing left before the open");
+        vc.run_until_parked();
+        let sent: Vec<_> = commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::SubmitInput { session_id, display_text, .. } => {
+                    Some((session_id.clone(), display_text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec![("s-open".to_owned(), Some("hello".to_owned()))], "sent exactly once, after landing");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the draft stays in the centre");
+            assert_eq!(view.read(cx).session_id, "s-open", "the view took the child's id");
+            assert!(!view.read(cx).is_starting(), "the open landed");
+            assert!(harness.starts_in_flight.is_empty(), "nothing is still opening");
+            assert_eq!(harness.drafts.get(&project).map(String::as_str), Some("s-open"), "the draft name moved");
+            assert!(harness.provider_sessions.contains_key("s-open"), "the landing writes the record");
+            assert!(!harness.provider_sessions.contains_key(&provisional), "nothing keeps the provisional id");
+            assert!(!harness.overrides.contains_key(&provisional), "nor its overrides");
+            assert_eq!(harness.pending_id.as_deref(), Some("s-open"), "the selection follows the id");
+        });
+        lane_restore(state);
+    }
+
+    /// An open that fails leaves the early provider view up, saying why,
+    /// with the send it captured back in the composer — and forgets it as
+    /// the project's draft, so the next "New session" starts fresh.
+    #[gpui::test]
+    fn a_failed_provider_open_keeps_the_draft_and_returns_the_send(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-early-fail");
+        let (baaz, vc, project) = provider_draft_window(cx, &state.2, failing_factory("no codex here"));
+        let provisional = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                harness.active.clone().expect("the draft is up").read(cx).session_id.clone()
+            })
+        });
+        type_unparked(vc, &["h", "i", "enter"]);
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the view stays");
+            assert_eq!(view.read(cx).session_id, provisional);
+            assert!(!view.read(cx).is_starting(), "the open settled as failed");
+            assert_eq!(view.read(cx).draft_text(cx), "hi", "the captured send is back in the composer");
+            let banner = view.read(cx).banner_text().unwrap_or_default().to_owned();
+            assert!(banner.contains("no codex here"), "the banner says why: {banner}");
+            assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
+            assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
+            assert!(harness.provider_sessions.is_empty(), "no record for a session that never was");
+            assert!(harness.overlays.read(cx).dialog.is_none(), "inline, not a dialog");
+        });
+        // Enter on the failed view keeps the words where they are.
+        type_unparked(vc, &["enter"]);
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the view stays");
+            assert_eq!(view.read(cx).draft_text(cx), "hi", "a send with nowhere to go keeps its words");
         });
         lane_restore(state);
     }

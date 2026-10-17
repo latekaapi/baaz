@@ -388,6 +388,9 @@ pub enum Frame {
         /// The CLI's rejection text, when this answer refuses: what the
         /// session banner shows. `None` on success.
         error: Option<String>,
+        /// The MCP servers this answer reports: an `mcp_status` reply
+        /// (`response.response.mcpServers`) only, `None` otherwise.
+        mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
     },
     /// Noise or the not-yet-known: hooks, spinner status, token estimates,
     /// turn summaries, and any unknown `type`. Ignored, not fatal.
@@ -1121,11 +1124,46 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 models,
                 permission_mode,
                 error: decode_control_error(response),
+                mcp_servers: inner.and_then(decode_mcp_servers),
             })
         }
         // Forward compatibility: the CLI will add frames; Baaz ignores them.
         other => Ok(Frame::Ignored { note: format!("unknown type {other:?}") }),
     }
+}
+
+/// The `mcpServers` rows of an `mcp_status` answer (2.1.276
+/// `McpServerStatus`, probed 2026-10-17): name, status, and — once the
+/// server connected — its tools with `annotations.readOnly`. `None` when
+/// the answer carries no `mcpServers` array (every other reply).
+fn decode_mcp_servers(inner: &Value) -> Option<Vec<crate::argv::McpServerStatus>> {
+    let rows = inner.get("mcpServers")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let tools = row.get("tools").and_then(Value::as_array).map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| {
+                            Some(crate::argv::McpToolStatus {
+                                name: tool.get("name")?.as_str()?.to_owned(),
+                                read_only: tool
+                                    .get("annotations")
+                                    .and_then(|annotations| annotations.get("readOnly"))
+                                    .and_then(Value::as_bool)
+                                    == Some(true),
+                            })
+                        })
+                        .collect()
+                });
+                Some(crate::argv::McpServerStatus {
+                    name: row.get("name")?.as_str()?.to_owned(),
+                    status: row.get("status").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    tools,
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1735,6 +1773,29 @@ mod tests {
 
     /// `supportsAutoMode` reads per row; a row that omits it lacks auto
     /// only when some row of the answer names the field.
+    #[test]
+    fn an_mcp_status_answer_decodes_its_servers_and_tool_annotations() {
+        // The 2.1.276 answer, verbatim but for the config path (probed
+        // 2026-10-17 with a scratch stdio server serving one read-only,
+        // one unannotated and one destructive tool).
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"baaz-mcp-0","response":{"mcpServers":[{"name":"probe","status":"connected","serverInfo":{"name":"probe","version":"1"},"config":{"type":"stdio","command":"python3","args":["srv.py"]},"scope":"dynamic","source":"dynamic","tools":[{"name":"peek","annotations":{"readOnly":true}},{"name":"poke","annotations":{}},{"name":"zap","annotations":{"destructive":true}}]},{"name":"later","status":"pending"}]}}}"#;
+        let Ok(Frame::ControlResponse { request_id, mcp_servers, .. }) = decode_line(line) else {
+            panic!("expected a control response");
+        };
+        assert_eq!(request_id, "baaz-mcp-0");
+        let servers = mcp_servers.expect("mcpServers");
+        assert_eq!(servers.len(), 2);
+        let tools = servers[0].tools.as_ref().expect("tools");
+        assert_eq!(
+            tools.iter().map(|tool| (tool.name.as_str(), tool.read_only)).collect::<Vec<_>>(),
+            vec![("peek", true), ("poke", false), ("zap", false)],
+        );
+        assert_eq!((servers[1].status.as_str(), servers[1].tools.as_ref()), ("pending", None));
+        // Every other answer carries none.
+        let bare = r#"{"type":"control_response","response":{"subtype":"success","request_id":"x"}}"#;
+        assert!(matches!(decode_line(bare), Ok(Frame::ControlResponse { mcp_servers: None, .. })));
+    }
+
     #[test]
     fn catalog_rows_read_auto_mode_support() {
         let answer = serde_json::json!({"models": [
