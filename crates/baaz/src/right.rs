@@ -1043,6 +1043,7 @@ fn fixture_git_status() -> crate::git_ops::GitTree {
         ahead: 2,
         behind: 1,
         ignored: vec![".cargo/".into(), ".claude/".into(), ".dev.env".into(), ".relay/".into(), "target/".into()],
+        untracked: Vec::new(),
     }
 }
 
@@ -1345,7 +1346,8 @@ fn append_cached_entries(
 /// (one kind → its letter, a mix → M).
 pub(crate) fn decorate_nodes(nodes: Vec<FileNode>, tree: Option<&crate::git_ops::GitTree>) -> Vec<FileNode> {
     let Some(tree) = tree else { return nodes };
-    let letter = |kind: ChangeKind| match kind {
+    let letter = |f: &FileChange| match f.change {
+        ChangeKind::Added if tree.is_untracked(&f.path) => GitBadge::U,
         ChangeKind::Added => GitBadge::A,
         ChangeKind::Deleted => GitBadge::D,
         _ => GitBadge::M,
@@ -1357,10 +1359,10 @@ pub(crate) fn decorate_nodes(nodes: Vec<FileNode>, tree: Option<&crate::git_ops:
             let ignored = tree.is_ignored(&id);
             let badge = if node.is_dir() {
                 let prefix = format!("{id}/");
-                let mut kinds = tree.files.iter().filter(|f| f.path.starts_with(&prefix)).map(|f| letter(f.change));
+                let mut kinds = tree.files.iter().filter(|f| f.path.starts_with(&prefix)).map(letter);
                 kinds.next().map(|first| if kinds.all(|k| k == first) { first } else { GitBadge::M })
             } else {
-                tree.change(&id).map(|f| letter(f.change))
+                tree.change(&id).map(letter)
             };
             let node = node.ignored(ignored);
             match badge {
