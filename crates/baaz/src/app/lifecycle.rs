@@ -3075,7 +3075,7 @@ impl Harness {
         let switching = switch.is_some_and(|epoch| self.replacing_epoch == Some(epoch));
         let early = (switching || (switch.is_none() && self.replacing.is_none()))
             && self.pending_handoff.is_none()
-            && self.client.is_some()
+            && !self.scripted_chrome()
             && crate::provider_status::provider_enabled(provider_id);
         if !early {
             self.open_on_provider(provider_id, project, workspace, window, cx);
