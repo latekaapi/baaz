@@ -103,15 +103,20 @@ fn omnibox_and_fixture_steps_are_window_verbs_and_documented() {
 }
 
 /// The suggestions expose their text as list-box options, and the pane's
-/// Browse button is labelled (the toolbar's own buttons moved to the
+/// Open in Browse is wired (the toolbar's own buttons moved to the
 /// sidebar's header in the library, 2026-10-13).
 #[test]
 fn toolbar_roles_and_labels() {
     let app = source("app.rs");
     assert!(app.contains("Address suggestions"), "the suggestions name themselves");
     assert!(app.contains("gpui::Role::ListBoxOption"), "suggestions are list-box options");
-    let right = source("right.rs");
-    assert!(right.contains("\"Browse full width\""), "the pane's Browse button is labelled");
+    // D6: the pane's 'Browse full width' button became the nav row's
+    // labelled 'Open in Browse' (agentic-ui page.rs), routed here.
+    let browser = source("browser/mod.rs");
+    assert!(
+        browser.contains("WebviewIntent::OpenInBrowse => self.carry_session_tab_to_browse(window, cx)"),
+        "the page's Open in Browse carries the session's page into Browse"
+    );
 }
 
 /// The covering rule includes the omnibox: the visibility struct carries
