@@ -982,12 +982,26 @@ impl SessionView {
         // `performance-2`): forward order, keeping the last hit, is the same
         // block the old per-frame reverse scan found first.
         let mut pending: Option<(String, Vec<aui_protocol::ApprovalChoice>)> = None;
+        // An open card field stays open only while its card still waits:
+        // a field whose approval settled (or whose question was answered)
+        // is never drawn, yet it kept the composer's ⏎ bound to
+        // `ConfirmField` — every later Enter re-sent a decided approval
+        // (live 2026-10-17). The same walk finds whether each still waits.
+        let mut feedback_live = false;
+        let mut clarify_live = false;
         for turn in self.cached_turns.iter() {
+            // A turn that is over settles its cards for key purposes, as it
+            // does for the row (`row_pending`): nothing can answer them.
+            let over = self.turn_over(turn.id());
             for block in turn.blocks() {
                 if let Block::Approval { id, state, choices, .. } = block {
-                    if *state == aui_protocol::ApprovalState::Pending {
+                    if *state == aui_protocol::ApprovalState::Pending && !over {
                         pending = Some((id.clone(), choices.clone()));
+                        feedback_live |= self.feedback_open.as_ref().is_some_and(|(open, _)| open == id);
                     }
+                }
+                if let Block::Question { id, answer: None, .. } = block {
+                    clarify_live |= !over && self.clarify_open.as_ref() == Some(id);
                 }
                 if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } = block
                 {
@@ -1006,6 +1020,12 @@ impl SessionView {
         }
         self.cached_full_output = Rc::new(full_output);
         self.cached_pending_approval = pending;
+        if !feedback_live {
+            self.feedback_open = None;
+        }
+        if !clarify_live {
+            self.clarify_open = None;
+        }
     }
 
     /// Flip one card's fold override (C8: group headers and per-call cards
@@ -1402,7 +1422,7 @@ impl SessionView {
                 }
             }
         }
-        if self.reply_complete_for_running_turn() {
+        if self.on_reminder_tail() {
             "Finishing up…".to_owned()
         } else {
             "Working…".to_owned()
@@ -1459,7 +1479,7 @@ impl SessionView {
             let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
             // The reply arrived whole but the turn is still open: Muse is on
             // the `reminderChild` tail (memory reminders), not stuck.
-            let finishing = self.reply_complete_for_running_turn();
+            let finishing = self.on_reminder_tail();
             let elapsed = (elapsed > 0).then(|| transcript::elapsed(elapsed));
             let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
             // Blocked on the person, the tail is not memory reminders: the
@@ -1599,9 +1619,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         }
         let guard = self.tier_banner.clone()?;
         let sign_out = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::Logout));
-        let through = cx.listener(move |_: &mut Self, _: &(), _, cx| {
-            cx.emit(SessionEvent::TierOverride);
-        });
+        let through = cx.listener(move |view: &mut Self, _: &(), window, cx| view.send_anyway(window, cx));
         let recheck = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::TierRecheck));
         let kind = if guard.blocking { BannerKind::Waiting } else { BannerKind::Info };
         let mut row = banner("tier-banner", kind, vec![BannerRun::Text(guard.text.clone().into())]);
@@ -1638,7 +1656,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     pub(super) fn render_needs_you(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (approvals, questions) = self.waiting_on_you()?;
         let at_tail = self.list_state.is_scrolled_to_end().unwrap_or(true);
-        if at_tail {
+        // A card with its field open is the one being answered: the reader
+        // is at it, and the band would only cover its send row.
+        if at_tail || self.card_field_open() {
             return None;
         }
         let detail = match (approvals, questions) {

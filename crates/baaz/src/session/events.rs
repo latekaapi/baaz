@@ -1137,4 +1137,29 @@ for line in sys.stdin:
         vc.run_until_parked();
         assert!(stub.saw("turn/steer").is_none(), "remove never steers");
     }
+
+    /// "Send anyway" is the send: the words the pay-as-you-go guard held
+    /// back leave on the press, not on a second Enter (2026-10-17).
+    #[gpui::test]
+    fn send_anyway_sends_the_held_back_message(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("send-anyway", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/send-anyway");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.set_tier_banner(
+                    Some(crate::session::TierBanner { text: "payg".to_owned(), blocking: true, checking: false }),
+                    cx,
+                );
+                view.send_text("bill me".to_owned(), cx);
+            })
+        });
+        assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("bill me"), "the guard holds the words back");
+        assert!(stub.saw("turn/start").is_none(), "nothing left while the guard blocks");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.send_anyway(window, cx)));
+        wait_for_wire(&stub, vc, "turn/start");
+        let start = stub.saw("turn/start").expect("the press sent a turn");
+        assert!(start.to_string().contains("bill me"), "the held-back words are the turn: {start}");
+    }
 }

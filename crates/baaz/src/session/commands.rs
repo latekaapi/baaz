@@ -905,7 +905,7 @@ impl SessionView {
     /// three-alias list had no row for the CLI's `default`, so the check
     /// sat past its end, at index 3, which the child's five-row catalog
     /// names Sonnet while the chip read Default (recommended).
-    fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
         let checked = self.model_menu_checked().unwrap_or(self.models.len());
         self.overlays.update(cx, |overlays, _| {
             if let Some(menu) = overlays.menu.as_mut().filter(|menu| menu.kind == MenuKind::Model) {
@@ -1209,15 +1209,35 @@ impl SessionView {
                     cx.notify();
                     return;
                 }
-                let Some(client) = self.wire_client(cx) else { return };
+                let Some(client) = self.wire_client(cx) else {
+                    // Muse starts on demand (docs/50 P1): an open picker
+                    // says so rather than opening empty.
+                    if self.muse_starting {
+                        self.models_error = Some(super::MUSE_STARTING_MENU.to_owned());
+                        cx.notify();
+                    }
+                    return;
+                };
                 let params = ModelListParams { session_id: Some(self.session_id.clone()) };
                 self.wire_call(
                     cx,
                     move || client.model_list(&params),
                     |this, result, cx| match result {
                         Ok(list) => {
-                            this.models = list.models;
+                            this.models = list
+                                .models
+                                .into_iter()
+                                .map(|mut row| {
+                                    row.display_label = SessionView::muse_row_label(&row.model_id, &row.display_label);
+                                    row
+                                })
+                                .collect();
                             this.models_error = None;
+                            // The menu opened before the rows landed: its
+                            // check was picked against no rows, so it fell on
+                            // index 0 (the default row) while the chip named
+                            // another. Re-pick it against the chip.
+                            this.sync_model_menu_check(cx);
                             cx.notify();
                         }
                         Err(error) => {
@@ -1819,7 +1839,7 @@ mod tests {
             // the chip updates at once, with the human name.
             view.update(cx, |view, cx| view.set_model("opus", cx));
             view.update(cx, |view, cx| {
-                assert_eq!(view.model().as_ref(), "Claude Opus");
+                assert_eq!(view.model().as_ref(), "Opus");
                 assert!(view.take_external_outbox().iter().any(|command| matches!(
                     command,
                     ProviderCommand::SelectModel { model, .. } if model == "opus"

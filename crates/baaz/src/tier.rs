@@ -354,6 +354,16 @@ pub struct Cached {
     /// needing re-verification for pay-as-you-go.
     #[serde(default)]
     pub probed_at_secs: Option<u64>,
+    /// Whether a subscription here was confirmed by an oracle that can tell
+    /// a subscription from pay-as-you-go: the `/upgrade` card, or a wire
+    /// observation naming its plan in words. A wire observation carrying
+    /// only the opaque numeric tier id (muse 1.4.x) is numbers, not a plan
+    /// kind — a pay-as-you-go login gets those too (see
+    /// [`wire_settles_kind`]). An unconfirmed subscription is never served
+    /// from the cache: the next boot asks the card. Absent in files older
+    /// builds wrote, which therefore re-probe once.
+    #[serde(default)]
+    pub kind_confirmed: bool,
 }
 
 /// Forget the remembered tier and plan name: a deliberate sign-out means
@@ -473,6 +483,9 @@ pub fn cached_at(now: u64) -> Option<Tier> {
     if matches!(cached.tier, Some(Tier::PayAsYouGo)) && payg_answer_stale(cached.probed_at_secs, now) {
         return None;
     }
+    if matches!(cached.tier, Some(Tier::Subscription { .. })) && !cached.kind_confirmed {
+        return None;
+    }
     if matches!(cached.tier, Some(Tier::Subscription { usage_unavailable: true, .. }))
         && unavailable_answer_stale(cached.probed_at_secs, now)
     {
@@ -504,12 +517,30 @@ pub fn cached_at(now: u64) -> Option<Tier> {
 /// plan (pay-as-you-go, an unrecognised card, a numeric wire id) never
 /// erases the name a previous reading established, even across a credential
 /// refresh that changes the mtime key under it.
+///
+/// For a probe's answer: what it says about the plan kind is confirmed.
 pub fn remember(tier: &Tier) {
     remember_at(tier, auth_mtime(), now_secs());
 }
 
+/// [`remember`] for a wire observation admitted through
+/// [`wire_settles_kind`]: its kind is confirmed only when it named its plan
+/// (`named`) or a confirmed subscription for this same login stands behind
+/// it — a numeric-id reading refreshes the numbers and nothing else.
+pub fn remember_observed(tier: &Tier, named: bool) {
+    let mtime = auth_mtime();
+    let prev: Cached = crate::store::read_json(&cache_path());
+    let inherited =
+        prev.kind_confirmed && prev.auth_mtime == mtime && matches!(prev.tier, Some(Tier::Subscription { .. }));
+    remember_with(tier, mtime, now_secs(), named || inherited);
+}
+
 /// [`remember`] with explicit stamps, so tests drive the mtime and the clock.
 pub fn remember_at(tier: &Tier, mtime: Option<u64>, now: u64) {
+    remember_with(tier, mtime, now, true);
+}
+
+fn remember_with(tier: &Tier, mtime: Option<u64>, now: u64, kind_confirmed: bool) {
     let prev: Cached = crate::store::read_json(&cache_path());
     let prev_known = prev.last_human_plan.filter(|name| is_human_plan_name(name));
     let own = match tier {
@@ -524,7 +555,7 @@ pub fn remember_at(tier: &Tier, mtime: Option<u64>, now: u64) {
         }
     }
     let cached =
-        Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan, probed_at_secs: Some(now) };
+        Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan, probed_at_secs: Some(now), kind_confirmed };
     if let Ok(text) = serde_json::to_vec_pretty(&cached) {
         let _ = crate::store::write_atomic(&cache_path(), &text);
     }
@@ -1100,6 +1131,38 @@ pub fn read_usage_value(client: &MuseClient) -> Option<serde_json::Value> {
     client.request("usage/read", None).ok()
 }
 
+/// The raw `tier` a wire usage value carries: a `usage/changed` params
+/// object, or a `usage/read` result (under `usage`).
+fn wire_raw_tier(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("tier")
+        .or_else(|| value.get("usage").and_then(|usage| usage.get("tier")))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Whether a wire usage value names its plan in words — the only wire
+/// reading that says which kind of plan the login is on.
+pub fn wire_names_plan(value: &serde_json::Value) -> bool {
+    wire_raw_tier(value).is_some_and(is_human_plan_name)
+}
+
+/// Whether a wire usage observation may become the tier, given the tier
+/// `held` now.
+///
+/// The `/upgrade` card is the oracle for subscription versus
+/// pay-as-you-go. Since muse 1.4.0 the wire's `tier` is an opaque numeric
+/// id, and a pay-as-you-go login receives `usage/changed` frames all the
+/// same (live 2026-10-17, muse 1.4.10: the card read "No active
+/// subscription — you're on pay-as-you-go" while the first turn's frame,
+/// 0 % / 0 % under a numeric id, flipped the footer to "Subscription"). So
+/// a numeric-id observation only refreshes the numbers of a subscription
+/// already known; it never decides the kind — never over a pay-as-you-go,
+/// never over an unknown plan. A reading that names its plan in words
+/// still settles the kind, as it always did.
+pub fn wire_settles_kind(value: &serde_json::Value, held: Option<&Tier>) -> bool {
+    wire_names_plan(value) || matches!(held, Some(Tier::Subscription { .. }))
+}
+
 /// The gated arm: decode, admit, build.
 ///
 /// [`tier_from_read_value`] decodes and builds; this admits in between. An
@@ -1231,7 +1294,11 @@ pub fn probe_primary_confirmed(
     mut fallback: impl FnMut() -> Result<Tier, String>,
     sleep: impl Fn(),
 ) -> Result<Tier, String> {
-    if let Some(tier) = read.and_then(|value| tier_from_read_current(value, auth_mtime_secs)) {
+    // Only a reading that names its plan answers for the card: a numeric
+    // id is not evidence of a subscription ([`wire_settles_kind`]).
+    if let Some(tier) =
+        read.filter(|value| wire_names_plan(value)).and_then(|value| tier_from_read_current(value, auth_mtime_secs))
+    {
         return Ok(tier);
     }
     let fresh = is_auth_fresh(auth_mtime_secs, now_secs);
@@ -2556,6 +2623,7 @@ mod tests {
             }),
             last_human_plan: Some("Muse Code Power Usage".into()),
             probed_at_secs: Some(mtime),
+            kind_confirmed: true,
         };
         crate::store::write_atomic(&cache_path(), &serde_json::to_vec_pretty(&prev).expect("seed"))
             .expect("seed tier.json");
@@ -2966,6 +3034,60 @@ mod usage_fraction_tests {
     }
 }
 
+    /// A numeric-id wire reading (muse 1.4.x) is numbers, not a plan kind:
+    /// a pay-as-you-go login gets them too (live 2026-10-17, muse 1.4.10 —
+    /// the card said pay-as-you-go, the first turn's frame flipped the
+    /// footer to "Subscription"). It refreshes a known subscription and
+    /// never decides the kind; a reading naming its plan still does.
+    #[test]
+    fn a_numeric_wire_reading_never_decides_the_plan_kind() {
+        let numeric = serde_json::json!({"tier": "27681631238169137", "observedAtMs": 1});
+        let named = serde_json::json!({"tier": "Muse Code High Usage", "observedAtMs": 1});
+        assert!(!wire_settles_kind(&numeric, Some(&Tier::PayAsYouGo)), "never over a pay-as-you-go");
+        assert!(!wire_settles_kind(&numeric, None), "never over an unknown plan");
+        assert!(!wire_settles_kind(&numeric, Some(&Tier::Unavailable("x".into()))));
+        assert!(wire_settles_kind(&numeric, Some(&test_subscription())), "it refreshes a known subscription");
+        assert!(wire_settles_kind(&named, Some(&Tier::PayAsYouGo)), "a named plan still settles the kind");
+        let read = serde_json::json!({"usage": {"tier": "27681631238169137"}});
+        assert!(!wire_names_plan(&read), "the usage/read shape too");
+    }
+
+    /// The probe's wire arm answers only for a reading that names its plan:
+    /// a numeric-id `usage/read` falls through to the card, which is what
+    /// says pay-as-you-go.
+    #[test]
+    fn a_numeric_usage_read_falls_through_to_the_card() {
+        let mtime = 1_786_000_000u64;
+        let mut read = test_read((mtime + 60) * 1000);
+        read["usage"]["tier"] = serde_json::json!("27681631238169137");
+        let calls = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            Some(&read),
+            Some(mtime),
+            mtime + 3600,
+            scripted_probe(vec![Ok(Tier::PayAsYouGo), Ok(Tier::PayAsYouGo)], &calls),
+            || {},
+        );
+        assert_eq!(tier, Ok(Tier::PayAsYouGo));
+        assert_eq!(calls.get(), 2, "the card answered, confirmed once");
+    }
+
+    /// A subscription remembered from a numeric-id reading alone is not
+    /// served from the cache: the next boot asks the card. One that a
+    /// confirmed subscription stands behind keeps being served.
+    #[test]
+    fn an_unconfirmed_wire_subscription_is_not_served_from_the_cache() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let numeric = tier_from_usage(&wire_usage("27681631238169137"));
+        remember_observed(&numeric, false);
+        assert_eq!(cached_at(now_secs()), None, "the card decides the kind on the next boot");
+        remember(&test_subscription());
+        remember_observed(&numeric, false);
+        assert!(
+            matches!(cached_at(now_secs()), Some(Tier::Subscription { .. })),
+            "a confirmed subscription's numbers refresh and stay served"
+        );
+    }
 }
 
 /// T1 (2026-10-06): ⌘W / the red dot froze the app because `Pty::drop`
@@ -3046,4 +3168,5 @@ mod t1_close_tests {
             start.elapsed()
         );
     }
+
 }

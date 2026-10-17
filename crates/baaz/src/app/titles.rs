@@ -243,6 +243,15 @@ impl Harness {
         }
     }
 
+    /// The model a one-shot completion for `session_id` runs on: the live
+    /// view's own model (what Codex is known to run for this account —
+    /// see [`crate::utility`]), or none when no live view names one.
+    fn utility_model(&self, session_id: &str, cx: &Context<Self>) -> Option<String> {
+        Self::live_view_for(&self.active, &self.session_cache, session_id, cx)
+            .map(|view| view.read(cx).model_id())
+            .filter(|model| !model.is_empty())
+    }
+
     /// [`Self::run_title_attempt`] on a Claude Code or Codex session: one
     /// completion on that provider's cheapest model, landed, retried once,
     /// or given up exactly as the Muse route's harvest does.
@@ -258,7 +267,8 @@ impl Harness {
             return;
         }
         let prompt = titles::title_prompt(&first_message);
-        self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, result, cx| {
+        let model = self.utility_model(&real_id, cx);
+        self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, result, cx| {
             let late = !this.titles_pending.contains(&real_id);
             let reason = match result.map(|text| titles::clean_title(&text)) {
                 Ok(Some(title)) => {
@@ -522,7 +532,8 @@ impl Harness {
         let provider = self.session_lane_provider(&source);
         if provider != crate::providers::ProviderId::Muse {
             self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
-            self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, reply, cx| {
+            let model = self.utility_model(&source, cx);
+            self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, reply, cx| {
                 let summary = reply.ok().and_then(|text| titles::clean_summary(&text));
                 if this.handoff_summary_waiting(&source, epoch) {
                     this.resolve_handoff_summary(source, epoch, summary, cx);
@@ -1010,7 +1021,8 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let prompt = byline::rewrite_prompt(&ask, &result);
-        self.wire_call(cx, move || crate::utility::complete(provider, &prompt), move |this, reply, cx| {
+        let model = self.utility_model(&real_id, cx);
+        self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, reply, cx| {
             if !this.byline_live.contains(&real_id) {
                 return;
             }

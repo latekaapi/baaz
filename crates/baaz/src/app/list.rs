@@ -360,7 +360,7 @@ impl Harness {
     /// instead. Never renders the parked transcript: only the row's live
     /// facts come back. Takes the fields, not `self`, so the caller keeps
     /// its mutable row borrow (disjoint fields).
-    fn live_view_for(
+    pub(super) fn live_view_for(
         active: &Option<Entity<SessionView>>,
         cache: &[(String, Entity<SessionView>)],
         session_id: &str,

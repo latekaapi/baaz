@@ -142,8 +142,9 @@ impl Harness {
     /// beside it as the Muse usage snapshot, so the account menu shows
     /// the newest reading with its true age.
     pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
-        if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()) {
-            tier::remember(&tier);
+        let admitted = tier::wire_settles_kind(params, self.tier.as_ref());
+        if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()).filter(|_| admitted) {
+            tier::remember_observed(&tier, tier::wire_names_plan(params));
             // The snapshot carries the notification's own arrival time,
             // and a tier with no numbers never wipes the last good one:
             // the rows keep it with "unavailable now" beside it.
@@ -171,6 +172,7 @@ impl Harness {
     /// always settles.
     pub(crate) fn refresh_muse_usage(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
+        let held = self.tier.clone();
         self.wire_call(
             cx,
             move || {
@@ -181,16 +183,17 @@ impl Harness {
                     let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
                     let observed_at =
                         value.as_ref().and_then(tier::observed_secs_from_read_value);
-                    value
-                        .and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
-                        .map(|tier| (tier, observed_at))
+                    // A numeric-id reading never decides the plan kind.
+                    let value = value.filter(|value| tier::wire_settles_kind(value, held.as_ref()))?;
+                    let named = tier::wire_names_plan(&value);
+                    tier::tier_from_read_current(&value, tier::auth_mtime()).map(|tier| (tier, observed_at, named))
                 }));
                 outcome.ok().flatten()
             },
             move |this, result, cx| {
                 match result {
-                    Some((tier, observed_at)) if tier::tier_has_numbers(&tier) => {
-                        tier::remember(&tier);
+                    Some((tier, observed_at, named)) if tier::tier_has_numbers(&tier) => {
+                        tier::remember_observed(&tier, named);
                         crate::provider_status::record_muse_snapshot_at(
                             Some(tier.footer_label()),
                             tier.usage_fraction().map(f64::from),

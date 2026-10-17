@@ -424,6 +424,15 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     entry
 }
 
+/// The id prefix of a local draft: a Muse draft with no session behind it
+/// (scripted chrome, or a live launch with Muse still starting).
+pub(crate) const LOCAL_DRAFT_PREFIX: &str = "local-draft-";
+
+/// Whether `session_id` names a local draft ([`LOCAL_DRAFT_PREFIX`]).
+pub(crate) fn is_local_draft(session_id: &str) -> bool {
+    session_id.starts_with(LOCAL_DRAFT_PREFIX)
+}
+
 impl Harness {
     // -------------------------------------------------------------- sessions
 
@@ -2174,8 +2183,44 @@ impl Harness {
         let parked =
             self.session_cache.iter().find(|(id, _)| id == draft_id).map(|(_, view)| view.clone());
         let Some(view) = in_centre.or(parked) else { return false };
+        // A local Muse draft stood in while Muse was not running; once it
+        // runs, the draft cannot send, so a new session starts a real one.
+        if is_local_draft(draft_id) && self.client.is_some() {
+            return false;
+        }
         view.read(cx).provider_kind() == wanted
             && view.read(cx).is_provider_lane() == (wanted != ProviderId::Muse)
+    }
+
+    /// Muse came up under a live local Muse draft (opened while it was
+    /// starting, docs/50 P1): that view has no child and can never send or
+    /// list models, so its words move into a real Muse draft for the same
+    /// project — the same move a project retarget makes. Anything else in
+    /// the centre is left alone, and so is a local draft with a send in
+    /// flight or one the person has switched off Muse.
+    pub(crate) fn promote_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let id = view.read(cx).session_id.clone();
+        if !is_local_draft(&id)
+            || view.read(cx).is_provider_lane()
+            || view.read(cx).is_sending()
+            || self.client.is_none()
+            || ProviderId::parse(&self.new_provider) != ProviderId::Muse
+        {
+            return;
+        }
+        crate::baaz_log!("new: Muse is up; the local draft becomes a Muse draft");
+        let moving = view.update(cx, |view, vc| view.take_draft(window, vc));
+        self.drafts.retain(|_, named| named != &id);
+        if self.sessions.iter().any(|e| e.id == id) {
+            self.set_override(&id, |meta| meta.hidden = true, cx);
+        }
+        self.pending_draft = Some(moving);
+        let project = self.current_project_id();
+        self.new_session_in(project, window, cx);
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.refresh_open_model_menu(cx));
+        }
     }
 
     /// Reopen a live draft's view: the active one when it is already open,
@@ -2244,7 +2289,7 @@ impl Harness {
         }
         let moving = self.pending_draft.take();
         let retarget = moving.is_some();
-        let draft_id = format!("local-draft-{id}");
+        let draft_id = format!("{LOCAL_DRAFT_PREFIX}{id}");
         let workspace = self.workspace();
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let host = SessionHost {
@@ -2261,6 +2306,12 @@ impl Harness {
             cx.notify();
         });
         view.update(cx, |view, cx| view.load_history(cx));
+        // Live, Muse is starting under this draft: the chip and the model
+        // menu say so (the promotion replaces the view once it is up).
+        let starting = !self.scripted_chrome()
+            && self.client.is_none()
+            && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
+        view.update(cx, |view, vc| view.set_muse_starting(starting, vc));
         // The Ask's session is this draft: key the draft to it before the
         // view lands, so `activate` takes it here — and only here.
         self.key_pending_ask(&draft_id);
@@ -9011,7 +9062,7 @@ done
             assert_eq!(view.mode_label(), "Ask", "never Auto on Haiku");
             assert_eq!(
                 view.banner_text(),
-                Some("Auto is not available for Claude Haiku; Claude Code will ask before acting.")
+                Some("Auto is not available for Haiku; Claude Code will ask before acting.")
             );
         });
         assert_eq!(

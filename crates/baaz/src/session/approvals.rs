@@ -105,8 +105,18 @@ impl SessionView {
     pub fn toggle_feedback(&mut self, approval_id: String, choice_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.feedback_open = choice_id.map(|choice| (approval_id, choice));
         self.feedback.update(cx, |state, cx| state.set_value("", window, cx));
-        if self.feedback_open.is_some() {
+        if let Some((open, _)) = &self.feedback_open {
             window.focus(&self.feedback.focus_handle(cx), cx);
+            // The field grows the card by its height and its send row. The
+            // newest card sits at the transcript's end, under the floating
+            // band: anchor the list at its end, whose tail clears the band
+            // and the stack, so the grown card shows whole above them
+            // rather than its buttons sliding under the composer (live
+            // 2026-10-17).
+            if self.newest_pending_approval().is_some_and(|(newest, _)| newest == open) {
+                self.follow = true;
+                self.list_state.scroll_to_end();
+            }
         }
         cx.notify();
     }
@@ -118,6 +128,9 @@ impl SessionView {
             let text = self.feedback.read(cx).value().to_string();
             let feedback = (!text.trim().is_empty()).then_some(text);
             self.decide_approval(approval_id, choice_id, feedback, cx);
+            // The field is gone with the decision; the keyboard goes back
+            // to the composer rather than to a field no longer drawn.
+            self.focus_composer(window, cx);
             return true;
         }
         if let Some(block_id) = self.clarify_open.clone() {
@@ -339,6 +352,7 @@ impl SessionView {
             return;
         };
         crate::baaz_log!("external approval {approval_id} ({headline}): deciding {choice_id}");
+        self.close_feedback_for(&approval_id);
         self.external_outbox.push(ProviderCommand::DecideApproval {
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
@@ -358,6 +372,13 @@ impl SessionView {
             };
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
+                    // The provider holds nothing under that id: nothing
+                    // will ever settle it, so it leaves here too rather
+                    // than staying armed for the next key.
+                    if error.is_unknown_approval() {
+                        this.drop_gone_approval(&approval, cx);
+                        return;
+                    }
                     // The decision never landed: re-park the card so the
                     // press can be tried again, and banner the reason —
                     // an `Unsupported` refusal shows it verbatim.
@@ -384,6 +405,11 @@ impl SessionView {
         let stage_token =
             self.external_approvals.get(&approval_id).and_then(|tap| tap.stage_token.clone());
         crate::baaz_log!("provider approval {approval_id}: deciding {choice_id} on the inline card");
+        // The press is the field's send: the field closes with it, as the
+        // muse lane's does. Left open, it kept the composer's ⏎ bound to
+        // `ConfirmField`, which re-sent this settled decision on every
+        // later Enter ("unknown approval", live 2026-10-17).
+        self.close_feedback_for(&approval_id);
         self.external_outbox.push(ProviderCommand::DecideApproval {
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
@@ -399,11 +425,53 @@ impl SessionView {
             };
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
+                    if error.is_unknown_approval() {
+                        this.drop_gone_approval(&approval, cx);
+                        return;
+                    }
                     this.report_provider_error(&error, cx);
                     crate::baaz_log!("provider approval {approval}: the decision never landed: {error}");
                 }
             });
         }
+        cx.notify();
+    }
+
+    /// Close the feedback field when it belongs to `approval_id`: the
+    /// decision it was opened for is on its way.
+    fn close_feedback_for(&mut self, approval_id: &str) {
+        if self.feedback_open.as_ref().is_some_and(|(open, _)| open == approval_id) {
+            self.feedback_open = None;
+        }
+    }
+
+    /// The provider answered a decision with "unknown approval": no pending
+    /// request carries that id there any more (answered already, expired,
+    /// or its child is gone), so no notification will ever settle it. It
+    /// leaves here too — the parked tap, a field open on it, and the
+    /// inline card, which settles the way muse's `approvalNotFound` does
+    /// (`Denied`, nobody's name on it) — so it can never hold a key again.
+    pub(super) fn drop_gone_approval(&mut self, approval_id: &str, cx: &mut Context<Self>) {
+        use aui_protocol::{ApprovalState, Block, Delta};
+        crate::baaz_log!("provider approval {approval_id}: the provider holds nothing under that id; dropping the card");
+        self.external_approvals.resolve(approval_id);
+        self.close_feedback_for(approval_id);
+        let pending = self.fold.session(&self.session_id).and_then(|session| {
+            session.turns.iter().find_map(|turn| {
+                let index = turn.blocks().iter().position(|block| {
+                    matches!(block, Block::Approval { id, state: ApprovalState::Pending, .. } if id == approval_id)
+                })?;
+                Some((turn.id().to_owned(), index, turn.blocks()[index].clone()))
+            })
+        });
+        if let Some((turn_id, block_index, mut block)) = pending {
+            if let Block::Approval { state, .. } = &mut block {
+                *state = ApprovalState::Denied;
+            }
+            self.fold.apply_deltas(&self.session_id, vec![Delta::BlockUpdated { turn_id, block_index, block }]);
+        }
+        self.follow = true;
+        cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
         cx.notify();
     }
 
