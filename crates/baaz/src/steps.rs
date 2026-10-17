@@ -109,6 +109,7 @@
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
+//! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown records a step failure, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
@@ -340,6 +341,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, rest, window, cx| this.step_fixture_session(rest, window, cx),
     },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
+    WindowVerb { verb: "changes-open", run: |this, rest, _, cx| this.step_changes_open(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },

@@ -374,6 +374,17 @@ impl SessionView {
                     show(&id, window, cx)
                 }))
             },
+            // D6: "N more lines" on a shell card opens the full output in
+            // the right pane (fetching the rest when the provider has it).
+            open_output: {
+                let open = cx.listener(|this: &mut Self, out: &transcript::OutputOpen, _, cx| {
+                    if out.fetchable {
+                        this.show_full_output(out.block_id.clone(), cx);
+                    }
+                    cx.emit(SessionEvent::OpenOutput(out.clone()));
+                });
+                Some(Rc::new(move |out: transcript::OutputOpen, window: &mut Window, cx: &mut gpui::App| open(&out, window, cx)))
+            },
             // Turn links and bottom-row actions (C5, C6): `http(s)` URLs
             // open in Baaz's Browser pane (B9), workspace paths reveal in
             // the Files pane, and every wire action is live-only — replay
@@ -532,8 +543,14 @@ impl SessionView {
             // stamped where applied deltas materialise below.
             sent: Rc::clone(&self.sent_pairs),
             open_attachment: {
+                // D6 (docs/43 §4): an image tile opens the image view; any
+                // other file reveals in Files.
                 let open = cx.listener(|_: &mut Self, path: &String, _, cx| {
-                    cx.emit(SessionEvent::RevealPath { abs: PathBuf::from(path), highlight: None });
+                    if crate::right::is_image_path(path) {
+                        cx.emit(SessionEvent::OpenImage(PathBuf::from(path)));
+                    } else {
+                        cx.emit(SessionEvent::RevealPath { abs: PathBuf::from(path), highlight: None });
+                    }
                 });
                 Some(Rc::new(move |path: String, window: &mut Window, cx: &mut gpui::App| open(&path, window, cx)))
             },
@@ -2035,15 +2052,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: Some(file.detail().into()),
                         state: ComposerChipState::Ready,
                     }))
-                    .chain(self.quotes.iter().map(|quote| ComposerChip {
-                        id: quote.id.clone().into(),
-                        kind: ComposerChipKind::Quote,
-                        label: quote_chip_words(&quote.text).into(),
-                        removable: true,
-                        thumbnail: None,
-                        detail: None,
-                        state: ComposerChipState::Ready,
-                    }))
                     .chain(self.failed_chips.iter().map(|(id, name, reason)| ComposerChip {
                         id: id.clone().into(),
                         kind: ComposerChipKind::File,
@@ -2053,6 +2061,16 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: None,
                         state: ComposerChipState::Failed(reason.clone().into()),
                     }))
+                    .collect(),
+            )
+            .quotes(
+                self.quotes
+                    .iter()
+                    .map(|quote| aui::composer::ComposerQuote {
+                        id: quote.id.clone().into(),
+                        text: quote_block_text(&quote.text, quote.code.is_some()).into(),
+                        code: quote.code.clone().map(|(lang, n)| (lang.into(), n)),
+                    })
                     .collect(),
             )
             .streaming(self.busy())
@@ -3645,22 +3663,16 @@ thread_local! {
     pub(crate) static OPENED_EXTERNALLY: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A quote chip's words: the first ones, cut at a word boundary near 40
-/// characters with an ellipsis (`the provider closed the stream before…`).
-pub(super) fn quote_chip_words(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 40 {
-        return flat;
+/// What a quote block shows (docs/43 §0): a prose quote flattened (the
+/// Markdown's list markers and fences fold into one line of words); a code
+/// quote as written.
+pub(super) fn quote_block_text(text: &str, code: bool) -> String {
+    if code {
+        return text.to_string();
     }
-    let mut out = String::new();
-    for word in flat.split(' ') {
-        if out.chars().count() + word.chars().count() + 1 > 40 {
-            break;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
-    }
-    format!("{out}…")
+    text.lines()
+        .map(|l| l.trim().trim_start_matches("```").trim_start_matches(['-', '*']).trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" • ")
 }
