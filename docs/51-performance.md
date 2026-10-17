@@ -1,6 +1,6 @@
 # 51 — Performance: measure, then make Baaz instant (plan, 2026-10-16)
 
-Status: **approved 2026-10-16; M + P0 in progress on `perf/measure-p0`.** No code written. Evidence: static audits of Baaz + agentic-ui (2026-10-16),
+Status: **approved 2026-10-16; P0 merged 2026-10-17; M budgets on `foundations/m-p3` (§6).** No code written. Evidence: static audits of Baaz + agentic-ui (2026-10-16),
 sqlite measurements on **copies** of the real databases (`/private/tmp/claude-501/perf-audit/`), Zed's source
 (`zed@5504e87`) and the peers' code and issue trackers. Live numbers (first frame, switch, send) have **not** been
 taken yet — step M below does that first.
@@ -92,3 +92,43 @@ Found while measuring: offline, the sidebar never leaves its loading skeleton (M
 login screen animates indefinitely — now at 30 Hz instead of display rate.
 Measurement traps: replay runs read the real Muse index unless `XDG_DATA_HOME` is isolated; `ps %cpu` is a decaying
 average (use cumulative `ps -o time`); test windows behind the owner's apps get no display link.
+
+## 6. Budgets that fail the gate (step M, 2026-10-17, branch `foundations/m-p3`)
+
+`scripts/perf-budgets.py` measures, compares against `scripts/perf-budgets.json` and exits 1 on a miss (2 when it could
+not measure — never a pass). Offline, deterministic, no model turns, a throwaway state dir; ~40 s. It runs:
+
+- in **relay Tier V** as the adapter's entry-less `budget` verb (`uiprobe.json`; `relay_visual.py` turns each miss into a
+  feel-wrong finding and each unmeasured metric into *unverified*; `--no-budget` skips it and says so);
+- in **CI** as `--only store --slack 3` (the windowed metrics need a display and this machine's numbers);
+- by hand: `python3 scripts/perf-budgets.py [--binary target/release/baaz] [--only <group>] [--json]`.
+
+| Metric | How | Measured (debug, median) | Budget |
+|---|---|---|---|
+| `store.index_refresh_unchanged_ms` | `baaz --perf-store`: stamp-only re-read of a 2,600-row Muse-shaped index | 0.7 ms | 20 |
+| `store.index_refresh_one_ms` | same, one row moved | 0.85 ms | 20 |
+| `store.index_cache_load_ms` | `index-cache.json` boot read, 2,600 rows | 1.1 ms | 50 |
+| `store.search_sync_unchanged_ms` | `search.db` sync, nothing changed | 0.7 ms | 25 |
+| `store.search_sync_one_ms` | sync, one finished turn | 1.2 ms | 50 |
+| `store.search_query_ms` | palette query | 0.3 ms | 20 |
+| `store.provider_bodies_ms` | 120 Claude/Codex transcripts read for search (P3) | 23 ms | 150 |
+| `boot.first_frame_ms` | `--no-connect --login signed-in`, `first-frame` mark, 1 warm-up + 5 runs | 125 ms | 300 |
+| `open.replay_300_ms` | `--replay synthetic-stress-300`: open → first transcript render | 13 ms | **50** (target) |
+| `switch.cached_300_ms` | `click:` away and back: cached switch → first transcript render | 3–6 ms | **16** (one frame) |
+| `stream.to_render_p50_ms` / `p99` | `--bench`: each event's fold → next transcript render | 0.7 / 1.6 ms | 8 / **16** |
+| `stream.fold_apply_p99_ms` | `--bench` fold per event | 0.045 ms | 2 |
+| `idle.cpu_pct` | 300-turn replay open, left alone 10 s: cumulative `ps` CPU | 0.0–0.1 % | **0.5** (target) |
+| `idle.renders` | same: `baaz-perf renders` lines | 0 | **0** |
+
+Informational (no budget): `store.index_full_read_ms` 8 ms, `store.search_first_sync_ms` 440 ms (first sync of 2,600
+rows of 16 KB). The real store's first sync was 19 s once (bodies 80 KB avg, 1 GB db).
+
+What changed to make these measurable: `--perf-store` (headless, `perf_budget.rs`); `--bench` reports
+`stream_to_render` (`bench-stream`); `--replay` marks `replay-open`/`replay-folded`/`first-content`; offline switches
+trace like live ones; a replayed capture parks in the MRU in a scripted window (it used to come back as a blank
+"Loading history…" view — the switch budget measured nothing until this changed).
+
+**What these numbers are not.** Debug build; the window renders behind other apps, so "render" is the transcript's
+element construction, not a pixel on glass, and idle cannot see display-rate loops that only run with a display link
+(the Tier V `idle` entries and a live check still own that). Synthetic bodies are 16 KB, not 80 KB. Release numbers:
+see the bundle run below.

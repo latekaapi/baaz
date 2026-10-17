@@ -4885,6 +4885,10 @@ impl Harness {
     /// frame that has a `Window` to build a composer with.
     fn open_replay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.args.replay.take() else { return };
+        // The open-at-length mark (docs/51 M): parse and fold the whole
+        // capture, then the first frame that draws it.
+        crate::log::trace_reset();
+        crate::log::trace_mark("replay-open");
         let at_rest = self.still();
         // The capture's own root when it names one: the replayed row groups
         // where a live session of that root would.
@@ -4915,6 +4919,8 @@ impl Harness {
             view.load_history(cx);
             view
         });
+        crate::log::trace_mark("replay-folded");
+        crate::log::trace_arm_first_frame();
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         // The replayed row stands for the capture's own turns: without them

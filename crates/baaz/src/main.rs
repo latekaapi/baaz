@@ -66,6 +66,7 @@ mod native_lights;
 mod newtab_ground;
 mod overlay;
 mod overlays;
+mod perf_budget;
 mod plan;
 mod project_menu;
 mod projects;
@@ -735,6 +736,16 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
 fn main() {
     crate::log::boot_init();
     crate::log::boot_mark("process-start");
+    // `--perf-store <dir>`: the per-turn store budgets (docs/51 step M),
+    // headless and offline; prints one JSON line and exits.
+    {
+        let mut argv = std::env::args().skip(1);
+        if argv.next().as_deref() == Some("--perf-store") {
+            let dir = argv.next().map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("baaz-perf-store"));
+            perf_budget::run(&dir);
+            return;
+        }
+    }
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();

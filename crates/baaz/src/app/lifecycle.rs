@@ -2475,7 +2475,13 @@ impl Harness {
                 if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
                     return;
                 }
+                // Traced like the live switch below, so the offline perf
+                // budget (`scripts/perf-budgets.py`) times a cached switch.
+                crate::log::trace_reset();
+                crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
+                crate::log::trace_arm_first_frame();
                 if let Some(view) = self.cache_take(&session_id) {
+                    crate::log::trace_mark("cache-hit");
                     self.activate(view, quiet, window, cx);
                 } else {
                     self.open(session_id.clone(), false, quiet, window, cx);
@@ -4521,7 +4527,12 @@ impl Harness {
     fn park_active(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.take() else { return };
         let session_id = view.read(cx).session_id.clone();
-        let cacheable = !view.read(cx).is_replay()
+        // A replayed capture parks only in a scripted window (`--replay`,
+        // offline): there it is the session, and switching away and back
+        // must find its transcript rather than a blank local view (the
+        // offline switch budget in `scripts/perf-budgets.py` times exactly
+        // that). A live window never holds a replay worth keeping.
+        let cacheable = (!view.read(cx).is_replay() || self.args.offline)
             && !self.overrides.get(&session_id).is_some_and(|m| m.hidden)
             && !self.overrides.get(&session_id).is_some_and(|m| m.archived);
         if cacheable {
