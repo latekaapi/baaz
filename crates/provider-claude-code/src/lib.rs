@@ -587,7 +587,15 @@ impl ClaudeCodeAdapter {
     /// into Auto still waiting on its relaunch (out of a launched
     /// Read-only) becomes a relaunch into Ask instead — the chip moves
     /// with it, as it moved for the pick.
+    ///
+    /// A mode other than Auto requested since (the host falls back to Ask
+    /// on the pick itself, before the child confirms) stands: nothing more
+    /// is sent and no second banner shows.
     fn leave_auto_if_unsupported(&self, model: &str) {
+        let requested = *self.requested_mode.lock().expect("requested mode mutex");
+        if requested.is_some_and(|mode| mode != PermissionMode::OnRequest) {
+            return;
+        }
         let (in_auto, row) = {
             let fold = self.fold.lock().expect("fold mutex");
             (fold.permission_mode() == Some(PermissionMode::OnRequest), fold.catalog_row(model).cloned())
@@ -1400,9 +1408,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // reads the record — never one command later.
         self.hub.drain_confirmations();
         // A model switch the child confirmed since: Auto follows the model
-        // it actually runs, before this command reads the mode.
+        // it actually runs, before this command reads the mode. A mode pick
+        // is the person's answer already — it supersedes the fallback, so
+        // no stale banner lands beside the mode they just chose.
         if let Some(model) = self.hub.take_confirmed_model() {
-            self.leave_auto_if_unsupported(&model);
+            if !matches!(command, Command::SelectApprovalMode { .. }) {
+                self.leave_auto_if_unsupported(&model);
+            }
         }
         self.ensure_read_only_layer();
         match command {
@@ -2689,6 +2701,46 @@ mod tests {
         adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::PromptUnmatched);
         select("haiku");
         assert_eq!(adapter.sent_control_lines().len(), 4);
+    }
+
+    /// The host falls back to Ask on the pick, and the person may pick a
+    /// mode before the child's confirmation is settled: either one stands,
+    /// so the confirmed switch sends no second mode change and no stale
+    /// fallback banner lands beside the mode they chose.
+    #[test]
+    fn a_mode_requested_after_the_switch_supersedes_the_fallback() {
+        for mode in [PermissionMode::PromptUnmatched, PermissionMode::DenyUnmatched] {
+            let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+            adapter.attach_session_for_tests("sess-1");
+            fold_catalog(&adapter);
+            adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::OnRequest);
+            adapter
+                .dispatch(Command::SelectModel {
+                    request_id: "r-1".into(),
+                    session_id: "sess-1".into(),
+                    model: "haiku".into(),
+                    model_provider: None,
+                })
+                .expect("a pick lands");
+            let id = pending_id(&adapter);
+            adapter.ingest_child_line(&success_line(&id));
+            adapter
+                .dispatch(Command::SelectApprovalMode {
+                    request_id: "r-2".into(),
+                    session_id: "sess-1".into(),
+                    mode,
+                })
+                .expect("the mode pick lands");
+            let _ = adapter.dispatch(Command::ListModels { session: None });
+            let modes: Vec<String> = adapter
+                .sent_control_lines()
+                .into_iter()
+                .filter(|line| line.contains("set_permission_mode"))
+                .collect();
+            assert!(modes.len() <= 1 && !modes.iter().any(|line| line.contains("\"manual\"") && mode != PermissionMode::PromptUnmatched), "{mode:?}: {modes:?}");
+            let cards = control_cards(&drain_events(&adapter));
+            assert!(cards.iter().all(|(kind, _)| kind != CONTROL_MODE_FALLBACK_CARD), "{mode:?}: {cards:?}");
+        }
     }
 
     /// A switch onto a model without auto that the child REFUSES leaves the

@@ -107,6 +107,8 @@ impl SessionView {
         };
         let deltas = self.fold.apply(event);
         let changed = !deltas.is_empty();
+        // The mode may have moved under an open mode menu.
+        self.sync_mode_menu_check(cx);
         self.record_usage(&deltas, cursor, cx);
         if completed_ours {
             self.record_created_files(cx);

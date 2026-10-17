@@ -246,7 +246,26 @@ impl SessionView {
     pub(super) fn set_banner(&mut self, message: &str, action: Option<BannerAction>, cx: &mut Context<Self>) {
         self.banner = Some(message.to_owned());
         self.banner_action = action;
+        self.banner_is_mode_fallback = false;
         cx.notify();
+    }
+
+    /// The banner saying a model pick left Auto for Ask: the one banner a
+    /// later mode pick takes down, since the person answered it.
+    pub(super) fn show_mode_fallback(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.set_banner(message, None, cx);
+        self.banner_is_mode_fallback = true;
+    }
+
+    /// Take down the Auto-fallback banner, if that is what shows: a mode
+    /// pick supersedes it.
+    pub(super) fn dismiss_mode_fallback(&mut self, cx: &mut Context<Self>) {
+        if self.banner_is_mode_fallback {
+            self.banner_is_mode_fallback = false;
+            self.banner = None;
+            self.banner_action = None;
+            cx.notify();
+        }
     }
 
     /// A session opened on a disabled provider: readable, but no child

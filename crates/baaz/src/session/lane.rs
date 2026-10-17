@@ -124,6 +124,35 @@ impl SessionView {
         }
     }
 
+    /// Stand the chip on `mode` until the provider reports one: a request
+    /// the host just made (the fallback out of Auto, or a pick superseding
+    /// an earlier unreported request). Returns what stood before, which a
+    /// refused request puts back with [`Self::restore_unreported_mode`].
+    pub(super) fn stand_on_mode(
+        &mut self,
+        mode: aui_protocol::PermissionMode,
+    ) -> Option<aui_protocol::PermissionMode> {
+        match &mut self.lane {
+            Lane::Opening(opening) => Some(std::mem::replace(&mut opening.mode, mode)),
+            Lane::Provider(lane) => lane.unreported_mode.replace(mode),
+            Lane::Muse => None,
+        }
+    }
+
+    /// Undo [`Self::stand_on_mode`] for a request the provider refused,
+    /// unless the provider reported (or a later request stood) since.
+    pub(super) fn restore_unreported_mode(
+        &mut self,
+        wanted: aui_protocol::PermissionMode,
+        previous: Option<aui_protocol::PermissionMode>,
+    ) {
+        if let Lane::Provider(lane) = &mut self.lane {
+            if lane.unreported_mode == Some(wanted) {
+                lane.unreported_mode = previous;
+            }
+        }
+    }
+
     /// Whether this view was drawn on the click and never got its child:
     /// still opening, or its open failed. Such a view stands on a
     /// provisional id nothing else outlives it with.
@@ -307,7 +336,11 @@ impl SessionView {
                             || kind == provider_claude_code::CONTROL_MODE_REJECTED_CARD
                             || kind == provider_claude_code::CONTROL_MODE_FALLBACK_CARD =>
                         {
-                            self.set_banner(text, None, cx);
+                            if kind == provider_claude_code::CONTROL_MODE_FALLBACK_CARD {
+                                self.show_mode_fallback(text, cx);
+                            } else {
+                                self.set_banner(text, None, cx);
+                            }
                             model_refused |=
                                 kind == provider_claude_code::CONTROL_MODEL_REJECTED_CARD;
                         }
@@ -392,6 +425,7 @@ impl SessionView {
                     _ => false,
                 };
                 if self.fold.set_session_mode(&session_id, mode) || was_unreported {
+                    self.sync_mode_menu_check(cx);
                     cx.notify();
                 }
             }
@@ -2560,6 +2594,135 @@ mod tests {
         });
     }
 
+    /// The model menu checks the row the chip names even when the child's
+    /// catalog folds while the menu stands open: the picker asks for the
+    /// catalog on every open, and the first ask (before the child's
+    /// `initialize` answered) folded Baaz's three-alias list, which has no
+    /// row for the CLI's `default` — so the check sat at index 3, which the
+    /// five-row catalog names Sonnet, under a chip reading Default.
+    #[gpui::test]
+    fn the_model_check_follows_the_chip_across_a_refold(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::MenuKind;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let row = |id: &str, label: &str, is_default: bool| provider::ModelSummary {
+            id: id.into(),
+            label: label.into(),
+            is_default,
+            ..Default::default()
+        };
+        let (adapter, _handle) = RecordingProvider::with_catalog(vec![
+            row("default", "Default (recommended)", true),
+            row("opus[1m]", "Opus (1M context)", false),
+            row("claude-fable-5-1[1m]", "Fable", false),
+            row("sonnet", "Sonnet", false),
+            row("haiku", "Haiku", false),
+        ]);
+        let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        // The open's own ask came back before the child's catalog existed.
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let provider = view.provider_id.clone();
+                view.apply_model_catalog(crate::providers::claude_code_catalog(Some("")), &provider, cx);
+            })
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.model().as_ref(), "Default (recommended)");
+            let selected = view.overlays.read(cx).menu.as_ref().map(|menu| menu.selected).expect("open");
+            assert_eq!(view.models.get(selected).map(|m| m.model_id.as_str()), Some("default"));
+        });
+    }
+
+    /// Arrow to `row` in the open picker and press Enter, the way the
+    /// composer's keys drive it.
+    fn choose_row(vc: &mut gpui::VisualTestContext, view: &Entity<SessionView>, kind: crate::overlays::MenuKind, row: usize) {
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.toggle_picker(kind, cx);
+                let rows = view.menu_rows(cx);
+                let from = view.overlays.read(cx).menu.as_ref().map_or(0, |menu| menu.selected);
+                view.overlays.update(cx, |overlays, _| overlays.move_selection(row as isize - from as isize, rows));
+                view.confirm_menu(window, cx);
+            })
+        });
+    }
+
+    /// Picking a model without Auto while the chip reads Auto moves the
+    /// chip, the mode picker's check and the banner to Ask on the pick —
+    /// not seconds later on the child's confirmation — and asks the
+    /// provider for Ask. A later mode pick takes the banner down and the
+    /// chip reads that pick, never the superseded Ask.
+    #[gpui::test]
+    fn a_model_without_auto_falls_back_to_ask_on_the_pick(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::PermissionMode;
+        use crate::overlays::{MODES, MenuKind};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::with_catalog(vec![
+            provider::ModelSummary { id: "sonnet".into(), label: "Sonnet".into(), active: true, ..Default::default() },
+            provider::ModelSummary {
+                id: "haiku".into(),
+                label: "Haiku".into(),
+                unavailable_modes: vec![PermissionMode::OnRequest],
+                ..Default::default()
+            },
+        ]);
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-1".into(),
+            mode: PermissionMode::OnRequest,
+        })
+        .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| assert_eq!(view.read(cx).mode_label(), "Auto"));
+        choose_row(vc, &view, MenuKind::Model, 1);
+        // On the pick, before anything answers.
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.model().as_ref(), "Haiku");
+            assert_eq!(view.mode_label(), "Ask", "the chip leaves Auto on the pick");
+            assert_eq!(
+                view.banner_text(),
+                Some("Auto is not available for Haiku; Claude Code will ask before acting.")
+            );
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
+        vc.update(|_, cx| {
+            let checked = view.read(cx).overlays.read(cx).menu.as_ref().map(|menu| menu.selected);
+            assert_eq!(checked, MODES.iter().position(|mode| *mode == PermissionMode::PromptUnmatched));
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.close_menu(cx)));
+        vc.run_until_parked();
+        let asked: Vec<PermissionMode> = handle
+            .received()
+            .into_iter()
+            .filter_map(|c| match c {
+                provider::Command::SelectApprovalMode { mode, .. } => Some(mode),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [PermissionMode::PromptUnmatched], "the requested mode becomes Ask");
+        // The person picks Read-only: the banner comes down at once.
+        let read_only = MODES.iter().position(|mode| *mode == PermissionMode::DenyUnmatched).expect("listed");
+        choose_row(vc, &view, MenuKind::Mode, read_only);
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.banner_text(), None, "a mode pick supersedes the fallback banner");
+            assert_eq!(view.mode_label(), "Read-only", "the newest request, not the superseded Ask");
+        });
+        // The CLI's report has the last word when it comes.
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-1".into(),
+            mode: PermissionMode::DenyUnmatched,
+        })
+        .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| assert_eq!(view.read(cx).mode_label(), "Read-only"));
+    }
+
     /// W4: a refused pick un-records itself and banners the reason — the
     /// chip never claims a model the child never took. The scripted
     /// provider answers `SessionConfig` as `Unavailable`, so the seam
@@ -3244,6 +3407,31 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
+        });
+    }
+
+    /// A mode report landing while the mode menu stands open moves its
+    /// check with the chip: the check never stays on a mode the chip no
+    /// longer names.
+    #[gpui::test]
+    fn an_open_mode_menu_checks_the_reported_mode(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{MODES, MenuKind};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
+        tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
+            session_id: "s-1".into(),
+            mode: aui_protocol::PermissionMode::AllowAll,
+        })
+        .expect("lane open");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.mode_label(), "Full access");
+            let selected = view.overlays.read(cx).menu.as_ref().map(|menu| menu.selected);
+            assert_eq!(selected, MODES.iter().position(|mode| *mode == aui_protocol::PermissionMode::AllowAll));
         });
     }
 
