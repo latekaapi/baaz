@@ -1490,6 +1490,20 @@ impl Harness {
         };
         let space = self.browse_space();
         let after = self.browser.tabs.active_of(&owner, space.as_deref());
+        // D6 (owner 2026-10-17): a session has one page — a new page for a
+        // session navigates the one it has instead of opening a second.
+        if let (Owner::Session(_), Some(id)) = (&owner, after) {
+            if url != BLANK {
+                if let Some(state) = self.browser.states.get(&id).cloned() {
+                    state.update(cx, |state, _| state.navigate(url));
+                    if self.browser.tabs.set_url_title(id, url, url) {
+                        self.schedule_tabs_write(cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         let id = self.browser.tabs.open(space, owner.clone(), url, after);
         self.schedule_tabs_write(cx);
         let key = match &owner {
@@ -2330,7 +2344,9 @@ impl Harness {
         let frame_live = browser_visible(BrowserVisibility {
             session_active: true,
             ..base
-        }) && !self.right_strip_moving;
+        }) && !self.right_strip_moving
+            // D6: no page yet / couldn't load draw Baaz's own state there.
+            && !self.pane_page_covered(cx);
         // B2a-H2b: in Browse the pane never shows a page — one tab, one
         // page — so the session page can neither share the centre's tab
         // nor paint behind the mode. The render path shows the Changes

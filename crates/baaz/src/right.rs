@@ -239,6 +239,8 @@ pub(crate) struct RightCache {
     pub gap_lines: HashMap<(String, usize), std::sync::Arc<Vec<String>>>,
     /// D6: the Changes screen's commit box, PR and form state.
     pub changes: crate::right_changes::ChangesUi,
+    /// D6: the Page screen's "Search or enter an address" field.
+    pub page_address: Option<gpui::Entity<gpui_kit::base::input::InputState>>,
     /// D6: Files' filter and keyboard state.
     pub files_ui: crate::right_files::FilesUi,
     /// D6: an image file previewed at 100 % instead of fitted.
@@ -649,6 +651,11 @@ pub(crate) fn render_screen(
                 let pushed = row.is_some();
                 (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
             }
+            (RightKind::Browser, _) => (
+                pane_row().on_close(close).into_any_element(),
+                crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cx),
+                false,
+            ),
             (RightKind::Files, project) => {
                 let (row, body) = crate::right_files::files_screen(cache, project.clone(), width, files_focus, browser.window, cx);
                 let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
@@ -659,7 +666,6 @@ pub(crate) fn render_screen(
                 aui::workbench::state_block("right-changes-noproject", IconName::Git, "No project").line("Open or add a project to see its changes.").into_any_element(),
                 false,
             ),
-            (kind, project) => (pane_row().on_close(close).into_any_element(), render(kind, cache, project, session_edits, browser, pane_open, width, agent, cx), false),
         }
     };
     // A pushed view slides 8 px in from the right and fades in, 160 ms
