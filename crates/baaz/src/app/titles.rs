@@ -68,7 +68,7 @@ impl Harness {
     /// override. Landing first means a crash between the start and the hide
     /// still hides by record after a restart — the old prefix rule's one
     /// job, without an id shape the server rejects.
-    fn remember_side_session(&mut self, side_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn remember_side_session(&mut self, side_id: &str, cx: &mut Context<Self>) {
         self.side_sessions.insert(side_id.to_owned());
         self.set_override(
             side_id,
@@ -1082,4 +1082,95 @@ impl Harness {
         });
         self.wire_tasks().push(task);
     }
+}
+
+/// D6: drafts on Muse through side sessions (the right pane's commit box
+/// and PR form; docs/43 §2.6), here beside the titles that use the same
+/// route, so the wire stays behind this seam.
+impl Harness {
+    /// Draft on Muse: a hidden side session in the side workspace, one turn
+    /// with the prompt; [`Self::harvest_draft`] reads the answer.
+    pub(crate) fn draft_on_muse(&mut self, root: &std::path::Path, kind: crate::right_changes::DraftKind, prompt: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            self.draft_failed(root, kind, cx);
+            return;
+        };
+        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
+        let side_id = titles::side_session_id();
+        self.remember_side_session(&side_id, cx);
+        let root = root.to_path_buf();
+        let work = move || -> Result<String, String> {
+            let models = client.model_list(&muse_client::schema::ModelListParams { session_id: None }).map(|r| r.models).unwrap_or_default();
+            let started = client
+                .session_start(&muse_client::schema::SessionStartParams {
+                    command_id: muse_client::new_command_id(),
+                    model_id: titles::pick_title_model(&models),
+                    session_id: Some(side_id.clone()),
+                    workspace_root: Some(workspace),
+                    ..Default::default()
+                })
+                .map_err(|e| format!("session/start: {e}"))?;
+            let id = started.session.session_id.clone();
+            client
+                .turn_start(&muse_client::schema::TurnStartParams {
+                    command_id: muse_client::new_command_id(),
+                    session_id: id.clone(),
+                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
+                    display_text: Some("baaz draft".to_owned()),
+                    ..Default::default()
+                })
+                .map_err(|e| format!("turn/start: {e}"))?;
+            Ok(id)
+        };
+        self.wire_call(cx, work, move |this, result, cx| match result {
+            Ok(id) => {
+                this.draft_jobs.insert(id, crate::right_changes::DraftJob { root, kind });
+            }
+            Err(reason) => {
+                crate::baaz_log!("draft on Muse failed: {reason}");
+                this.draft_failed(&root, kind, cx);
+            }
+        });
+    }
+
+    /// A drafting side session finished: read its answer, land it where
+    /// the person has not typed.
+    pub(crate) fn harvest_draft(&mut self, side_id: &str, cx: &mut Context<Self>) {
+        let Some(job) = self.draft_jobs.remove(side_id) else { return };
+        let Some(client) = self.client.clone() else { return };
+        let read_id = side_id.to_owned();
+        let work = move || client.session_read(&muse_client::schema::SessionReadParams { session_id: read_id.clone(), exclude_items: Some(false) });
+        self.wire_call(cx, work, move |this, result, cx| {
+            let text = result.ok().and_then(|read| {
+                let inline = read.history.items.iter().flatten();
+                let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
+                inline
+                    .chain(snapshot)
+                    .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
+                    .filter_map(|item| item.text.clone())
+                    .rfind(|t| !t.trim().is_empty())
+            });
+            let root = job.root.clone();
+            this.draft_failed(&root, job.kind, cx);
+            let Some(text) = text.map(|t: String| crate::right_changes::clean_draft(&t)).filter(|t| !t.is_empty()) else { return };
+            match job.kind {
+                crate::right_changes::DraftKind::Commit => {
+                    let ui = this.changes_ui(&root);
+                    if !ui.message_edited && ui.message.trim().is_empty() {
+                        ui.message = text;
+                    }
+                }
+                crate::right_changes::DraftKind::PrBody => {
+                    if let Some(form) = this.changes_ui(&root).form.as_ref() {
+                        let body = form.body.clone();
+                        if body.read(cx).value().is_empty() {
+                            this.pending_pr_body = Some((body, text));
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        });
+    }
+
 }

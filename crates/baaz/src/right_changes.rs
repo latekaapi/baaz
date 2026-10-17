@@ -79,6 +79,22 @@ pub(crate) struct ChangesUi {
     pub row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>>>,
 }
 
+/// What a Muse side session is drafting (docs/43 §2.6; owner 2026-10-17:
+/// drafts on the session's own provider, Muse through its side sessions
+/// as titles are).
+#[derive(Clone, Debug)]
+pub(crate) struct DraftJob {
+    pub root: PathBuf,
+    pub kind: DraftKind,
+}
+
+/// Which field a draft fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftKind {
+    Commit,
+    PrBody,
+}
+
 /// The flash lasts this long, easing out.
 const FLASH: Duration = Duration::from_millis(900);
 /// While a PR's checks run, read them again this often.
@@ -202,9 +218,15 @@ impl Harness {
             return;
         }
         ui.drafted_for = Some(key);
-        let Some(provider) = provider.filter(|p| crate::utility::supports(*p)) else { return };
-        ui.drafting = true;
         let prompt = commit_prompt(title.as_deref(), &tree.files);
+        let Some(provider) = provider.filter(|p| crate::utility::supports(*p)) else {
+            if provider == Some(crate::providers::ProviderId::Muse) {
+                self.changes_ui(root).drafting = true;
+                self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
+            }
+            return;
+        };
+        ui.drafting = true;
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, &prompt) }).await;
@@ -221,6 +243,18 @@ impl Harness {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn draft_failed(&mut self, root: &Path, kind: DraftKind, cx: &mut Context<Self>) {
+        match kind {
+            DraftKind::Commit => self.changes_ui(root).drafting = false,
+            DraftKind::PrBody => {
+                if let Some(form) = self.changes_ui(root).form.as_mut() {
+                    form.drafting = false;
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Toggle one row's diff, reading it the first time it opens.
@@ -415,7 +449,10 @@ impl Harness {
         let files = self.right_cache.git_for(root).flatten().map(|t| t.files).unwrap_or_default();
         let prompt = pr_prompt(label.as_deref(), &files);
         if let Some(form) = self.changes_ui(root).form.as_mut() {
-            form.drafting = provider.is_some_and(crate::utility::supports);
+            form.drafting = provider.is_some();
+        }
+        if provider == Some(crate::providers::ProviderId::Muse) {
+            self.draft_on_muse(root, DraftKind::PrBody, prompt.clone(), cx);
         }
         cx.spawn(async move |this, cx| {
             let r = root_buf.clone();
