@@ -330,16 +330,38 @@ fn initialize_result(registry: &ToolRegistry) -> Value {
     result
 }
 
+/// The bridge tools that only look — list, read, screen, open a page,
+/// follow links, screenshot — advertised with the MCP `readOnlyHint`
+/// annotation. Codex runs an annotated tool without an approval and Muse
+/// allows it by policy (`allow:mcp_read_only_hint`), so in Read-only these
+/// keep working while every other bridge tool — unannotated — is refused.
+/// The same split as Claude Code's Read-only deny list
+/// (`provider_claude_code::argv::READ_ONLY_DENIED_BRIDGE_TOOLS`). Named,
+/// never defaulted: a new tool is acting until it is listed here.
+pub const READ_ONLY_TOOL_NAMES: [&str; 7] = [
+    "terminal_list",
+    "terminal_read",
+    "terminal_screen",
+    "browser_open",
+    "browser_read",
+    "browser_links",
+    "browser_screenshot",
+];
+
 fn tools_list_result(registry: &ToolRegistry) -> Value {
     let tools: Vec<Value> = registry
         .tools()
         .iter()
         .map(|t| {
-            json!({
+            let mut tool = json!({
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": t.input_schema,
-            })
+            });
+            if READ_ONLY_TOOL_NAMES.contains(&t.name.as_str()) {
+                tool["annotations"] = json!({"readOnlyHint": true});
+            }
+            tool
         })
         .collect();
     json!({"tools": tools})

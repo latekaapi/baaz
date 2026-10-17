@@ -209,9 +209,10 @@ pub fn set_permission_mode_control_request(request_id: &str, mode: PermissionMod
 /// `apply_flag_settings` carrying the Read-only deny layer onto the live
 /// child (`on`), or nulling it back off (probed 2026-10-16: the rules show
 /// in `list_permission_rules` from the answer on, and are gone after the
-/// clear, while the owner's own rules stand throughout).
-pub fn apply_read_only_control_request(request_id: &str, on: bool) -> String {
-    let settings = if on { argv::read_only_settings() } else { argv::read_only_settings_cleared() };
+/// clear, while the owner's own rules stand throughout). `mcp_denies`
+/// ride the layer going on ([`argv::read_only_settings_with`]).
+pub fn apply_read_only_control_request(request_id: &str, on: bool, mcp_denies: &[String]) -> String {
+    let settings = if on { argv::read_only_settings_with(mcp_denies) } else { argv::read_only_settings_cleared() };
     serde_json::json!({
         "type": "control_request",
         "request_id": request_id,
@@ -540,6 +541,8 @@ impl ClaudeCodeAdapter {
             sent_at: Instant::now(),
         };
         let _ = self.send_control(&initialize_control_request(&request_id), pending);
+        // The owner's MCP servers, for the Read-only layer's MCP denies.
+        self.hub.query_mcp_status();
     }
 
     /// The `set_model` line for the live child, switching its model from
@@ -672,7 +675,15 @@ impl ClaudeCodeAdapter {
             sent_at: Instant::now(),
         };
         let on = wanted == PermissionMode::DenyUnmatched;
-        self.send_control(&apply_read_only_control_request(&request_id, on), pending)
+        // The owner's own acting MCP tools ride the layer as last known;
+        // a fresh `mcp_status` then refreshes them from the pump.
+        let mcp_denies = if on { self.hub.known_mcp_denies() } else { Vec::new() };
+        self.send_control(&apply_read_only_control_request(&request_id, on, &mcp_denies), pending)?;
+        self.hub.note_read_only_layer(on, mcp_denies);
+        if on {
+            self.hub.query_mcp_status();
+        }
+        Ok(())
     }
 
     /// Record the mode a child was launched in: the chip shows it until the
@@ -688,11 +699,12 @@ impl ClaudeCodeAdapter {
         }
         // A fresh child holds only the layer its argv gave it: one applied
         // live died with the child it was applied to.
-        *self.read_only_layer.lock().expect("read-only mutex") = if argv::carries_read_only_settings(launch) {
-            ReadOnlyLayer::Launched
-        } else {
-            ReadOnlyLayer::Off
-        };
+        let launched = argv::carries_read_only_settings(launch);
+        *self.read_only_layer.lock().expect("read-only mutex") =
+            if launched { ReadOnlyLayer::Launched } else { ReadOnlyLayer::Off };
+        // The `--settings` layer carries no MCP denies: the `mcp_status`
+        // answer after `initialize` adds them live.
+        self.hub.note_read_only_layer(launched, Vec::new());
         // A child launched in Full access already owes no relaunch into it.
         if bypass {
             *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
@@ -1028,6 +1040,10 @@ impl ClaudeCodeAdapter {
         }
         let mut layer = self.read_only_layer.lock().expect("read-only mutex");
         if *layer != ReadOnlyLayer::Off {
+            drop(layer);
+            // The owner's MCP servers may have connected (or changed) since
+            // the last answer: ask again before the turn goes out.
+            self.hub.query_mcp_status();
             return;
         }
         *layer = ReadOnlyLayer::Live;
@@ -2516,9 +2532,11 @@ mod tests {
             .pending
             .lock()
             .expect("pending mutex")
-            .keys()
-            .next()
-            .cloned()
+            .values()
+            // The hub's own `mcp_status` queries ride beside every
+            // adapter request; these tests answer the adapter's.
+            .find(|pending| pending.kind != PendingControlKind::McpStatus)
+            .map(|pending| pending.request_id.clone())
             .expect("one tracked request")
     }
 
@@ -3105,7 +3123,16 @@ mod tests {
             vec![("sess-1".to_owned(), PermissionMode::DenyUnmatched)],
             "the reported mode, once"
         );
-        assert!(adapter.hub.pending.lock().expect("pending mutex").is_empty(), "settled");
+        assert!(
+            adapter
+                .hub
+                .pending
+                .lock()
+                .expect("pending mutex")
+                .values()
+                .all(|pending| pending.kind == PendingControlKind::McpStatus),
+            "settled but for the MCP query"
+        );
     }
 
     /// A refused mode pick banners the CLI's reason and moves nothing.
@@ -3281,6 +3308,131 @@ mod tests {
         let lines = adapter.sent_control_lines();
         assert_eq!(lines.len(), 6, "{lines:?}");
         assert!(applied_settings(&lines[5]).is_none());
+    }
+
+    /// The hub's `mcp_status` queries and MCP refreshes, as sent.
+    fn mcp_lines(adapter: &ClaudeCodeAdapter) -> Vec<serde_json::Value> {
+        adapter
+            .hub
+            .mcp_sent
+            .lock()
+            .expect("mcp sent mutex")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect()
+    }
+
+    /// Answer the hub's open `mcp_status` query with `servers`.
+    fn answer_mcp_status(adapter: &ClaudeCodeAdapter, servers: serde_json::Value) {
+        let query = mcp_lines(adapter)
+            .into_iter()
+            .rev()
+            .find(|line| line["request"]["subtype"] == "mcp_status")
+            .expect("an mcp_status query");
+        adapter.ingest_child_line(
+            &serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": query["request_id"],
+                    "response": {"mcpServers": servers},
+                },
+            })
+            .to_string(),
+        );
+    }
+
+    fn probe_servers(later: &str) -> serde_json::Value {
+        serde_json::json!([
+            {"name": "probe", "status": "connected", "tools": [
+                {"name": "peek", "annotations": {"readOnly": true}},
+                {"name": "poke", "annotations": {}},
+            ]},
+            {"name": "later", "status": later},
+        ])
+    }
+
+    fn deny_rules(settings: &serde_json::Value) -> Vec<String> {
+        settings["permissions"]["deny"]
+            .as_array()
+            .expect("deny")
+            .iter()
+            .filter_map(|rule| rule.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// Read-only reaches the owner's own MCP tools: a child launched in it
+    /// asks for its MCP servers right after `initialize`, and the answer
+    /// puts a live layer on that denies every acting tool and every server
+    /// whose tools are unknown yet — the base rules riding along — while a
+    /// read-only-annotated tool stays usable. The next dispatch asks again
+    /// and refines the layer once the pending server connects; an answer
+    /// that changes nothing sends nothing.
+    #[test]
+    fn launched_read_only_denies_the_owners_acting_mcp_tools_live() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let launch = argv::with_permission_mode(
+            adapter.launch_for_open("sess-1", None, None).expect("open launch"),
+            Some(PermissionMode::DenyUnmatched),
+        );
+        adapter.note_launch_mode(&launch);
+        adapter.send_initialize();
+        adapter.attach_session_for_tests("sess-1");
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        let lines = mcp_lines(&adapter);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1]["request"]["subtype"], "apply_flag_settings");
+        let deny = deny_rules(&lines[1]["request"]["settings"]);
+        assert!(deny.contains(&"Bash".to_owned()), "the base rules ride along: {deny:?}");
+        assert!(deny.contains(&"mcp__probe__poke".to_owned()) && deny.contains(&"mcp__later".to_owned()));
+        assert!(!deny.iter().any(|rule| rule == "mcp__probe__peek" || rule == "mcp__probe"), "{deny:?}");
+
+        // The server connects: the next dispatch's query refines the layer.
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        answer_mcp_status(
+            &adapter,
+            serde_json::json!([{"name": "later", "status": "connected", "tools": [{"name": "send", "annotations": {}}]},
+                               {"name": "probe", "status": "connected", "tools": [{"name": "poke"}]}]),
+        );
+        let lines = mcp_lines(&adapter);
+        let refreshed = deny_rules(&lines.last().expect("refresh")["request"]["settings"]);
+        assert!(refreshed.contains(&"mcp__later__send".to_owned()) && !refreshed.contains(&"mcp__later".to_owned()));
+
+        // Nothing moved: no further layer.
+        let before = mcp_lines(&adapter).len();
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        answer_mcp_status(
+            &adapter,
+            serde_json::json!([{"name": "probe", "status": "connected", "tools": [{"name": "poke"}]},
+                               {"name": "later", "status": "connected", "tools": [{"name": "send"}]}]),
+        );
+        let after = mcp_lines(&adapter);
+        assert_eq!(after.len(), before + 1, "only the query: {after:?}");
+    }
+
+    /// Outside Read-only an answer applies nothing, but it is remembered:
+    /// a live switch into Read-only carries the known MCP denies on its own
+    /// layer, and leaving clears them with the rest — a later answer then
+    /// applies nothing.
+    #[test]
+    fn a_live_switch_into_read_only_carries_the_known_mcp_denies() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.send_initialize();
+        answer_mcp_status(&adapter, probe_servers("failed"));
+        assert_eq!(mcp_lines(&adapter).len(), 1, "no layer outside Read-only");
+
+        pick(&adapter, PermissionMode::DenyUnmatched);
+        let lines = adapter.sent_control_lines();
+        let layer = applied_settings(&lines[1]).expect("the layer");
+        assert_eq!(layer, argv::read_only_settings_with(&["mcp__later".to_owned(), "mcp__probe__poke".to_owned()]));
+
+        pick(&adapter, PermissionMode::PromptUnmatched);
+        let cleared = adapter.sent_control_lines();
+        assert!(cleared.iter().any(|line| applied_settings(line) == Some(argv::read_only_settings_cleared())));
+        let before = mcp_lines(&adapter).len();
+        answer_mcp_status(&adapter, probe_servers("pending"));
+        assert_eq!(mcp_lines(&adapter).len(), before, "the layer is off: nothing applied");
     }
 
     /// A child launched Read-only carries its layer on `--settings`, which

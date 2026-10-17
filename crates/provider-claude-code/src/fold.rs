@@ -914,6 +914,9 @@ pub struct ControlOutcome {
     /// reply only, empty otherwise. Applied only when the adapter confirms
     /// the id — never straight into [`ClaudeFold::catalog_models`].
     pub models: Vec<crate::frame::CatalogModel>,
+    /// The MCP servers, when this answer reports them: the `mcp_status`
+    /// reply only, `None` otherwise.
+    pub mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
 }
 
 /// Wall time as Unix milliseconds for live turn starts: the clock the
@@ -1445,12 +1448,13 @@ impl ClaudeFold {
             // catalog-carrying answer straight into the catalog let a
             // rejected model/effort change claim success, and let a stray
             // id rewrite `ListModels`.
-            Frame::ControlResponse { request_id, subtype, models, error, .. } => {
+            Frame::ControlResponse { request_id, subtype, models, error, mcp_servers, .. } => {
                 self.control_outcomes.push(ControlOutcome {
                     request_id: request_id.clone(),
                     subtype: subtype.clone(),
                     error: error.clone(),
                     models: models.clone(),
+                    mcp_servers: mcp_servers.clone(),
                 });
                 Vec::new()
             }

@@ -2249,7 +2249,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         // the pick restates it rather than switching.
                         let detail = self
                             .mode_unavailable(*mode)
-                            .unwrap_or_else(|| mode.description().to_owned());
+                            .unwrap_or_else(|| {
+                                crate::providers::mode_description(self.provider_kind(), *mode).to_owned()
+                            });
                         PickerRow::new(format!("{mode:?}"), mode.label(), detail)
                     })
                     .collect();

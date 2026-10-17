@@ -161,16 +161,108 @@ pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 6] =
 /// Read-only leaves it by relaunching, and one switched in live leaves it
 /// live with [`read_only_settings_cleared`].
 pub fn read_only_settings() -> serde_json::Value {
+    read_only_settings_with(&[])
+}
+
+/// [`read_only_settings`] plus `mcp_denies` — the owner's own MCP tools
+/// that can act ([`read_only_mcp_denies`]) — on the same deny list. This is
+/// the shape every live (`apply_flag_settings`) Read-only layer takes: an
+/// apply replaces the layer's whole `permissions` key, so the base rules
+/// ride along with every refresh of the MCP ones.
+pub fn read_only_settings_with(mcp_denies: &[String]) -> serde_json::Value {
     let mut deny: Vec<String> = READ_ONLY_DENIED_TOOLS.iter().map(|tool| (*tool).to_owned()).collect();
     deny.extend(
         READ_ONLY_DENIED_BRIDGE_TOOLS
             .iter()
             .map(|tool| format!("mcp__{}__{tool}", crate::terminal::SERVER_NAME)),
     );
+    deny.extend(mcp_denies.iter().cloned());
     serde_json::json!({
         "permissions": {"deny": deny},
         "disableSkillShellExecution": true,
     })
+}
+
+/// One MCP server as the CLI's `mcp_status` control request reports it
+/// (2.1.276 `McpServerStatus`, probed 2026-10-17 against a scratch stdio
+/// server): `tools` is present only once the server connected, each tool
+/// carrying the MCP annotations folded to `readOnly`/`destructive`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerStatus {
+    /// The server name as configured (not yet normalized for a rule).
+    pub name: String,
+    /// `connected`, `pending`, `failed`, `needs-auth` or `disabled`.
+    pub status: String,
+    /// The tools a connected server serves; `None` when the answer named
+    /// none (any status but `connected`).
+    pub tools: Option<Vec<McpToolStatus>>,
+}
+
+/// One tool of an [`McpServerStatus`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpToolStatus {
+    /// The tool name as the server serves it.
+    pub name: String,
+    /// Whether the server marked it `readOnlyHint: true` (the CLI reports
+    /// it as `annotations.readOnly`).
+    pub read_only: bool,
+}
+
+/// A server or tool name as the CLI spells it inside an `mcp__…` tool
+/// name and permission rule (2.1.276 `normalizeNameForMCP`): every
+/// character outside `[A-Za-z0-9_-]` becomes `_`, and a `claude.ai `
+/// connector name also collapses runs of `_` and trims them at the ends.
+pub fn mcp_rule_segment(name: &str) -> String {
+    let mut segment: String = name
+        .chars()
+        .map(|char| if char.is_ascii_alphanumeric() || char == '_' || char == '-' { char } else { '_' })
+        .collect();
+    if name.starts_with("claude.ai ") {
+        let mut collapsed = String::with_capacity(segment.len());
+        for char in segment.chars() {
+            if !(char == '_' && collapsed.ends_with('_')) {
+                collapsed.push(char);
+            }
+        }
+        segment = collapsed.trim_matches('_').to_owned();
+    }
+    segment
+}
+
+/// The deny rules Read-only adds for the owner's own MCP servers: every
+/// tool a connected server did NOT mark `readOnlyHint: true`
+/// (`mcp__<server>__<tool>`), and every server whose tools are not known
+/// yet — pending, failed, needing auth — whole (`mcp__<server>`, which the
+/// CLI matches against every tool of that server). Baaz's own bridge is
+/// left to [`READ_ONLY_DENIED_BRIDGE_TOOLS`]. A deny is checked before any
+/// allow rule, whatever its source (see [`READ_ONLY_DENIED_TOOLS`]), so an
+/// owner allow rule on one of these no longer runs it in Read-only.
+///
+/// The annotation is the server's own claim: a server that marks an
+/// acting tool read-only is believed, exactly as Codex and Muse believe it.
+pub fn read_only_mcp_denies(servers: &[McpServerStatus]) -> Vec<String> {
+    let mut denies = Vec::new();
+    for server in servers {
+        if server.name == crate::terminal::SERVER_NAME {
+            continue;
+        }
+        let segment = mcp_rule_segment(&server.name);
+        if segment.is_empty() {
+            continue;
+        }
+        match (&server.tools, server.status.as_str()) {
+            (Some(tools), "connected") => denies.extend(
+                tools
+                    .iter()
+                    .filter(|tool| !tool.read_only)
+                    .map(|tool| format!("mcp__{segment}__{}", mcp_rule_segment(&tool.name))),
+            ),
+            _ => denies.push(format!("mcp__{segment}")),
+        }
+    }
+    denies.sort();
+    denies.dedup();
+    denies
 }
 
 /// The `apply_flag_settings` payload that takes [`read_only_settings`]
@@ -461,6 +553,53 @@ pub struct ImageInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool(name: &str, read_only: bool) -> McpToolStatus {
+        McpToolStatus { name: name.into(), read_only }
+    }
+
+    #[test]
+    fn read_only_denies_the_owners_acting_mcp_tools_and_unknown_servers() {
+        let servers = vec![
+            McpServerStatus {
+                name: "probe".into(),
+                status: "connected".into(),
+                tools: Some(vec![tool("peek", true), tool("poke", false), tool("zap", false)]),
+            },
+            McpServerStatus { name: "claude.ai Gmail".into(), status: "needs-auth".into(), tools: None },
+            McpServerStatus { name: "slow.server".into(), status: "pending".into(), tools: None },
+            // Baaz's own bridge rides its own list.
+            McpServerStatus {
+                name: crate::terminal::SERVER_NAME.into(),
+                status: "connected".into(),
+                tools: Some(vec![tool("terminal_run", false)]),
+            },
+            McpServerStatus { name: "quiet".into(), status: "connected".into(), tools: Some(Vec::new()) },
+        ];
+        assert_eq!(
+            read_only_mcp_denies(&servers),
+            vec!["mcp__claude_ai_Gmail", "mcp__probe__poke", "mcp__probe__zap", "mcp__slow_server"],
+        );
+    }
+
+    #[test]
+    fn mcp_rule_segments_match_the_clis_normalization() {
+        assert_eq!(mcp_rule_segment("my-server_1"), "my-server_1");
+        assert_eq!(mcp_rule_segment("plugin:foo:bar"), "plugin_foo_bar");
+        assert_eq!(mcp_rule_segment("claude.ai  Google Drive"), "claude_ai_Google_Drive");
+        assert_eq!(mcp_rule_segment("a.b  c"), "a_b__c", "only claude.ai names collapse");
+    }
+
+    #[test]
+    fn the_live_layer_keeps_the_base_rules_beside_the_mcp_ones() {
+        assert_eq!(read_only_settings_with(&[]), read_only_settings());
+        let layer = read_only_settings_with(&["mcp__probe__poke".to_owned()]);
+        let deny: Vec<&str> =
+            layer["permissions"]["deny"].as_array().expect("deny").iter().filter_map(|rule| rule.as_str()).collect();
+        assert!(deny.contains(&"Bash") && deny.contains(&"mcp__baaz__terminal_run"), "{deny:?}");
+        assert_eq!(deny.last(), Some(&"mcp__probe__poke"));
+        assert_eq!(layer["disableSkillShellExecution"], true);
+    }
 
     #[test]
     fn the_chip_seed_never_reaches_the_argv() {

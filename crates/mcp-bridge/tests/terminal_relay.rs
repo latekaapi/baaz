@@ -209,6 +209,13 @@ fn tools_list_advertises_all_thirteen_tools_with_schemas() {
             "{name} is described"
         );
         assert!(tool.get("inputSchema").is_some(), "{name} has a schema");
+        // Only the looking tools claim `readOnlyHint` (Read-only lets
+        // them run on Codex and Muse); every acting one carries none.
+        let read_only = tool.pointer("/annotations/readOnlyHint") == Some(&json!(true));
+        assert_eq!(read_only, mcp_bridge::READ_ONLY_TOOL_NAMES.contains(&name), "{name}: {tool}");
+    }
+    for acting in ["terminal_open", "terminal_run", "terminal_send", "terminal_close", "browser_click", "browser_type"] {
+        assert!(!mcp_bridge::READ_ONLY_TOOL_NAMES.contains(&acting), "{acting} acts");
     }
     let run = tools.iter().find(|tool| tool.get("name") == Some(&json!("terminal_run"))).expect("run");
     assert!(
