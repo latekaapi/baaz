@@ -6655,6 +6655,36 @@ mod tests {
         })
     }
 
+    /// Perf P1: the search rows leave out side sessions by every mark —
+    /// the in-memory set, the override and the list's side marker — with
+    /// the marker read through one set per build, not a list scan per
+    /// indexed session (that scan was O(n²), ~30 ms per rebuild).
+    #[gpui::test]
+    fn search_rows_skip_side_sessions_by_every_mark(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("search-side-marks");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                for id in ["s-plain", "s-set", "s-meta", "s-marker"] {
+                    harness.index.insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                }
+                harness.side_sessions.insert("s-set".into());
+                harness.overrides.insert(
+                    "s-meta".into(),
+                    crate::sessions::SessionMeta { side_session: true, ..Default::default() },
+                );
+                let mut marked = chain_muse_entry("s-marker", "Marker", 1);
+                marked.side_marker = true;
+                harness.sessions.push(marked);
+                let ids: Vec<String> = harness.search_session_rows().into_iter().map(|row| row.session_id).collect();
+                assert_eq!(ids, vec!["s-plain".to_owned()], "only the ordinary session is searchable");
+            });
+        });
+        lane_restore(state);
+    }
+
     /// Perf P1: an override edit that changes nothing settles nothing. A
     /// provider reopen re-states the project its session already has, and
     /// that used to rejoin the list and rebuild the search rows — 75 ms of
