@@ -114,11 +114,22 @@ impl Harness {
         // One cache over the whole build: each distinct index root is
         // canonicalized once, not once per row.
         let mut canon = crate::projects::CanonicalCache::default();
+        // `is_side_session` scans the session list for a side marker; asked
+        // per indexed session that was O(n²) — ~7 M id compares and ~30 ms
+        // of UI thread per rebuild on 2,600 sessions (perf P1). The marked
+        // ids are collected once instead.
+        let marked: std::collections::HashSet<&str> =
+            self.sessions.iter().filter(|entry| entry.side_marker).map(|entry| entry.id.as_str()).collect();
+        let is_side = |id: &str| {
+            self.side_sessions.contains(id)
+                || self.overrides.get(id).is_some_and(|meta| meta.side_session)
+                || marked.contains(id)
+        };
         let mut per_session: HashMap<String, crate::search::SessionRow> = HashMap::new();
         for (session_id, entry) in self.index.iter() {
             // Title side sessions never reach the search palette: their
             // only transcript is the title prompt itself.
-            if self.is_side_session(session_id) {
+            if is_side(session_id) {
                 continue;
             }
             let meta = self.overrides.get(session_id);
@@ -159,7 +170,7 @@ impl Harness {
         // ([`crate::provider_search`]) when the row is written. A session
         // both stores know (never expected) keeps its index row.
         for (session_id, record) in &self.provider_sessions {
-            if per_session.contains_key(session_id) || self.is_side_session(session_id) {
+            if per_session.contains_key(session_id) || is_side(session_id) {
                 continue;
             }
             let meta = self.overrides.get(session_id);
@@ -214,7 +225,7 @@ impl Harness {
         for head in heads {
             let mut members = by_head.remove(&head).unwrap_or_default();
             members.sort();
-            if self.is_side_session(&head) {
+            if is_side(&head) {
                 // A chained side session stays unfindable, but its members
                 // keep their own rows rather than vanishing with it.
                 for member in members {
