@@ -1591,8 +1591,9 @@ impl RunningChild {
         // Detach, never join: the pump ends when stdout closes, which is
         // when the child exits after stdin closes.
         self.pump.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // SIGTERM first: a SIGKILLed app-server keeps its thread's writer
+        // lease, and the next resume of that thread waits ~5 s and fails.
+        provider::child_env::terminate(&mut self.child, std::time::Duration::from_millis(250));
     }
 }
 
