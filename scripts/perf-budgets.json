@@ -68,7 +68,70 @@
       }
     },
     "release": {
-      "budgets": {}
+      "budgets": {
+        "store.index_refresh_unchanged_ms": {
+          "budget": 20,
+          "measured": 0.65
+        },
+        "store.index_refresh_one_ms": {
+          "budget": 20,
+          "measured": 0.8
+        },
+        "store.index_cache_load_ms": {
+          "budget": 50,
+          "measured": 1.0
+        },
+        "store.search_sync_unchanged_ms": {
+          "budget": 25,
+          "measured": 0.65
+        },
+        "store.search_sync_one_ms": {
+          "budget": 50,
+          "measured": 1.1
+        },
+        "store.search_query_ms": {
+          "budget": 20,
+          "measured": 0.25
+        },
+        "store.provider_bodies_ms": {
+          "budget": 150,
+          "measured": 21
+        },
+        "boot.first_frame_ms": {
+          "budget": 300,
+          "measured": 123
+        },
+        "open.replay_300_ms": {
+          "budget": 50,
+          "measured": 12.3
+        },
+        "switch.cached_300_ms": {
+          "budget": 16,
+          "measured": 2.0
+        },
+        "stream.to_render_p50_ms": {
+          "budget": 8,
+          "measured": 0.41
+        },
+        "stream.to_render_p99_ms": {
+          "budget": 16,
+          "measured": 0.6
+        },
+        "stream.fold_apply_p99_ms": {
+          "budget": 2,
+          "measured": 0.024
+        },
+        "idle.cpu_pct": {
+          "budget": 0.5,
+          "unit": "%",
+          "measured": 0.1
+        },
+        "idle.renders": {
+          "budget": 0,
+          "unit": "renders",
+          "measured": 0
+        }
+      }
     }
   }
 }
