@@ -1,6 +1,6 @@
 # 51 — Performance: measure, then make Baaz instant (plan, 2026-10-16)
 
-Status: **approved 2026-10-16; P0 merged 2026-10-17; M budgets on `foundations/m-p3` (§6).** No code written. Evidence: static audits of Baaz + agentic-ui (2026-10-16),
+Status: **approved 2026-10-16; P0 merged 2026-10-17; M merged 2026-10-18 (§6); P1 on `perf/p1` (§7).** No code written. Evidence: static audits of Baaz + agentic-ui (2026-10-16),
 sqlite measurements on **copies** of the real databases (`/private/tmp/claude-501/perf-audit/`), Zed's source
 (`zed@5504e87`) and the peers' code and issue trackers. Live numbers (first frame, switch, send) have **not** been
 taken yet — step M below does that first.
@@ -137,3 +137,28 @@ optimised either way), idle 0–0.1 % and 0 renders.
 Provider reopen (traced now: `resume <provider> <id>` → `provider lane open` → `first-content`), release bundle, owner
 state copy, cold: Claude Code 120–150 ms, Codex 2.0–2.3 s. Not budgeted — it spawns a real CLI; P1's "stored history
 painted before the child" is the fix for Codex.
+
+## 7. P1 progress (2026-10-18/19, branch `perf/p1`)
+
+Measured on the release bundle against a copy of the owner's state (2,612 sessions, 91 Claude/Codex records) unless
+noted; every number before → after. Each cause was traced first (new marks: `reopen gate done → adapter connected →
+resume acked`, `resume-ack-err <error>`), not guessed.
+
+| What | Cause found | Fix | Before → after |
+|---|---|---|---|
+| Codex reopen | the ack waited on `account/rateLimits/read` (network, 2.3–6.3 s, 10 s timeout) and, for a thread at a non-default level, a cold `model/list` (3.4 s) | usage read detached; catalog cached per home and, when cold, read in the background (a turn waits for it) | 2.1 s (2–9 s) → **0.21–0.23 s** |
+| Codex reopen soon after a quit | `SIGKILL` left Codex's thread writer lease held: the next resume waited ~5 s, then "already has an active writer" | `SIGTERM`, 250 ms grace, then `SIGKILL` (`provider::child_env::terminate`) | every other relaunch 5 s / failed → 0.22–0.33 s back to back |
+| Claude Code reopen | `record_provider_open` re-stated the session's project → full rejoin + 54 ms search-row rebuild on the UI thread | `set_override` returns when the edit changes nothing | 110–130 ms → **28–31 ms** |
+| Muse reopen (all sessions) | muse 1.4.10 refuses the terminal bridge on `session/resume` (-32603 "session MCP base configuration is unavailable") → an error dialog on every reopen | retry once without the bridge; remembered for the run | dialog → history in **0.46 s** (the rest is Muse's own resume, 0.5–1.8 s) |
+| Streaming at length | `refresh_render_cache` deep-compared every turn, recounted every turn's rows and cloned 3,000 row ids per chunk | exact dirty-turn set from the fold (pinned by an every-capture test), suffix refresh, row-count memo, suffix-only list sync | 3,000 turns: render work p50 7.7 → **0.86 ms**, stream-to-render p99 19 → **4.2 ms**, frame p99 30 → 15 ms |
+| Search rows after every turn | `is_side_session` scanned the session list per indexed session: O(n²) | side-marked ids collected once per build | 54 ms → **8–9 ms** (UI thread) |
+| Rejoin after every pin / rename / title | ~2,070 workspace roots `realpath`ed again each pass | process-wide memo (unresolved roots re-checked after 5 min) | 18–143 ms → **6 ms** |
+
+New budget: `stream.long_1000_element_p99_ms` (generated 1,000-turn transcript) — 0.19 ms now, budget 0.6 ms; the
+pre-P1 build measures 1.17 ms there, so the old O(n) refresh fails the gate.
+
+Looked at and left (measured, not worth it now): Muse's first history page (30 ms once the resume succeeds — the 1 s
+seen earlier was the failed-resume path); a smaller first page buys nothing. Muse's own `session/resume` (0.5–1.8 s)
+is server work. Muse `session/list` at boot is 27 serial pages of 200 (the server maximum), ~5 s, but the sidebar
+paints from the cache and nothing waits on it — an `updatedAfter` incremental listing is the follow-up. 60 Muse chain
+rows rewrite their search row once per launch because the boot label (index cache) and the list's label differ.
