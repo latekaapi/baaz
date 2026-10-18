@@ -624,7 +624,19 @@ impl SessionView {
     /// tail-pinned reader is exactly the H2 stack.
     pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)]) {
         let count: usize = counts.iter().map(|(_, n)| n).sum();
-        let changed = count != self.list_len || counts != self.synced_counts.as_slice();
+        // Rows above the first turn a refresh rebuilt since the last sync
+        // are unchanged, so only the rebuilt suffix is compared and copied
+        // (perf P1: a 3,000-turn transcript compared and cloned every id
+        // string per streamed chunk). No rebuild since: nothing to compare.
+        let shared = counts.len().min(self.synced_counts.len());
+        let hint = self.rows_changed_from.take().unwrap_or(shared).min(shared);
+        let same_rows = hint
+            + counts[hint..shared]
+                .iter()
+                .zip(self.synced_counts[hint..shared].iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+        let changed = count != self.list_len || same_rows != counts.len() || counts.len() != self.synced_counts.len();
         // Never re-anchor under a gesture. While one is in
         // flight no `reset` runs and the tail does not re-engage; whatever
         // is owed lands on the first frame after it lapses.
@@ -634,14 +646,11 @@ impl SessionView {
             // The first row of the first turn whose `(id, rows)` differs from
             // what the list was last synced to; everything before it is
             // unchanged and stays measured.
-            let same = counts
-                .iter()
-                .zip(self.synced_counts.iter())
-                .take_while(|(a, b)| a == b)
-                .count();
+            let same = same_rows;
             let from: usize = counts.iter().take(same).map(|(_, n)| n).sum();
             self.list_len = count;
-            self.synced_counts = counts.to_vec();
+            self.synced_counts.truncate(same);
+            self.synced_counts.extend_from_slice(&counts[same..]);
             if old == 0 || self.loading_history {
                 if gesture {
                     // The count still moves (a splice never resets), but the
@@ -898,6 +907,22 @@ impl SessionView {
     /// result. Called when the fold changes (length drift or `follow`), never
     /// per frame, so steady-state frames share one `Rc`.
     pub(crate) fn refresh_render_cache(&mut self) {
+        // The fold names the turns it wrote since the last refresh (perf
+        // P1, docs/51 #6). Taken once: both paths below read the same set.
+        let dirty =
+            if self.fold.session(&self.session_id).is_some() { self.fold.take_dirty(&self.session_id) } else { None };
+        if let Some(dirty) = dirty.as_ref() {
+            if self.refresh_render_suffix(dirty) {
+                return;
+            }
+        }
+        self.refresh_render_full(dirty);
+    }
+
+    /// The whole-transcript refresh: every turn reconsidered, every row
+    /// counted. What a fresh session, a handoff view, a removed turn or a
+    /// toggle takes; streaming takes [`Self::refresh_render_suffix`].
+    fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>) {
         if self.fold.session(&self.session_id).is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
@@ -905,6 +930,12 @@ impl SessionView {
             // (finding `performance-4`). The comparison is what makes it
             // safe without a dirty list: an unequal turn is always re-cloned,
             // whatever produced the change.
+            // Every fold turn the dirty set leaves out is the snapshot's own
+            // `Rc`, taken without comparing it (the deep compare was 2.1 ms a
+            // refresh at 3,000 turns). `None` — a fresh or re-folded session
+            // — compares everything, as before. Exactness is pinned by
+            // `muse-adapter`'s every-capture dirty-set test, and debug builds
+            // re-check every reuse below.
             let mut held: HashMap<&str, &Rc<Turn>> = HashMap::with_capacity(self.cached_turns.len());
             for turn in self.cached_turns.iter() {
                 held.insert(turn.id(), turn);
@@ -927,20 +958,33 @@ impl SessionView {
             let hidden_reply =
                 hidden.as_deref().and_then(|id| crate::handoff_snapshot::pack_acknowledgement_id(own, id));
             self.handoff_pack_reply_hidden = hidden_reply.clone();
-            let visible: Vec<&Turn> = self
+            // `true` marks a fold turn (the dirty set speaks for it); the
+            // view-side prefix and divider always compare.
+            let visible: Vec<(&Turn, bool)> = self
                 .handoff_prefix
                 .iter()
-                .map(|rc| rc as &Turn)
-                .chain(self.handoff_divider.iter().map(|rc| rc as &Turn))
-                .chain(own.iter().filter(|turn| {
-                    hidden.as_deref() != Some(turn.id()) && hidden_reply.as_deref() != Some(turn.id())
-                }))
+                .map(|rc| (rc as &Turn, false))
+                .chain(self.handoff_divider.iter().map(|rc| (rc as &Turn, false)))
+                .chain(
+                    own.iter()
+                        .filter(|turn| {
+                            hidden.as_deref() != Some(turn.id()) && hidden_reply.as_deref() != Some(turn.id())
+                        })
+                        .map(|turn| (turn, true)),
+                )
                 .collect();
             let turns: Vec<Rc<Turn>> = visible
                 .into_iter()
-                .map(|turn| match held.get(turn.id()) {
-                    Some(previous) if ***previous == *turn => Rc::clone(previous),
-                    _ => Rc::new(turn.clone()),
+                .map(|(turn, from_fold)| {
+                    let clean = from_fold && dirty.as_ref().is_some_and(|dirty| !dirty.contains(turn.id()));
+                    match held.get(turn.id()) {
+                        Some(previous) if clean => {
+                            debug_assert!(***previous == *turn, "turn {} changed but the fold did not mark it", turn.id());
+                            Rc::clone(previous)
+                        }
+                        Some(previous) if ***previous == *turn => Rc::clone(previous),
+                        _ => Rc::new(turn.clone()),
+                    }
                 })
                 .collect();
             self.cached_turns = Rc::new(turns);
@@ -960,23 +1004,134 @@ impl SessionView {
         // the totals, splices and hints exactly like a block row, and
         // renders as one fixed-height row (`TAIL_SPACER_H`) in
         // `transcript_list`.
-        let mut rows = Vec::with_capacity(self.rows.len() + 1);
-        let mut row_counts = Vec::with_capacity(self.cached_turns.len() + 1);
+        self.row_counts.clear();
+        Rc::make_mut(&mut self.rows).clear();
+        self.rebuild_rows_from(0);
+        self.suffix_inputs = Some((self.toggled_gen, self.fold_finished_turns));
+        self.refresh_card_state();
+    }
+
+    /// Bring `rows` and `row_counts` up to date from turn `from` on, keeping
+    /// everything before it: one item per block row through the shared slot
+    /// mapping, the same settled rule the list renderer draws with (only
+    /// the live tail draws live rows), plus one trailing spacer below the
+    /// final block so it never sits against the status row or a banner — a
+    /// real, hinted list item that renders as one fixed-height row
+    /// (`TAIL_SPACER_H`) in `transcript_list`. Each turn's count is
+    /// memoised against its snapshot `Rc` (see `row_memo`).
+    fn rebuild_rows_from(&mut self, from: usize) {
+        let offset: usize = self.row_counts.iter().take(from).map(|(_, n)| n).sum();
         let last_turn = self.cached_turns.len().saturating_sub(1);
-        // B12: rows go through the shared slot mapping, with the same
-        // settled rule the list renderer draws with below — replayed
-        // history draws settled, and only the live tail draws live rows.
         let live_tail = self.busy() && !crate::clock::deterministic();
-        for (turn_ix, turn) in self.cached_turns.iter().enumerate() {
+        self.row_counts.truncate(from);
+        let rows = Rc::make_mut(&mut self.rows);
+        rows.truncate(offset);
+        for (turn_ix, turn) in self.cached_turns.iter().enumerate().skip(from) {
             let settled = turn_ix != last_turn || !live_tail;
-            let n = transcript::turn_mapped_rows(turn, settled, &self.toggled, self.fold_finished_turns);
+            let inputs = (settled, self.toggled_gen, self.fold_finished_turns);
+            let n = match self.row_memo.get(turn.id()) {
+                Some(hit) if Rc::ptr_eq(&hit.turn, turn) && hit.inputs == inputs => hit.rows,
+                _ => {
+                    let n = transcript::turn_mapped_rows(turn, settled, &self.toggled, self.fold_finished_turns);
+                    self.row_memo.insert(turn.id().to_owned(), RowMemo { turn: Rc::clone(turn), inputs, rows: n });
+                    n
+                }
+            };
             rows.extend((0..n).map(|row| (turn_ix, row)));
-            row_counts.push((turn.id().to_owned(), n));
+            self.row_counts.push((turn.id().to_owned(), n));
         }
         rows.push((self.cached_turns.len(), 0));
-        row_counts.push((TAIL_SPACER_ID.to_owned(), 1));
-        self.rows = Rc::new(rows);
-        self.row_counts = row_counts;
+        self.row_counts.push((TAIL_SPACER_ID.to_owned(), 1));
+        // A turn the session no longer has leaves the memo with the full
+        // refresh (the only path a removal takes).
+        if from == 0 {
+            let live: HashSet<&str> = self.cached_turns.iter().map(|turn| turn.id()).collect();
+            self.row_memo.retain(|id, _| live.contains(id.as_str()));
+        }
+        self.rows_changed_from = Some(self.rows_changed_from.map_or(from, |earlier| earlier.min(from)));
+    }
+
+    /// The streaming refresh: a fold change confined to the last few turns
+    /// rebuilds from the first changed turn and keeps everything above it
+    /// — turns, rows, counts, tool clocks — instead of re-walking a 3,000-
+    /// turn transcript per chunk (perf P1: 6.7 ms → see docs/51). `false`
+    /// means "not this kind of change": the caller runs the full refresh
+    /// with the same dirty set.
+    fn refresh_render_suffix(&mut self, dirty: &HashSet<String>) -> bool {
+        /// More changed turns than this is a page or a replay, not a stream.
+        const SUFFIX_LIMIT: usize = 64;
+        // A handoff view interleaves view-side turns and hides two of the
+        // fold's: the full refresh owns that mapping.
+        if !self.handoff_prefix.is_empty()
+            || self.handoff_divider.is_some()
+            || self.handoff_pack_full.is_some()
+            || self.handoff_pack_hidden.is_some()
+            || self.handoff_pack_reply_hidden.is_some()
+        {
+            return false;
+        }
+        // A toggle or the fold switch can change any turn's rows.
+        if self.suffix_inputs != Some((self.toggled_gen, self.fold_finished_turns)) {
+            return false;
+        }
+        let Some(session) = self.fold.session(&self.session_id) else { return false };
+        let own = &session.turns;
+        let old_len = self.cached_turns.len();
+        if old_len == 0 || own.len() < old_len || self.row_counts.len() != old_len + 1 {
+            return false;
+        }
+        // The first changed turn, from the tail: a dirty id the session no
+        // longer has is a removal, which the full refresh owns.
+        let mut first = own.len();
+        let mut found = 0usize;
+        for (ix, turn) in own.iter().enumerate().rev() {
+            if found == dirty.len() {
+                break;
+            }
+            if dirty.contains(turn.id()) {
+                found += 1;
+                first = ix;
+            }
+        }
+        if found != dirty.len() {
+            return false;
+        }
+        // The old last turn too: a new turn after it, or a busy flip,
+        // changes its settled rows.
+        let from = first.min(old_len - 1);
+        if own.len() - from > SUFFIX_LIMIT {
+            return false;
+        }
+        if from > 0 && own[from - 1].id() != self.cached_turns[from - 1].id() {
+            return false;
+        }
+        let tail_old: Vec<Rc<Turn>> = self.cached_turns[from..].to_vec();
+        let mut turns: Vec<Rc<Turn>> = Vec::with_capacity(own.len());
+        turns.extend(self.cached_turns[..from].iter().cloned());
+        for turn in &own[from..] {
+            let previous = tail_old.iter().find(|old| old.id() == turn.id());
+            turns.push(match previous {
+                Some(previous) if !dirty.contains(turn.id()) => {
+                    debug_assert!(**previous == *turn, "turn {} changed but the fold did not mark it", turn.id());
+                    Rc::clone(previous)
+                }
+                Some(previous) if **previous == *turn => Rc::clone(previous),
+                _ => Rc::new(turn.clone()),
+            });
+        }
+        self.cached_turns = Rc::new(turns);
+        self.sent_pairs = Rc::new(crate::sent::pair(&self.cached_turns, &self.sent_items));
+        let now_ms = transcript::transcript_now_ms(&self.cached_turns);
+        transcript::note_tool_starts(&self.cached_turns[from..], &mut self.tool_first_seen, now_ms);
+        self.rebuild_rows_from(from);
+        self.refresh_card_state();
+        true
+    }
+
+    /// The per-refresh card facts every block walk feeds: the newest
+    /// pending approval, which open card fields still wait, and each shell
+    /// call's full-output state.
+    fn refresh_card_state(&mut self) {
         let mut full_output = HashMap::new();
         // The newest pending approval falls out of the same walk (finding
         // `performance-2`): forward order, keeping the last hit, is the same
@@ -1033,6 +1188,7 @@ impl SessionView {
     /// it too, so a toggle rebuilds the row mapping at once — counts and
     /// clicks never disagree for a frame.
     pub(super) fn toggle_fold(&mut self, key: String, cx: &mut Context<Self>) {
+        self.toggled_gen += 1;
         let toggled = Rc::make_mut(&mut self.toggled);
         if !toggled.remove(&key) {
             toggled.insert(key);
@@ -1325,6 +1481,7 @@ impl SessionView {
             };
             for (index, block) in blocks.iter().enumerate() {
                 if matches!(block, Block::ToolGroup { .. }) {
+                    self.toggled_gen += 1;
                     Rc::make_mut(&mut self.toggled).insert(transcript::block_key(id, index));
                 }
             }
@@ -3663,4 +3820,14 @@ pub(super) fn quote_chip_words(text: &str) -> String {
         out.push_str(word);
     }
     format!("{out}…")
+}
+
+/// One turn's memoised row count (see `SessionView::row_memo`).
+pub(crate) struct RowMemo {
+    /// The snapshot the count was computed from; held, so its address
+    /// stays this turn's while memoised.
+    turn: Rc<Turn>,
+    /// `(settled, toggled_gen, fold_finished_turns)` at the count.
+    inputs: (bool, u64, bool),
+    rows: usize,
 }

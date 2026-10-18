@@ -209,6 +209,28 @@ pub struct Folds {
 /// (group members included) and drop ids that left the transcript, so the
 /// map stays bounded by what is on screen. The session view calls this
 /// where applied deltas materialise, with the frame's own clock.
+/// [`refresh_tool_starts`] for the turns a streaming refresh rebuilt: new
+/// calls get their first-seen time, and nothing is forgotten (the kept
+/// turns above still hold theirs; a removal takes the full refresh).
+pub fn note_tool_starts(turns: &[Rc<Turn>], starts: &mut HashMap<String, u64>, now_ms: u64) {
+    for turn in turns {
+        let Turn::Assistant { blocks, .. } = turn.as_ref() else { continue };
+        for block in blocks {
+            match block {
+                Block::ToolCall { id, .. } => {
+                    starts.entry(id.clone()).or_insert(now_ms);
+                }
+                Block::ToolGroup { calls, .. } => {
+                    for call in calls {
+                        starts.entry(call.id.clone()).or_insert(now_ms);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 pub fn refresh_tool_starts(turns: &[Rc<Turn>], starts: &mut HashMap<String, u64>, now_ms: u64) {
     let mut seen = HashSet::new();
     for turn in turns {

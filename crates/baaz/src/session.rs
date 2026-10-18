@@ -649,6 +649,23 @@ pub struct SessionView {
     /// toggle is rare: the frame clones a refcount, `toggle_fold` clones the
     /// set once with `Rc::make_mut` (finding `performance-3`).
     toggled: Rc<HashSet<String>>,
+    /// Bumped on every write to [`Self::toggled`]: a row count memoised
+    /// under an older generation is recomputed (see `row_memo`).
+    toggled_gen: u64,
+    /// Each turn's mapped row count from the last render-cache refresh,
+    /// keyed by turn id, holding the snapshot `Rc` it was computed from (so
+    /// its address cannot be reused by another turn while memoised), the
+    /// settled flag, the toggle generation and the fold switch. A turn whose
+    /// snapshot is the same `Rc` under the same inputs keeps its count: a
+    /// streaming chunk recounts one turn, not the transcript (perf P1).
+    row_memo: HashMap<String, render::RowMemo>,
+    /// `(toggled_gen, fold_finished_turns)` at the last full refresh: a
+    /// streaming refresh reuses the rows above its first changed turn only
+    /// while these still hold.
+    suffix_inputs: Option<(u64, bool)>,
+    /// The first turn a render-cache refresh rebuilt since the last
+    /// `sync_virtual_list`: the rows above it are unchanged there.
+    rows_changed_from: Option<usize>,
     /// B12: "Fold finished turns" (Settings → General; default on): a
     /// settled assistant turn folds its work behind one header row, while
     /// the final answer stays out. The persisted switch belongs to the
@@ -1137,6 +1154,10 @@ impl SessionView {
             composer,
             overlays,
             toggled: Rc::new(HashSet::new()),
+            toggled_gen: 0,
+            row_memo: HashMap::new(),
+            suffix_inputs: None,
+            rows_changed_from: None,
             fold_finished_turns: true,
             list_state: ListState::new(
                 0,
