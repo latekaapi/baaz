@@ -15,7 +15,9 @@ owner's state:
   switch   the same window, `click:` away and back: a cached switch to the
            300-turn session, to its first transcript render.
   stream   `--bench synthetic-stress-300`: each streamed event's fold to the
-           next transcript render (stream-to-render), and the fold itself.
+           next transcript render (stream-to-render), and the fold itself;
+           then a generated 1,000-turn transcript, where the per-chunk
+           render work must not grow with the session (docs/51 #6).
   idle     the signed-in shell with the 300-turn replay open, left alone:
            CPU used (cumulative `ps` time, not the decaying `%cpu`) and root
            renders over a quiet window. At rest both must be ~zero.
@@ -154,6 +156,28 @@ def measure_stream(binary, state):
     }
 
 
+def measure_stream_long(binary, state):
+    """Streaming into a 1,000-turn transcript: the cost that used to grow
+    with the session (docs/51 #6). The fixture is generated, not checked in
+    (4 MB), with the same generator as the 300-turn one."""
+    capture = os.path.join(state, "stress-1000.jsonl")
+    subprocess.run([sys.executable, "fixtures/msp/make-stress-300.py", "--turns", "1000", "--out", capture],
+                   cwd=REPO, check=True, capture_output=True)
+    out = os.path.join(state, "bench-1000.json")
+    code, _, stderr = run(binary, ["--bench", capture, "--bench-scroll", "tail", "--bench-cadence-ms", "1",
+                                   "--bench-frames", "60", "--bench-out", out], state, timeout=300)
+    if not os.path.exists(out):
+        raise Unmeasured(f"--bench (1,000 turns) wrote nothing (exit {code}): {stderr[-400:]}")
+    row = json.load(open(out))
+    stream = row.get("stream_to_render") or {}
+    if not stream.get("n") or not row.get("element", {}).get("n"):
+        raise Unmeasured("--bench (1,000 turns) recorded no frames")
+    return {
+        "stream.long_1000_element_p99_ms": row["element"]["p99_us"] / 1000.0,
+        "stream.long_1000_to_render_p99_ms": stream["p99_us"] / 1000.0,
+    }
+
+
 def cpu_seconds(pid):
     p = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True)
     text = p.stdout.strip()
@@ -209,7 +233,8 @@ def main():
     if not os.path.exists(binary):
         sys.stderr.write(f"perf-budgets: no binary at {binary} — build it first (cargo build -p baaz)\n")
         return 2
-    profile = "release" if os.sep + "release" + os.sep in binary or binary.endswith(".app/Contents/MacOS/baaz") else "debug"
+    # A bundle's binary (`Baaz.app/Contents/MacOS/Baaz`) is a release build.
+    profile = "release" if os.sep + "release" + os.sep in binary or ".app/Contents/MacOS/" in binary else "debug"
     config = json.load(open(a.budgets))
     budgets = config["profiles"][profile]["budgets"]
     groups = a.only or list(GROUPS)
@@ -231,6 +256,7 @@ def main():
                         measured.update({k: v for k, v in both.items() if k.split(".", 1)[0] in groups})
                 elif group == "stream":
                     measured.update(measure_stream(binary, state))
+                    measured.update(measure_stream_long(binary, state))
                 elif group == "idle":
                     measured.update(measure_idle(binary, a.idle_settle, a.idle_window, state))
             except (Unmeasured, subprocess.TimeoutExpired, OSError, ValueError, KeyError) as error:

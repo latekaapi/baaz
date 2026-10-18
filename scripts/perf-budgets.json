@@ -64,6 +64,14 @@
           "budget": 0,
           "unit": "renders",
           "measured": 0
+        },
+        "stream.long_1000_element_p99_ms": {
+          "budget": 0.6,
+          "measured": 0.19
+        },
+        "stream.long_1000_to_render_p99_ms": {
+          "budget": 8,
+          "measured": 0.84
         }
       }
     },
@@ -130,6 +138,14 @@
           "budget": 0,
           "unit": "renders",
           "measured": 0
+        },
+        "stream.long_1000_element_p99_ms": {
+          "budget": 0.6,
+          "measured": 0.2
+        },
+        "stream.long_1000_to_render_p99_ms": {
+          "budget": 8,
+          "measured": 0.86
         }
       }
     }
