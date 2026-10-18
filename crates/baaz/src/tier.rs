@@ -3147,11 +3147,14 @@ mod t1_close_tests {
         );
 
         // 3. The quit cleanup with the same stuck registration: bounded by
-        // `QUIT_WAIT`, never the old multi-second wait.
+        // `QUIT_WAIT`, never the old multi-second wait. The slack is for a
+        // shared CI runner: 100 ms over the 500 ms wait failed there at
+        // 624 ms (2026-10-17 and -18) while catching nothing a 500 ms
+        // margin would miss.
         let start = Instant::now();
         cleanup_probes();
         assert!(
-            start.elapsed() <= Duration::from_millis(600),
+            start.elapsed() <= QUIT_WAIT + Duration::from_millis(500),
             "quit cleanup took {:?} with a stuck probe",
             start.elapsed()
         );
