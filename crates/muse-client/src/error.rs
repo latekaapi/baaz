@@ -78,6 +78,19 @@ impl MuseError {
             _ => false,
         }
     }
+
+    /// Whether this is muse 1.4.10's `-32603` refusing a per-session MCP
+    /// server on a resume ("session MCP base configuration is
+    /// unavailable"): seen 2026-10-18 on every resume that carried Baaz's
+    /// terminal bridge, while the same resume without it succeeds. Same
+    /// narrow message match as [`Self::is_stale_sidecar`], for the same
+    /// reason: `data.kind` is only `internal`.
+    pub fn is_session_mcp_refused(&self) -> bool {
+        match self {
+            MuseError::Rpc(err) => err.code == -32603 && err.message.contains("session MCP base configuration"),
+            _ => false,
+        }
+    }
 }
 
 
@@ -128,6 +141,14 @@ mod tests {
         }))
         .expect("error object decodes");
         MuseError::Rpc(Box::new(object))
+    }
+
+    /// The session-MCP refusal classifies, and nothing else does.
+    #[test]
+    fn only_the_session_mcp_refusal_classifies() {
+        assert!(rpc(-32603, "internal error: session MCP base configuration is unavailable").is_session_mcp_refused());
+        assert!(!rpc(-32603, "internal error: stale sidecar generation").is_session_mcp_refused());
+        assert!(!rpc(-32021, "session MCP base configuration is unavailable").is_session_mcp_refused());
     }
 
     /// The stale-sidecar `-32603` classifies, and nothing

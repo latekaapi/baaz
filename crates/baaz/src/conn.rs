@@ -204,6 +204,35 @@ fn bridge_events<T: Send + 'static>(events: crossbeam_channel::Receiver<T>) -> U
     rx
 }
 
+/// Set once muse has refused the bridge on a resume: this muse refuses it on
+/// every resume, so later ones go bare at once instead of paying the
+/// refused round trip first. Lives until restart (a muse update restarts
+/// the child, and the app with it more often than not).
+pub static MUSE_REFUSES_RESUME_BRIDGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `session/resume` carrying the terminal bridge (`bridged`), retried once
+/// as `bare` — the same resume without it — when muse refuses the bridge
+/// ([`muse_client::MuseError::is_session_mcp_refused`], muse 1.4.10). The
+/// session then opens with no agent terminal route instead of an error
+/// dialog on every reopen. Blocking: call it from the wire's work closure.
+pub fn resume_muse(
+    client: &muse_client::MuseClient,
+    bridged: &muse_client::schema::SessionResumeParams,
+    bare: &muse_client::schema::SessionResumeParams,
+) -> Result<muse_client::schema::SessionResumeResult, muse_client::MuseError> {
+    match client.session_resume(bridged) {
+        Err(error) if bridged != bare && error.is_session_mcp_refused() => {
+            MUSE_REFUSES_RESUME_BRIDGE.store(true, std::sync::atomic::Ordering::Relaxed);
+            crate::baaz_log!(
+                "muse refused the terminal bridge on resuming {} ({error}); resuming without it",
+                bare.session_id
+            );
+            client.session_resume(bare)
+        }
+        result => result,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

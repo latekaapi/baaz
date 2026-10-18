@@ -2554,8 +2554,9 @@ impl Harness {
         };
         // The terminal relay's route, as on every resume: re-registered
         // and carried, grant-gated.
+        let bare = resume_params.clone();
         self.muse_terminal_resume(&mut resume_params);
-        let work = move || client.session_resume(&resume_params);
+        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
         self.wire_call(cx, work, move |this, result, cx| {
             // The notice belongs to the resumed session: a switch since owns
             // its own lease, so anything but the still-open resumed view is
