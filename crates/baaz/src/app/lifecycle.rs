@@ -2454,7 +2454,13 @@ impl Harness {
         // record reopens over `ResumeSession`, with its history replayed.
         // muse sessions continue below.
         if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
+            // Traced like a Muse switch: `HistoryReady` marks the stored
+            // history painted into the reopened lane.
+            crate::log::trace_reset();
+            crate::log::trace_mark(&format!("resume {} {}", record.provider, session_id.chars().take(8).collect::<String>()));
+            crate::log::trace_arm_first_frame();
             if let Some(view) = self.cache_take(&session_id) {
+                crate::log::trace_mark("cache-hit");
                 self.activate(view, quiet, window, cx);
                 return;
             }
@@ -11722,6 +11728,22 @@ done
                 assert_eq!(claude_row.0.label, "Kestrel audit");
                 assert_eq!(claude_row.1, vec!["cc-search-1".to_owned()], "its body comes from its own transcript");
 
+                // A Muse row's fingerprint is exactly the pre-P3 formula, so
+                // upgrading writes only the new provider rows (a changed
+                // formula rewrote all 2,612 rows of a real store once, 23 s).
+                {
+                    use std::hash::{Hash, Hasher};
+                    let (row, body_ids, fingerprint) =
+                        rows.iter().find(|(row, _, _)| row.session_id == "muse-search-1").expect("muse row");
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    (&row.session_id, &row.label, &row.title, &row.first_prompt, &row.body, &row.project, &row.workspace)
+                        .hash(&mut hasher);
+                    for id in body_ids {
+                        id.hash(&mut hasher);
+                        harness.index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
+                    }
+                    assert_eq!(*fingerprint, hasher.finish() as i64, "a Muse row's fingerprint is unchanged by P3");
+                }
                 let owners = harness.search_body_owners();
                 assert_eq!(owners.len(), 2, "muse ids are never read from provider files");
                 let index_path = state.2.join("no-muse-index.db");

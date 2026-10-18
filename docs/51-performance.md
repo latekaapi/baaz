@@ -130,5 +130,10 @@ trace like live ones; a replayed capture parks in the MRU in a scripted window (
 
 **What these numbers are not.** Debug build; the window renders behind other apps, so "render" is the transcript's
 element construction, not a pixel on glass, and idle cannot see display-rate loops that only run with a display link
-(the Tier V `idle` entries and a live check still own that). Synthetic bodies are 16 KB, not 80 KB. Release numbers:
-see the bundle run below.
+(the Tier V `idle` entries and a live check still own that). Synthetic bodies are 16 KB, not 80 KB. Release (`--binary target/release/baaz`, same budgets): first frame 123–172 ms, open 12–13 ms, cached switch 2.0 ms,
+stream-to-render p50/p99 0.4/0.6–1.2 ms, fold p99 0.024 ms, store costs within 10 % of debug (sqlite is built
+optimised either way), idle 0–0.1 % and 0 renders.
+
+Provider reopen (traced now: `resume <provider> <id>` → `provider lane open` → `first-content`), release bundle, owner
+state copy, cold: Claude Code 120–150 ms, Codex 2.0–2.3 s. Not budgeted — it spawns a real CLI; P1's "stored history
+painted before the child" is the fix for Codex.

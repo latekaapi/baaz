@@ -138,5 +138,14 @@ Now:
 - Tests: adapter extraction (both), home walks (both), Baaz dispatch + owner-home fallback, and a Harness test that
   syncs Muse + Claude + Codex rows into one `search.db` and finds each by its own transcript words.
 
+Checked on the release bundle against a copy of the owner's state (2,612 sessions, 91 Claude/Codex records; screen
+control was refused, so by scripted steps + window captures, not by hand): the upgrade sync wrote 141 rows in 0.6 s;
+"qa-codex-ask" finds only its Codex session; "qa-claude-ro" finds its Claude session but ranks it 9th, because the palette
+ANDs prefix terms (`qa* claude* ro*`) and long Muse relay transcripts match too — a search-quality item (phrase-match
+hyphenated words), not P3's. Both reopen through `resume` with full history and the right provider chip: Claude Code
+≈ 130 ms to the transcript, Codex ≈ 2.0–2.3 s (its app-server starts before anything paints — doc 51 #7, P1).
+Defect found live and fixed: the first build hashed an absent provider record into every Muse fingerprint, so the
+upgrade rewrote all 2,612 rows (23 s); a test now pins a Muse row's fingerprint to the pre-P3 formula.
+
 Not done in P3 (still P4): Muse's `session/list` is still the Muse half of the list, and Muse rows are not in Baaz's own
 registry file; the registry is two stores read as one, not one store.

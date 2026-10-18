@@ -296,8 +296,13 @@ impl Harness {
             id.hash(&mut hasher);
             self.index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
             // A provider transcript grows with each settled exchange, which
-            // moves its record's turn count and stamp.
-            self.provider_sessions.get(id).map(|record| (record.turns, record.updated_ms)).hash(&mut hasher);
+            // moves its record's turn count and stamp. Hashed only when there
+            // is a record: a Muse row's fingerprint stays what it was before
+            // provider rows existed, so an upgrade rewrites only the new rows
+            // (hashing a `None` here rewrote all 2,612 rows once, 23 s).
+            if let Some(record) = self.provider_sessions.get(id) {
+                (record.turns, record.updated_ms).hash(&mut hasher);
+            }
         }
         match hasher.finish() as i64 {
             0 => 1,
