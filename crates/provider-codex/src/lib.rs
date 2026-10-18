@@ -37,6 +37,14 @@ use provider::{
 };
 pub use caps::{capabilities, codex_version_supported, CODEX_VERSION_FLOOR};
 
+/// The last `model/list` read in this process per Codex home, as each
+/// model's default reasoning level: the catalog belongs to the account the
+/// home signs in as, not to the session, so a resumed child reuses what an
+/// earlier one read instead of waiting on the network again. Refreshed by
+/// every catalog read; lives until restart.
+type CatalogDefaults = HashMap<String, Option<String>>;
+static CATALOG_DEFAULTS: Mutex<Option<HashMap<std::path::PathBuf, CatalogDefaults>>> = Mutex::new(None);
+
 use child::{
     initialize_request, initialized_notification, thread_ids, thread_start_request, turn_id_from,
     turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
@@ -316,7 +324,7 @@ impl CodexAdapter {
                 reason: format!("the session child is unreachable: {error}"),
             })?;
         let rows = Self::fetch_catalog(&running).map_err(Self::unavailable)?;
-        *self.model_defaults.lock().expect("defaults mutex") = Some(Self::defaults_of(&rows));
+        self.remember_defaults(Self::defaults_of(&rows));
         // A requested model is taken as named even when the catalog does not
         // list it (aliases travel here — `gpt-6-*` runs while `model/list`
         // names no such row); only an absent request falls back to the
@@ -371,14 +379,23 @@ impl CodexAdapter {
     /// leaves the snapshot to the `account/rateLimits/updated` pushes —
     /// a session must never fail to open for want of a meter.
     fn refresh_rate_limits(&self, running: &RunningChild) {
-        let answer = running.send_request_with_timeout(
-            "account/rateLimits/read",
-            serde_json::json!({}),
-            Self::RATE_LIMITS_TIMEOUT,
-        );
-        if let Ok(result) = answer {
-            self.fold.lock().expect("fold mutex").observe_rate_limits(&result);
-        }
+        // Detached: the read is a network round trip to the account
+        // service (2.3–6.3 s measured 2026-10-18, against 166 ms for the
+        // whole `thread/resume`), and the open/resume ack used to wait for
+        // it, so a reopened Codex session painted nothing for seconds. The
+        // snapshot is pulled on demand (`ReadAccount`), like the live
+        // `account/rateLimits/updated` pushes, so landing late is fine.
+        let Ok(answer) = running.request_detached("account/rateLimits/read", serde_json::json!({})) else {
+            return;
+        };
+        let fold = Arc::clone(&self.fold);
+        let _ = std::thread::Builder::new().name("codex-rate-limits".into()).spawn(move || {
+            if let Ok(Ok(result)) = answer.recv_timeout(Self::RATE_LIMITS_TIMEOUT) {
+                if let Ok(mut fold) = fold.lock() {
+                    fold.observe_rate_limits(&result);
+                }
+            }
+        });
     }
 
     fn with_child<T>(&self, f: impl FnOnce(&RunningChild) -> T) -> Result<T, ProviderError> {
@@ -406,11 +423,31 @@ impl CodexAdapter {
         if let Some(defaults) = self.model_defaults.lock().expect("defaults mutex").as_ref() {
             return Ok(defaults.get(model).cloned().flatten());
         }
+        // Another session's child already read the catalog in this run:
+        // `model/list` can be a multi-second network fetch when Codex's own
+        // cache is cold (3.4 s measured 2026-10-18), and a resume waited on
+        // it before acking.
+        let home = self.resolved_home();
+        let cached = CATALOG_DEFAULTS.lock().ok().and_then(|cached| cached.as_ref()?.get(&home).cloned());
+        if let Some(defaults) = cached {
+            let found = defaults.get(model).cloned().flatten();
+            *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
+            return Ok(found);
+        }
         let rows = self.with_child(Self::fetch_catalog)?.unwrap_or_default();
         let defaults = Self::defaults_of(&rows);
         let found = defaults.get(model).cloned().flatten();
-        *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
+        self.remember_defaults(defaults);
         Ok(found)
+    }
+
+    /// Keep a catalog read for this child and for every later child in this
+    /// process ([`CATALOG_DEFAULTS`]).
+    fn remember_defaults(&self, defaults: HashMap<String, Option<String>>) {
+        if let Ok(mut cached) = CATALOG_DEFAULTS.lock() {
+            cached.get_or_insert_with(HashMap::new).insert(self.resolved_home(), defaults.clone());
+        }
+        *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
     }
 
     /// Tell the chip the level `session_id` actually runs at.
@@ -511,6 +548,7 @@ impl CodexAdapter {
         // A resumed lane reconnects its server: re-read the limits the
         // same way an open does, best-effort.
         self.refresh_rate_limits(&running);
+
         *self.child.lock().expect("child mutex") = Some(running);
         // The level the thread runs at, which an earlier session's pick may
         // have left above or below the model's default: it stands until a
@@ -1017,7 +1055,7 @@ impl ProviderAdapter for CodexAdapter {
                 let rows = self
                     .with_child(Self::fetch_catalog)?
                     .map_err(Self::unavailable)?;
-                *self.model_defaults.lock().expect("defaults mutex") = Some(Self::defaults_of(&rows));
+                self.remember_defaults(Self::defaults_of(&rows));
                 // Human labels ride `label`; the wire id stays in `id`.
                 // A row without a `displayName` falls back to its id rather
                 // than vanishing: an empty menu is a failure, not a state.
@@ -1256,11 +1294,17 @@ with open(log, "w") as handle:
         let (dir, _) = seed_executable("effort", "unused", "");
         let log = dir.join("frames.log");
         let body = r#"#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, threading
 if len(sys.argv) > 1 and sys.argv[1] == "--version":
     print("codex-cli 0.200.0")
     sys.exit(0)
 log = open(os.environ["FAKE_CODEX_LOG"], "a", buffering=1)
+out = threading.Lock()
+def write(answer):
+    with out:
+        sys.stdout.write(json.dumps(answer) + "\n")
+        sys.stdout.flush()
+rate_delay = float(os.environ.get("FAKE_CODEX_RATE_DELAY") or 0)
 def result_for(method):
     if method == "model/list":
         return {"data": [{"id": "gpt-test", "displayName": "GPT Test", "isDefault": True,
@@ -1283,8 +1327,13 @@ for line in sys.stdin:
     log.write(line + "\n")
     method = frame.get("method")
     if "id" in frame and method:
-        sys.stdout.write(json.dumps({"id": frame["id"], "result": result_for(method)}) + "\n")
-        sys.stdout.flush()
+        answer = {"id": frame["id"], "result": result_for(method)}
+        # The account read is a network round trip in the real server; a
+        # delay here answers it late without holding up later requests.
+        if method == "account/rateLimits/read" and rate_delay:
+            threading.Timer(rate_delay, write, args=(answer,)).start()
+        else:
+            write(answer)
 "#;
         let script = seed_executable_in(&dir, "fake-codex", body);
         (script, log)
@@ -1368,6 +1417,44 @@ for line in sys.stdin:
         let turns = method_frames(&frames, "turn/start");
         assert!(turns.iter().all(|turn| turn["params"].get("effort").is_none()), "never a guessed level");
         assert_eq!(method_frames(&frames, "model/list").len(), 1, "resolved once, not per turn");
+    }
+
+    /// A resume acks on `thread/resume`, never on the account read after
+    /// it: that read is a network round trip (2.3–6.3 s measured
+    /// 2026-10-18) and a reopened session painted nothing until it landed.
+    #[test]
+    fn a_resume_never_waits_for_the_account_read() {
+        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let (script, log) = scripted_effort_server();
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        std::env::set_var("FAKE_CODEX_MODEL", "gpt-test");
+        std::env::set_var("FAKE_CODEX_RESUME_EFFORT", "medium");
+        std::env::set_var("FAKE_CODEX_RATE_DELAY", "3");
+        let scratch = script.parent().expect("temp dir").join("homes");
+        let owner_home = scratch.join("owner-home");
+        std::fs::create_dir_all(owner_home.join(".codex")).expect("temp owner home");
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home);
+        adapter.set_state_dir(scratch.join("state"));
+        adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        let at = std::time::Instant::now();
+        let ack = adapter.dispatch(Command::ResumeSession {
+            request_id: "r-resume".into(),
+            session_id: "sess-1".into(),
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+        });
+        let took = at.elapsed();
+        std::env::remove_var("FAKE_CODEX_RATE_DELAY");
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
+        assert!(took < Duration::from_millis(2_000), "the ack waited {took:?} for a 3 s account read");
+        let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(method_frames(&frames, "account/rateLimits/read").len(), 1, "the read was still sent");
+        drop(adapter);
     }
 
     /// A resumed thread at its model's default needs nothing said.
@@ -1530,7 +1617,17 @@ for line in sys.stdin:
         // The folded answer behind `read_usage`: plan plus a weekly
         // window at 85% — the shape the account menu's card renders, not
         // a label string.
-        let report = adapter.read_usage().expect("a reading was folded");
+        // The read is detached from the open (it is a network round trip
+        // the ack must not wait for), so it lands shortly after.
+        let mut report = adapter.read_usage();
+        for _ in 0..200 {
+            if report.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            report = adapter.read_usage();
+        }
+        let report = report.expect("a reading was folded");
         assert_eq!(report.plan.as_deref(), Some("prolite"));
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].label, "Weekly");
