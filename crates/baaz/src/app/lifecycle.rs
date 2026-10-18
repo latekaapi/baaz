@@ -6655,6 +6655,32 @@ mod tests {
         })
     }
 
+    /// Perf P1: an override edit that changes nothing settles nothing. A
+    /// provider reopen re-states the project its session already has, and
+    /// that used to rejoin the list and rebuild the search rows — 75 ms of
+    /// UI thread per reopen. A real change still settles.
+    #[gpui::test]
+    fn an_override_edit_that_changes_nothing_settles_nothing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("override-noop");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                // Indexed, so the edit is not the inert new-session case.
+                harness.index.insert("s-known".into(), IndexEntry { title: "Known".into(), ..Default::default() });
+                Harness::reset_search_rebuild_count();
+                harness.set_override("s-known", |meta| meta.project = Some("p-1".into()), cx);
+                assert_eq!(Harness::search_rebuild_count(), 1, "a real change settles");
+                Harness::reset_search_rebuild_count();
+                harness.set_override("s-known", |meta| meta.project = Some("p-1".into()), cx);
+                assert_eq!(Harness::search_rebuild_count(), 0, "the same project again settles nothing");
+                assert_eq!(harness.overrides.get("s-known").and_then(|meta| meta.project.clone()), Some("p-1".into()));
+            });
+        });
+        lane_restore(state);
+    }
+
     /// B7fix2: the handoff destination inherits pane state through the
     /// cheap save — no row rejoin, no search-index rebuild, no sync
     /// settle write. The restore that follows flushes the armed write, so
