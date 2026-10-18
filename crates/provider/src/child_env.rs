@@ -188,6 +188,36 @@ pub fn ensure_linked_dir(dir: &PathBuf, owner_root: &std::path::Path, names: &[&
 /// spawn surface now carries its own per-`Command` removals
 /// ([`scrub_command`], [`scrubbed_removals`], [`scrub_overrides_for`]), so
 /// no shared state is ever touched.
+/// Stop a provider child the way it can clean up after itself: `SIGTERM`,
+/// up to `grace` for it to exit, then `SIGKILL`. Reaps it either way.
+///
+/// Why not `kill()` straight away: Codex keeps a writer lease on the
+/// thread it serves, and a `SIGKILL`ed app-server leaves it held — the
+/// next `thread/resume` of that thread waited ~5 s and then failed with
+/// "already has an active writer" (measured 2026-10-18, codex-cli
+/// 0.153.2). `SIGTERM` released it in ~10 ms.
+pub fn terminate(child: &mut std::process::Child, grace: std::time::Duration) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: `kill(2)` with a pid this process spawned and has not
+        // reaped (try_wait above said it is still running).
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +483,22 @@ mod tests {
             "a real file is never overwritten"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn terminate_lets_a_child_exit_on_sigterm_and_kills_one_that_ignores_it() {
+        let started = std::time::Instant::now();
+        let mut polite = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        terminate(&mut polite, std::time::Duration::from_secs(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "SIGTERM ended it, no wait for the grace");
+        let started = std::time::Instant::now();
+        let mut stubborn = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .expect("spawn sh");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        terminate(&mut stubborn, std::time::Duration::from_millis(200));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "SIGKILL after the grace");
+        assert!(matches!(stubborn.try_wait(), Ok(Some(_))), "reaped");
     }
 }
