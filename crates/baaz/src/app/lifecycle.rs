@@ -1455,6 +1455,11 @@ impl Harness {
         &mut self,
         params: &mut muse_client::schema::SessionResumeParams,
     ) {
+        // This muse already refused the bridge on a resume (see
+        // `conn::resume_muse`): resume bare, as without the grant.
+        if crate::conn::MUSE_REFUSES_RESUME_BRIDGE.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         if !self.session_mcp {
             crate::terminal::relay::note_muse_route_ungranted();
             return;
@@ -2541,8 +2546,9 @@ impl Harness {
         };
         // The terminal relay's route: re-register the stored id and carry
         // the bridge — grant-gated, like the start.
+        let bare = resume_params.clone();
         self.muse_terminal_resume(&mut resume_params);
-        let work = move || client.session_resume(&resume_params);
+        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
         self.wire_call(cx, work, move |this, result, cx| {
             match &result {
                 Ok(_) => crate::log::trace_mark("resume-ack"),
@@ -4617,8 +4623,9 @@ impl Harness {
         };
         // The terminal relay's route, as in `open`: re-registered and
         // carried, grant-gated.
+        let bare = resume_params.clone();
         self.muse_terminal_resume(&mut resume_params);
-        let work = move || client.session_resume(&resume_params);
+        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
         self.wire_call_in(cx, work, move |this, result, window, cx| {
             match result {
                 Ok(resumed) => {
