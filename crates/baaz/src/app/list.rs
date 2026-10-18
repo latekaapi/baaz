@@ -44,7 +44,16 @@ impl Harness {
     /// can lose a rename to a window that closed a moment later — which is the
     /// one outcome a store exists to prevent.
     pub(crate) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
+        let before = self.overrides.get(session_id).cloned();
         edit(self.overrides.entry(session_id.to_owned()).or_default());
+        // An edit that changed nothing — a reopen re-stating the project the
+        // session already has — settles nothing: the rejoin and search
+        // rebuild it used to run were 75 ms of UI thread on every provider
+        // reopen (perf P1, 2026-10-18), for a list and index that could not
+        // differ.
+        if before.as_ref() == self.overrides.get(session_id) {
+            return;
+        }
         // A session with no row, no index entry and no chain link is
         // nothing a rejoin or the search index reads: a new session's
         // project lands here before either exists, and the full rejoin and
