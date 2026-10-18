@@ -257,6 +257,37 @@ pub fn canonical_path(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
+/// How long a root that did not resolve (a deleted worktree, a folder not
+/// made yet) is taken at its raw spelling before the disk is asked again.
+const UNRESOLVED_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What every [`CanonicalCache`] reads through: each root's canonical
+/// spelling, kept for the run once it resolved. Every rejoin — on each
+/// pin, rename, title and list reply, on the UI thread — re-read all ~2,070
+/// distinct roots of a real store: 18–143 ms a rejoin, 6 ms with this
+/// (perf P1, 2026-10-18). A root that exists keeps its answer (a folder
+/// does not move under its own path); one that did not resolve is asked
+/// again after [`UNRESOLVED_TTL`], so a folder made later still resolves.
+fn resolved(root: &str) -> String {
+    type Memo = std::collections::HashMap<String, (String, Option<std::time::Instant>)>;
+    static MEMO: std::sync::Mutex<Option<Memo>> = std::sync::Mutex::new(None);
+    if let Ok(mut memo) = MEMO.lock() {
+        let memo = memo.get_or_insert_with(Memo::new);
+        match memo.get(root) {
+            Some((canon, None)) => return canon.clone(),
+            Some((canon, Some(at))) if at.elapsed() < UNRESOLVED_TTL => return canon.clone(),
+            _ => {}
+        }
+        let (canon, missing) = match Path::new(root).canonicalize() {
+            Ok(path) => (path.to_string_lossy().into_owned(), None),
+            Err(_) => (root.to_owned(), Some(std::time::Instant::now())),
+        };
+        memo.insert(root.to_owned(), (canon.clone(), missing));
+        return canon;
+    }
+    canonical_str(root)
+}
+
 /// [`canonical_path`] for a string root, which is what the wire hands over.
 pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
@@ -342,7 +373,7 @@ impl CanonicalCache {
         if let Some(hit) = self.map.get(root) {
             return hit.clone();
         }
-        let canon = canonical_str(root);
+        let canon = resolved(root);
         self.map.insert(root.to_owned(), canon.clone());
         canon
     }
@@ -738,6 +769,21 @@ pub fn start_params_for_root(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_roots_are_canonical_and_missing_ones_stay_raw() {
+        let dir = std::env::temp_dir().join(format!("baaz-resolved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let raw = dir.to_string_lossy().into_owned();
+        let canonical = dir.canonicalize().expect("canonical").to_string_lossy().into_owned();
+        assert_eq!(super::resolved(&raw), canonical);
+        assert_eq!(super::resolved(&raw), canonical, "the memo answers the same");
+        let missing = format!("{raw}-absent");
+        assert_eq!(super::resolved(&missing), missing, "a missing root keeps its raw spelling");
+        let mut cache = CanonicalCache::default();
+        assert_eq!(cache.get(&raw), canonical);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::ffi::OsString;
 
