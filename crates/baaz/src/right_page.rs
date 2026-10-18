@@ -4,7 +4,8 @@
 //! or crashed page. The pill and the notes panel float over the native page
 //! in their own window (`overlay.rs`, `OverlayKind::PageFloat`).
 
-use aui::workbench::{address_field_frame, no_page_state, page_error_state, state_block};
+use aui::workbench::{address_field_frame, no_page_state, page_error_state, recent_pages_menu, state_block, PaneRow, RecentRow};
+use aui_webview::WebviewState;
 use aui_icons::IconName;
 use aui_tokens::ActiveAui;
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, SharedString, Window};
@@ -62,6 +63,24 @@ impl Harness {
         input
     }
 
+    /// Open or close the Page row's Recent pages menu.
+    pub(crate) fn set_page_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.right_cache.page_menu != open {
+            self.right_cache.page_menu = open;
+            cx.notify();
+        }
+    }
+
+    /// A Recent pages row: the session's one page goes there; the menu closes.
+    pub(crate) fn open_recent_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.set_page_menu(false, cx);
+        let Some(state) = self.existing_browser(cx) else { return };
+        let url = state.read(cx).recent_pages().get(index).map(|p| p.url.to_string());
+        if let Some(url) = url {
+            state.update(cx, |s, _| s.navigate(&url));
+        }
+    }
+
     /// Whether the Page screen draws its own state over the page (no page
     /// yet, couldn't load, crashed) — the native view hides under it.
     pub(crate) fn pane_page_covered(&self, cx: &gpui::App) -> bool {
@@ -70,6 +89,48 @@ impl Harness {
             is_blank(&s.url()) || s.load_failed().is_some() || s.crashed().is_some()
         })
     }
+}
+
+/// The Recent pages rows for `state`: newest first, the page on screen checked.
+pub(crate) fn recent_rows(state: &WebviewState) -> Vec<RecentRow> {
+    let current = state.url();
+    state.recent_pages().iter().map(|p| RecentRow::new(&p.url, &p.title, p.url == current)).collect()
+}
+
+/// The Page row: its title is the Recent pages button once the session's
+/// page has shown an address (owner 2026-10-18, canvas v50 `D6PageRecent`).
+pub(crate) fn page_row(row: PaneRow, open: bool, state: Option<&Entity<WebviewState>>, cx: &mut Context<Harness>) -> PaneRow {
+    let has = state.is_some_and(|s| !s.read(cx).recent_pages().is_empty());
+    if !has {
+        return row;
+    }
+    let row = row.title_menu(open, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
+        let open = !this.right_cache.page_menu;
+        this.set_page_menu(open, cx);
+    }));
+    row
+}
+
+/// The menu drawn inside the window, for a page that is not a native view
+/// (the scripted page captures and tests run); a native page gets it in its
+/// overlay window ([`crate::overlay`]), since it draws above gpui.
+pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, width: f32, cx: &mut Context<Harness>) -> Option<AnyElement> {
+    let state = state?;
+    if !open || state.read(cx).is_native() {
+        return None;
+    }
+    let menu = recent_menu(&recent_rows(state.read(cx)), width, cx);
+    let close = cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
+    Some(div().absolute().left(px(6.0)).top(px(2.0)).on_mouse_down_out(close).child(menu).into_any_element())
+}
+
+/// The menu itself, its rows wired to the session's page.
+pub(crate) fn recent_menu(rows: &[RecentRow], width: f32, cx: &mut Context<Harness>) -> AnyElement {
+    let weak = cx.weak_entity();
+    let pick = std::rc::Rc::new(move |index: usize, _: &mut Window, cx: &mut gpui::App| {
+        let _ = weak.update(cx, |this, cx| this.open_recent_page(index, cx));
+    });
+    recent_pages_menu("right-page-recent", rows, width, pick).into_any_element()
 }
 
 /// The Page screen's body.

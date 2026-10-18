@@ -193,6 +193,14 @@ radii and strokes are unscaled.
   secondary **Try again**.
 - Everything drawn over the page (pill, pins, outline, notes panel) is an overlay window (memory
   `feedback-native-page-above-gpui`).
+- **Recent pages** (owner, 2026-10-18; canvas v51 `D6PageRecent`): once the session's page has shown an address,
+  the pane row's name is a menu button — "Page" + chevron 12 muted, 28 tall, r 6, hover 5 %, lit 9 % while open,
+  label "Recent pages". It opens the app's one dropdown (FF; panel inset 6) 2 px under the row's top edge, 6 in:
+  a "Recent pages" label, then one 36 px row per main-frame address of this session's page, newest first, each
+  once, at most 8 — the title (the address when it had none), the host muted (hidden under 300 wide), the check on
+  the page on screen. Width = pane − 12, at most 320. A row navigates the session's one page; Esc, a click
+  outside, closing the pane, another screen or another session closes it. Over a native page it is drawn in the
+  page's overlay window, which then covers the nav row and the page so an outside click closes it.
 
 ### 2.8 Light (new; locked with the design)
 Frame #ECECEF · sheet #FAFAFB · Raised #FFFFFF · Raised-lit #F3F3F5 · Floating #FFFFFF · Well #F2F2F4 · FG #18181B
@@ -224,6 +232,21 @@ both themes.
   below), title 600, line 13.2 / 18 muted (max 260), then at most one secondary action 8 below.
 - Skeleton bars: 10 tall, r 5, at selected (9 % / 7 %). No spinners for list loading.
 - Spinner 12: 1.5 px ring at 35 % muted with a muted top.
+
+### 2.11 Settled by the build (owner: "decide, plan, settle them and implement", 2026-10-18)
+1. **Commit box on a clean, pushed default branch:** one row, the branch and "· up to date" — no primary (a PR
+   from the default branch into itself means nothing). When the remote is ahead: "· ↓N on the remote" (no Pull).
+2. **A folder's git letter:** the one kind of change under it; a mix reads M; all untracked reads U.
+3. **The hook-failure action** names the session's provider: "Ask Claude Code / Codex / Muse to fix it".
+4. **A code quote in light** inks `#3F3F46` (between FG and muted, as `#C9C9D0` is on dark).
+5. **The quote bar** anchors from the selection's own start line (press or release, whichever comes first in
+   reading order); a word or line picked by double / triple click anchors at that click.
+6. **The image view** shows the pointer cursor (gpui has no zoom cursors).
+7. **"This page couldn't load"** sentences: refused the connection · could not be found · is out of reach: this
+   Mac is offline · took too long to answer · closed the connection · has a certificate Baaz does not trust ·
+   did not load (code).
+8. **Esc** goes back from a pushed full output or image wherever the keyboard is (the window's Esc chain),
+   after the Recent pages menu and the file preview.
 
 ## 3. Motion (Emil's rules)
 - **Strip slide** (a toggle while open, or a two-finger sideways swipe in the pane — one screen per swipe, snapping):
@@ -323,7 +346,9 @@ Decisions (2026-10-17, chat and canvas):
 15. Quote (§0): select across a paragraph and a list → the bar 6 above; Quote → the block in the composer; a code
     selection → a code quote; send → the bubble's quote; click it → scroll + flash; near the top → the bar below.
 16. The 18-entry probe exits 0 after baselines are regenerated **on main** in their own commit (the right-* entries
-    change by design; `right-tabs` no longer applies and needs retiring with the owner's OK).
+    change by design). `right-tabs` is retired (owner, 2026-10-18).
+17. Recent pages: visit three pages, open the title menu → newest first, the current one checked; pick an older
+    one → the page goes there, the menu closes; Esc and a click on the page close it (§2.7).
 
 ## 8. Next session (build, Opus 5.5) — the prompt
 ```

@@ -246,7 +246,7 @@ impl Harness {
     /// The model a one-shot completion for `session_id` runs on: the live
     /// view's own model (what Codex is known to run for this account —
     /// see [`crate::utility`]), or none when no live view names one.
-    fn utility_model(&self, session_id: &str, cx: &Context<Self>) -> Option<String> {
+    pub(crate) fn utility_model(&self, session_id: &str, cx: &Context<Self>) -> Option<String> {
         Self::live_view_for(&self.active, &self.session_cache, session_id, cx)
             .map(|view| view.read(cx).model_id())
             .filter(|model| !model.is_empty())

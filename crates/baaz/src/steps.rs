@@ -107,6 +107,7 @@
 //! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse with the ↩ chip (the offline `browse-from-session` shot), free |
+//! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
@@ -315,6 +316,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "page-menu", run: |this, rest, _, cx| this.set_page_menu(rest.trim() != "off", cx) },
     WindowVerb { verb: "mode", run: |this, rest, window, cx| this.step_mode(rest, window, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },

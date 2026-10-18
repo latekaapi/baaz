@@ -4482,6 +4482,7 @@ impl Harness {
         // `set` without `notify`: a parked view reuses its retained subtree
         // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
+        self.right_cache.page_menu = false;
         self.active = Some(view.clone());
         self.focus_composer = true;
         // "Ask Muse to write one" (A5): the fresh session opens with the
