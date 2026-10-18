@@ -145,6 +145,12 @@ pub(crate) fn foot_for(tree: &GitTree, ui: &ChangesUi) -> Foot {
     }
 }
 
+/// What follows the branch when nothing is waiting to push: "up to date",
+/// or how far the remote is ahead (no Pull here; docs/43 §2.6).
+fn level_note(behind: u32) -> SharedString {
+    if behind == 0 { "· up to date".into() } else { format!("· ↓{behind} on the remote").into() }
+}
+
 fn default_of(ui: &ChangesUi) -> &str {
     ui.default_branch.as_deref().unwrap_or("main")
 }
@@ -228,8 +234,9 @@ impl Harness {
         };
         ui.drafting = true;
         let root = root.to_path_buf();
+        let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
-            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, &prompt) }).await;
+            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
                 ui.drafting = false;
@@ -454,11 +461,12 @@ impl Harness {
         if provider == Some(crate::providers::ProviderId::Muse) {
             self.draft_on_muse(root, DraftKind::PrBody, prompt.clone(), cx);
         }
+        let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
             let r = root_buf.clone();
             let bases = cx.background_executor().spawn(async move { git_ops::remote_branches(&r) }).await;
             let draft = match provider.filter(|p| crate::utility::supports(*p)) {
-                Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, &prompt).ok() }).await,
+                Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, model.as_deref(), &prompt).ok() }).await,
                 None => None,
             };
             let _ = this.update(cx, |this: &mut Self, cx| {
@@ -862,14 +870,14 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, foot: Foot, agent: 
                     h_flex()
                         .h(px(28.0))
                         .items_center()
-                        .child(branch_label(&tree.branch, Some("· up to date".into()), cx))
+                        .child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx))
                         .child(div().flex_1())
                         .child(primary_action("right-create-pr", "Create PR", Some(IconName::PullRequest), false, busy.is_some(), cx).on_click(cx.listener(move |this, _, window, cx| this.open_pr_form(&r, window, cx)))),
                 )
                 .into_any_element()
         }
         Foot::Level => commit_frame(false, cx)
-            .child(h_flex().h(px(28.0)).items_center().child(branch_label(&tree.branch, Some("· up to date".into()), cx)))
+            .child(h_flex().h(px(28.0)).items_center().child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx)))
             .into_any_element(),
         Foot::Pr(pr) => {
             let url = pr.url.clone();

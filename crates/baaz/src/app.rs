@@ -2700,6 +2700,7 @@ impl Harness {
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
         self.right_snap = false;
+        self.right_cache.page_menu = false;
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         self.arm_browser_url_focus();
@@ -2949,6 +2950,7 @@ impl Harness {
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
+        self.right_cache.page_menu = false;
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus();
     }
@@ -5011,6 +5013,7 @@ impl Harness {
         self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
+        self.right_cache.page_menu = false;
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
@@ -7518,10 +7521,23 @@ impl Harness {
                 return;
             }
         }
+        // The Page row's Recent pages menu closes first (D6, 2026-10-18).
+        if self.right_cache.page_menu {
+            self.set_page_menu(false, cx);
+            return;
+        }
         // An open file preview is the next thing Escape takes back: back
         // to the tree, keeping the selected marker and the scroll offset.
         if let Some((root, _)) = self.right_project() {
             if self.close_file_preview_for(&root, cx) {
+                return;
+            }
+        }
+        // Then a pushed full output or image on the screen the pane shows
+        // (docs/43 §2.9–2.10: ←, Esc and ⌘[ go back).
+        if self.layout.right_open {
+            let screen = crate::right::screen_index(crate::layout::right_kind(&self.layout));
+            if self.pop_right_view(screen, cx) {
                 return;
             }
         }

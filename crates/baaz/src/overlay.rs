@@ -202,6 +202,9 @@ impl Render for OverlayView {
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
         }
+        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, _| baaz.right_cache.page_menu).unwrap_or(false) {
+            return div().size_full().children(content);
+        }
         if kind == OverlayKind::PageFloat {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_center().children(content);
         }
@@ -491,6 +494,16 @@ impl Harness {
         let rect = page.page_rect()?;
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
+        if self.right_cache.page_menu {
+            // The Recent pages menu: the window covers the nav row and the
+            // page, so a click anywhere over them outside the menu closes it.
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            ("menu", page.url().to_string(), page.recent_pages().len()).hash(&mut h);
+            let top = rect.top() - gpui::px(aui::workbench::PAGE_NAV_H);
+            let size = gpui::size(rect.size.width, rect.size.height + gpui::px(aui::workbench::PAGE_NAV_H));
+            return Some((Bounds::new(origin + gpui::point(rect.left(), top), size), h.finish()));
+        }
         if page.annotating() {
             let rows = page.annotations().len() as f32;
             let height = gpui::px(12.0 + 48.0 * rows + 40.0) + pad * 2.0;
@@ -585,6 +598,20 @@ impl Harness {
         let page = state.read(cx);
         let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
+        if self.right_cache.page_menu {
+            let rows = crate::right_page::recent_rows(page);
+            let width = page.page_rect().map(|r| f32::from(r.size.width)).unwrap_or(400.0);
+            let menu = crate::right_page::recent_menu(&rows, width, cx);
+            let close = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
+            return Some(
+                div()
+                    .size_full()
+                    .relative()
+                    .on_mouse_down(gpui::MouseButton::Left, close)
+                    .child(div().absolute().left(gpui::px(6.0)).top(gpui::px(2.0)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu))
+                    .into_any_element(),
+            );
+        }
         if page.annotating() {
             let notes: Vec<aui::workbench::PageNote> = page
                 .annotations()

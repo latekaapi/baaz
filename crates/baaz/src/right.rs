@@ -241,6 +241,8 @@ pub(crate) struct RightCache {
     pub changes: crate::right_changes::ChangesUi,
     /// D6: the Page screen's "Search or enter an address" field.
     pub page_address: Option<gpui::Entity<gpui_kit::base::input::InputState>>,
+    /// The Page row's Recent pages menu is open (owner 2026-10-18).
+    pub page_menu: bool,
     /// D6: Files' filter and keyboard state.
     pub files_ui: crate::right_files::FilesUi,
     /// D6: an image file previewed at 100 % instead of fitted.
@@ -651,11 +653,16 @@ pub(crate) fn render_screen(
                 let pushed = row.is_some();
                 (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
             }
-            (RightKind::Browser, _) => (
-                pane_row().on_close(close).into_any_element(),
-                crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cx),
-                false,
-            ),
+            (RightKind::Browser, _) => {
+                let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close).into_any_element();
+                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, width, cx);
+                let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cx);
+                let body = match menu {
+                    Some(menu) => div().relative().size_full().child(body).child(menu).into_any_element(),
+                    None => body,
+                };
+                (row, body, false)
+            }
             (RightKind::Files, project) => {
                 let (row, body) = crate::right_files::files_screen(cache, project.clone(), width, files_focus, browser.window, cx);
                 let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
