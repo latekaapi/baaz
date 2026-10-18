@@ -2569,7 +2569,7 @@ impl Harness {
                     }
                 }
                 Err(error) => {
-                    crate::log::trace_mark("resume-ack-err");
+                    crate::log::trace_mark(&format!("resume-ack-err {error}"));
                     this.report(error, cx);
                 }
             }

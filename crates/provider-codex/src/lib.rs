@@ -79,13 +79,18 @@ pub struct CodexAdapter {
     /// this is set a Default turn must reset to the model's default rather
     /// than omit the key (see [`child::turn_effort`]). Cleared on every
     /// open and resume, and by a reset that lands.
-    sent_effort: Mutex<Option<String>>,
+    sent_effort: Arc<Mutex<Option<String>>>,
     /// Each catalog model's `defaultReasoningEffort`, resolved once per
     /// child: the level a Default turn resets to. A model the catalog does
     /// not list (an alias) maps to `None`, so a reset with no known level
     /// never refetches `model/list` on every turn. Cleared with each new
     /// child.
-    model_defaults: Mutex<Option<HashMap<String, Option<String>>>>,
+    model_defaults: Arc<Mutex<Option<CatalogDefaults>>>,
+    /// A resume's effort lookup still running in the background (see
+    /// [`Self::settle_effort_later`]): closed when it lands. A turn, or a
+    /// catalog read, waits for it first, so neither acts on a half-known
+    /// level nor fetches the catalog twice.
+    effort_lookup: Mutex<Option<Receiver<()>>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
@@ -139,8 +144,9 @@ impl CodexAdapter {
             thread_id: Mutex::new(None),
             model: Mutex::new(None),
             pending_turn_mode: Mutex::new(None),
-            sent_effort: Mutex::new(None),
-            model_defaults: Mutex::new(None),
+            sent_effort: Arc::new(Mutex::new(None)),
+            model_defaults: Arc::new(Mutex::new(None)),
+            effort_lookup: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
@@ -420,6 +426,7 @@ impl CodexAdapter {
     /// empty catalog — no known default, said on the chip — rather than a
     /// refetch on every turn.
     fn model_default(&self, model: &str) -> Result<Option<String>, ProviderError> {
+        self.await_effort_lookup();
         if let Some(defaults) = self.model_defaults.lock().expect("defaults mutex").as_ref() {
             return Ok(defaults.get(model).cloned().flatten());
         }
@@ -428,8 +435,7 @@ impl CodexAdapter {
         // cache is cold (3.4 s measured 2026-10-18), and a resume waited on
         // it before acking.
         let home = self.resolved_home();
-        let cached = CATALOG_DEFAULTS.lock().ok().and_then(|cached| cached.as_ref()?.get(&home).cloned());
-        if let Some(defaults) = cached {
+        if let Some(defaults) = Self::cached_catalog(&home) {
             let found = defaults.get(model).cloned().flatten();
             *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
             return Ok(found);
@@ -439,6 +445,77 @@ impl CodexAdapter {
         let found = defaults.get(model).cloned().flatten();
         self.remember_defaults(defaults);
         Ok(found)
+    }
+
+    /// The catalog an earlier child in this process read for `home`.
+    fn cached_catalog(home: &std::path::Path) -> Option<CatalogDefaults> {
+        CATALOG_DEFAULTS.lock().ok().and_then(|cached| cached.as_ref()?.get(home).cloned())
+    }
+
+    /// Wait for a resume's background effort lookup, when one is still
+    /// running ([`Self::settle_effort_later`]). Bounded like any request.
+    fn await_effort_lookup(&self) {
+        let pending = self.effort_lookup.lock().expect("lookup mutex").take();
+        if let Some(done) = pending {
+            let _ = done.recv_timeout(Duration::from_secs(120));
+        }
+    }
+
+    /// Decide whether a resumed thread's standing `level` is its model's
+    /// default — what the chip says and what a Default turn resets from —
+    /// with `defaults` in hand.
+    fn settle_effort(
+        sent_effort: &Mutex<Option<String>>,
+        tx: &Sender<ProviderEvent>,
+        session_id: &str,
+        level: String,
+        default: Option<String>,
+    ) {
+        if default.as_deref() != Some(level.as_str()) {
+            *sent_effort.lock().expect("effort mutex") = Some(level.clone());
+            let _ = tx.send(ProviderEvent::EffortInForce { session_id: session_id.to_owned(), effort: Some(level) });
+        }
+    }
+
+    /// [`Self::settle_effort`] once the catalog arrives, without holding
+    /// the resume's ack: `model/list` can be a multi-second network fetch
+    /// when Codex's cache is cold (3.4 s measured 2026-10-18). Only the
+    /// first page is read here (one page in every catalog seen so far); a
+    /// paged catalog is finished by the next synchronous read.
+    fn settle_effort_later(&self, session_id: &str, model: &str, level: String) {
+        let first = child::model_list_request(0, None);
+        let answer = self.with_child(|running| running.request_detached("model/list", first["params"].clone()));
+        let Ok(Ok(answer)) = answer else {
+            // The child is gone or unwritable: the next read reports that.
+            *self.sent_effort.lock().expect("effort mutex") = Some(level);
+            return;
+        };
+        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(0);
+        *self.effort_lookup.lock().expect("lookup mutex") = Some(done_rx);
+        let (sent_effort, model_defaults, tx) =
+            (Arc::clone(&self.sent_effort), Arc::clone(&self.model_defaults), self.tx.clone());
+        let (home, session_id, model) = (self.resolved_home(), session_id.to_owned(), model.to_owned());
+        let spawned = std::thread::Builder::new().name("codex-effort".into()).spawn(move || {
+            let _done = done_tx;
+            match answer.recv_timeout(Duration::from_secs(120)) {
+                Ok(Ok(result)) if child::next_cursor(&result).is_none() => {
+                    let defaults = Self::defaults_of(&child::model_catalog(&result));
+                    let default = defaults.get(&model).cloned().flatten();
+                    if let Ok(mut cached) = CATALOG_DEFAULTS.lock() {
+                        cached.get_or_insert_with(HashMap::new).insert(home, defaults.clone());
+                    }
+                    *model_defaults.lock().expect("defaults mutex") = Some(defaults);
+                    Self::settle_effort(&sent_effort, &tx, &session_id, level, default);
+                }
+                // A paged catalog, a failed read, or no answer: the level
+                // stands as not-the-default, so the chip shows it and a
+                // Default turn resets through a full catalog read.
+                _ => Self::settle_effort(&sent_effort, &tx, &session_id, level, None),
+            }
+        });
+        if spawned.is_err() {
+            self.effort_lookup.lock().expect("lookup mutex").take();
+        }
     }
 
     /// Keep a catalog read for this child and for every later child in this
@@ -556,10 +633,13 @@ impl CodexAdapter {
         // from it — never a Default chip over another level.
         let in_force = child::resume_effort(&answer);
         if let Some(level) = in_force {
-            let default = self.model_default(&model).unwrap_or(None);
-            if default.as_deref() != Some(level.as_str()) {
-                *self.sent_effort.lock().expect("effort mutex") = Some(level.clone());
-                self.announce_effort(&resumed_session, Some(level));
+            match Self::cached_catalog(&self.resolved_home()) {
+                Some(defaults) => {
+                    let default = defaults.get(&model).cloned().flatten();
+                    *self.model_defaults.lock().expect("defaults mutex") = Some(defaults);
+                    Self::settle_effort(&self.sent_effort, &self.tx, &resumed_session, level, default);
+                }
+                None => self.settle_effort_later(&resumed_session, &model, level),
             }
         }
         if !deltas.is_empty() {
@@ -620,6 +700,9 @@ impl CodexAdapter {
     ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
+        // A turn sent before a resume's effort lookup landed reads the
+        // level it settles, never a half-known one.
+        self.await_effort_lookup();
         let sticky = self.sent_effort.lock().expect("effort mutex").clone();
         let picked = effort.filter(|level| !level.is_empty());
         // Only a reset reads the catalog — once per child: the model's own
@@ -1305,6 +1388,7 @@ def write(answer):
         sys.stdout.write(json.dumps(answer) + "\n")
         sys.stdout.flush()
 rate_delay = float(os.environ.get("FAKE_CODEX_RATE_DELAY") or 0)
+models_delay = float(os.environ.get("FAKE_CODEX_MODELS_DELAY") or 0)
 def result_for(method):
     if method == "model/list":
         return {"data": [{"id": "gpt-test", "displayName": "GPT Test", "isDefault": True,
@@ -1330,8 +1414,13 @@ for line in sys.stdin:
         answer = {"id": frame["id"], "result": result_for(method)}
         # The account read is a network round trip in the real server; a
         # delay here answers it late without holding up later requests.
-        if method == "account/rateLimits/read" and rate_delay:
-            threading.Timer(rate_delay, write, args=(answer,)).start()
+        delay = rate_delay if method == "account/rateLimits/read" else (
+            models_delay if method == "model/list" else 0)
+        if delay:
+            # A daemon: the fake exits with its stdin, never on a pending answer.
+            timer = threading.Timer(delay, write, args=(answer,))
+            timer.daemon = True
+            timer.start()
         else:
             write(answer)
 "#;
@@ -1342,7 +1431,22 @@ for line in sys.stdin:
     /// Resume against [`scripted_effort_server`], then two Default turns:
     /// the frames the fake saw, and the levels the chip was told.
     fn resume_then_default_turns(model: &str, resume_effort: &str) -> (Vec<serde_json::Value>, Vec<Option<String>>) {
+        let (frames, told, _) = resume_then_default_turns_timed(model, resume_effort, None);
+        (frames, told)
+    }
+
+    /// [`resume_then_default_turns`] plus how long the resume's ack took.
+    fn resume_then_default_turns_timed(
+        model: &str,
+        resume_effort: &str,
+        models_delay: Option<&str>,
+    ) -> (Vec<serde_json::Value>, Vec<Option<String>>, Duration) {
         let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        // Under the lock: the env is the process's, and every fake reads it.
+        match models_delay {
+            Some(delay) => std::env::set_var("FAKE_CODEX_MODELS_DELAY", delay),
+            None => std::env::remove_var("FAKE_CODEX_MODELS_DELAY"),
+        }
         let (script, log) = scripted_effort_server();
         std::env::set_var("FAKE_CODEX_LOG", &log);
         std::env::set_var("FAKE_CODEX_MODEL", model);
@@ -1353,6 +1457,7 @@ for line in sys.stdin:
         let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home);
         adapter.set_state_dir(scratch.join("state"));
         adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        let at = std::time::Instant::now();
         adapter
             .dispatch(Command::ResumeSession {
                 request_id: "r-resume".into(),
@@ -1362,6 +1467,7 @@ for line in sys.stdin:
                 mode: None,
             })
             .expect("resumes");
+        let resumed_in = at.elapsed();
         for turn in ["t-1", "t-2"] {
             adapter
                 .dispatch(Command::SubmitInput {
@@ -1386,7 +1492,8 @@ for line in sys.stdin:
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
-        (frames, told)
+        std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
+        (frames, told, resumed_in)
     }
 
     fn method_frames<'a>(frames: &'a [serde_json::Value], method: &str) -> Vec<&'a serde_json::Value> {
@@ -1417,6 +1524,20 @@ for line in sys.stdin:
         let turns = method_frames(&frames, "turn/start");
         assert!(turns.iter().all(|turn| turn["params"].get("effort").is_none()), "never a guessed level");
         assert_eq!(method_frames(&frames, "model/list").len(), 1, "resolved once, not per turn");
+    }
+
+    /// A cold `model/list` (3.4 s measured 2026-10-18) never holds a
+    /// resume's ack; a Default turn sent at once waits for the lookup, so
+    /// the chip and the reset are exactly what a synchronous read gave.
+    #[test]
+    fn a_slow_catalog_never_holds_the_resume_and_the_reset_still_lands() {
+        let (frames, told, resumed_in) = resume_then_default_turns_timed("gpt-test", "high", Some("2"));
+        assert!(resumed_in < Duration::from_millis(1_500), "the ack waited {resumed_in:?} on a 2 s catalog");
+        assert_eq!(told, vec![Some("high".to_owned())], "the chip reads the standing level");
+        let turns = method_frames(&frames, "turn/start");
+        assert_eq!(turns[0]["params"]["effort"], "medium", "Default resets to the model's default");
+        assert!(turns[1]["params"].get("effort").is_none(), "nothing stands after the reset");
+        assert_eq!(method_frames(&frames, "model/list").len(), 1, "resolved once");
     }
 
     /// A resume acks on `thread/resume`, never on the account read after
