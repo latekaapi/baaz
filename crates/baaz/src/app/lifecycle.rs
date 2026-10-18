@@ -3853,12 +3853,15 @@ impl Harness {
             if moved > 0 {
                 crate::baaz_log!("provider reopen: lazy-moved {moved} file(s) for {}", record.session_id);
             }
+            crate::log::trace_mark("reopen gate done");
             let result = (|| -> Result<ProviderOpen, provider::ProviderError> {
                 let provider = factory(provider_id)?;
+                crate::log::trace_mark("reopen adapter connected");
                 #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
                 let session_id =
                     crate::provider_sessions::send_resume(&provider, &record, &new_command_id(), Some(mode))?;
+                crate::log::trace_mark("reopen resume acked");
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
                 // starts, with no forwarding thread.

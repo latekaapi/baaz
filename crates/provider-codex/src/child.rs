@@ -246,7 +246,7 @@ pub struct PendingQuestionView {
 
 /// The answer lane for one in-flight request: the `result`, or the wire
 /// error message.
-type Answer = Result<Value, String>;
+pub type Answer = Result<Value, String>;
 
 /// What the pump and the request lane share.
 #[derive(Debug, Default)]
@@ -1421,6 +1421,28 @@ impl RunningChild {
                 Err(RequestError { reason: format!("{method} timed out") })
             }
         }
+    }
+
+    /// Call one client→server method without waiting: the request is
+    /// written and its answer arrives on the returned channel whenever the
+    /// server sends it (or fails when the child's stdout ends). For calls
+    /// nothing should block on — the account read after an open. A caller
+    /// that drops the receiver loses the answer; the pump still removes the
+    /// waiter when it arrives.
+    pub fn request_detached(&self, method: &str, params: Value) -> Result<Receiver<Answer>, RequestError> {
+        let id = self.next_request_id();
+        let key = id.to_string();
+        let (tx, rx): (Sender<Answer>, Receiver<Answer>) = unbounded();
+        self.shared
+            .lock()
+            .map_err(|_| RequestError { reason: "the session state lock is poisoned".into() })?
+            .waiters
+            .insert(key.clone(), tx);
+        if let Err(error) = write_value(&self.stdin, &json!({"id": id, "method": method, "params": params})) {
+            let _ = self.shared.lock().ok().and_then(|mut shared| shared.waiters.remove(&key));
+            return Err(RequestError { reason: format!("the session child is unreachable: {error}") });
+        }
+        Ok(rx)
     }
 
     /// Send one client→server notification (no id, no answer).
