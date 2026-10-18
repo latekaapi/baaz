@@ -972,3 +972,51 @@ fn a_skill_load_folds_to_the_quiet_row() {
         "no skill load still reads \"Read skill\""
     );
 }
+
+/// Perf P1 (docs/51 #6): a renderer reuses its copy of every turn
+/// [`MuseFold::take_dirty`] does not name, without comparing it. That is only
+/// sound if the dirty set is exact, so every capture is replayed event by
+/// event and every turn left out of the set must equal its copy from before
+/// the event — bytes and all.
+#[test]
+fn every_turn_the_dirty_set_leaves_out_is_unchanged() {
+    use std::collections::HashMap;
+    let mut checked = 0usize;
+    for path in captures() {
+        let text = std::fs::read_to_string(&path).expect("capture is readable");
+        let mut fold = MuseFold::new();
+        let mut before: HashMap<String, HashMap<String, aui_protocol::Turn>> = HashMap::new();
+        for (number, line) in text.lines().enumerate() {
+            let Some(body) = line.strip_prefix("<-- ") else { continue };
+            let Some(frame) = frame::parse_line(body).expect("capture parses") else { continue };
+            let Some(event) = MuseEvent::from_frame(frame) else { continue };
+            fold.apply(event);
+            let ids: Vec<String> = fold.session_ids().map(str::to_owned).collect();
+            for id in ids {
+                let dirty = fold.take_dirty(&id);
+                let turns: HashMap<String, aui_protocol::Turn> = fold
+                    .session(&id)
+                    .map(|s| s.turns.iter().map(|t| (t.id().to_owned(), t.clone())).collect())
+                    .unwrap_or_default();
+                if let (Some(dirty), Some(previous)) = (dirty, before.get(&id)) {
+                    for (turn_id, turn) in &turns {
+                        if dirty.contains(turn_id) {
+                            continue;
+                        }
+                        if let Some(old) = previous.get(turn_id) {
+                            checked += 1;
+                            assert!(
+                                old == turn,
+                                "{}:{}: turn {turn_id} changed but was not reported dirty",
+                                path.display(),
+                                number + 1
+                            );
+                        }
+                    }
+                }
+                before.insert(id, turns);
+            }
+        }
+    }
+    assert!(checked > 1_000, "the check compared too few turns to mean anything ({checked})");
+}

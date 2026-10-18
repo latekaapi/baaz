@@ -1,6 +1,6 @@
 //! `MuseFold` — MSP view events in, `aui_protocol::Delta`s out.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use aui_protocol::{
@@ -28,6 +28,12 @@ struct ReasoningStart {
 /// One Muse session, folded.
 struct Folded {
     session: Session,
+    /// The ids of the turns changed since the last [`MuseFold::take_dirty`],
+    /// or `None` when that is not known (a fresh session, a session folded
+    /// back after eviction): what lets a renderer reuse its copy of every
+    /// other turn without comparing it (perf P1, docs/51 #6). Every turn
+    /// write goes through [`Folded::apply_to_session`] or marks here itself.
+    dirty: Option<HashSet<String>>,
     side: SideState,
     /// Every cached block position — items, approvals, questions, the todo
     /// card and the goal card — grouped by the turn that hosts it, so an
@@ -248,6 +254,15 @@ impl MuseFold {
         }
     }
 
+    /// The ids of `session_id`'s turns changed since the last call, and
+    /// start counting afresh. `None` means "unknown — treat every turn as
+    /// changed": the first call for a session, or one folded back after
+    /// eviction. A turn not named was not written in between.
+    pub fn take_dirty(&mut self, session_id: &str) -> Option<HashSet<String>> {
+        let folded = self.sessions.get_mut(session_id)?;
+        folded.dirty.replace(HashSet::new())
+    }
+
     /// The folded session for a Muse session id.
     pub fn session(&self, session_id: &str) -> Option<&Session> {
         self.sessions.get(session_id).map(|s| &s.session)
@@ -323,14 +338,14 @@ impl MuseFold {
         for delta in deltas {
             match &delta {
                 Delta::TurnStarted { turn } => {
-                    if folded.session.apply(delta.clone()) {
+                    if folded.apply_to_session(delta.clone()) {
                         folded.track_turn(turn);
                         landed.push(delta);
                     }
                 }
                 Delta::TurnRemoved { turn_id } => {
                     let at = folded.session.turns.iter().position(|turn| turn.id() == turn_id);
-                    if folded.session.apply(delta.clone()) {
+                    if folded.apply_to_session(delta.clone()) {
                         if let Some(at) = at {
                             folded.reindex(at, turn_id);
                         }
@@ -338,7 +353,7 @@ impl MuseFold {
                     }
                 }
                 _ => {
-                    if folded.session.apply(delta.clone()) {
+                    if folded.apply_to_session(delta.clone()) {
                         landed.push(delta);
                     }
                 }
@@ -521,9 +536,50 @@ impl MuseFold {
     }
 }
 
+/// The turn a delta writes to.
+fn delta_turn_id(delta: &Delta) -> Option<&str> {
+    match delta {
+        Delta::TurnStarted { turn } | Delta::TurnReplaced { turn } => Some(turn.id()),
+        Delta::TextDelta { turn_id, .. }
+        | Delta::BlockAdded { turn_id, .. }
+        | Delta::BlockUpdated { turn_id, .. }
+        | Delta::ThinkingDelta { turn_id, .. }
+        | Delta::ToolOutputDelta { turn_id, .. }
+        | Delta::TurnRemoved { turn_id }
+        | Delta::BlockRemoved { turn_id, .. }
+        | Delta::TurnFinished { turn_id, .. } => Some(turn_id),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
 impl Folded {
     fn new(session_id: &str) -> Self {
         Self::new_with_provider(session_id, Provider::Muse, String::new(), String::new())
+    }
+
+    /// Apply one delta to the session and remember the turn it names as
+    /// changed. The one door every turn write takes but the item stamp,
+    /// which marks itself.
+    fn apply_to_session(&mut self, delta: Delta) -> bool {
+        let turn = delta_turn_id(&delta).map(str::to_owned);
+        let applied = self.session.apply(delta);
+        if applied {
+            self.mark_dirty(turn);
+        }
+        applied
+    }
+
+    /// Remember `turn` as changed; `None` (a change no turn names) makes
+    /// everything unknown.
+    fn mark_dirty(&mut self, turn: Option<String>) {
+        match (turn, self.dirty.as_mut()) {
+            (Some(turn), Some(dirty)) => {
+                dirty.insert(turn);
+            }
+            (None, _) => self.dirty = None,
+            (Some(_), None) => {}
+        }
     }
 
     fn new_with_provider(session_id: &str, provider: Provider, model: String, cwd: String) -> Self {
@@ -531,6 +587,7 @@ impl Folded {
         session.mode = PermissionMode::OnRequest;
         Self {
             session,
+            dirty: None,
             side: SideState::default(),
             slots: Slots::default(),
             revisions: HashMap::new(),
@@ -931,7 +988,7 @@ impl Folded {
         // turn's terminal asks what it cost (finding `client-adapter-6`).
         self.usage.remove(&turn_id);
         let delta = Delta::TurnFinished { turn_id: self.session.turns[turn].id().to_owned(), meta };
-        self.session.apply(delta.clone());
+        self.apply_to_session(delta.clone());
         deltas.push(delta);
         deltas
     }
@@ -1243,7 +1300,7 @@ impl Folded {
                 timestamp,
             };
             let delta = Delta::TurnReplaced { turn };
-            self.session.apply(delta.clone());
+            self.apply_to_session(delta.clone());
             self.user_text.insert(item.item_id.clone(), presentation);
             self.stamp_item(key, item);
             return vec![delta];
@@ -1259,7 +1316,7 @@ impl Folded {
             timestamp: None,
         };
         let delta = Delta::TurnStarted { turn };
-        self.session.apply(delta.clone());
+        self.apply_to_session(delta.clone());
         // A user message is a whole turn of its own, appended here rather
         // than through `ensure_assistant_turn`, so it mints its handle here.
         let key = self.mint_turn_key();
@@ -1757,7 +1814,7 @@ impl Folded {
                 text: text.to_owned(),
             },
         };
-        if self.session.apply(delta.clone()) {
+        if self.apply_to_session(delta.clone()) {
             vec![delta]
         } else {
             Vec::new()
@@ -1977,7 +2034,7 @@ impl Folded {
                 timestamp: None,
             },
         };
-        self.session.apply(delta.clone());
+        self.apply_to_session(delta.clone());
         deltas.push(delta);
         let key = self.mint_turn_key();
         self.assistant_turns.insert(turn_id.to_owned(), key);
@@ -2042,7 +2099,11 @@ impl Folded {
             let slot = match &mut self.session.turns[at] {
                 Turn::User { timestamp, .. } | Turn::Assistant { timestamp, .. } => timestamp,
             };
-            *slot = Some(earliest);
+            if *slot != Some(earliest) {
+                *slot = Some(earliest);
+                let id = self.session.turns[at].id().to_owned();
+                self.mark_dirty(Some(id));
+            }
         }
     }
 
@@ -2116,7 +2177,7 @@ impl Folded {
             .partition_point(|&key| key <= order);
 
         let mut deltas = vec![Delta::BlockAdded { turn_id: turn_id.clone(), block: block.clone() }];
-        if !self.session.apply(deltas[0].clone()) {
+        if !self.apply_to_session(deltas[0].clone()) {
             return (Vec::new(), None);
         }
         self.block_order.entry(turn_id.clone()).or_default().insert(at, order);
@@ -2141,7 +2202,7 @@ impl Folded {
                 block_index: at + offset,
                 block,
             };
-            if self.session.apply(delta.clone()) {
+            if self.apply_to_session(delta.clone()) {
                 deltas.push(delta);
             }
         }
@@ -2176,7 +2237,7 @@ impl Folded {
             None => block,
         };
         let delta = Delta::BlockUpdated { turn_id, block_index: slot.block, block };
-        if self.session.apply(delta.clone()) {
+        if self.apply_to_session(delta.clone()) {
             vec![delta]
         } else {
             Vec::new()
@@ -2187,7 +2248,7 @@ impl Folded {
         let Some(turn) = self.turn_of(slot) else { return Vec::new() };
         let turn_id = turn.id().to_owned();
         let delta = Delta::BlockRemoved { turn_id: turn_id.clone(), block_index: slot.block };
-        if !self.session.apply(delta.clone()) {
+        if !self.apply_to_session(delta.clone()) {
             return Vec::new();
         }
         // The order keys are parallel to the blocks, and every slot past the
@@ -2219,7 +2280,7 @@ impl Folded {
             return Vec::new();
         };
         let delta = Delta::TurnRemoved { turn_id: turn_id.to_owned() };
-        if !self.session.apply(delta.clone()) {
+        if !self.apply_to_session(delta.clone()) {
             return Vec::new();
         }
         self.reindex(at, turn_id);
