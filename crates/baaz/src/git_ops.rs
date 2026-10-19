@@ -247,11 +247,16 @@ pub(crate) fn parse_numstat_z(raw: &str) -> HashMap<String, (u32, u32)> {
     counts
 }
 
-/// Lines in a file, for an untracked file's `+N`. Big files count as 0.
+/// Lines in a file, for an untracked file's `+N`. Big files count as 0, and
+/// so do binary ones (a NUL in the first 8 KB, as git decides), whose
+/// newlines mean nothing — a PNG read as +2,475 live (2026-10-19).
 fn count_lines(path: &Path) -> u32 {
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() && meta.len() <= UNTRACKED_BYTES_CAP => std::fs::read(path)
             .map(|bytes| {
+                if bytes.iter().take(8192).any(|b| *b == 0) {
+                    return 0;
+                }
                 let n = bytes.iter().filter(|b| **b == b'\n').count();
                 (n + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'))) as u32
             })
@@ -451,6 +456,31 @@ pub(crate) fn remote_branches(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What this branch adds over `base`, for the PR description draft: its
+/// commits (subject, then body), newest first, at most 30, and `diff --stat`
+/// against the merge base, at most 40 lines. Against `origin/<base>` when the
+/// remote has it. Empty when git says nothing.
+pub(crate) fn branch_summary(root: &Path, base: &str) -> (Vec<String>, Vec<String>) {
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let remote = format!("origin/{base}");
+    let has_remote = git_read(root, &["rev-parse", "--verify", "--quiet", &remote]).and_then(|j| j.finish(deadline)).is_some_and(|f| f.ok);
+    let from = if has_remote { remote } else { base.to_string() };
+    let range = format!("{from}..HEAD");
+    let log = git_read(root, &["log", "--no-merges", "-n", "30", "--format=%s%n%b%x1e", &range]);
+    let stat = git_read(root, &["diff", "--stat", "--no-color", &format!("{from}...HEAD")]);
+    let commits = log
+        .and_then(|j| j.finish(deadline))
+        .filter(|f| f.ok)
+        .map(|f| f.text.split('\u{1e}').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
+        .unwrap_or_default();
+    let stat = stat
+        .and_then(|j| j.finish(deadline))
+        .filter(|f| f.ok)
+        .map(|f| f.text.lines().take(40).map(str::to_string).collect())
+        .unwrap_or_default();
+    (commits, stat)
+}
+
 /// Commits on this branch the remote does not have, when no upstream is
 /// set: against `origin/<default>`.
 pub(crate) fn unpushed_without_upstream(root: &Path, default: &str) -> u32 {
@@ -574,6 +604,40 @@ mod tests {
         assert!(t.is_ignored(".cargo"));
         assert!(!t.is_ignored(".github"));
         assert!(t.is_untracked("crates/baaz/src/panes/mod.rs") && !t.is_untracked("crates/baaz/src/right.rs"));
+    }
+
+    #[test]
+    fn branch_summary_reads_the_branch_commits_and_stat() {
+        let dir = std::env::temp_dir().join(format!("baaz-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(&dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "feature"]);
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "Add b", "-m", "Because b."]);
+        let (commits, stat) = branch_summary(&dir, "main");
+        assert_eq!(commits, vec!["Add b\nBecause b.".to_string()]);
+        assert!(stat.iter().any(|l| l.contains("b.txt")), "{stat:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_untracked_files_count_no_lines() {
+        let dir = std::env::temp_dir().join(format!("baaz-count-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree").unwrap();
+        std::fs::write(dir.join("b.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\n\n\n").unwrap();
+        assert_eq!(count_lines(&dir.join("a.txt")), 3);
+        assert_eq!(count_lines(&dir.join("b.png")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

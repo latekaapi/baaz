@@ -17,7 +17,7 @@ use aui::workbench::{
     state_block, text_action, unchanged_between, well_input,
 };
 use aui_icons::IconName;
-use aui_tokens::ActiveAui;
+use aui_tokens::{ActiveAui, AuiStyled};
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, ScrollHandle, SharedString, Window};
 use gpui_kit::base::input::{InputState, TextareaState};
 use gpui_kit::base::ElementExt as _;
@@ -106,10 +106,11 @@ const PR_POLL: Duration = Duration::from_secs(60);
 fn change_set_key(files: &[FileChange]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // The set of files and how each changed — not its line counts, or an
+    // agent's every save would re-draft on the utility model.
     for f in files {
         f.path.hash(&mut h);
-        f.added.hash(&mut h);
-        f.removed.hash(&mut h);
+        format!("{:?}", f.change).hash(&mut h);
     }
     h.finish()
 }
@@ -220,23 +221,44 @@ impl Harness {
         let provider = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
         let title = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
         let ui = self.changes_ui(root);
-        if ui.message_edited || !ui.message.trim().is_empty() || ui.drafting || ui.drafted_for == Some(key) {
+        // A draft that the person never touched follows the change set: a
+        // new set re-drafts over it (live 2026-10-19: "Commit 3 files" under
+        // a message about two). Their own words are never replaced.
+        let own_words = ui.message_edited || (!ui.message.trim().is_empty() && ui.drafted_for.is_none());
+        if std::env::var("BAAZ_DRAFT_TRACE").as_deref() == Ok("1") {
+            eprintln!(
+                "baaz: draft check provider={provider:?} own_words={own_words} drafting={} same_set={} files={}",
+                ui.drafting,
+                ui.drafted_for == Some(key),
+                tree.files.len()
+            );
+        }
+        if own_words || ui.drafting || ui.drafted_for == Some(key) {
             return;
         }
+        // No session's provider yet (the first snapshot can land before the
+        // session opens): leave the set undrafted for the next snapshot
+        // (live 2026-10-19: the set was marked and never drafted).
+        let Some(provider) = provider else { return };
+        ui.message.clear();
         ui.drafted_for = Some(key);
         let prompt = commit_prompt(title.as_deref(), &tree.files);
-        let Some(provider) = provider.filter(|p| crate::utility::supports(*p)) else {
-            if provider == Some(crate::providers::ProviderId::Muse) {
+        if !crate::utility::supports(provider) {
+            if provider == crate::providers::ProviderId::Muse {
                 self.changes_ui(root).drafting = true;
                 self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
             }
             return;
-        };
+        }
+        let ui = self.changes_ui(root);
         ui.drafting = true;
         let root = root.to_path_buf();
         let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
             let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt) }).await;
+            if std::env::var("BAAZ_DRAFT_TRACE").as_deref() == Ok("1") {
+                eprintln!("baaz: draft reply {:?}", reply.as_ref().map(|t| t.chars().take(120).collect::<String>()));
+            }
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
                 ui.drafting = false;
@@ -454,17 +476,21 @@ impl Harness {
         let root_buf = root.to_path_buf();
         let provider = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
         let files = self.right_cache.git_for(root).flatten().map(|t| t.files).unwrap_or_default();
-        let prompt = pr_prompt(label.as_deref(), &files);
+        let base_for_summary = self.changes_ui(root).form.as_ref().map(|f| f.base.clone()).unwrap_or_else(|| "main".into());
         if let Some(form) = self.changes_ui(root).form.as_mut() {
             form.drafting = provider.is_some();
-        }
-        if provider == Some(crate::providers::ProviderId::Muse) {
-            self.draft_on_muse(root, DraftKind::PrBody, prompt.clone(), cx);
         }
         let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
             let r = root_buf.clone();
             let bases = cx.background_executor().spawn(async move { git_ops::remote_branches(&r) }).await;
+            let r = root_buf.clone();
+            let (commits, stat) = cx.background_executor().spawn(async move { git_ops::branch_summary(&r, &base_for_summary) }).await;
+            let prompt = pr_prompt(label.as_deref(), &commits, &stat, &files);
+            if provider == Some(crate::providers::ProviderId::Muse) {
+                let (r, muse_prompt) = (root_buf.clone(), prompt.clone());
+                let _ = this.update(cx, |this: &mut Self, cx| this.draft_on_muse(&r, DraftKind::PrBody, muse_prompt, cx));
+            }
             let draft = match provider.filter(|p| crate::utility::supports(*p)) {
                 Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, model.as_deref(), &prompt).ok() }).await,
                 None => None,
@@ -473,11 +499,11 @@ impl Harness {
                 if let Some(form) = this.changes_ui(&root_buf).form.as_mut() {
                     form.bases = bases;
                     form.drafting = false;
-                    if let Some(text) = draft {
+                    if let Some(text) = draft.map(|t| clean_draft(&t)).filter(|t| !t.is_empty()) {
                         let body = form.body.clone();
                         let untouched = body.read(cx).value().is_empty();
                         if untouched {
-                            this.pending_pr_body = Some((body, clean_draft(&text)));
+                            this.pending_pr_body = Some((body, text));
                         }
                     }
                 }
@@ -586,7 +612,8 @@ impl Harness {
 fn commit_prompt(title: Option<&str>, files: &[FileChange]) -> String {
     let mut p = String::from(
         "Write a git commit message for the changes below. First line: an imperative summary, at most 60 characters. \
-Then a blank line and at most three short lines on why. Plain text only, no quotes, no markdown, no preamble.\n\n",
+Then a blank line and at most three short lines on why. Use only the list given; do not run commands or call \
+tools. Plain text only, no quotes, no markdown, no preamble.\n\n",
     );
     if let Some(t) = title {
         p.push_str(&format!("Session: {t}\n"));
@@ -598,23 +625,48 @@ Then a blank line and at most three short lines on why. Plain text only, no quot
     p
 }
 
-/// The prompt behind a drafted PR description.
-fn pr_prompt(title: Option<&str>, files: &[FileChange]) -> String {
+/// The prompt behind a drafted PR description: what the branch adds over
+/// its base — its commits and `diff --stat` — plus anything still
+/// uncommitted. Live 2026-10-19: built from the working tree alone, a pushed
+/// branch gave the model nothing and it answered with tool calls.
+fn pr_prompt(title: Option<&str>, commits: &[String], stat: &[String], files: &[FileChange]) -> String {
     let mut p = String::from(
-        "Write a pull request description for this branch: one short paragraph on what changed and why, then up to five \
-bullet points. Plain markdown, no heading, no preamble.\n\n",
+        "Write a pull request description for the branch summarised below: one short paragraph on what changed and why, \
+then up to five bullet points. Use only the information given; do not run commands or call tools. Plain markdown, no \
+heading, no preamble.\n\n",
     );
     if let Some(t) = title {
-        p.push_str(&format!("Session: {t}\n"));
+        p.push_str(&format!("Session: {t}\n\n"));
     }
-    for f in files.iter().take(40) {
-        p.push_str(&format!("- {}\n", f.path));
+    if !commits.is_empty() {
+        p.push_str("Commits:\n");
+        for c in commits {
+            p.push_str(&format!("- {}\n", c.replace('\n', "\n  ")));
+        }
+        p.push('\n');
+    }
+    if !stat.is_empty() {
+        p.push_str("Changed files:\n");
+        for l in stat {
+            p.push_str(&format!("{l}\n"));
+        }
+        p.push('\n');
+    }
+    if !files.is_empty() {
+        p.push_str("Not yet committed:\n");
+        for f in files.iter().take(40) {
+            p.push_str(&format!("- {}\n", f.path));
+        }
     }
     p
 }
 
-/// A model's draft without fences or wrapping quotes.
+/// A model's draft without fences or wrapping quotes. Empty when the reply
+/// is not a draft at all — a model that answered with tool calls.
 pub(crate) fn clean_draft(text: &str) -> String {
+    if ["<function_calls", "<invoke", "<parameter", "</invoke"].iter().any(|m| text.contains(m)) {
+        return String::new();
+    }
     let t = text.trim().trim_start_matches("```").trim_end_matches("```").trim();
     let t = t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(t);
     t.to_string()
@@ -701,11 +753,14 @@ pub(crate) fn changes_screen(
             if open {
                 opened.push((change.path.clone(), row_el(SharedString::from(format!("right-changes-sticky:{}", change.path)), cx).into_any_element()));
             }
+            // `Some(None)`: read, but there is no text diff (a binary file).
+            let unreadable = matches!(diffs.get(&change.path), Some(None));
             let diff = diffs.get(&change.path).cloned().flatten();
             let path = change.path.clone();
             let gap_root = root_buf.clone();
             let weak = cx.weak_entity();
             let gaps = gaps.clone();
+            let muted = cx.aui().colors.fg_muted;
             let body = move || -> AnyElement {
                 match diff {
                     Some(diff) => {
@@ -723,14 +778,31 @@ pub(crate) fn changes_screen(
                         })
                         .into_any_element()
                     }
+                    // Live 2026-10-19: a binary file opened onto an empty box.
+                    None if unreadable => div()
+                        .h(px(28.0))
+                        .px(px(22.0))
+                        .flex()
+                        .items_center()
+                        .text_px(13.2)
+                        .text_color(muted)
+                        .child("Binary file — no text diff.")
+                        .into_any_element(),
                     None => div().h(px(24.0)).into_any_element(),
                 }
             };
             let tops = row_tops.clone();
             let key = change.path.clone();
+            let at = scroll.clone();
             let el = div()
                 .on_prepaint(move |b, _, _| {
-                    tops.borrow_mut().insert(key.clone(), (f32::from(b.origin.y), f32::from(b.size.height)));
+                    // Kept relative to the scroll content, so the sticky
+                    // test can use the offset as it is now.
+                    let content_y = f32::from(b.origin.y - at.bounds().origin.y - at.offset().y);
+                    if std::env::var("BAAZ_STICKY_TRACE").as_deref() == Ok("1") {
+                        eprintln!("baaz: sticky prepaint {key} origin={} bounds={} offset={} content_y={content_y} h={}", f32::from(b.origin.y), f32::from(at.bounds().origin.y), f32::from(at.offset().y), f32::from(b.size.height));
+                    }
+                    tops.borrow_mut().insert(key.clone(), (content_y, f32::from(b.size.height)));
                 })
                 .child(change_with_diff(SharedString::from(format!("right-changes-fold:{}", change.path)), row, open, body, window, cx));
             list = list.item(ix, el);
@@ -748,6 +820,9 @@ pub(crate) fn changes_screen(
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&scroll)
+            // The sticky row is decided in render: a scroll re-renders, after
+            // the wheel has moved the offset (live 2026-10-19: it never stuck).
+            .on_scroll_wheel(cx.listener(|_: &mut Harness, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
             .pt(px(4.0))
             .px(px(6.0))
             .pb(px(180.0))
@@ -758,11 +833,14 @@ pub(crate) fn changes_screen(
     // while its diff still shows sticks at the top (docs/43 §2.6).
     let sticky = (!clean)
         .then(|| {
-            let content_top = f32::from(scroll.bounds().origin.y);
+            let offset = f32::from(scroll.offset().y);
             let tops = row_tops.borrow();
             opened.into_iter().find_map(|(path, el)| {
-                let (top, h) = *tops.get(&path)?;
-                let rel = top - content_top;
+                let (content_y, h) = *tops.get(&path)?;
+                let rel = content_y + offset;
+                if std::env::var("BAAZ_STICKY_TRACE").as_deref() == Ok("1") {
+                    eprintln!("baaz: sticky render {path} content_y={content_y} offset={offset} rel={rel} h={h}");
+                }
                 (rel < 0.0 && rel + h > 64.0).then_some(el)
             })
         })
@@ -1019,6 +1097,7 @@ mod tests {
     fn a_draft_loses_its_fences_and_quotes() {
         assert_eq!(clean_draft("```\nFix the thing\n```"), "Fix the thing");
         assert_eq!(clean_draft("\"Fix it\""), "Fix it");
+        assert_eq!(clean_draft("I need to look first.\n<function_calls>\n<invoke name=\"bash\">"), "", "a tool call is no draft");
     }
 
     #[test]
