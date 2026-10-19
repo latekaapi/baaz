@@ -82,13 +82,19 @@ impl Harness {
     }
 
     /// Whether the Page screen draws its own state over the page (no page
-    /// yet, couldn't load, crashed) — the native view hides under it.
+    /// yet, couldn't load, crashed, a pushed view) — the native view hides
+    /// under it.
     pub(crate) fn pane_page_covered(&self, cx: &gpui::App) -> bool {
-        self.existing_browser(cx).is_some_and(|state| {
-            let s = state.read(cx);
-            is_blank(&s.url()) || s.load_failed().is_some() || s.crashed().is_some()
-        })
+        self.existing_browser(cx).is_some_and(|state| page_covered(state.read(cx), &self.right_cache))
     }
+}
+
+/// Whether the Page screen draws over the page, so the native view hides:
+/// no page yet, couldn't load, crashed, or a full output / image pushed on
+/// the Page screen (live 2026-10-19: the page drew over the output view).
+pub(crate) fn page_covered(state: &WebviewState, cache: &crate::right::RightCache) -> bool {
+    let page_screen = crate::right::screen_index(crate::layout::RightKind::Browser);
+    cache.pushed.contains_key(&page_screen) || is_blank(&state.url()) || state.load_failed().is_some() || state.crashed().is_some()
 }
 
 /// The Recent pages rows for `state`: newest first, the page on screen checked.
@@ -114,9 +120,12 @@ pub(crate) fn page_row(row: PaneRow, open: bool, state: Option<&Entity<WebviewSt
 /// The menu drawn inside the window, for a page that is not a native view
 /// (the scripted page captures and tests run); a native page gets it in its
 /// overlay window ([`crate::overlay`]), since it draws above gpui.
-pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, width: f32, cx: &mut Context<Harness>) -> Option<AnyElement> {
+pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, cache: &crate::right::RightCache, width: f32, cx: &mut Context<Harness>) -> Option<AnyElement> {
     let state = state?;
-    if !open || state.read(cx).is_native() {
+    // In the window unless a live native page is showing (that one gets the
+    // overlay window): a covered page — its error page, say — hides it.
+    let native_showing = state.read(cx).is_native() && !page_covered(state.read(cx), cache);
+    if !open || native_showing {
         return None;
     }
     let menu = recent_menu(&recent_rows(state.read(cx)), width, cx);
@@ -154,35 +163,51 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
         });
         return no_page_state("right-page-none", field, agent, cx).into_any_element();
     }
-    if let Some((failed_url, reason)) = failed {
-        let retry_state = state.clone();
-        let retry_url = failed_url.to_string();
-        return div()
-            .size_full()
-            .child(page_error_state("right-page-error", &host_of(&failed_url), &load_failure_words(&reason), move |_, _, cx| {
-                let url = retry_url.clone();
-                retry_state.update(cx, |s, _| s.navigate(&url));
-            }, cx))
-            .into_any_element();
-    }
-    if let Some(reason) = crashed {
-        let retry_state = state.clone();
-        let retry_url = url.clone();
-        return div()
-            .size_full()
-            .child(page_error_state("right-page-crashed", &host_of(&url), &format!("stopped: {reason}."), move |_, _, cx| {
-                let url = retry_url.clone();
-                retry_state.update(cx, |s, _| s.navigate(&url));
-            }, cx))
-            .into_any_element();
-    }
     let weak = cx.weak_entity();
-    aui_webview::webview_pane("right-browser", state)
+    let pane = aui_webview::webview_pane("right-browser", state)
         .agent(SharedString::from(agent.to_string()))
         .on_intent(move |intent, window, cx| {
             let _ = weak.update(cx, |harness, cx| harness.handle_browser_intent(intent, window, cx));
         })
-        .into_any_element()
+        .into_any_element();
+    // Couldn't load / crashed: Baaz's own page over the page area, under the
+    // nav row, so another address is one field away (canvas D6StatesPage;
+    // live 2026-10-19 the row went with the page).
+    let error = if let Some((failed_url, reason)) = failed {
+        let retry_state = state.clone();
+        let retry_url = failed_url.to_string();
+        Some(page_error_state("right-page-error", &host_of(&failed_url), &load_failure_words(&reason), move |_, _, cx| {
+            let url = retry_url.clone();
+            retry_state.update(cx, |s, _| s.navigate(&url));
+        }, cx))
+    } else {
+        crashed.map(|reason| {
+            let retry_state = state.clone();
+            let retry_url = url.clone();
+            page_error_state("right-page-crashed", &host_of(&url), &format!("stopped: {reason}."), move |_, _, cx| {
+                let url = retry_url.clone();
+                retry_state.update(cx, |s, _| s.navigate(&url));
+            }, cx)
+        })
+    };
+    match error {
+        Some(error) => div()
+            .relative()
+            .size_full()
+            .child(pane)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(aui::workbench::PAGE_NAV_H))
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bg(p.surface_2)
+                    .child(error),
+            )
+            .into_any_element(),
+        None => pane,
+    }
 }
 
 #[cfg(test)]

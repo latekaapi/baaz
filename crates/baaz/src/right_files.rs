@@ -338,8 +338,11 @@ fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width:
     let mut row = pushed_row("right-file-row", preview.name.clone())
         .back_label("Back to files")
         .width(px(width))
-        .on_back(cx.listener(move |this: &mut Harness, _, _, cx| {
+        .on_back(cx.listener(move |this: &mut Harness, _, window, cx| {
             this.close_file_preview_for(&back_root, cx);
+            // The tree takes the keyboard back, so ↑ ↓ go on from the row
+            // that was open (live 2026-10-19: the keys went nowhere).
+            window.focus(&this.right_files_focus.clone(), cx);
         }))
         .on_close(cx.listener(|this: &mut Harness, _, _, cx| this.toggle_right(cx)));
     if !folder.is_empty() {

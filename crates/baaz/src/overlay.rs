@@ -202,7 +202,7 @@ impl Render for OverlayView {
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
         }
-        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, _| baaz.right_cache.page_menu).unwrap_or(false) {
+        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_cache.page_menu && !baaz.pane_page_covered(cx)).unwrap_or(false) {
             return div().size_full().children(content);
         }
         if kind == OverlayKind::PageFloat {
@@ -494,7 +494,7 @@ impl Harness {
         let rect = page.page_rect()?;
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
-        if self.right_cache.page_menu {
+        if self.right_cache.page_menu && !crate::right_page::page_covered(page, &self.right_cache) {
             // The Recent pages menu: the window covers the nav row and the
             // page, so a click anywhere over them outside the menu closes it.
             use std::hash::{Hash, Hasher};
@@ -598,7 +598,7 @@ impl Harness {
         let page = state.read(cx);
         let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
-        if self.right_cache.page_menu {
+        if self.right_cache.page_menu && !crate::right_page::page_covered(page, &self.right_cache) {
             let rows = crate::right_page::recent_rows(page);
             let width = page.page_rect().map(|r| f32::from(r.size.width)).unwrap_or(400.0);
             let menu = crate::right_page::recent_menu(&rows, width, cx);
@@ -638,7 +638,9 @@ impl Harness {
             };
             let clear = act(aui::workbench::AnnotatorAction::Clear);
             let send = act(aui::workbench::AnnotatorAction::Send);
-            return Some(aui::workbench::notes_panel("page-float-notes", &notes, name, Some(clear), Some(send), cx).into_any_element());
+            // Under 360 the footer cannot hold the hint and "Send N to <agent>".
+            let compact = page.page_rect().is_some_and(|r| f32::from(r.size.width) < 360.0);
+            return Some(aui::workbench::notes_panel("page-float-notes", &notes, name, Some(clear), Some(send), compact, cx).into_any_element());
         }
         let session = self.active.as_ref()?.read(cx).session_id.clone();
         let label = self.terminal_service.browser_activity(&session)?;

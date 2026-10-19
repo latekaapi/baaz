@@ -116,9 +116,13 @@ fn note_cache_hit() {
 
 /// Count one collected directory entry toward [`walk_collected_count`] in
 /// test builds; nothing in production.
-fn note_collected() {
+/// Record how many entries one directory read holds at once (the most seen
+/// since the last reset): the bound the walk keeps however big the folder.
+fn note_collected(held: usize) {
     #[cfg(test)]
-    WALK_COLLECTED.fetch_add(1, Ordering::Relaxed);
+    WALK_COLLECTED.fetch_max(held, Ordering::Relaxed);
+    #[cfg(not(test))]
+    let _ = held;
 }
 
 /// One cached read: what was read, for which root, and when.
@@ -251,6 +255,9 @@ pub(crate) struct RightCache {
     pub pushed: HashMap<usize, crate::right_views::Pushed>,
     /// When each pushed view went on (its 160 ms slide-in).
     pub pushed_at: HashMap<usize, Instant>,
+    /// Per screen: whether the last frame showed a pushed view, and when the
+    /// screen last came back from one (the 120 ms reverse, docs/43 §3).
+    pub popped: std::cell::RefCell<HashMap<usize, (bool, Option<Instant>)>>,
     /// The last file-tree listing and whether the cap cut it, by root.
     pub files: Option<Stamped<(Vec<FileNode>, bool)>>,
     /// Directory ids standing open, per project root: the session's
@@ -643,6 +650,25 @@ pub(crate) fn render_screen(
     if cache.pushed.contains_key(&screen) && cache.pushed_at.get(&screen).is_some_and(|at| at.elapsed().as_secs_f32() < 0.16) {
         browser.window.request_animation_frame();
     }
+    // Back is the reverse, 120 ms: the screen under it comes in 8 px from the
+    // left as it fades in. Any pop path counts — the transition is read
+    // here, from what this screen showed last frame.
+    let pushed_now = cache.pushed.contains_key(&screen)
+        || (matches!(kind, RightKind::Files) && project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some()))
+        || (matches!(kind, RightKind::Changes | RightKind::Diff | RightKind::Git)
+            && cache.changes.form.is_some());
+    let back_since = {
+        let mut popped = cache.popped.borrow_mut();
+        let entry = popped.entry(screen).or_insert((pushed_now, None));
+        if entry.0 && !pushed_now {
+            entry.1 = Some(Instant::now());
+        }
+        entry.0 = pushed_now;
+        entry.1.map(|at| at.elapsed().as_secs_f32() / 0.12).filter(|t| *t < 1.0 && !cx.reduce_motion())
+    };
+    if back_since.is_some() {
+        browser.window.request_animation_frame();
+    }
     let (row, body, pushed): (AnyElement, AnyElement, bool) = if let Some(view) = cache.pushed.get(&screen) {
         let (row, body) = crate::right_views::pushed_screen(screen, view, width, browser.window, cx);
         (row, body, true)
@@ -654,8 +680,22 @@ pub(crate) fn render_screen(
                 (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
             }
             (RightKind::Browser, _) => {
-                let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close).into_any_element();
-                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, width, cx);
+                let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close);
+                // Over a native page the menu sits in its own window: a press
+                // anywhere else in this one closes it (live 2026-10-19).
+                let overlay_menu = cache.page_menu
+                    && browser.state.is_some_and(|st| st.read(cx).is_native() && !crate::right_page::page_covered(st.read(cx), cache));
+                // (The in-window menu closes itself on an outside press; this
+                // one would also fire on a press inside it, before its click.)
+                let row = if overlay_menu {
+                    div()
+                        .on_mouse_down_out(cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx)))
+                        .child(row)
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                };
+                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, cache, width, cx);
                 let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cx);
                 let body = match menu {
                     Some(menu) => div().relative().size_full().child(body).child(menu).into_any_element(),
@@ -681,6 +721,9 @@ pub(crate) fn render_screen(
         let since = cache.pushed_at.get(&screen).map(|at| at.elapsed().as_secs_f32() / 0.16).unwrap_or(1.0).min(1.0);
         let eased = 1.0 - (1.0 - since).powi(3);
         div().size_full().relative().left(px(8.0 * (1.0 - eased))).opacity(eased).child(body).into_any_element()
+    } else if let Some(t) = back_since {
+        let eased = 1.0 - (1.0 - t).powi(3);
+        div().size_full().relative().left(px(-8.0 * (1.0 - eased))).opacity(eased).child(body).into_any_element()
     } else {
         body
     };
@@ -804,6 +847,11 @@ impl Harness {
     /// selected marker kept. What the preview's back control and Escape
     /// call. Returns whether one was open.
     pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        // The keyboard goes on from the file that was open (live 2026-10-19:
+        // ↓ after Back started at the top).
+        if let Some(path) = self.right_cache.preview_for(root).map(|p| p.path.clone()) {
+            self.right_cache.files_ui.cursor = Some(path);
+        }
         let closed = close_file_preview(&mut self.right_cache, root);
         if closed {
             self.save_right_for_active(cx);
@@ -1227,12 +1275,11 @@ fn walk_level_cached(
         }
     }
     note_io();
-    // Bounded: at most `cap + 1` entries are ever collected — the `+ 1` is
-    // the probe that tells a full directory from a truncated one. A
-    // directory under the cap reads in full, so its order is exactly what
-    // the old sort-and-truncate showed.
-    let mut entries: Vec<(String, bool)> = Vec::new();
-    let mut dir_truncated = false;
+    // Bounded: a max-heap holds at most `cap + 1` entries, so a huge folder
+    // never builds an unbounded Vec, and what stays is the `cap` smallest
+    // names — the folder's real first `cap`, not the first the disk handed
+    // back (live 2026-10-19: f117 was followed by f120).
+    let mut heap: std::collections::BinaryHeap<(String, bool)> = std::collections::BinaryHeap::new();
     let mut total = 0usize;
     match std::fs::read_dir(dir) {
         Ok(read) => {
@@ -1242,23 +1289,22 @@ fn walk_level_cached(
                     continue;
                 }
                 total += 1;
-                if entries.len() <= cap {
-                    let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
-                    entries.push((name, is_dir));
-                    note_collected();
-                } else {
-                    // Past the cap: counted for the folder's line, not kept.
-                    dir_truncated = true;
+                if heap.len() >= cap && heap.peek().is_some_and(|top| top.0 <= name) {
+                    // Past the cap and after every kept name: counted only.
+                    continue;
                 }
+                let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
+                heap.push((name, is_dir));
+                if heap.len() > cap {
+                    heap.pop();
+                }
+                note_collected(heap.len() + 1);
             }
         }
         Err(_) => return,
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    if entries.len() > cap {
-        entries.truncate(cap);
-        dir_truncated = true;
-    }
+    let entries: Vec<(String, bool)> = heap.into_sorted_vec();
+    let dir_truncated = total > entries.len();
     dir_cache.dirs.insert(
         dir.to_path_buf(),
         CachedDir {
@@ -1317,6 +1363,10 @@ fn append_cached_entries(
             let open = expanded.contains(&id);
             nodes.push(FileNode::dir(id.clone(), name.clone(), open).depth(depth));
             if open {
+                // `cap` is per folder: a capped child ends with its own line
+                // and the walk goes on to its siblings (live 2026-10-19, the
+                // folders after a 350-file one vanished). The tree's total
+                // is bounded by FILE_TREE_TOTAL_CAP at the loop's top.
                 walk_level_cached(
                     root,
                     &dir.join(name),
@@ -1327,10 +1377,6 @@ fn append_cached_entries(
                     nodes,
                     truncated,
                 );
-                if nodes.len() >= cap {
-                    *truncated = true;
-                    return;
-                }
             }
         } else {
             let kind = file_type_for(name);
@@ -2270,6 +2316,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Live 2026-10-19: the folder cap is per folder — the siblings after a
+    /// capped, open folder still list.
+    #[test]
+    fn folders_after_a_capped_folder_still_list() {
+        let root = temp_root("walk-capped-sibling");
+        std::fs::create_dir_all(root.join("big")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        for index in 0..(FILE_WALK_CAP + 50) {
+            std::fs::write(root.join("big").join(format!("f{index}.txt")), "x").unwrap();
+        }
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        let mut cache = RightCache::default();
+        let expanded: HashSet<String> = ["big".to_string(), "src".to_string()].into();
+        let (nodes, _) = walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        assert!(nodes.iter().any(|n| n.note), "the capped folder ends with its line");
+        assert!(nodes.iter().any(|n| n.id.as_ref() == "src"), "src follows the capped folder");
+        assert!(nodes.iter().any(|n| n.id.as_ref() == "src/main.rs"), "and lists its file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// H1: a huge directory is read bounded — never sorted-and-truncated
     /// from an unbounded Vec. 2000 entries collect at most `cap + 1` (the
     /// `+ 1` probe) while the listing still truncates at the cap.
@@ -2292,9 +2358,12 @@ mod tests {
         assert!(nodes.last().is_some_and(|n| n.note && n.name.contains("of 2 000")));
         assert!(
             walk_collected_count() <= FILE_WALK_CAP + 1,
-            "the read must stay bounded, collected {}",
+            "the read must stay bounded, held {}",
             walk_collected_count()
         );
+        let names: Vec<&str> = nodes.iter().filter(|n| !n.note).map(|n| n.name.as_ref()).collect();
+        assert_eq!(names.first(), Some(&"f0000.txt"));
+        assert_eq!(names.last(), Some(&"f0299.txt"), "the folder's real first 300, alphabetically");
         let _ = std::fs::remove_dir_all(&root);
     }
 

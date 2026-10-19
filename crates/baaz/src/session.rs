@@ -789,6 +789,12 @@ pub struct SessionView {
     /// landed, and the bar's anchor after a release that left a selection.
     quote_press: Option<gpui::Point<Pixels>>,
     quote_anchor: Option<QuoteAnchor>,
+    /// The press began while the selection bar was up: a click (no drag)
+    /// then dismisses the selection.
+    quote_dismiss: bool,
+    /// A sent quote's way back to its source in flight (docs/43 §0): the
+    /// start, the from / to scroll offsets, and the turn it lands on.
+    quote_scroll: Option<(std::time::Instant, gpui::Point<Pixels>, gpui::Point<Pixels>, gpui::ListOffset)>,
     /// The transcript box in window coordinates (the bar's frame).
     transcript_bounds: Option<gpui::Bounds<Pixels>>,
     /// The turn whose copy button shows the success check, if any: set on
@@ -1207,6 +1213,8 @@ impl SessionView {
             span_sessions: HashMap::new(),
             quote_press: None,
             quote_anchor: None,
+            quote_dismiss: false,
+            quote_scroll: None,
             transcript_bounds: None,
             copied_turn: None,
             last_tick_secs: None,

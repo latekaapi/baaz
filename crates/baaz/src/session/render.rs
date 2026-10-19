@@ -258,6 +258,7 @@ impl SessionView {
                 });
             }));
         }
+        self.step_quote_scroll(window);
         let quote_bar = self.render_quote_bar(window, cx);
         let element = self.transcript_list(folds, quote_bar, cx);
         record_frame_stats(frame_start.elapsed());
@@ -266,18 +267,43 @@ impl SessionView {
     }
 
     /// D4: scrolls the transcript so `turn`'s first row is at the top —
-    /// the quote's way back to its source.
+    /// the quote's way back to its source. D6 (docs/43 §0): eased over
+    /// 260 ms, out — the jump is measured, undone, then travelled.
     pub(super) fn scroll_to_turn(&mut self, turn: &str, cx: &mut Context<Self>) {
         let mut ix = 0usize;
         for (id, rows) in &self.row_counts {
             if id == turn {
                 self.follow = false;
-                self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+                let target = gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) };
+                let from = self.list_state.scroll_px_offset_for_scrollbar();
+                self.list_state.scroll_to(target);
+                let to = self.list_state.scroll_px_offset_for_scrollbar();
+                if cx.reduce_motion() || crate::clock::deterministic() || (f32::from(to.y) - f32::from(from.y)).abs() < 1.0 {
+                    self.quote_scroll = None;
+                } else {
+                    self.list_state.set_offset_from_scrollbar(from);
+                    self.quote_scroll = Some((std::time::Instant::now(), from, to, target));
+                }
                 cx.notify();
                 return;
             }
             ix += rows;
         }
+    }
+
+    /// One frame of a quote's scroll back to its source.
+    pub(super) fn step_quote_scroll(&mut self, window: &mut Window) {
+        let Some((at, from, to, target)) = self.quote_scroll else { return };
+        let t = (at.elapsed().as_secs_f32() / 0.26).min(1.0);
+        if t >= 1.0 {
+            self.list_state.scroll_to(target);
+            self.quote_scroll = None;
+            return;
+        }
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let y = f32::from(from.y) + (f32::from(to.y) - f32::from(from.y)) * eased;
+        self.list_state.set_offset_from_scrollbar(gpui::point(from.x, px(y)));
+        window.request_animation_frame();
     }
 
     /// The one place a frame writes the render cache.
@@ -785,10 +811,14 @@ impl SessionView {
             // transcript place the selection bar.
             .capture_any_mouse_down(cx.listener(|this: &mut Self, e: &gpui::MouseDownEvent, _, _| {
                 this.quote_press = Some(e.position);
+                this.quote_dismiss = this.quote_anchor.is_some();
                 this.quote_anchor = None;
             }))
             .capture_any_mouse_up(cx.listener(|this: &mut Self, e: &gpui::MouseUpEvent, _, cx| {
                 this.note_quote_release(e.position, cx);
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this: &mut Self, _: &gpui::MouseUpEvent, _, cx| {
+                this.dismiss_quote_on_click(cx);
             }))
             .on_children_prepainted({
                 let view = cx.entity().downgrade();
@@ -3701,6 +3731,16 @@ impl SessionView {
     /// the quote bar up at its first line (docs/43 §0); none takes it down.
     fn note_quote_release(&mut self, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
         let press = self.quote_press.take().unwrap_or(at);
+        // A click — press and release in one place — is "a click elsewhere"
+        // (docs/43 §0): the held selection and its bar go (live 2026-10-19:
+        // the bar moved to the click instead).
+        let moved = (f32::from(at.x) - f32::from(press.x)).abs() + (f32::from(at.y) - f32::from(press.y)).abs();
+        if moved < 3.0 && self.quote_dismiss {
+            // Dismissed in the bubble phase ([`Self::dismiss_quote_on_click`]),
+            // after the Quote button itself has had the click.
+            return;
+        }
+        self.quote_dismiss = false;
         let has = super::spans::span_copy_text(&self.span_held).is_some_and(|t| !t.trim().is_empty());
         self.quote_anchor = has.then(|| {
             let (start, end) = if (press.y - at.y).abs() < px(13.0) {
@@ -3713,6 +3753,15 @@ impl SessionView {
             crate::session::QuoteAnchor { start, end, scroll_y: self.list_state.scroll_px_offset_for_scrollbar().y }
         });
         cx.notify();
+    }
+
+    /// The bubble half of a click that dismisses the selection bar.
+    fn dismiss_quote_on_click(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.quote_dismiss) {
+            self.quote_anchor = None;
+            self.clear_selection(cx);
+            cx.notify();
+        }
     }
 
     /// Quote the held selection into the composer (docs/43 §0): one quote
@@ -3759,6 +3808,9 @@ impl SessionView {
         }
         let measure_left = (f32::from(bounds.size.width) - TRANSCRIPT_MEASURE).max(0.0) / 2.0;
         let left = f32::from(anchor.start.x - bounds.origin.x).clamp(measure_left, measure_left + TRANSCRIPT_MEASURE - 96.0);
-        Some(div().absolute().top(px(top)).left(px(left)).child(bar).into_any_element())
+        // `bounds` is the list's; the bar hangs in the list's padded
+        // container, whose absolute origin is before that padding (live
+        // 2026-10-19: the bar sat 24 px left of the selection).
+        Some(div().absolute().top(px(top)).left(px(left + TRANSCRIPT_PAD_X)).child(bar).into_any_element())
     }
 }

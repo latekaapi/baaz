@@ -271,6 +271,12 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 
 /// The new-tab page's Field width (canvas NewTab board): 560.
 const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
+
+/// D6 (docs/43 §2.1): the right pane is a sheet this far in from the
+/// window's right edge…
+const RIGHT_SHEET_INSET: f32 = 6.0;
+/// …and this far right of the centre sheet; the divider handle straddles the gap.
+const RIGHT_SHEET_GAP: f32 = 6.0;
 /// What the host hands the shell's chrome row (see `Harness::render_bar_chrome`).
 pub(crate) struct BarChrome {
     pub(crate) lead: AnyElement,
@@ -6920,7 +6926,11 @@ impl Render for Harness {
                         .absolute()
                         .top(px(0.0))
                         .bottom(px(0.0))
-                        .right(px(self.right_resize.width - RESIZE_HANDLE_W / 2.0))
+                        // D6: the pane is a sheet 6 in from the window's
+                        // right edge with a 6 gap before it; the handle
+                        // straddles that gap (live 2026-10-19: it sat 9 px
+                        // inside the pane, where nobody aims).
+                        .right(px(self.right_resize.width + RIGHT_SHEET_INSET + RIGHT_SHEET_GAP / 2.0 - RESIZE_HANDLE_W / 2.0))
                         .id("right-resize-area")
                         .role(gpui::Role::Splitter)
                         .aria_label("Resize right pane")
@@ -7530,6 +7540,7 @@ impl Harness {
         // to the tree, keeping the selected marker and the scroll offset.
         if let Some((root, _)) = self.right_project() {
             if self.close_file_preview_for(&root, cx) {
+                window.focus(&self.right_files_focus.clone(), cx);
                 return;
             }
         }
