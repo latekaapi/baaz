@@ -249,7 +249,7 @@ both themes.
    after the Recent pages menu and the file preview.
 
 ## 3. Motion (Emil's rules)
-- **Strip slide** (a toggle while open, or a two-finger sideways swipe in the pane — one screen per swipe, snapping):
+- **Strip slide** (a toggle while open, or **Shift** + a two-finger sideways swipe in the pane — one screen per swipe, snapping; owner 2026-10-21: a plain sideways swipe only scrolls the content under it and never switches screens):
   the screens translate together, **240 ms ease-out**; nothing fades, the pane's width and row do not move apart
   from the content. With reduced motion: an instant swap.
 - The **Page** screen during a slide is a still picture of the page (the Browse cover technique); the live page
@@ -323,7 +323,7 @@ Decisions (2026-10-17, chat and canvas):
 1. Transcript row: three toggles + Terminal + hairline + ⋯; the old pane icon is gone; VoiceOver names each.
 2. Click Files with the pane closed → opens on Files, Files lit. Click Changes → the strip slides (240 ms, no fade,
    pane width fixed); click Changes again → closes. ✕ closes; ⌘⌥B reopens on Changes.
-3. Swipe sideways with two fingers in the pane → one screen per swipe, snapping. Reduced motion → instant swap.
+3. Shift + a two-finger sideways swipe in the pane → one screen per swipe, snapping; a plain sideways swipe over a wide code line scrolls it and never switches screens. Reduced motion → instant swap.
 4. Each screen keeps its scroll: scroll Files, slide to Changes and back → same place.
 5. Files: rows 28, hover 5 %, selected 9 %, keyboard ring; ↑↓←→⏎; filter (⌘F) narrows and Esc restores; a capped
    folder ends with the faint line; no refresh button, no footer.
