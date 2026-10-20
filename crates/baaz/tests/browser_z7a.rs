@@ -122,8 +122,8 @@ fn intents_land_in_the_draft() {
 }
 
 /// The visual surface: `right-browser` still captures deterministically,
-/// `right-browser-page` drives the fake backend through `browse:`, and
-/// `right-tabs` opens two tabs and selects back to the first.
+/// and `right-browser-page` drives the fake backend through `browse:`.
+/// `right-tabs` is retired: D6's pane has no tab strip (owner, 2026-10-18).
 #[test]
 fn probe_entries_cover_blank_and_loaded_browser() {
     let probe = workspace_source("scripts/uiprobe.py");
@@ -136,9 +136,5 @@ fn probe_entries_cover_blank_and_loaded_browser() {
         probe.contains("browse:https://example.com"),
         "the loaded entry navigates the fake backend to example.com"
     );
-    assert!(probe.contains("\"right-tabs\""), "two-tab strip entry exists");
-    assert!(
-        probe.contains("tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-select:1"),
-        "the strip entry opens two tabs and selects back to the first"
-    );
+    assert!(!probe.contains("\"right-tabs\""), "the pane's tab-strip entry stays retired");
 }

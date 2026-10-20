@@ -67,6 +67,7 @@
 //! | `skip` | decline the newest question |
 //! | `select-text:<turn>:<from>-<to>` | hold a text selection over a turn |
 //! | `select-span:<turn>` | hold the whole turn as one cross-block span |
+//! | `quote` | quote the held selection into the composer (the selection bar's Quote, D6 §0) |
 //! | `copy:<turn>` | capture aid: press the turn's copy button (0-based, like `select-span`), so the success check holds for the screenshot, free |
 //! | `top` | jump to the head of the transcript |
 //! | `mid` | jump to the middle of the transcript |
@@ -106,9 +107,11 @@
 //! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse with the ↩ chip (the offline `browse-from-session` shot), free |
+//! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
+//! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown records a step failure, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
@@ -313,6 +316,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "page-menu", run: |this, rest, _, cx| this.set_page_menu(rest.trim() != "off", cx) },
     WindowVerb { verb: "mode", run: |this, rest, window, cx| this.step_mode(rest, window, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
@@ -340,6 +344,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, rest, window, cx| this.step_fixture_session(rest, window, cx),
     },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
+    WindowVerb { verb: "changes-open", run: |this, rest, _, cx| this.step_changes_open(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },
@@ -794,6 +799,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // selection, and open every tool group for its screenshot.
     SessionVerb { verb: "select-text", run: |v, rest, _, cx| v.select_text_step(rest, cx) },
     SessionVerb { verb: "select-span", run: |v, rest, _, cx| v.select_span_step(rest, cx) },
+    SessionVerb { verb: "quote", run: |v, _, window, cx| v.quote_selection_step(window, cx) },
     SessionVerb { verb: "copy", run: |v, rest, window, cx| v.step_copy(rest, window, cx) },
     SessionVerb { verb: "top", run: |v, _, _, cx| v.step_top(cx) },
     SessionVerb { verb: "end", run: |v, _, _, cx| v.step_end(cx) },

@@ -113,6 +113,8 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ConfirmRename", keystroke: "enter", context: Some(crate::app::RENAME_CONTEXT), category: "sidebar", label: "Confirm rename" },
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
     KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
+    KeymapEntry { action: "CommitMessage", keystroke: "cmd-enter", context: Some("CommitMessage"), category: "pane", label: "Commit from the message" },
+    KeymapEntry { action: "RightBack", keystroke: "cmd-[", context: Some("RightPane"), category: "pane", label: "Back in the right pane" },
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
@@ -241,6 +243,8 @@ fn field_twin(context: Option<&str>, keystroke: &str) -> Option<String> {
 fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> Option<gpui::KeyBinding> {
     match action {
         "SendTurn" => Some(gpui::KeyBinding::new(keystroke, crate::app::SendTurn, context)),
+        "CommitMessage" => Some(gpui::KeyBinding::new(keystroke, crate::app::CommitMessage, context)),
+        "RightBack" => Some(gpui::KeyBinding::new(keystroke, crate::app::RightBack, context)),
         "MenuConfirm" => Some(gpui::KeyBinding::new(keystroke, crate::app::MenuConfirm, context)),
         "ConfirmField" => Some(gpui::KeyBinding::new(keystroke, crate::app::ConfirmField, context)),
         "SteerTurn" => Some(gpui::KeyBinding::new(keystroke, crate::app::SteerTurn, context)),
