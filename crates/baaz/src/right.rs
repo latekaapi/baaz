@@ -188,6 +188,9 @@ pub(crate) struct FilePreview {
     pub mtime: Option<std::time::SystemTime>,
     /// What the pane draws.
     pub content: PreviewContent,
+    /// "View source" (owner 2026-10-21): the raw text with line numbers,
+    /// even for a file that otherwise renders (Markdown).
+    pub source: bool,
 }
 
 /// One directory's cached listing: the sorted entries the walk replays while
@@ -790,7 +793,25 @@ impl Harness {
         highlight: Option<std::ops::Range<u32>>,
         cx: &mut Context<Self>,
     ) {
-        mark_file_preview_loading(&mut self.right_cache, root, id, highlight);
+        self.begin_file_preview_as(root, id, highlight, false, cx);
+    }
+
+    /// "View source" (owner 2026-10-21): preview `id` as raw text with
+    /// line numbers, even when it would render (Markdown) or open in the
+    /// Page (HTML, SVG).
+    pub(crate) fn begin_file_source_for(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        self.begin_file_preview_as(root, id, None, true, cx);
+    }
+
+    fn begin_file_preview_as(
+        &mut self,
+        root: &Path,
+        id: &str,
+        highlight: Option<std::ops::Range<u32>>,
+        source: bool,
+        cx: &mut Context<Self>,
+    ) {
+        mark_file_preview_loading(&mut self.right_cache, root, id, highlight, source);
         self.save_right_for_active(cx);
         cx.notify();
         let root = root.to_path_buf();
@@ -1527,6 +1548,13 @@ pub(crate) fn opens_in_page(path: &str) -> bool {
     [".html", ".htm", ".xhtml", ".svg", ".pdf"].iter().any(|ext| lower.ends_with(ext))
 }
 
+/// Whether a file's menu offers "View source": the kinds that otherwise
+/// render (HTML, SVG in the Page; Markdown in the preview).
+pub(crate) fn has_source_view(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".html", ".htm", ".xhtml", ".svg", ".md", ".markdown"].iter().any(|ext| lower.ends_with(ext))
+}
+
 /// A `file://` URL for an absolute path, percent-encoding everything but
 /// the unreserved characters and `/` (office files carry spaces, `#`, `%`).
 pub(crate) fn file_url(abs: &Path) -> String {
@@ -1638,6 +1666,7 @@ pub(crate) fn begin_file_preview_highlight(
                 content: PreviewContent::Card {
                     meta: "The file is gone — it may have been moved or deleted.".into(),
                 },
+                source: false,
             },
         );
         return false;
@@ -1663,6 +1692,7 @@ pub(crate) fn begin_file_preview_highlight(
                 content: PreviewContent::Card {
                     meta: format!("{} — too large to preview", friendly_size(size)),
                 },
+                source: false,
             },
         );
         return false;
@@ -1677,6 +1707,7 @@ pub(crate) fn begin_file_preview_highlight(
             size,
             mtime,
             content: PreviewContent::Loading,
+            source: false,
         },
     );
     true
@@ -1715,12 +1746,12 @@ pub(crate) fn probe_file_preview(path: &Path) -> PreviewProbe {
 
 /// Select `id` and show it loading, touching no file: the UI-thread half of
 /// a preview open.
-pub(crate) fn mark_file_preview_loading(cache: &mut RightCache, root: &Path, id: &str, highlight: Option<std::ops::Range<u32>>) {
+pub(crate) fn mark_file_preview_loading(cache: &mut RightCache, root: &Path, id: &str, highlight: Option<std::ops::Range<u32>>, source: bool) {
     let name = id.rsplit('/').next().unwrap_or(id).to_string();
     cache.selected.insert(root.to_path_buf(), id.to_string());
     cache.previews.insert(
         root.to_path_buf(),
-        FilePreview { path: id.to_string(), name, language: preview_language(id), highlight, size: 0, mtime: None, content: PreviewContent::Loading },
+        FilePreview { path: id.to_string(), name, language: preview_language(id), highlight, size: 0, mtime: None, content: PreviewContent::Loading, source },
     );
 }
 
@@ -1778,6 +1809,7 @@ pub(crate) fn complete_file_preview(
     let name = current.name.clone();
     let language = current.language.clone();
     let highlight = current.highlight.clone();
+    let source = current.source;
     let content = match bytes {
         None => PreviewContent::Card {
             meta: "The file could not be read.".into(),
@@ -1789,7 +1821,7 @@ pub(crate) fn complete_file_preview(
             ),
         },
         Some(bytes) => match String::from_utf8(bytes) {
-            Ok(text) if is_markdown(&name) => PreviewContent::Markdown { text },
+            Ok(text) if is_markdown(&name) && !source => PreviewContent::Markdown { text },
             Ok(code) => PreviewContent::Text {
                 language: language.clone(),
                 code,
@@ -1809,6 +1841,7 @@ pub(crate) fn complete_file_preview(
             size: current.size,
             mtime: current.mtime,
             content,
+            source,
         },
     );
     true
@@ -2978,7 +3011,7 @@ mod tests {
     /// The probe/mark/land trio against a real directory.
     fn landed(root: &std::path::Path, id: &str) -> (RightCache, bool) {
         let mut cache = RightCache::default();
-        mark_file_preview_loading(&mut cache, root, id, None);
+        mark_file_preview_loading(&mut cache, root, id, None, false);
         let probe = probe_file_preview(&root.join(id));
         let changed = land_file_preview(&mut cache, root, id, probe);
         (cache, changed)
@@ -3049,8 +3082,8 @@ mod tests {
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         let mut cache = RightCache::default();
-        mark_file_preview_loading(&mut cache, &root, "a.txt", None);
-        mark_file_preview_loading(&mut cache, &root, "b.txt", None);
+        mark_file_preview_loading(&mut cache, &root, "a.txt", None, false);
+        mark_file_preview_loading(&mut cache, &root, "b.txt", None, false);
         let probe = probe_file_preview(&root.join("a.txt"));
         assert!(!land_file_preview(&mut cache, &root, "a.txt", probe));
         let preview = cache.preview_for(&root).expect("preview");

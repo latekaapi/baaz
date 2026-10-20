@@ -1385,6 +1385,8 @@ pub struct Harness {
     /// The open project menu's own rect: the Colour submenu's anchor is
     /// computed off its right edge at the Colour row's height.
     pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
+    /// The Files pane's open context menu (owner 2026-10-21).
+    pub(crate) files_menu: Option<crate::right_files::FilesMenu>,
     /// Every rendered project group row's tray `…` button bounds, keyed by
     /// group id, from `SidebarView::on_group_menu_prepainted` — what a group
     /// row's project menu seats at. Entries are refreshed while their row is
@@ -1716,6 +1718,7 @@ impl Harness {
             project_colour_open: false,
             overflow_bounds: None,
             project_menu_bounds: None,
+            files_menu: None,
             group_menu_bounds: HashMap::new(),
             projects_query: projects_query.clone(),
             commands_query: commands_query.clone(),
@@ -7016,6 +7019,7 @@ impl Render for Harness {
         // over the right pane or the Browse page: they leave the page live.
         let view_options_open = false;
         let project_menu = self.render_project_menu(cx);
+        let files_menu = self.render_files_menu(cx);
         // The Browse tab menu went with the old tab rows (D3); the v2 rows
         // carry no context menu yet.
         let tab_menu: Option<AnyElement> = None;
@@ -7384,6 +7388,7 @@ impl Render for Harness {
                 .children(overflow)
                 .children(back_history)
                 .children(project_menu)
+                .children(files_menu)
                 .children(tab_menu)
                 // F2: the feedback capture layer paints above the palette,
                 // dialog, settings and menus, so the layer truly covers
@@ -7487,6 +7492,9 @@ impl Harness {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
             cx.notify();
+            return;
+        }
+        if self.close_files_menu(cx) {
             return;
         }
         // The Browse tab menu is pane state, never the overlay stack:
@@ -9730,6 +9738,45 @@ mod tests {
         });
         assert!(page_shows(vc, &url), "the Page navigates to the file");
         assert!(vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root).is_none()), "no code preview opened");
+        restore_state(state);
+    }
+
+    /// Owner 2026-10-21: clicking kitchen-sink.html in Files opened its
+    /// code. A Files click on HTML opens the Page; "View source" on a
+    /// Markdown file previews its text, not the rendering.
+    #[gpui::test]
+    fn a_files_click_on_html_opens_the_page_and_view_source_shows_text(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("files-html");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        std::fs::write(root.join("index.html"), "<h1>hi</h1>").unwrap();
+        std::fs::write(root.join("notes.md"), "# Notes\n").unwrap();
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.select_right(crate::layout::RightKind::Files, cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_file_entry(&root, "index.html", cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(crate::layout::right_kind(&harness.layout), crate::layout::RightKind::Browser, "a Files click on HTML opens the Page");
+            assert!(harness.right_cache.preview_for(&root).is_none(), "no code preview");
+        });
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.begin_file_source_for(&root, "notes.md", cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let preview = baaz.read(cx).right_cache.preview_for(&root).expect("a source preview");
+            assert!(matches!(preview.content, crate::right::PreviewContent::Text { .. }), "View source shows text, drew {:?}", preview.content);
+        });
+        // Without "View source" the same file renders.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_file_entry(&root, "notes.md", cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let preview = baaz.read(cx).right_cache.preview_for(&root).expect("a preview");
+            assert!(matches!(preview.content, crate::right::PreviewContent::Markdown { .. }), "a plain open renders, drew {:?}", preview.content);
+        });
         restore_state(state);
     }
 
