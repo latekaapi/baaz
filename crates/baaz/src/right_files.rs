@@ -180,7 +180,7 @@ impl Harness {
             return true;
         }
         if key == "escape" {
-            return self.close_files_filter(cx) || self.close_file_preview_for(root, cx);
+            return self.close_files_menu(cx) || self.close_files_filter(cx) || self.close_file_preview_for(root, cx);
         }
         let rows: Vec<&FileNode> = nodes.iter().filter(|n| !n.note).collect();
         if rows.is_empty() {
@@ -216,7 +216,7 @@ impl Harness {
                 if rows[i].is_dir() {
                     self.toggle_files_dir(root, &id, cx);
                 } else {
-                    self.begin_file_preview_for(root, &id, cx);
+                    self.open_file_entry(root, &id, cx);
                 }
             }
             _ => return false,
@@ -298,11 +298,20 @@ pub(crate) fn files_screen(
                     }
                     FileTreeAction::Select(id) => {
                         this.right_cache.files_ui.cursor = Some(id.to_string());
-                        this.begin_file_preview_for(&root, id, cx);
+                        this.open_file_entry(&root, id, cx);
                     }
                 }
                 window.focus(&this.right_files_focus.clone(), cx);
             });
+        })
+        .on_context_menu({
+            let (root, weak) = (root.clone(), cx.weak_entity());
+            move |menu, _, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.files_menu = Some(FilesMenu { root: root.clone(), id: menu.id.to_string(), is_dir: menu.is_dir, at: menu.at });
+                    cx.notify();
+                });
+            }
         });
     if let Some((reveal, token)) = cache.reveal.get(&root) {
         t = t.scroll_to(reveal.clone()).scroll_token(*token);
@@ -426,5 +435,133 @@ mod tests {
         assert_eq!(kind_of("app.db"), "SQLite database");
         assert_eq!(kind_of("x.bin"), "BIN file");
         assert_eq!(size_label(4_404_019), "4.2 MB");
+    }
+}
+
+/// The open Files context menu (owner 2026-10-21): the row it belongs to and
+/// where the secondary click landed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FilesMenu {
+    pub root: PathBuf,
+    pub id: String,
+    pub is_dir: bool,
+    pub at: gpui::Point<gpui::Pixels>,
+}
+
+/// One row of the Files context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilesMenuAction {
+    OpenDefault,
+    Reveal,
+    ViewSource,
+}
+
+/// The menu's rows for a row: every file gets Open in default app and Reveal
+/// in Finder, a file that otherwise renders (HTML, SVG, Markdown) also View
+/// source; a folder gets Reveal in Finder only.
+pub(crate) fn files_menu_rows(id: &str, is_dir: bool) -> Vec<(&'static str, FilesMenuAction)> {
+    if is_dir {
+        return vec![("Reveal in Finder", FilesMenuAction::Reveal)];
+    }
+    let mut rows = vec![("Open in default app", FilesMenuAction::OpenDefault), ("Reveal in Finder", FilesMenuAction::Reveal)];
+    if crate::right::has_source_view(id) {
+        rows.push(("View source", FilesMenuAction::ViewSource));
+    }
+    rows
+}
+
+impl Harness {
+    /// Open a file row (click or ⏎): HTML, SVG and PDF render in the Page;
+    /// everything else previews here (owner 2026-10-21).
+    pub(crate) fn open_file_entry(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        if crate::right::opens_in_page(id) {
+            self.right_cache.selected.insert(root.to_path_buf(), id.to_string());
+            self.open_url_in_browser(crate::right::file_url(&root.join(id)), cx);
+        } else {
+            self.begin_file_preview_for(root, id, cx);
+        }
+    }
+
+    /// Close the Files context menu; whether one was open (Escape's first
+    /// layer, from the tree or from anywhere the window's Cancel reaches).
+    pub(crate) fn close_files_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.files_menu.take().is_some();
+        if open {
+            cx.notify();
+        }
+        open
+    }
+
+    fn run_files_menu(&mut self, menu: &FilesMenu, action: FilesMenuAction, cx: &mut Context<Self>) {
+        let abs = menu.root.join(&menu.id);
+        match action {
+            FilesMenuAction::OpenDefault => cx.open_with_system(&abs),
+            FilesMenuAction::Reveal => cx.reveal_path(&abs),
+            FilesMenuAction::ViewSource => {
+                self.right_cache.files_ui.cursor = Some(menu.id.clone());
+                self.begin_file_source_for(&menu.root, &menu.id, cx);
+            }
+        }
+    }
+
+    /// The Files context menu, seated at the secondary click: the app's one
+    /// menu over a window-wide catcher, as the project menu draws.
+    pub(crate) fn render_files_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.files_menu.clone()?;
+        let rows = files_menu_rows(&menu.id, menu.is_dir);
+        let actions: Vec<FilesMenuAction> = rows.iter().map(|(_, a)| *a).collect();
+        let view_rows: Vec<aui::nav::MenuRow> = rows.iter().map(|(label, _)| aui::nav::MenuRow::Toggle { label: (*label).into(), checked: false }).collect();
+        let held = menu.clone();
+        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
+            this.files_menu = None;
+            if let Some(action) = actions.get(*index) {
+                this.run_files_menu(&held, *action, cx);
+            }
+            cx.notify();
+        });
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.files_menu = None;
+            cx.notify();
+        });
+        let catcher = div()
+            .id("files-menu-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(gpui::MouseButton::Right, move |_, w, cx| dismiss(&(), w, cx))
+            .on_click({
+                let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+                    this.files_menu = None;
+                    cx.notify();
+                });
+                move |_, w, cx| dismiss(&(), w, cx)
+            });
+        let trigger = gpui::Bounds { origin: menu.at, size: gpui::size(px(0.0), px(0.0)) };
+        let list = aui::nav::view_menu("files-menu", view_rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx));
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(catcher)
+                .child(aui::overlay::anchored_menu(trigger, aui::overlay::MenuSide::Below, aui::overlay::MenuAlign::Start, list))
+                .into_any_element(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::{files_menu_rows, FilesMenuAction};
+
+    #[test]
+    fn the_menu_offers_view_source_only_where_a_file_renders() {
+        let actions = |id: &str, dir: bool| files_menu_rows(id, dir).into_iter().map(|(_, a)| a).collect::<Vec<_>>();
+        use FilesMenuAction::*;
+        assert_eq!(actions("site/index.html", false), [OpenDefault, Reveal, ViewSource]);
+        assert_eq!(actions("README.md", false), [OpenDefault, Reveal, ViewSource]);
+        assert_eq!(actions("logo.svg", false), [OpenDefault, Reveal, ViewSource]);
+        assert_eq!(actions("src/main.rs", false), [OpenDefault, Reveal]);
+        assert_eq!(actions("report.pdf", false), [OpenDefault, Reveal]);
+        assert_eq!(actions("docs", true), [Reveal]);
     }
 }
