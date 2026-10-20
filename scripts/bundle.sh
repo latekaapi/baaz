@@ -20,8 +20,12 @@
 # `crates/baaz/src/terminal/relay.rs`).
 #
 # The bundle is ad-hoc signed so it launches on this machine with `open`.
-# Re-running the script rebuilds in place; it never touches the repo's
-# sources. Costs nothing: no server, no turn.
+# Re-running the script assembles the new app beside the old one and swaps
+# it in with one rename at the end, so a Baaz that is running keeps the
+# files it already has open (2026-10-21: overwriting the running binary in
+# place got the owner's Baaz killed mid-session, no crash report). Quit and
+# reopen to run the new build. It never touches the repo's sources. Costs
+# nothing: no server, no turn.
 set -eu
 
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
@@ -29,7 +33,9 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/assets/icon-1024.png"
 OUT="$ROOT/target/bundle/Baaz.app"
-CONTENTS="$OUT/Contents"
+# Assembled here, on the same volume, then renamed over OUT in one step.
+STAGE="$ROOT/target/bundle/.Baaz.app.new"
+CONTENTS="$STAGE/Contents"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 
 if [ ! -f "$SRC" ]; then
@@ -55,7 +61,9 @@ else
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+trap 'rm -rf "$WORK" "$STAGE"' EXIT INT TERM
+rm -rf "$STAGE"
+mkdir -p "$(dirname "$OUT")"
 SET="$WORK/Baaz.iconset"
 mkdir -p "$SET"
 # Every slot iconutil wants, downsampled from the 1024 source.
@@ -186,7 +194,19 @@ cat >"$CONTENTS/Info.plist" <<EOF
 EOF
 
 # Ad-hoc sign so Gatekeeper lets `open` launch it on this machine.
-codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || true
+codesign --force --deep --sign - "$STAGE" >/dev/null 2>&1 || true
+
+# Swap: the old app moves aside and is removed; a running Baaz keeps its
+# open files (unlinked, not overwritten) until it quits.
+OLD="$OUT.old.$$"
+if [ -e "$OUT" ]; then
+    mv "$OUT" "$OLD"
+fi
+mv "$STAGE" "$OUT"
+rm -rf "$OLD"
+if pgrep -f "$OUT/Contents/MacOS/Baaz" >/dev/null 2>&1; then
+    echo "bundle: a Baaz is running from the previous build — quit and reopen it to run this one"
+fi
 
 echo "bundle: $OUT"
 echo "bundle: launch with: open \"$OUT\""
