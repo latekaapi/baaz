@@ -835,6 +835,12 @@ impl Harness {
             cx.notify();
             return;
         };
+        // HTML, SVG and PDF open rendered in the Page, wherever they live
+        // (owner 2026-10-21: "clicking it should open in the browser").
+        if !is_dir && opens_in_page(&abs.to_string_lossy()) {
+            self.open_url_in_browser(file_url(abs), cx);
+            return;
+        }
         let Ok(rel) = abs.strip_prefix(root) else {
             cx.open_with_system(abs);
             self.overlays.update(cx, |overlays, _| {
@@ -1513,7 +1519,28 @@ fn is_markdown(name: &str) -> bool {
     lower.ends_with(".md") || lower.ends_with(".markdown")
 }
 
-/// Whether `name` previews as an image card rather than as code.
+/// Whether a file opens rendered in the Page rather than in the preview
+/// (owner 2026-10-21): HTML and SVG as a browser draws them, PDFs in
+/// Chromium's viewer.
+pub(crate) fn opens_in_page(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".html", ".htm", ".xhtml", ".svg", ".pdf"].iter().any(|ext| lower.ends_with(ext))
+}
+
+/// A `file://` URL for an absolute path, percent-encoding everything but
+/// the unreserved characters and `/` (office files carry spaces, `#`, `%`).
+pub(crate) fn file_url(abs: &Path) -> String {
+    let mut url = String::from("file://");
+    for byte in abs.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 /// Whether a path names an image the image view shows.
 pub(crate) fn is_image_path(path: &str) -> bool {
     is_image(path)

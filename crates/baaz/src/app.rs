@@ -9680,6 +9680,59 @@ mod tests {
         restore_state(state);
     }
 
+    /// Owner 2026-10-21: an HTML file linked from the transcript opened
+    /// as code in Files. It renders in the Page now.
+    #[gpui::test]
+    fn an_html_link_opens_in_the_page(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("html-in-page");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        std::fs::create_dir_all(root.join("site")).unwrap();
+        std::fs::write(root.join("site/kitchen sink.html"), "<h1>hi</h1>").unwrap();
+        let view = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: root.to_string_lossy().into_owned(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
+                harness.active = Some(view.clone());
+                view
+            })
+        });
+        let page_shows = |vc: &mut gpui::VisualTestContext, url: &str| {
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                harness.browser_pending_url.as_deref() == Some(url)
+                    || harness.browser.states.values().any(|state| state.read(cx).url().as_ref() == url)
+            })
+        };
+        let abs = root.join("site/kitchen sink.html");
+        let url = crate::right::file_url(&abs);
+        assert!(url.ends_with("/site/kitchen%20sink.html"), "{url}");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.on_session_event(view.clone(), &crate::session::SessionEvent::RevealPath { abs: abs.clone(), highlight: None }, cx);
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(crate::layout::right_kind(&baaz.read(cx).layout), crate::layout::RightKind::Browser, "an HTML link opens the Page");
+        });
+        assert!(page_shows(vc, &url), "the Page navigates to the file");
+        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root).is_none()), "no code preview opened");
+        restore_state(state);
+    }
+
     /// Beginning one divider's drag while the other runs is a no-op: both
     /// drags are never active at once.
     #[gpui::test]
