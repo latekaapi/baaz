@@ -1152,14 +1152,17 @@ impl SessionView {
             });
         }
         for quote in self.quotes.drain(..) {
+            // A code quote says so in `meta` (`code` / `code:<lang>`), which
+            // the sent bubble's quote block reads (docs/43 §0).
+            let meta = quote.code.map(|(lang, _)| if lang.is_empty() { "code".to_string() } else { format!("code:{lang}") });
             attachments.push(Attachment {
                 name: quote.text,
                 kind: AttachmentKind::Quote,
                 size_bytes: None,
-                meta: None,
+                meta,
                 state: UploadState::Ready,
                 path: None,
-                quote_of: Some(quote.source),
+                quote_of: quote.source,
             });
         }
         self.failed_chips.clear();

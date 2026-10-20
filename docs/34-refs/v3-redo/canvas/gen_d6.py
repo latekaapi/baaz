@@ -171,6 +171,20 @@ body{{margin:0}}
 .addr2{{height:28px;flex:1;min-width:0;border-radius:6px;background:var(--well);box-shadow:var(--edge);display:flex;align-items:center;gap:6px;padding:0 8px;font-size:13.2px;white-space:nowrap;overflow:hidden}}
 .addr2 .h{{color:var(--fg)}}.addr2 .p{{color:var(--muted);overflow:hidden;text-overflow:ellipsis}}
 .pgw{{position:absolute;left:0;right:0;top:32px;bottom:0;background:#FFFFFF;overflow:hidden}}
+/* the Page title as a menu button + the Recent pages dropdown (owner, 2026-10-18) */
+.ttl2{{height:28px;border:0;border-radius:6px;background:transparent;color:var(--fg);display:inline-flex;align-items:center;gap:4px;padding:0 6px 0 4px;font-size:14.3px;font-weight:600;white-space:nowrap;margin-left:-4px}}
+.ttl2 .cv{{color:var(--muted);display:flex}}
+.ttl2:hover,.ttl2.hov{{background:var(--hov)}}
+.ttl2.on{{background:var(--sel)}}
+.dd2{{position:absolute;z-index:5;background:var(--l3);border-radius:10px;box-shadow:var(--float);padding:6px;display:flex;flex-direction:column}}
+.dd2 .lb{{height:28px;display:flex;align-items:center;padding:0 8px;font-size:13.2px;color:var(--muted)}}
+.dd2 .it{{height:36px;display:flex;align-items:center;gap:8px;border-radius:6px;padding:0 8px;color:var(--muted);white-space:nowrap;min-width:0}}
+.dd2 .it .g{{display:flex;flex:none;color:var(--muted)}}
+.dd2 .it .t{{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}}
+.dd2 .it .v{{font-size:13.2px;color:var(--muted);flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis}}
+.dd2 .it .k{{display:flex;flex:none;width:14px;color:var(--fg)}}
+.dd2 .it.hov{{background:var(--hov);color:var(--fg)}}
+.dd2 .it.chk{{color:var(--fg);font-weight:600}}
 .prog{{position:absolute;left:0;top:0;height:2px;background:var(--muted)}}
 .apill{{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);height:32px;border-radius:999px;background:#2C2C32;color:#F2F2F4;box-shadow:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.06),0 8px 24px -10px rgba(0,0,0,.4);display:inline-flex;align-items:center;gap:8px;padding:0 14px 0 10px;font-size:13.2px;white-space:nowrap}}
 .mk2{{width:16px;height:16px;border-radius:4px;color:#fff;font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:none;background:#3B6DF2}}
@@ -732,6 +746,49 @@ def b_states_views(src):
     ]]
     return grid_board('D6 · Views the transcript opens — full output and image', 'Neither existed: today the output expands in place and an image file shows a binary card. Both open as a pushed view on the screen the pane is showing (with the pane closed: it opens on its last screen), and Back returns to what was there.', rows, 1500)
 
+# ------------------------------------------------------------------ Page · recent pages (owner, 2026-10-18)
+RECENT = [
+    ('Pricing — Acme', 'localhost:3000'),
+    ('Sign in — Acme', 'localhost:3000'),
+    ('Dashboard — Acme', 'localhost:3000'),
+    ('Checkout | Stripe Documentation', 'docs.stripe.com'),
+    ('tailwindcss.com/docs/grid-template-columns', 'tailwindcss.com'),
+]
+
+def header_page_menu(open_=False, hov=False):
+    cls = 'on' if open_ else ('hov' if hov else '')
+    return (f'<div class="ph2" style="padding-left:12px;gap:8px"><span style="color:var(--muted);display:flex">{ic("page", 14)}</span>'
+            f'<div class="pt" style="padding-left:0"><button class="ttl2 {cls}" aria-haspopup="menu" aria-expanded="{"true" if open_ else "false"}" aria-label="Recent pages">Page<span class="cv">{ic("down", 12)}</span></button></div>'
+            f'{ib2("x", "Close the pane", size=12)}</div><div class="pfade"></div>')
+
+def recent_menu(w, hov=1, n=None):
+    width = min(320, w - 12)
+    rows = RECENT[:n] if n else RECENT
+    items = ''
+    for i, (title, host) in enumerate(rows):
+        cur = i == 0
+        cls = ('chk ' if cur else '') + ('hov' if i == hov else '')
+        k = ic('check', 14) if cur else ''
+        v = '' if w < 300 else f'<span class="v">{host}</span>'
+        items += f'<div class="it {cls}" role="menuitemradio" aria-checked="{"true" if cur else "false"}"><span class="t">{title}</span>{v}<span class="k">{k}</span></div>'
+    return f'<div class="dd2" role="menu" aria-label="Recent pages" style="left:6px;top:34px;width:{width}px"><div class="lb">Recent pages</div>{items}</div>'
+
+def view_page_recent(src, w, open_=True, hov=1):
+    pg = page_img(src, w)
+    menu = recent_menu(w, hov) if open_ else ''
+    return header_page_menu(open_=open_, hov=not open_) + nav_row(w) + f'<div class="pgw" style="top:68px">{pg}</div>' + menu
+
+def b_page_recent(src):
+    rows = [[
+        mini(view_page_recent(src, 400), 400, 700, label='Recent pages, open',
+             note='The pane row’s title is the menu button when the session has a page: “Page” and a 12 px chevron, 28 tall, r 6, hover 5 %, lit 9 % while open. The menu is the app’s one dropdown (FF, the sidebar’s menus): Raised panel r 10 with the float shadow, 6 inset; a “Recent pages” label row (28, muted); rows 36, r 6: the page title (ellipsis; the address when it has none), the host muted, then the check on the page on screen (FG 600). Newest first, each address once, at most 8. A row navigates the session’s one page there; Esc or a click outside closes. Drawn over the native page, so it is an overlay window like the pill.'),
+        mini(view_page_recent(src, 400), 400, 700, theme=LIGHT, label='Light'),
+        mini(view_page_recent(src, 280, hov=2), 280, 700, label='Narrow (280)', note='Width = pane − 12, at most 320; under 300 the host leaves, titles take the row.'),
+    ], [
+        mini(view_page_recent(src, 400, open_=False), 400, 520, label='Closed, hover on the title', note='Nothing else in the row changes. With no page yet (the “No page yet” state) the title is plain text, no chevron.'),
+    ]]
+    return grid_board('D6 · Page — recent pages (owner, 2026-10-18)', 'The owner’s request: a drop-down in the Page header listing the session’s recent pages. The pane keeps one page per session (no tab strip); this is only a way back to where the agent or you have been. It lists main-frame navigations of this session’s page, newest first, each address once; the page on screen is checked.', rows, 1500)
+
 def centre_row(lit, hov=None, w=760):
     acts = centre_actions(set(lit) if lit else set())
     if hov:
@@ -850,6 +907,7 @@ BOARDS = {
  "D6StatesPage.dc.html": ("D6 · Page states", b_states_page, 1440, 1520),
  "D6StatesViews.dc.html": ("D6 · Output + image", b_states_views, 1440, 1500),
  "D6Light.dc.html": ("D6 · Light", b_light, 1440, 1540),
+ "D6PageRecent.dc.html": ("D6 · Page — recent pages", b_page_recent, 1440, 1500),
 }
 
 def page6(name, title, body, w, h):

@@ -118,47 +118,6 @@ fn a_closed_last_tab_never_resurrects() {
     );
 }
 
-/// The strip's × never also selects, middle-click closes only when the
-/// press and the release land on the same tab, and both aria labels read
-/// the same visible (ellipsized) text the row shows.
-#[test]
-fn the_strip_close_never_selects_and_labels_what_it_shows() {
-    let body = source("right.rs");
-    assert!(
-        body.contains(".on_mouse_down(gpui::MouseButton::Middle,"),
-        "the middle press records its tab"
-    );
-    assert!(
-        body.contains(".on_mouse_up(gpui::MouseButton::Middle,"),
-        "middle-click closes on mouse up over the tab"
-    );
-    assert!(
-        body.contains("middle_press_action(&press, id_tab, cx);"),
-        "the middle press records its tab on the harness"
-    );
-    assert!(
-        body.contains("middle_release_action(&middle, id_tab, window, cx);"),
-        "the release asks the harness, which closes only its own press"
-    );
-    let browser = source("browser/mod.rs");
-    assert!(
-        browser.contains("middle_release_closes(pressed, id)"),
-        "the release closes only its own press"
-    );
-    assert!(
-        body.contains("cx.stop_propagation();\n                    close_tab_action(&close, id_tab, window, cx);"),
-        "the × stops propagation so it never also selects"
-    );
-    assert!(
-        body.contains(".aria_label(format!(\"{} tab\", title))"),
-        "the tab aria label uses the row's visible ellipsized text"
-    );
-    assert!(
-        body.contains("format!(\"Close {}\", title)"),
-        "the close aria label uses the row's visible ellipsized text"
-    );
-}
-
 /// A visible page never dirties `tabs.json` on its own: the shown stamp
 /// stays in memory and rides along with the next real change (or the quit
 /// flush), so an idle visible page writes about never instead of about

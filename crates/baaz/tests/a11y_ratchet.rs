@@ -51,7 +51,26 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
 /// Builders that take a visible text label, which names the control for
 /// assistive tech on its own: `button("id", "label")` and friends.
 fn has_text_label(window: &str) -> bool {
-    ["button(\"", "chip(\"", "nav_item(\"", "sidebar_footer(\""].iter().any(|needle| window.contains(needle))
+    // The D6 workbench helpers take their accessible name as a required
+    // argument and always set role + aria-label from it (agentic-ui
+    // workbench/pane.rs, changes.rs, output_view.rs), like `button("…")`.
+    [
+        "button(\"",
+        "chip(\"",
+        "nav_item(\"",
+        "sidebar_footer(\"",
+        "pane_action(",
+        "pane_toggle(",
+        "primary_action(",
+        "secondary_action(",
+        "text_action(",
+        "commit_message_view(",
+        "draft_checkbox(",
+        "base_picker(",
+        "image_view(",
+    ]
+    .iter()
+    .any(|needle| window.contains(needle))
 }
 
 fn unlabeled_clickables() -> Vec<String> {

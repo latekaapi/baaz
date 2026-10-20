@@ -258,25 +258,52 @@ impl SessionView {
                 });
             }));
         }
-        let element = self.transcript_list(folds, cx);
+        self.step_quote_scroll(window);
+        let quote_bar = self.render_quote_bar(window, cx);
+        let element = self.transcript_list(folds, quote_bar, cx);
         record_frame_stats(frame_start.elapsed());
 
         element
     }
 
     /// D4: scrolls the transcript so `turn`'s first row is at the top —
-    /// the quote's way back to its source.
+    /// the quote's way back to its source. D6 (docs/43 §0): eased over
+    /// 260 ms, out — the jump is measured, undone, then travelled.
     pub(super) fn scroll_to_turn(&mut self, turn: &str, cx: &mut Context<Self>) {
         let mut ix = 0usize;
         for (id, rows) in &self.row_counts {
             if id == turn {
                 self.follow = false;
-                self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+                let target = gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) };
+                let from = self.list_state.scroll_px_offset_for_scrollbar();
+                self.list_state.scroll_to(target);
+                let to = self.list_state.scroll_px_offset_for_scrollbar();
+                if cx.reduce_motion() || crate::clock::deterministic() || (f32::from(to.y) - f32::from(from.y)).abs() < 1.0 {
+                    self.quote_scroll = None;
+                } else {
+                    self.list_state.set_offset_from_scrollbar(from);
+                    self.quote_scroll = Some((std::time::Instant::now(), from, to, target));
+                }
                 cx.notify();
                 return;
             }
             ix += rows;
         }
+    }
+
+    /// One frame of a quote's scroll back to its source.
+    pub(super) fn step_quote_scroll(&mut self, window: &mut Window) {
+        let Some((at, from, to, target)) = self.quote_scroll else { return };
+        let t = (at.elapsed().as_secs_f32() / 0.26).min(1.0);
+        if t >= 1.0 {
+            self.list_state.scroll_to(target);
+            self.quote_scroll = None;
+            return;
+        }
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let y = f32::from(from.y) + (f32::from(to.y) - f32::from(from.y)) * eased;
+        self.list_state.set_offset_from_scrollbar(gpui::point(from.x, px(y)));
+        window.request_animation_frame();
     }
 
     /// The one place a frame writes the render cache.
@@ -373,6 +400,17 @@ impl SessionView {
                 Some(Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
                     show(&id, window, cx)
                 }))
+            },
+            // D6: "N more lines" on a shell card opens the full output in
+            // the right pane (fetching the rest when the provider has it).
+            open_output: {
+                let open = cx.listener(|this: &mut Self, out: &transcript::OutputOpen, _, cx| {
+                    if out.fetchable {
+                        this.show_full_output(out.block_id.clone(), cx);
+                    }
+                    cx.emit(SessionEvent::OpenOutput(out.clone()));
+                });
+                Some(Rc::new(move |out: transcript::OutputOpen, window: &mut Window, cx: &mut gpui::App| open(&out, window, cx)))
             },
             // Turn links and bottom-row actions (C5, C6): `http(s)` URLs
             // open in Baaz's Browser pane (B9), workspace paths reveal in
@@ -532,8 +570,14 @@ impl SessionView {
             // stamped where applied deltas materialise below.
             sent: Rc::clone(&self.sent_pairs),
             open_attachment: {
+                // D6 (docs/43 §4): an image tile opens the image view; any
+                // other file reveals in Files.
                 let open = cx.listener(|_: &mut Self, path: &String, _, cx| {
-                    cx.emit(SessionEvent::RevealPath { abs: PathBuf::from(path), highlight: None });
+                    if crate::right::is_image_path(path) {
+                        cx.emit(SessionEvent::OpenImage(PathBuf::from(path)));
+                    } else {
+                        cx.emit(SessionEvent::RevealPath { abs: PathBuf::from(path), highlight: None });
+                    }
                 });
                 Some(Rc::new(move |path: String, window: &mut Window, cx: &mut gpui::App| open(&path, window, cx)))
             },
@@ -731,7 +775,7 @@ impl SessionView {
     }
 
     /// The virtualised list itself, built from the cache and nothing else.
-    pub(super) fn transcript_list(&mut self, folds: Folds, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn transcript_list(&mut self, folds: Folds, quote_bar: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         // The turn's progress, inline under the last message (owner
         // 2026-10-14, after Claude Desktop): it scrolls with the transcript
         // instead of standing pinned over the composer.
@@ -772,6 +816,27 @@ impl SessionView {
             // No bottom padding: the list runs to the sheet's edge, under
             // the floating composer; its tail row carries the inset.
             .key_context(TRANSCRIPT_CONTEXT)
+            // The quote flow (docs/43 §0): the press and the release in the
+            // transcript place the selection bar.
+            .capture_any_mouse_down(cx.listener(|this: &mut Self, e: &gpui::MouseDownEvent, _, _| {
+                this.quote_press = Some(e.position);
+                this.quote_dismiss = this.quote_anchor.is_some();
+                this.quote_anchor = None;
+            }))
+            .capture_any_mouse_up(cx.listener(|this: &mut Self, e: &gpui::MouseUpEvent, _, cx| {
+                this.note_quote_release(e.position, cx);
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this: &mut Self, _: &gpui::MouseUpEvent, _, cx| {
+                this.dismiss_quote_on_click(cx);
+            }))
+            .on_children_prepainted({
+                let view = cx.entity().downgrade();
+                move |bounds, _, cx| {
+                    if let Some(first) = bounds.first().copied() {
+                        let _ = view.update(cx, |v, _| v.transcript_bounds = Some(first));
+                    }
+                }
+            })
             // The wheel is taken over the whole sheet, margins included —
             // on the 880 px measure alone, a wheel beside the text scrolled
             // nothing (owner 2026-10-15). Positioned, so the capture's
@@ -889,6 +954,7 @@ impl SessionView {
                         .into_any_element(),
                     )
             )
+            .children(quote_bar)
             .into_any_element()
     }
 
@@ -2192,15 +2258,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: Some(file.detail().into()),
                         state: ComposerChipState::Ready,
                     }))
-                    .chain(self.quotes.iter().map(|quote| ComposerChip {
-                        id: quote.id.clone().into(),
-                        kind: ComposerChipKind::Quote,
-                        label: quote_chip_words(&quote.text).into(),
-                        removable: true,
-                        thumbnail: None,
-                        detail: None,
-                        state: ComposerChipState::Ready,
-                    }))
                     .chain(self.failed_chips.iter().map(|(id, name, reason)| ComposerChip {
                         id: id.clone().into(),
                         kind: ComposerChipKind::File,
@@ -2210,6 +2267,16 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: None,
                         state: ComposerChipState::Failed(reason.clone().into()),
                     }))
+                    .collect(),
+            )
+            .quotes(
+                self.quotes
+                    .iter()
+                    .map(|quote| aui::composer::ComposerQuote {
+                        id: quote.id.clone().into(),
+                        text: quote_block_text(&quote.text, quote.code.is_some()).into(),
+                        code: quote.code.clone().map(|(lang, n)| (lang.into(), n)),
+                    })
                     .collect(),
             )
             .streaming(self.busy())
@@ -3802,24 +3869,107 @@ thread_local! {
     pub(crate) static OPENED_EXTERNALLY: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A quote chip's words: the first ones, cut at a word boundary near 40
-/// characters with an ellipsis (`the provider closed the stream before…`).
-pub(super) fn quote_chip_words(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 40 {
-        return flat;
+/// What a quote block shows (docs/43 §0): a prose quote flattened (the
+/// Markdown's list markers and fences fold into one line of words); a code
+/// quote as written.
+pub(super) fn quote_block_text(text: &str, code: bool) -> String {
+    if code {
+        return text.to_string();
     }
-    let mut out = String::new();
-    for word in flat.split(' ') {
-        if out.chars().count() + word.chars().count() + 1 > 40 {
-            break;
+    text.lines()
+        .map(|l| l.trim().trim_start_matches("```").trim_start_matches(['-', '*']).trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" • ")
+}
+
+impl SessionView {
+    /// A release in the transcript: a held selection inside one turn puts
+    /// the quote bar up at its first line (docs/43 §0); none takes it down.
+    fn note_quote_release(&mut self, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let press = self.quote_press.take().unwrap_or(at);
+        // A click — press and release in one place — is "a click elsewhere"
+        // (docs/43 §0): the held selection and its bar go (live 2026-10-19:
+        // the bar moved to the click instead).
+        let moved = (f32::from(at.x) - f32::from(press.x)).abs() + (f32::from(at.y) - f32::from(press.y)).abs();
+        if moved < 3.0 && self.quote_dismiss {
+            // Dismissed in the bubble phase ([`Self::dismiss_quote_on_click`]),
+            // after the Quote button itself has had the click.
+            return;
         }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
+        self.quote_dismiss = false;
+        let has = super::spans::span_copy_text(&self.span_held).is_some_and(|t| !t.trim().is_empty());
+        self.quote_anchor = has.then(|| {
+            let (start, end) = if (press.y - at.y).abs() < px(13.0) {
+                if press.x <= at.x { (press, at) } else { (at, press) }
+            } else if press.y < at.y {
+                (press, at)
+            } else {
+                (at, press)
+            };
+            crate::session::QuoteAnchor { start, end, scroll_y: self.list_state.scroll_px_offset_for_scrollbar().y }
+        });
+        cx.notify();
     }
-    format!("{out}…")
+
+    /// The bubble half of a click that dismisses the selection bar.
+    fn dismiss_quote_on_click(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.quote_dismiss) {
+            self.quote_anchor = None;
+            self.clear_selection(cx);
+            cx.notify();
+        }
+    }
+
+    /// Quote the held selection into the composer (docs/43 §0): one quote
+    /// block, Markdown kept; a selection inside one code block is a code
+    /// quote with its language.
+    fn quote_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((turn_id, (source, span))) = self.span_held.iter().next().map(|(k, v)| (k.clone(), v.clone())) else { return };
+        let Some(text) = super::spans::span_copy_text(&self.span_held) else { return };
+        let cell = span.anchor.cell.as_str().to_string();
+        let code = (span.anchor.cell == span.focus.cell && cell.contains("code")).then(|| {
+            let index: usize = cell.rsplit("code").next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let lang = aui::transcript::markdown_fences(&source).into_iter().find(|f| f.index == index).and_then(|f| f.language).unwrap_or_default();
+            (lang, text.lines().count().max(1))
+        });
+        self.quote_anchor = None;
+        self.clear_selection(cx);
+        self.add_quote(text, Some(turn_id), code, window, cx);
+    }
+
+    /// `quote`: the selection bar's Quote, for scripted captures.
+    pub(crate) fn quote_selection_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quote_selection(window, cx);
+    }
+
+    /// The selection bar over the transcript, when a selection is held.
+    fn render_quote_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.span_held.is_empty() {
+            self.quote_anchor = None;
+        }
+        let anchor = self.quote_anchor;
+        let bounds = self.transcript_bounds?;
+        let present = anchor.is_some();
+        let quote = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.quote_selection(window, cx));
+        let bar = aui::transcript::quote_bar("transcript-quote-bar", present, quote, window, cx)?;
+        let anchor = anchor?;
+        // The bar rides with the text: the scroll since the release moves it.
+        let dy = anchor.scroll_y - self.list_state.scroll_px_offset_for_scrollbar().y;
+        let first_top = f32::from(anchor.start.y - bounds.origin.y + dy) - 13.0;
+        let last_bottom = f32::from(anchor.end.y - bounds.origin.y + dy) + 13.0;
+        let top = aui::transcript::quote_bar_top(first_top, last_bottom);
+        // Hidden while its anchor is under the title row or the composer.
+        if first_top < 32.0 || top > f32::from(bounds.size.height) - 150.0 {
+            return None;
+        }
+        let measure_left = (f32::from(bounds.size.width) - TRANSCRIPT_MEASURE).max(0.0) / 2.0;
+        let left = f32::from(anchor.start.x - bounds.origin.x).clamp(measure_left, measure_left + TRANSCRIPT_MEASURE - 96.0);
+        // `bounds` is the list's; the bar hangs in the list's padded
+        // container, whose absolute origin is before that padding (live
+        // 2026-10-19: the bar sat 24 px left of the selection).
+        Some(div().absolute().top(px(top)).left(px(left + TRANSCRIPT_PAD_X)).child(bar).into_any_element())
+    }
 }
 
 /// One turn's memoised row count (see `SessionView::row_memo`).

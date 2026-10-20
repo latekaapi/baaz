@@ -160,6 +160,10 @@ actions!(
         ToggleTerminal,
         /// Toggle the right pane (⌘-backslash, from the library).
         ToggleRightPane,
+        /// D6: commit from the commit message (⌘⏎).
+        CommitMessage,
+        /// D6: pop the pane's pushed view (Esc, ⌘[).
+        RightBack,
         /// Show Changes in the right pane (⌘⇧D).
         ShowRightChanges,
         /// Show Files in the right pane (⌘⌥E; ⌘⇧E is the effort picker).
@@ -267,6 +271,12 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 
 /// The new-tab page's Field width (canvas NewTab board): 560.
 const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
+
+/// D6 (docs/43 §2.1): the right pane is a sheet this far in from the
+/// window's right edge…
+const RIGHT_SHEET_INSET: f32 = 6.0;
+/// …and this far right of the centre sheet; the divider handle straddles the gap.
+const RIGHT_SHEET_GAP: f32 = 6.0;
 /// What the host hands the shell's chrome row (see `Harness::render_bar_chrome`).
 pub(crate) struct BarChrome {
     pub(crate) lead: AnyElement,
@@ -803,6 +813,14 @@ pub struct Harness {
     /// the shell's `resizing` bypass. User toggles never set it, so they
     /// keep animating exactly as today.
     pub(crate) right_snap: bool,
+    /// D6: the right pane's strip is between screens this frame (the Page
+    /// screen's native view hides behind its still picture while it moves).
+    pub(crate) right_strip_moving: bool,
+    /// D6: the Files screen's keyboard focus (↑ ↓ ← → ⏎, ⌘F, /, Esc).
+    pub(crate) right_files_focus: gpui::FocusHandle,
+    /// D6: a drafted PR description waiting for a frame with the window to
+    /// land in its editor.
+    pub(crate) pending_pr_body: Option<(gpui::Entity<gpui_kit::base::input::TextareaState>, String)>,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
     /// Whether the window's traffic lights are hidden now (closed sidebar,
@@ -1167,6 +1185,9 @@ pub struct Harness {
     pub(crate) corner: Option<crate::overlay::Overlay>,
     /// The corner window being opened, until it lands.
     pub(crate) corner_pending: Option<gpui::Bounds<gpui::Pixels>>,
+    /// D6: the Page screen's float (pill, notes panel) over its native page.
+    pub(crate) page_float: Option<crate::overlay::Overlay>,
+    pub(crate) page_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
@@ -1215,6 +1236,8 @@ pub struct Harness {
     /// Side session id → the generation it serves. Harvested off
     /// `turn/completed`, reaped by the watchdog.
     pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
+    /// D6: Muse side sessions drafting a commit message or PR description.
+    pub(crate) draft_jobs: HashMap<String, crate::right_changes::DraftJob>,
     /// Side session id → the byline rewrite it serves.
     pub(crate) byline_jobs: HashMap<String, titles::BylineJob>,
     /// Real session ids with a rewrite in flight: late answers for a
@@ -1582,6 +1605,9 @@ impl Harness {
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
+            right_strip_moving: false,
+            right_files_focus: cx.focus_handle(),
+            pending_pr_body: None,
             peek_pinned: false,
             lights_hidden: false,
             right_save_epoch: 0,
@@ -1651,6 +1677,7 @@ impl Harness {
             titles_pending: HashSet::new(),
             side_sessions: HashSet::new(),
             title_jobs: HashMap::new(),
+            draft_jobs: HashMap::new(),
             byline_jobs: HashMap::new(),
             byline_live: HashSet::new(),
             byline_last_start: HashMap::new(),
@@ -1722,6 +1749,8 @@ impl Harness {
             overlay_pending: None,
             corner: None,
             corner_pending: None,
+            page_float: None,
+            page_float_pending: None,
             main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
@@ -2341,6 +2370,8 @@ impl Harness {
                         self.harvest_title(&side_id, cx);
                     } else if self.byline_jobs.contains_key(&side_id) {
                         self.harvest_byline(&side_id, cx);
+                    } else if self.draft_jobs.contains_key(&side_id) {
+                        self.harvest_draft(&side_id, cx);
                     }
                 }
             }
@@ -2676,6 +2707,7 @@ impl Harness {
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
         self.right_snap = false;
+        self.right_cache.page_menu = false;
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         self.arm_browser_url_focus();
@@ -2925,6 +2957,7 @@ impl Harness {
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
+        self.right_cache.page_menu = false;
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus();
     }
@@ -3374,6 +3407,8 @@ impl Harness {
             if let Some(reload) = reload {
                 crate::right::apply_preview_reload(&mut self.right_cache, &root, reload);
             }
+            self.changes_after_snapshot(&root, cx);
+            self.reload_open_diffs(&root, cx);
             self.right_last_key = Some((true, kind, Some(root)));
             cx.notify();
             return;
@@ -3419,6 +3454,8 @@ impl Harness {
                 if let Some(reload) = reload {
                     crate::right::apply_preview_reload(&mut this.right_cache, &root, reload);
                 }
+                this.changes_after_snapshot(&root, cx);
+                this.reload_open_diffs(&root, cx);
                 // The 2 s refresh used to redraw the window even when git and
                 // the tree were exactly as before (perf audit 2026-10-16).
                 if reloaded || this.right_snapshot_print != Some(print) {
@@ -3875,42 +3912,52 @@ impl Harness {
     }
 
 
-    /// The right-pane toggle the centre headers share (B2a-H4): ⌘⌥B's
-    /// button, lit while the pane stands open. The centre cell is a custom
-    /// `header_cell`, not the library's `centre_header`, so the library's
-    /// `on_toggle_right` has no compatible builder here — and the right cell
-    /// collapses to width zero while closed, so a toggle placed there could
-    /// close but never reopen. This is the same ghost `PanelRight` the
-    /// library paints, wired straight to `toggle_right`, with a hover label
-    /// naming what it does.
-    fn right_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let right_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.toggle_right(cx);
-            // B7fix2: the click builds the real webview itself, with the
-            // window — the deferred warmup the toggle armed is then a
-            // no-op, and render never constructs first.
-            this.prewarm_browser_in(window, cx);
-        });
-        let mut right_button =
-            icon_button("hd-centre-toggle-right", IconName::PanelRight)
-                .ghost()
-                .size(ButtonSize::Sm)
-                .accessibility_label("Toggle right pane");
-        if self.layout.right_open {
-            right_button = right_button.on_click(right_toggle);
-        } else {
-            right_button = right_button.muted().on_click(right_toggle);
+    /// The transcript row's pane toggles (D6, docs/43 §2.2): Changes ·
+    /// Files · Page, 28 px ghost buttons; the one the pane shows is lit and
+    /// announces itself pressed; none is lit while the pane is closed. A
+    /// click opens the pane on that screen (sliding the strip when it was
+    /// open on another), and the lit toggle closes it.
+    fn pane_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.layout.right_open && !self.settings_page.open;
+        let shown = layout::right_kind(&self.layout);
+        let mut row = h_flex().flex_none().items_center().gap(px(2.0));
+        for (kind, glyph, label, id) in [
+            (layout::RightKind::Changes, IconName::Git, "Changes", "hd-centre-pane-changes"),
+            (layout::RightKind::Files, IconName::Folder, "Files", "hd-centre-pane-files"),
+            (layout::RightKind::Browser, IconName::Globe, "Page", "hd-centre-pane-page"),
+        ] {
+            let lit = open && shown == kind;
+            let click = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.pane_toggle_click(kind, cx);
+                if kind == layout::RightKind::Browser && this.layout.right_open {
+                    // B7fix2: the click builds the real webview itself, with
+                    // the window, ahead of the strip's first frame.
+                    this.prewarm_browser_in(window, cx);
+                }
+            });
+            row = row.child(aui::workbench::pane_toggle(id, glyph, label, lit).on_click(click));
         }
-        // The tooltip names the button for a pointer; the role and label name
-        // it for everything else. `icon_button` yields a `Button`, which has
-        // no aria builder of its own, so the wrapper carries both.
-        div()
-            .id("hd-centre-toggle-right-tip")
-            .role(gpui::Role::Button)
-            .aria_label("Toggle right pane")
-            .tooltip(|_, cx| cx.new(|_| RightToggleTip).into())
-            .child(right_button)
-            .into_any_element()
+        row.into_any_element()
+    }
+
+    /// A two-finger sideways swipe in the pane: one screen along the strip
+    /// (Changes · Files · Page), stopping at either end.
+    pub(crate) fn swipe_right_screen(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let at = right::screen_index(layout::right_kind(&self.layout)) as i32 + dir;
+        if let Some(kind) = usize::try_from(at).ok().and_then(|i| layout::RightKind::ALL.get(i).copied()) {
+            self.select_right(kind, cx);
+        }
+    }
+
+    /// A pane toggle's click: the lit one closes the pane; any other opens
+    /// the pane on its screen (the strip slides there when it was open).
+    pub(crate) fn pane_toggle_click(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        let lit = self.layout.right_open && layout::right_kind(&self.layout) == kind;
+        if lit {
+            self.toggle_right(cx);
+        } else {
+            self.select_right(kind, cx);
+        }
     }
 
 
@@ -4816,15 +4863,15 @@ impl Harness {
         });
         let mut term_button = icon_button("hd-centre-terminal", IconName::Terminal)
             .ghost()
-            .size(ButtonSize::Sm)
             .accessibility_label("Toggle terminal");
         if self.layout.terminal_open {
             term_button = term_button.on_click(term_toggle);
         } else {
             term_button = term_button.muted().on_click(term_toggle);
         }
-        // The right-pane toggle both centre headers share.
-        let right_tip = self.right_toggle(cx);
+        // D6 (docs/43 §2.2): Changes · Files · Page choose the pane's screen
+        // (lit = the screen it shows); then Terminal, a hairline, the menu.
+        let toggles = self.pane_toggles(cx);
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
@@ -4832,7 +4879,9 @@ impl Harness {
             .flex_none()
             .items_center()
             .gap(px(2.0))
+            .child(toggles)
             .child(term_button)
+            .child(div().flex_none().mx(px(4.0)).w(px(1.0)).h(px(16.0)).bg(cx.aui().colors.line))
             .child(
                 div()
                     .flex_none()
@@ -4848,13 +4897,11 @@ impl Harness {
                         icon_button("hd-centre-overflow", IconName::Dots)
                             .ghost()
                             .muted()
-                            .size(ButtonSize::Sm)
                             .accessibility_label("Open session menu")
                             .menu_open(overflow_open)
                             .on_click(overflow),
                     ),
             )
-            .child(right_tip)
             .into_any_element()
     }
 
@@ -4973,6 +5020,7 @@ impl Harness {
         self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
+        self.right_cache.page_menu = false;
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
@@ -6186,27 +6234,6 @@ impl Harness {
 ///
 /// A session with no user prompt still did something, and what it did is the
 /// only honest thing to call it. `session/read` makes no model call.
-/// The hover label on the header's right-pane toggle: what it does, not
-/// what it is.
-struct RightToggleTip;
-
-impl gpui::Render for RightToggleTip {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let p = cx.aui().colors;
-        div()
-            .px(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .rounded(px(scale::R_SM))
-            .border_1()
-            .border_color(p.line_strong)
-            .bg(p.overlay)
-            .text_color(p.ink)
-            .ui(scale::FS_12)
-            .whitespace_nowrap()
-            .child("Toggle right pane")
-    }
-}
-
 fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<String> {
     // The server decides what it serves, never the client: `mode: inline`
     // fills `items`, a snapshot fills `snapshot.state.items`, and both carry
@@ -6248,6 +6275,7 @@ impl Harness {
         // what is open and where.
         self.sync_overlay(window, cx);
         self.sync_corner(window, cx);
+        self.sync_page_float(window, cx);
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once
@@ -6567,6 +6595,7 @@ impl Render for Harness {
             // shown for the still-active session, so its page can neither
             // draw nor hit-test under the loading centre.
             let pending_neutral = self.pending_right_neutral(cx);
+            let browse_mode = self.mode == layout::Mode::Browse;
             // B2a-H2b: in Browse the pane never drives a native page —
             // one tab, one page. The Browser kind falls back to Changes
             // until B3 puts the agent there: a session page behind
@@ -6589,7 +6618,7 @@ impl Render for Harness {
             // while closing (or while Settings hides the pane) the existing
             // webview passes through without creating, so the last page
             // snapshot slides out instead of the "Opening the page" placeholder.
-            let browser = if pending_neutral {
+            let browser = if pending_neutral || !browse_mode {
                 None
             } else if body_kind == layout::RightKind::Browser {
                 if right_open {
@@ -6610,6 +6639,7 @@ impl Render for Harness {
             // (so a steady frame never dirties it either). Empty when no
             // session is open.
             let shows_changes = right_open
+                && browse_mode
                 && !pending_neutral
                 && matches!(
                     body_kind,
@@ -6637,8 +6667,77 @@ impl Render for Harness {
             // person tabs already live in Browse, so they get none.
             let carry =
                 matches!(self.shown_tab_owner(cx), crate::browser::Owner::Session(_));
+            // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
+            // three screens on a strip — Changes · Files · Page — each with
+            // its own row; a toggle slides the strip (240 ms ease-out), a
+            // two-finger sideways swipe moves one screen. Browse keeps its
+            // pane as it was (out of D6's scope): one body under the tabs.
+            let strip_mode = !browse_mode && !pending_neutral;
+            if !self.right_cache.pushed.is_empty() {
+                self.sync_pushed_outputs(cx);
+            }
+            // A drafted PR description lands in its editor here, where the
+            // window is at hand (the draft came back on a background task).
+            if let Some((body, text)) = self.pending_pr_body.take() {
+                body.update(cx, |state, cx| state.set_value(&text, window, cx));
+            }
             let right = if pending_neutral {
                 v_flex().size_full().into_any_element()
+            } else if strip_mode {
+                let index = right::screen_index(kind);
+                let pos = aui::workbench::strip_position("right-strip", index, window, cx);
+                let moving = aui::workbench::strip_moving(pos, index);
+                if moving != self.right_strip_moving {
+                    self.right_strip_moving = moving;
+                }
+                let visible = aui::workbench::strip_visible(pos, 3);
+                if visible(2) && self.right_cache.page_address.is_none() {
+                    self.ensure_page_address(window, cx);
+                }
+                let agent = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id).label()).unwrap_or("Muse");
+                let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
+                for (i, screen_kind) in layout::RightKind::ALL.into_iter().enumerate() {
+                    if !visible(i) {
+                        screens.push(None);
+                        continue;
+                    }
+                    let page = if screen_kind == layout::RightKind::Browser {
+                        if right_open { Some(self.ensure_browser_person(window, cx)) } else { self.existing_browser(cx) }
+                    } else {
+                        None
+                    };
+                    let edits = if screen_kind == layout::RightKind::Changes && !session_edits.is_empty() {
+                        session_edits.clone()
+                    } else if screen_kind == layout::RightKind::Changes {
+                        self.active
+                            .as_ref()
+                            .map(|view| match view.read(cx).fresh_session_edits() {
+                                Some(fresh) => fresh,
+                                None => view.update(cx, |view, _| view.refresh_session_edits()),
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    screens.push(Some(right::render_screen(
+                        screen_kind,
+                        &self.right_cache,
+                        right_project.clone(),
+                        &edits,
+                        crate::right::BrowserPane { state: page.as_ref(), tabs: &[], window: &mut *window, carry: false },
+                        right_open,
+                        self.right_resize.width,
+                        agent,
+                        &self.right_files_focus,
+                        cx,
+                    )));
+                }
+                let swipe = cx.weak_entity();
+                aui::workbench::pane_strip("right-strip", pos, px(self.right_resize.width), screens)
+                    .on_swipe(move |dir, _, cx| {
+                        let _ = swipe.update(cx, |this, cx| this.swipe_right_screen(dir, cx));
+                    })
+                    .into_any_element()
             } else {
                 right::render(
                     body_kind,
@@ -6652,6 +6751,8 @@ impl Render for Harness {
                         carry,
                     },
                     right_open,
+                    self.right_resize.width,
+                    "Muse",
                     cx,
                 )
             };
@@ -6743,7 +6844,6 @@ impl Render for Harness {
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
                 .sidebar_open(self.sidebar_open)
                 .right_open(right_open)
-                .header_right(header_right_el)
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
                 .peek_open(self.peek_pinned)
@@ -6767,6 +6867,11 @@ impl Render for Harness {
                 })
                 .right(right)
                 .centre(centre);
+            // Browse keeps the pane's old tab header; Sessions' screens
+            // carry their own rows on the strip.
+            if browse_mode {
+                shell = shell.header_right(header_right_el);
+            }
             if let Some(switch) = chrome.switch {
                 shell = shell.chrome_switch(switch);
             }
@@ -6822,7 +6927,11 @@ impl Render for Harness {
                         .absolute()
                         .top(px(0.0))
                         .bottom(px(0.0))
-                        .right(px(self.right_resize.width - RESIZE_HANDLE_W / 2.0))
+                        // D6: the pane is a sheet 6 in from the window's
+                        // right edge with a 6 gap before it; the handle
+                        // straddles that gap (live 2026-10-19: it sat 9 px
+                        // inside the pane, where nobody aims).
+                        .right(px(self.right_resize.width + RIGHT_SHEET_INSET + RIGHT_SHEET_GAP / 2.0 - RESIZE_HANDLE_W / 2.0))
                         .id("right-resize-area")
                         .role(gpui::Role::Splitter)
                         .aria_label("Resize right pane")
@@ -7423,10 +7532,24 @@ impl Harness {
                 return;
             }
         }
+        // The Page row's Recent pages menu closes first (D6, 2026-10-18).
+        if self.right_cache.page_menu {
+            self.set_page_menu(false, cx);
+            return;
+        }
         // An open file preview is the next thing Escape takes back: back
         // to the tree, keeping the selected marker and the scroll offset.
         if let Some((root, _)) = self.right_project() {
             if self.close_file_preview_for(&root, cx) {
+                window.focus(&self.right_files_focus.clone(), cx);
+                return;
+            }
+        }
+        // Then a pushed full output or image on the screen the pane shows
+        // (docs/43 §2.9–2.10: ←, Esc and ⌘[ go back).
+        if self.layout.right_open {
+            let screen = crate::right::screen_index(crate::layout::right_kind(&self.layout));
+            if self.pop_right_view(screen, cx) {
                 return;
             }
         }
@@ -9088,7 +9211,7 @@ mod tests {
         }
         assert_eq!(tabs[0].label.as_ref(), "Changes");
         assert_eq!(tabs[1].label.as_ref(), "Files");
-        assert_eq!(tabs[2].label.as_ref(), "Browser");
+        assert_eq!(tabs[2].label.as_ref(), "Page");
         assert!(!tabs.iter().any(|tab| tab.closable), "header tabs are fixed, never closable");
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
@@ -9275,6 +9398,8 @@ mod tests {
                                 carry: false,
                             },
                             true,
+                            400.0,
+                            "Muse",
                             cx,
                         );
                     });
@@ -9321,7 +9446,7 @@ mod tests {
         // Outside any `Harness` update, exactly like the pane's own action
         // dispatch: nesting an entity update inside one panics.
         vc.update(|_, cx| {
-            crate::right::refresh_files(baaz.downgrade(), cx);
+            baaz.update(cx, |this, cx| this.refresh_right_now(cx));
         });
         vc.run_until_parked();
         assert!(

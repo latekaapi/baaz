@@ -327,6 +327,9 @@ struct PendingRun {
 struct PendingBrowser {
     id: Value,
     session: String,
+    /// What the agent is doing, for the Page screen's pill (D6, docs/43
+    /// §2.7): "clicking “Choose”".
+    label: String,
     deadline: Instant,
     reply: mpsc::Sender<String>,
     wait: BrowserWait,
@@ -1297,7 +1300,38 @@ impl TerminalService {
 /// registered id from [`TerminalService::register_session`], and the
 /// webview is the harness's [`register_browser`][TerminalService::register_browser]
 /// entry for that same id — never another session's.
+/// The pill's words for a browser tool (D6, docs/43 §2.7).
+pub(crate) fn browser_activity_label(tool: &str, params: &Value) -> String {
+    let arg = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let quoted = |s: String| {
+        let s = s.strip_prefix("text=").unwrap_or(&s).trim_matches(['"', '\'']).to_string();
+        let s: String = if s.chars().count() > 32 { format!("{}…", s.chars().take(31).collect::<String>()) } else { s };
+        format!("\u{201C}{s}\u{201D}")
+    };
+    match tool {
+        "browser_open" => {
+            let url = arg("url");
+            let host = url.split_once("://").map(|(_, r)| r).unwrap_or(&url).split('/').next().unwrap_or("").to_string();
+            format!("opening {host}")
+        }
+        "browser_read" => "reading the page".into(),
+        "browser_links" => "reading the links".into(),
+        "browser_click" => format!("clicking {}", quoted(arg("selector"))),
+        "browser_type" => format!("typing into {}", quoted(arg("selector"))),
+        "browser_screenshot" => "taking a screenshot".into(),
+        _ => "working on the page".into(),
+    }
+}
+
 impl TerminalService {
+    /// What the agent is doing on `session`'s page right now (the oldest
+    /// browser job still waiting), for the Page screen's pill.
+    pub fn browser_activity(&self, session: &str) -> Option<String> {
+        let session = self.resolve_session(session);
+        let pending = self.shared.pending_browser.lock().ok()?;
+        pending.iter().find(|p| p.session == session).map(|p| p.label.clone())
+    }
+
     /// Dispatch one `browser_*` job. Refusals (a bad URL, a missing
     /// argument, no webview yet) answer at once; navigations, evaluations
     /// and screenshots queue a [`PendingBrowser`] for [`poll_browser`].
@@ -1317,10 +1351,12 @@ impl TerminalService {
         let session = self.resolve_session(session);
         let session = session.as_str();
         let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
+        let label = browser_activity_label(tool, params);
         let pend = |reply: mpsc::Sender<String>, wait: BrowserWait| {
             self.shared.pending_browser.lock().expect("pending browser").push(PendingBrowser {
                 id: job_id.clone(),
                 session: session.to_owned(),
+                label: label.clone(),
                 deadline: Instant::now() + timeout,
                 reply,
                 wait,
