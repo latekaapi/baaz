@@ -663,7 +663,16 @@ impl ControlHub {
         };
         match subtype {
             "success" => match pending.kind {
-                PendingControlKind::Initialize => self.fold.lock().expect("fold mutex").set_catalog(models),
+                PendingControlKind::Initialize => {
+                    self.fold.lock().expect("fold mutex").set_catalog(models);
+                    // The view asked for the list at attach, usually before
+                    // this answer: tell it the catalog is here. Unnamed yet
+                    // (the answer beat the open's return), the attach-time
+                    // ask comes after and already finds it.
+                    if let Some(session_id) = self.session_id.lock().expect("session mutex").clone() {
+                        let _ = self.tx.send(ProviderEvent::ModelCatalogChanged { session_id });
+                    }
+                }
                 PendingControlKind::SetModel => {
                     // Owned read first (see `refuse`): only the pick still
                     // on record counts — a superseded one answers for

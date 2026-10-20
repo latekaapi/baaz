@@ -83,6 +83,16 @@ pub enum ProviderEvent {
         /// The level in force, as the backend spells it.
         effort: Option<String>,
     },
+    /// The session's model catalog changed after the open answered: ask
+    /// again with [`crate::Command::ListModels`]. Claude Code acks the
+    /// open before the child's `initialize` answer (which carries the
+    /// catalog, effort levels included) lands, so a list asked for at
+    /// attach can find nothing but the offline fallback (owner 2026-10-21:
+    /// the effort menu offered only Default).
+    ModelCatalogChanged {
+        /// The owning session.
+        session_id: String,
+    },
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.
     ConnectionLost {
