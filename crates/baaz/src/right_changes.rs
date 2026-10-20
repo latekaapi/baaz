@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use aui::interact::{fluid_list, Axis};
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
-    ahead_behind, base_and_head, base_picker, branch_label, change_row, change_with_diff, changes_caption, commit_foot, commit_frame,
+    ahead_behind, base_and_head, base_picker, branch_label, change_row, changes_caption, diff_fold, commit_foot, commit_frame,
     commit_message_view, diff_body, draft_checkbox, form_field, hook_failed_note, pr_card, primary_action, pushed_row, skeleton_bar,
     state_block, text_action, unchanged_between, well_input,
 };
@@ -791,22 +791,34 @@ pub(crate) fn changes_screen(
                     None => div().h(px(24.0)).into_any_element(),
                 }
             };
-            let tops = row_tops.clone();
-            let key = change.path.clone();
-            let at = scroll.clone();
-            let el = div()
-                .on_prepaint(move |b, _, _| {
-                    // Kept relative to the scroll content, so the sticky
-                    // test can use the offset as it is now.
-                    let content_y = f32::from(b.origin.y - at.bounds().origin.y - at.offset().y);
-                    if std::env::var("BAAZ_STICKY_TRACE").as_deref() == Ok("1") {
-                        eprintln!("baaz: sticky prepaint {key} origin={} bounds={} offset={} content_y={content_y} h={}", f32::from(b.origin.y), f32::from(at.bounds().origin.y), f32::from(at.offset().y), f32::from(b.size.height));
-                    }
-                    tops.borrow_mut().insert(key.clone(), (content_y, f32::from(b.size.height)));
-                })
-                .child(change_with_diff(SharedString::from(format!("right-changes-fold:{}", change.path)), row, open, body, window, cx));
-            list = list.item(ix, el);
+            // The row and its diff are two list entries: the diff is a
+            // toolbar, so the pointer over it lights nothing (owner
+            // 2026-10-21: one item lit the row and every hunk). The sticky
+            // test still needs the pair's top and joint height: the row
+            // records its top, the diff extends the height to its foot.
+            let (tops, key, at) = (row_tops.clone(), change.path.clone(), scroll.clone());
+            let row_wrap = div().w_full().on_prepaint(move |b, _, _| {
+                // Kept relative to the scroll content, so the sticky
+                // test can use the offset as it is now.
+                let content_y = f32::from(b.origin.y - at.bounds().origin.y - at.offset().y);
+                if std::env::var("BAAZ_STICKY_TRACE").as_deref() == Ok("1") {
+                    eprintln!("baaz: sticky prepaint {key} origin={} bounds={} offset={} content_y={content_y} h={}", f32::from(b.origin.y), f32::from(at.bounds().origin.y), f32::from(at.offset().y), f32::from(b.size.height));
+                }
+                tops.borrow_mut().insert(key.clone(), (content_y, f32::from(b.size.height)));
+            });
+            list = list.item(ix, row_wrap.child(row));
             ix += 1;
+            if let Some(fold) = diff_fold(SharedString::from(format!("right-changes-fold:{}", change.path)), open, body, window, cx) {
+                let (tops, key, at) = (row_tops.clone(), change.path.clone(), scroll.clone());
+                let wrap = div().w_full().on_prepaint(move |b, _, _| {
+                    let foot = f32::from(b.origin.y + b.size.height - at.bounds().origin.y - at.offset().y);
+                    if let Some(entry) = tops.borrow_mut().get_mut(&key) {
+                        entry.1 = foot - entry.0;
+                    }
+                });
+                list = list.item_toolbar(ix, wrap.child(fold));
+                ix += 1;
+            }
         }
     }
 
