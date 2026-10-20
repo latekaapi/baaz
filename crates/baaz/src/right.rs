@@ -715,6 +715,7 @@ pub(crate) fn render_screen(
             ),
         }
     };
+    let chrome_under_row = opens_on_chrome(kind, pushed, cache.files_ui.filter.is_some());
     // A pushed view slides 8 px in from the right and fades in, 160 ms
     // ease-out (docs/43 §3).
     let body = if pushed {
@@ -739,8 +740,26 @@ pub(crate) fn render_screen(
         }))
         .child(row)
         .child(div().flex_1().min_h(px(0.0)).child(body))
-        .child(aui::workbench::pane_row_fade(cx))
+        // The fade is for content scrolling under the row; a screen whose
+        // body opens on its own opaque chrome (the Page's nav row, the
+        // Files filter) has none there. Drawn over that chrome, it veiled
+        // the address field (owner 2026-10-21: "the address bar is getting
+        // hidden under the Page header's shadow"; the locked boards draw
+        // the nav row above the fade).
+        .when(!chrome_under_row, |screen| screen.child(aui::workbench::pane_row_fade(cx)))
         .into_any_element()
+}
+
+/// Whether a screen's body opens on opaque chrome of its own right under
+/// the pane row — the Page's nav row, the open Files filter — which the
+/// row's fade must not veil. A pushed view opens on content.
+fn opens_on_chrome(kind: RightKind, pushed: bool, filter_open: bool) -> bool {
+    !pushed
+        && match kind {
+            RightKind::Browser => true,
+            RightKind::Files => filter_open,
+            _ => false,
+        }
 }
 
 impl Harness {
@@ -3014,4 +3033,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+
+    /// Owner 2026-10-21: the address field sat under the pane row's fade.
+    #[test]
+    fn the_row_fade_never_veils_a_screens_own_chrome() {
+        use super::opens_on_chrome;
+        assert!(opens_on_chrome(RightKind::Browser, false, false), "the Page's nav row");
+        assert!(opens_on_chrome(RightKind::Files, false, true), "the open Files filter");
+        assert!(!opens_on_chrome(RightKind::Files, false, false), "the tree scrolls under the fade");
+        assert!(!opens_on_chrome(RightKind::Changes, false, false));
+        assert!(!opens_on_chrome(RightKind::Browser, true, false), "a pushed view opens on content");
+    }
 }
