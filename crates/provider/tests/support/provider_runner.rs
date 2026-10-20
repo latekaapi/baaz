@@ -130,7 +130,7 @@ impl Lane<'_> {
                 }
             }
             // The effort chip's word; the mode matrix reads none of it.
-            ProviderEvent::EffortInForce { .. } => {}
+            ProviderEvent::EffortInForce { .. } | ProviderEvent::ModelCatalogChanged { .. } => {}
         }
     }
 

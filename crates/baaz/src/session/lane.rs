@@ -439,6 +439,15 @@ impl SessionView {
             // thread's standing level, or a Default the backend could not
             // reset): the chip reads it, and nothing is recorded as a new
             // pick — no project default moves.
+            // The catalog the attach-time ask missed has landed (Claude
+            // Code's `initialize` answer): fold it, so the effort menu
+            // lists the model's levels instead of only Default.
+            provider::ProviderEvent::ModelCatalogChanged { session_id } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                self.request_provider_models(cx);
+            }
             provider::ProviderEvent::EffortInForce { session_id, effort } => {
                 if session_id != self.session_id {
                     return;
@@ -1562,6 +1571,14 @@ mod tests {
     }
 
     impl RecordingHandle {
+        /// Serve `models` from `ListModels` from now on, the way Claude
+        /// Code's fold does once the child's `initialize` answer lands.
+        fn set_catalog(&self, models: Vec<provider::ModelSummary>) {
+            let mut state = self.inner.state.lock().expect("recording mutex");
+            state.catalog = models;
+            state.catalog_provider = "anthropic".to_owned();
+        }
+
         /// Serve a usage reading from `read_usage`, the way a live fold
         /// does after the wire speaks.
         fn set_usage(&self, report: provider::UsageReport) {
@@ -3517,6 +3534,44 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(crate::overlays::effort_label(view.read(cx).effort), "High");
         });
+    }
+
+    /// Owner 2026-10-21: a new Claude Code session's effort menu offered
+    /// only Default. The attach-time `ListModels` beat the child's
+    /// `initialize` answer, folded the effort-less fallback, and nothing
+    /// asked again. The adapter now says when the catalog lands; the lane
+    /// asks again and the menu lists the model's levels.
+    #[gpui::test]
+    fn a_late_claude_catalog_brings_the_effort_levels(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::EffortOptions;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        let levels = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| match view.read(cx).effort_options() {
+                EffortOptions::Available(options) | EffortOptions::AvailableWithNote { options, .. } => options.len(),
+                EffortOptions::Unavailable(_) => 0,
+            })
+        };
+        assert_eq!(levels(vc), 1, "before the catalog: Default only");
+        let level = |e: &str| e.to_owned();
+        handle.set_catalog(vec![provider::ModelSummary {
+            unavailable_modes: Vec::new(),
+            id: "opus".into(),
+            label: "Opus".into(),
+            active: true,
+            efforts: vec![level("low"), level("medium"), level("high")],
+            hidden: false,
+            is_default: true,
+            description: None,
+        }]);
+        tx.unbounded_send(provider::ProviderEvent::ModelCatalogChanged { session_id: "s-other".into() }).expect("lane open");
+        vc.run_until_parked();
+        assert_eq!(levels(vc), 1, "another session's catalog changes nothing here");
+        tx.unbounded_send(provider::ProviderEvent::ModelCatalogChanged { session_id: "s-1".into() }).expect("lane open");
+        vc.run_until_parked();
+        assert_eq!(levels(vc), 4, "Default + low, medium, high once the catalog lands");
     }
 
     /// W4: plan mode stands back down when the child refuses the switch —

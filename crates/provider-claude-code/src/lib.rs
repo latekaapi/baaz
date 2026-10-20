@@ -2100,6 +2100,38 @@ mod tests {
         assert_eq!(adapter.fold.lock().expect("fold mutex").model(), Some("sonnet"));
     }
 
+    /// Owner 2026-10-21: the effort menu offered only Default because the
+    /// view's attach-time `ListModels` came before this answer and nothing
+    /// asked again. The answer now tells the view its catalog is here.
+    #[test]
+    fn the_initialize_answer_announces_the_catalog() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("s-1");
+        adapter.hub.track(PendingControl {
+            kind: PendingControlKind::Initialize,
+            request_id: "req_init_1".into(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            wanted_mcp: None,
+            sent_at: Instant::now(),
+        });
+        let events = adapter.events();
+        let path = format!("{}/../../fixtures/claude-code/permission.jsonl", env!("CARGO_MANIFEST_DIR"));
+        for line in std::fs::read_to_string(path).expect("fixture reads").lines().filter(|l| !l.trim().is_empty()) {
+            adapter.ingest_child_line(line);
+        }
+        let mut announced = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ProviderEvent::ModelCatalogChanged { session_id } = event {
+                announced.push(session_id);
+            }
+        }
+        assert_eq!(announced, ["s-1"], "one announcement, for the session the child serves");
+    }
+
     #[test]
     fn list_models_serves_the_initialize_catalog_including_fable() {
         // Offline throughout: the program name does not exist, so a stray

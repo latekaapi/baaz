@@ -192,6 +192,14 @@ pub struct Projects {
     /// The adoptions, in adoption order.
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// The person's last model, effort and approval-mode picks, wherever
+    /// they were made: what every new session starts with (owner
+    /// 2026-10-21, replacing D35's per-project memory — "Last pick,
+    /// everywhere"). A project's own [`Project::defaults`] are only read
+    /// for a field never picked since (see [`Projects::picks`]), so an old
+    /// store keeps its choices until the next pick replaces them.
+    #[serde(default, skip_serializing_if = "is_default_picks")]
+    pub last_picks: ProjectDefaults,
     /// Root-exists answers per project id: `(exists, checked_at_secs)`.
     /// Memory only — never serialized, so a missing root stays adopted in
     /// `projects.json` and comes back when the path does. Compared by the
@@ -203,8 +211,12 @@ pub struct Projects {
 
 impl Default for Projects {
     fn default() -> Self {
-        Self { version: VERSION, current: None, projects: Vec::new(), existence: Default::default() }
+        Self { version: VERSION, current: None, projects: Vec::new(), last_picks: ProjectDefaults::default(), existence: Default::default() }
     }
+}
+
+fn is_default_picks(picks: &ProjectDefaults) -> bool {
+    *picks == ProjectDefaults::default()
 }
 
 /// `~/Library/Application Support/baaz/projects.json`.
@@ -385,6 +397,25 @@ impl CanonicalCache {
 }
 
 impl Projects {
+    /// What a new session starts with: the last picks (see
+    /// [`Projects::last_picks`]), each field falling back to `project`'s
+    /// stored default only when it was never picked since.
+    pub fn picks(&self, project: Option<&Project>) -> ProjectDefaults {
+        let mut picks = self.last_picks.clone();
+        if let Some(project) = project {
+            for (lane, model) in &project.defaults.models {
+                picks.models.entry(lane.clone()).or_insert_with(|| model.clone());
+            }
+            for (lane, effort) in &project.defaults.efforts {
+                picks.efforts.entry(lane.clone()).or_insert_with(|| effort.clone());
+            }
+            if picks.approval_mode.is_none() {
+                picks.approval_mode = project.defaults.approval_mode.clone();
+            }
+        }
+        picks
+    }
+
     /// Adopt `root`, or hand back the project that already holds it.
     ///
     /// A newcomer is named for the folder's last component, takes the
@@ -694,12 +725,8 @@ pub fn start_params(
     cli_approval: Option<muse_client::schema::ApprovalMode>,
 ) -> Option<muse_client::schema::SessionStartParams> {
     let project = project_id.and_then(|id| projects.find(id))?;
-    Some(build_start_params(
-        &project.root,
-        provider,
-        project.defaults.model_for(provider),
-        cli_approval.or_else(|| project.defaults.approval_mode.clone()),
-    ))
+    let picks = projects.picks(Some(project));
+    Some(build_start_params(&project.root, provider, picks.model_for(provider), cli_approval.or(picks.approval_mode)))
 }
 
 /// The dropped-model ids already logged: the drop repeats every start

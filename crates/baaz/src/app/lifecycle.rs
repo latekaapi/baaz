@@ -1680,10 +1680,10 @@ impl Harness {
         // migration starts on the server default instead of failing the
         // turn. A handoff destination to muse lands here too — it opens
         // through `new_session` — so it filters alike.
-        let effort = current
-            .as_deref()
-            .and_then(|id| self.projects.find(id))
-            .and_then(|p| p.defaults.effort_for(&self.new_provider))
+        let effort = self
+            .projects
+            .picks(current.as_deref().and_then(|id| self.projects.find(id)))
+            .effort_for(&self.new_provider)
             .as_deref()
             .and_then(projects::parse_effort);
         let started_project = current.clone();
@@ -2326,8 +2326,9 @@ impl Harness {
         self.set_override(&draft_id, |meta| meta.project = Some(id.clone()), cx);
         let name = self.current_project().map(|p| p.name.clone());
         let effort = self
-            .current_project()
-            .and_then(|p| p.defaults.effort_for(&self.new_provider))
+            .projects
+            .picks(self.current_project())
+            .effort_for(&self.new_provider)
             .as_deref()
             .and_then(projects::parse_effort);
         if let Some(view) = self.active.clone() {
@@ -2819,9 +2820,9 @@ impl Harness {
         self.args
             .approval_mode
             .as_ref()
-            .or_else(|| {
-                self.projects.resolve(workspace, project).and_then(|p| p.defaults.approval_mode.as_ref())
-            })
+            .cloned()
+            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
+            .as_ref()
             .map(muse_adapter::permission_mode)
             .unwrap_or_default()
     }
@@ -3175,17 +3176,20 @@ impl Harness {
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
         let fold_on = self.layout.fold_finished_turns;
         view.update(cx, |view, _| view.fold_finished_turns = fold_on);
-        // A switch carries the replaced draft's mode and effort; then the
-        // project's remembered model for this provider is the model the
-        // draft asks for — the chip names it and the open's landing sends
-        // it, so chip, menu check and child agree from the first frame.
+        // A switch carries the replaced draft's mode and effort; otherwise
+        // the last effort picked on this provider is the level the first
+        // turn asks for (owner 2026-10-21: a Claude Code draft never read
+        // it). Then the last model picked for this provider is the model
+        // the draft asks for — the chip names it and the open's landing
+        // sends it, so chip, menu check and child agree from the first
+        // frame.
+        let picks = self.projects.picks(project.as_deref().and_then(|id| self.projects.find(id)));
         if let Some((mode, effort)) = switch.and(self.switch_carry.take()) {
             view.update(cx, |view, cx| view.carry_draft_settings(mode, effort, cx));
+        } else if let Some(effort) = picks.effort_for(provider_id.as_str()).as_deref().and_then(projects::parse_effort) {
+            view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
         }
-        let remembered = project
-            .as_deref()
-            .and_then(|id| self.projects.find(id))
-            .and_then(|p| p.defaults.model_for(provider_id.as_str()));
+        let remembered = picks.model_for(provider_id.as_str());
         if let Some(model) = remembered {
             view.update(cx, |view, cx| view.set_model(&model, cx));
         }
@@ -4691,21 +4695,13 @@ impl Harness {
         });
     }
 
-    /// Store a picked default on a session's project: resolve the session to
-    /// its project — its stored id first, then its own workspace's root —
-    /// edit that adoption's defaults and persist. A session that resolves to
-    /// no project changes nothing.
-    fn note_project_default(&mut self, session_id: &str, edit: impl FnOnce(&mut crate::projects::ProjectDefaults)) {
-        let project = self
-            .sessions
-            .iter()
-            .find(|e| e.id == session_id)
-            .and_then(|e| self.projects.resolve(e.workspace.as_deref(), e.project.as_deref()))
-            .map(|p| p.id.clone());
-        let Some(id) = project else { return };
-        if let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) {
-            edit(&mut project.defaults);
-        }
+    /// Store a pick as the one every new session starts with, in any
+    /// project, and persist (owner 2026-10-21: "Last pick, everywhere").
+    /// It needs no session row, so a pick made while a provider draft is
+    /// still opening counts too (it used to be dropped: the draft had no
+    /// row to resolve a project from).
+    fn note_pick(&mut self, edit: impl FnOnce(&mut crate::projects::ProjectDefaults)) {
+        edit(&mut self.projects.last_picks);
         projects::write(&self.projects);
     }
 
@@ -4976,27 +4972,24 @@ impl Harness {
                 }
             }
             // The person picked a model, effort or approval mode in a
-            // session: it becomes that session's project defaults, so the
-            // next session there starts with it. Scripted `setmodel:` /
+            // session: it becomes the last pick, so the next session — in
+            // any project — starts with it. Scripted `setmodel:` /
             // `setmode:` steps and plan-mode toggles never emit these, so
             // scripted and transient choices stay out of the defaults.
             SessionEvent::ModelSelected { model_id } => {
-                let session_id = view.read(cx).session_id.clone();
                 let provider = view.read(cx).provider_kind();
-                self.note_project_default(&session_id, |defaults| {
+                self.note_pick(|defaults| {
                     defaults.note_model(provider.as_str(), model_id);
                 });
             }
             SessionEvent::EffortSelected { effort } => {
-                let session_id = view.read(cx).session_id.clone();
                 let provider = view.read(cx).provider_kind();
-                self.note_project_default(&session_id, |defaults| {
+                self.note_pick(|defaults| {
                     defaults.note_effort(provider.as_str(), effort.clone());
                 });
             }
             SessionEvent::ModeSelected { mode } => {
-                let session_id = view.read(cx).session_id.clone();
-                self.note_project_default(&session_id, |defaults| {
+                self.note_pick(|defaults| {
                     defaults.approval_mode = Some(mode.clone());
                 });
             }
@@ -9126,6 +9119,64 @@ done
             assert!(!view.read(cx).is_opening_lane());
             assert_eq!(view.read(cx).model_id(), "opus[1m]");
         });
+        lane_restore(state);
+    }
+
+    /// Owner 2026-10-21: a new session in harness set to Full access and
+    /// Medium, then a new session in office-samples — it came up in the
+    /// default mode and effort. Picks are now one memory ("Last pick,
+    /// everywhere"), and a Claude Code draft reads the effort (it never
+    /// did). The picks travel the real event path, made while the first
+    /// draft could still be opening.
+    #[gpui::test]
+    fn a_pick_in_one_project_starts_the_next_session_in_another(cx: &mut gpui::TestAppContext) {
+        use crate::session::SessionEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("last-picks");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, shared) = y2b2_factory();
+        let first = b2fix_project(vc, &baaz, "claude-code", &[], &[]);
+        let other_root = std::env::temp_dir().join(format!("baaz-last-picks-{}", std::process::id()));
+        std::fs::create_dir_all(&other_root).expect("second root");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                harness.active = None;
+                harness.current_project = Some(first.clone());
+            });
+        });
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+        y2b2_drain_until_opens(vc, &shared, 1);
+        // Picked on the draft before its open lands.
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the first draft is drawn");
+            baaz.update(cx, |harness, cx| {
+                harness.on_session_event(view.clone(), &SessionEvent::ModeSelected { mode: muse_client::schema::ApprovalMode::AllowAll }, cx);
+                harness.on_session_event(view, &SessionEvent::EffortSelected { effort: Some("medium".into()) }, cx);
+            });
+        });
+        vc.run_until_parked();
+        let second = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let id = harness.projects.add(&other_root).id.clone();
+                assert_ne!(id, first, "a second project");
+                harness.current_project = Some(id.clone());
+                harness.active = None;
+                id
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+        y2b2_drain_until_opens(vc, &shared, 2);
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the second draft is drawn");
+            let (mode, effort) = view.read(cx).draft_settings();
+            assert_eq!(mode, aui_protocol::PermissionMode::AllowAll, "Full access carries into {second}");
+            assert_eq!(crate::overlays::effort_label(effort), "Medium", "Medium carries into {second}");
+        });
+        let _ = std::fs::remove_dir_all(&other_root);
         lane_restore(state);
     }
 
