@@ -85,3 +85,32 @@ Then: docs/64 handoff, tracker, memory. Baselines are regenerated on main at pus
   profile first. Each keeps its current behaviour unless a step says otherwise.
 - **Parked Muse views** start receiving their own events once each has a lane (today only the open view does). That
   is the intended fix, but it is new behaviour: checked live in step 4.
+
+## 6. Progress — PAUSED 2026-10-21 late (owner asked to pause at a logical point)
+
+| Step | State | Commit |
+|---|---|---|
+| 1 Neutral session store | **done**; tests, clippy, headless `store` budgets green. **Owed:** live BaazCheck look (a `--replay` capture + a Claude Code session), the windowed budgets (`boot/open/switch/stream/idle`) and the 18-entry probe — all deferred because the owner was at the keyboard (HIDIdleTime 0). | `adf3d28` |
+| 2 Seam vocabulary | **done**; tests + clippy green. Nothing consumes the new Muse events until step 4. | `19ddb85` |
+| 3–8 | not started | — |
+
+**Resume here:**
+1. If the owner is away (HIDIdleTime ≥ 180 s), run the owed step-1 checks first: `scripts/bundle.sh`, then
+   BaazCheck on `--replay fixtures/msp/synthetic-stress-300.jsonl` and on a Claude Code session; then
+   `python3 scripts/perf-budgets.py --binary target/release/baaz` and the probe in CLAUDE.md. A defect = its own
+   fix commit before step 3.
+2. Step 3 (Muse hub) as in §3. Design notes from steps 1–2 that it builds on:
+   - Muse-only reactions move *into* the adapter: already-resolved/not-found approvals resolve in the hub's fold
+     and go out as deltas; the stage token is filled from the fold when the view sends none; profile moves on
+     `SelectApprovalMode`; backfill is the view sending `PageTranscript` (Muse's capability says paging) and
+     folding `Ack::TranscriptPage` deltas — keep the first-page `HistoryReady` cue and the one stale-history retry
+     (`RefusalHint::StaleHistory`).
+   - Bind a lane to its session id **before** the send: open mints the id client-side (`request_id`, a bare uuid
+     muse ≥ 1.3 accepts), resume names it; events for unbound sessions go to the connection stream.
+   - Pin attached sessions in the hub's fold (`SESSION_CACHE_LIMIT` evicts otherwise).
+   - `provider_muse::facts::FactTracker` already turns the fold's state into `SessionFacts`/`HeaderChanged`/
+     `TurnRunning`/`TurnSettled`/`PromptRestored`/`StatusChanged`; the lane already handles each
+     (`session/lane.rs` `on_provider_event`).
+3. Working tree notes: `Cargo.lock` shows modified (local `[patch]` + the new `session-store` crate) — never commit
+   it; the repin at push regenerates it. Disk had 12 GB free at start; `target/debug` was wiped and rebuilt
+   (~74 GB free after).
