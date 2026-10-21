@@ -51,6 +51,11 @@ fn malformed_approval_tap_surfaces_a_visible_error() {
                 saw_deltas = true;
                 continue;
             }
+            // The facts beside the transcript the fold now holds for the
+            // session: not a tap, not transcript.
+            Ok(ProviderEvent::HeaderChanged { .. } | ProviderEvent::SessionFacts { .. } | ProviderEvent::ApprovalModeChanged { .. }) => {
+                continue
+            }
             Ok(other) => panic!("the bad tap must surface as an error, not {other:?}"),
             Err(_) => panic!("timed out waiting for the malformed tap to surface"),
         }
@@ -67,10 +72,14 @@ fn malformed_approval_tap_surfaces_a_visible_error() {
     // One bad prompt must not end the session: the pump keeps running, so
     // shutting down still reports the child's exit exactly once.
     adapter.shutdown();
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(ProviderEvent::ConnectionLost { reason }) => {
-            assert!(reason.contains("exited"), "exit notice must describe the exit: {reason}");
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(ProviderEvent::ConnectionLost { reason }) => {
+                assert!(reason.contains("exited"), "exit notice must describe the exit: {reason}");
+                break;
+            }
+            Ok(ProviderEvent::HeaderChanged { .. } | ProviderEvent::SessionFacts { .. } | ProviderEvent::ApprovalModeChanged { .. }) => {}
+            other => panic!("expected the exit notice after shutdown, got {other:?}"),
         }
-        other => panic!("expected the exit notice after shutdown, got {other:?}"),
     }
 }

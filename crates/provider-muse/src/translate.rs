@@ -182,6 +182,19 @@ pub(crate) fn transport_error_unclassified(error: &MuseError) -> ProviderError {
     }
 }
 
+/// Reach a fold behind whatever lock its owner keeps it under: the
+/// adapter's own mutex, or the hub's fold-and-routes lock.
+pub trait FoldAccess {
+    /// Run `f` with the fold held.
+    fn with_fold(&self, f: &mut dyn FnMut(&mut muse_adapter::MuseFold));
+}
+
+impl FoldAccess for std::sync::Mutex<muse_adapter::MuseFold> {
+    fn with_fold(&self, f: &mut dyn FnMut(&mut muse_adapter::MuseFold)) {
+        f(&mut self.lock().expect("fold mutex"));
+    }
+}
+
 /// Run one neutral command against the client. One arm per [`Command`]
 /// variant; each builds the typed params, makes the one matching call, and
 /// maps the result to a neutral [`Ack`]. Paging also takes the fold: it is
@@ -198,7 +211,7 @@ pub(crate) fn transport_error_unclassified(error: &MuseError) -> ProviderError {
 /// sent.
 pub fn dispatch(
     client: &MuseClient,
-    fold: &std::sync::Mutex<muse_adapter::MuseFold>,
+    fold: &dyn FoldAccess,
     command: Command,
     terminal: Option<(String, muse_client::schema::SessionConfig)>,
 ) -> Result<Ack, ProviderError> {
@@ -345,7 +358,7 @@ pub fn dispatch(
             // names the submission by its command id alone, so the words
             // are remembered before the command leaves.
             let text = display_text.clone().unwrap_or_else(|| submission_text(&parts));
-            fold.lock().expect("fold mutex").record_command(&session_id, &request_id, &text);
+            fold.with_fold(&mut |fold| fold.record_command(&session_id, &request_id, &text));
             let command_id = request_id.clone();
             let session = session_id.clone();
             let result = client
@@ -362,12 +375,13 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             let queued = result.disposition == muse_client::schema::TurnStartDisposition::Queued;
             if queued {
-                fold.lock().expect("fold mutex").record_queued(&session, &result.turn_id, &command_id, &text);
+                fold.with_fold(&mut |fold| fold.record_queued(&session, &result.turn_id, &command_id, &text));
             }
             Ok(Ack::TurnAccepted { turn_id: result.turn_id, queued })
         }
         Command::SteerInput { request_id, session_id, expected_turn, parts, effort } => {
-            fold.lock().expect("fold mutex").record_command(&session_id, &request_id, &submission_text(&parts));
+            let steered = submission_text(&parts);
+            fold.with_fold(&mut |fold| fold.record_command(&session_id, &request_id, &steered));
             client
                 .turn_steer(&TurnSteerParams {
                     command_id: request_id,
@@ -414,25 +428,7 @@ pub fn dispatch(
             let result = client
                 .model_list(&muse_client::schema::ModelListParams { session_id: session })
                 .map_err(transport_error)?;
-            Ok(Ack::ModelCatalog {
-                models: result
-                    .models
-                    .into_iter()
-                    .map(|model| ModelSummary {
-                        // The host's own tiers (1.4.9); empty from an older
-                        // host, which offers the whole vocabulary.
-                        efforts: model
-                            .effort_tiers()
-                            .map(|tiers| tiers.into_iter().map(str::to_owned).collect())
-                            .unwrap_or_default(),
-                        id: model.model_id,
-                        label: model.display_label,
-                        active: model.is_active,
-                        ..Default::default()
-                    })
-                    .collect(),
-                provider: result.provider_id,
-            })
+            Ok(Ack::ModelCatalog { models: model_summaries(&result.models), provider: result.provider_id })
         }
         Command::DecideApproval { request_id, session_id, approval, choice, stage_token, feedback } => {
             let Some(token) = stage_token else {
@@ -530,8 +526,14 @@ pub fn dispatch(
                     session_id,
                 })
                 .map_err(transport_error)?;
-            let mut fold = fold.lock().expect("fold mutex");
-            let (deltas, next_cursor) = fold_page(&mut fold, page)?;
+            let mut page = Some(page);
+            let mut folded = Err(ProviderError::Rejected { reason: "the page never folded".into() });
+            fold.with_fold(&mut |fold| {
+                if let Some(page) = page.take() {
+                    folded = fold_page(fold, page);
+                }
+            });
+            let (deltas, next_cursor) = folded?;
             Ok(Ack::TranscriptPage { deltas, next_cursor })
         }
         Command::FollowSession { session_id, after } => {
@@ -622,6 +624,27 @@ pub fn fold_page(
         }));
     }
     Ok((deltas, page.next_cursor))
+}
+
+/// `model/list`'s rows as the seam carries them.
+pub fn model_summaries(models: &[muse_client::schema::ModelCatalogEntry]) -> Vec<ModelSummary> {
+    models
+        .iter()
+        .map(|model| ModelSummary {
+            // The host's own tiers (1.4.9); empty from an older host, which
+            // offers the whole vocabulary.
+            efforts: model
+                .effort_tiers()
+                .map(|tiers| tiers.into_iter().map(str::to_owned).collect())
+                .unwrap_or_default(),
+            id: model.model_id.clone(),
+            label: model.display_label.clone(),
+            active: model.is_active,
+            is_default: model.is_default,
+            description: model.description.clone(),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Page direction for [`Command::PageTranscript`]: forward from the start

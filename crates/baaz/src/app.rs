@@ -51,7 +51,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use aui::a11y_text::a11y_text_input;
 use aui::composer::composer_state_rows;
@@ -106,7 +106,7 @@ use crate::sidebar_view::{
 };
 use crate::search::{FileHit, SessionHit};
 use crate::terminal::{self, TabOwner, TerminalHost, TerminalService};
-use crate::wire::{SharedProvider, WireCall};
+use crate::wire::WireCall;
 use crate::{layout, Args};
 
 actions!(
@@ -649,10 +649,10 @@ pub struct Harness {
     /// provider below — never a second spawn. Gone with the last legacy
     /// view.
     pub(crate) client: Option<Arc<MuseClient>>,
-    /// The one way to talk to the provider: the adapter behind the
-    /// enforced capability gate. Set alongside `client` on connect and
-    /// cleared with it on reconnect.
-    pub(crate) provider: Option<SharedProvider>,
+    /// The `muse serve` child as a hub: one provider lane per Muse
+    /// session. Set alongside `client` on connect and cleared with it on
+    /// reconnect.
+    pub(crate) muse_hub: Option<provider_muse::MuseHub>,
     /// How a new Claude Code / Codex session connects: the production
     /// factory spawns the real CLI child; tests inject a scripted provider.
     /// Never touched on the UI thread — the open path runs it on the
@@ -1541,7 +1541,7 @@ impl Harness {
             new_provider,
             args,
             client: None,
-            provider: None,
+            muse_hub: None,
             provider_factory: crate::providers::default_provider_factory(
                 terminal_service.socket_path().to_path_buf(),
             ),
@@ -2173,7 +2173,7 @@ impl Harness {
                 this.user_shell = connected.legacy.user_shell;
                 this.session_mcp = connected.legacy.session_mcp;
                 this.client = Some(connected.legacy.transport);
-                this.provider = Some(Arc::new(Mutex::new(connected.provider)));
+                this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
                 this.promote_local_draft = true;
                 this.pump(connected.legacy.events, cx);
@@ -2522,7 +2522,7 @@ impl Harness {
     /// keep working. Only a failed respawn takes the wire down.
     pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
-        self.provider = None;
+        self.muse_hub = None;
         let program = self.args.program.clone();
         let resume = self
             .active
@@ -2545,7 +2545,7 @@ impl Harness {
                     active.update(cx, |view, cx| view.reconnected(transport.clone(), cx));
                 }
                 this.client = Some(transport);
-                this.provider = Some(Arc::new(Mutex::new(connected.provider)));
+                this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
                 this.pump(connected.legacy.events, cx);
                 this.observe_provider(connected.events, cx);

@@ -22,6 +22,10 @@ use crate::providers::{ExternalApproval, ExternalApprovalKind, ProviderId};
 use crate::wire::{ProviderCall as _, SharedProvider};
 use aui_protocol::{ApprovalState, Block, Delta, Turn};
 
+/// The lost-connection banner's lead: [`provider::ProviderEvent::ConnectionRestored`]
+/// clears a banner that starts with it, and only that one.
+const CONNECTION_LOST: &str = "Provider connection lost: ";
+
 /// Which event stream owns a session view. Set at construction, never
 /// reassigned: there is no setter and no public field.
 pub(super) enum Lane {
@@ -276,7 +280,9 @@ impl SessionView {
         // session (`--resume`) on the next send, and the resumed child's
         // events arrive on this same stream — so only that lane keeps
         // draining past a lost connection.
-        let revives = self.provider_kind() == ProviderId::ClaudeCode;
+        // A Muse lane rides the shared child, which the hub respawns and
+        // re-attaches: it keeps draining too.
+        let revives = matches!(self.provider_kind(), ProviderId::ClaudeCode | ProviderId::Muse);
         self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
@@ -561,9 +567,26 @@ impl SessionView {
             // A row's status: the application's, for sessions no view
             // follows; a view has its own transcript to read.
             provider::ProviderEvent::StatusChanged { .. } => {}
+            // The provider's own words for the banner.
+            provider::ProviderEvent::Notice { session_id, text } => {
+                if session_id == self.session_id {
+                    self.set_banner(&text, None, cx);
+                }
+            }
+            // The shared child is back and this session re-attached: the
+            // lost-connection banner stands down.
+            provider::ProviderEvent::ConnectionRestored => {
+                if self.banner.as_deref().is_some_and(|banner| banner.starts_with(CONNECTION_LOST)) {
+                    self.banner = None;
+                    self.banner_action = None;
+                    cx.notify();
+                }
+            }
             provider::ProviderEvent::ConnectionLost { reason } => {
-                // Hang up the lane's provider: it will never deliver again.
-                if let Lane::Provider(lane) = &self.lane {
+                // Hang up the lane's provider: it will never deliver again —
+                // unless its connection is shared and comes back (Muse),
+                // where hanging up would only unbind this session.
+                if let (Lane::Provider(lane), false) = (&self.lane, self.provider_kind() == ProviderId::Muse) {
                     if let Ok(mut provider) = lane.provider.lock() {
                         provider.shutdown();
                     }
@@ -580,7 +603,7 @@ impl SessionView {
                 self.clear_running();
                 self.external_approvals.clear();
                 self.external_questions.clear();
-                self.set_banner(&format!("Provider connection lost: {reason}"), None, cx);
+                self.set_banner(&format!("{CONNECTION_LOST}{reason}"), None, cx);
             }
         }
     }
