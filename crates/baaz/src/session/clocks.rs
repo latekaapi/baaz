@@ -109,9 +109,14 @@ impl SessionView {
     /// both counts join here — a Codex approval waiting below must light
     /// the same banner a legacy one does.
     pub(super) fn waiting_on_you(&self) -> Option<(usize, usize)> {
+        // The side's pending approvals and the taps the lane parked can name
+        // the same approval (Muse sends both): count each id once.
         let side = self.store.side();
-        let (legacy_approvals, questions) = (side.pending_approvals.len(), side.pending_prompts.len());
-        let approvals = legacy_approvals + self.external_approvals.pending().len();
+        let questions = side.pending_prompts.len();
+        let mut ids: HashSet<&str> = side.pending_approvals.keys().map(String::as_str).collect();
+        let external = self.external_approvals.pending();
+        ids.extend(external.iter().map(|approval| approval.id.as_str()));
+        let approvals = ids.len();
         (approvals + questions > 0).then_some((approvals, questions))
     }
 

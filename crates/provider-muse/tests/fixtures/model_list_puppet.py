@@ -108,7 +108,8 @@ def canned(method, params, granted=()):
             "userAgent": "fake/0.0.0-test",
         }
     if method == "session/start":
-        if EMIT_TURN and (params or {}).get("sessionId"):
+        # `session/start` takes an exact identity: echo it.
+        if (params or {}).get("sessionId"):
             session = fake_session(params["sessionId"])
         return {"session": session, "viewCursor": "v:0"}
     if method in ("session/resume", "session/fork", "session/read"):

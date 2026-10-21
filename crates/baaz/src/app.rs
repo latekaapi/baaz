@@ -638,6 +638,11 @@ pub(crate) struct PendingAsk {
     pub query: String,
 }
 
+/// The lease notice: another window holds this session, so this one is
+/// read-only until it lets go.
+pub(crate) const LEASE_NOTICE: &str =
+    "This session is open in another window. Close it there, or start a new session.";
+
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
@@ -653,6 +658,9 @@ pub struct Harness {
     /// session. Set alongside `client` on connect and cleared with it on
     /// reconnect.
     pub(crate) muse_hub: Option<provider_muse::MuseHub>,
+    /// The same hub as the provider factory sees it: a Muse open waits on
+    /// it while `muse serve` starts.
+    pub(crate) muse_slot: crate::providers::MuseSlot,
     /// How a new Claude Code / Codex session connects: the production
     /// factory spawns the real CLI child; tests inject a scripted provider.
     /// Never touched on the UI thread — the open path runs it on the
@@ -1537,13 +1545,16 @@ impl Harness {
         // screenshot, and captures must be deterministic — while the app runs
         // WKWebView. Never sniffed in render.
         let browser_fake = args.screenshot.is_some();
+        let muse_slot = crate::providers::MuseSlot::default();
         let mut this = Self {
             new_provider,
             args,
             client: None,
             muse_hub: None,
+            muse_slot: muse_slot.clone(),
             provider_factory: crate::providers::default_provider_factory(
                 terminal_service.socket_path().to_path_buf(),
+                muse_slot,
             ),
             wire: Wire::Connecting,
             auth: Auth::Probing,
@@ -2173,6 +2184,13 @@ impl Harness {
                 this.user_shell = connected.legacy.user_shell;
                 this.session_mcp = connected.legacy.session_mcp;
                 this.client = Some(connected.legacy.transport);
+                // Muse sessions are lanes on this hub; the terminal relay
+                // rides its `sessionMcp` grant.
+                connected.hub.set_terminal_relay(
+                    crate::terminal::relay::bridge_path(),
+                    this.terminal_service.socket_path().to_path_buf(),
+                );
+                this.muse_slot.set_ready(connected.hub.clone());
                 this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
                 this.promote_local_draft = true;
@@ -2229,6 +2247,7 @@ impl Harness {
     }
 
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.muse_slot.set_down(reason.clone());
         self.wire = Wire::Down(reason);
         // A Muse draft waiting on the start stops saying "Starting Muse…".
         if let Some(view) = self.active.clone() {
@@ -2261,12 +2280,10 @@ impl Harness {
     /// Drain the bridge onto the UI thread, one event at a time, in wire order.
     pub(crate) fn pump(&mut self, mut events: UnboundedReceiver<MuseEvent>, cx: &mut Context<Self>) {
         self.tasks.push(cx.spawn(async move |this, cx| {
+            // The hub keeps one raw stream across respawns, so the pump
+            // outlives a child's exit and drains the next child's events.
             while let Some(event) = events.next().await {
-                let closed = matches!(event, MuseEvent::Closed(_));
                 if this.update(cx, |this, cx| this.route(event, cx)).is_err() {
-                    return;
-                }
-                if closed {
                     return;
                 }
             }
@@ -2385,7 +2402,9 @@ impl Harness {
                 }
             }
         }
-        if let Some(active) = &self.active {
+        // A Muse view on a lane hears its session from the hub; only a view
+        // still on the legacy lane (a capture, a local draft) folds here.
+        if let Some(active) = self.active.as_ref().filter(|view| !view.read(cx).is_provider_lane()) {
             active.update(cx, |view, cx| view.apply(event, cx));
         }
         // The row's live facts, straight from the event — no `session/list`
@@ -2521,38 +2540,55 @@ impl Harness {
     /// banner on that session's view while the sidebar, the palette and ⌘N
     /// keep working. Only a failed respawn takes the wire down.
     pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
+        // Never connected: this is the first start, not a respawn.
+        let Some(hub) = self.muse_hub.clone() else {
+            self.wire = Wire::Connecting;
+            self.connect(cx);
+            return;
+        };
         self.client = None;
-        self.muse_hub = None;
-        let program = self.args.program.clone();
-        let resume = self
-            .active
-            .as_ref()
-            .map(|a| (a.read(cx).session_id.clone(), a.read(cx).last_cursor()));
-        let work = move || conn::connect(&program);
+        self.muse_slot.set_starting();
+        let work = move || hub.reconnect().map(|refused| (hub, refused));
         self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(connected) => {
-                if let Some(warning) = &connected.legacy.warning {
+            Ok((hub, refused)) => {
+                if let Some(warning) = hub.schema_warning() {
                     // A fingerprint mismatch is additive evolution, never a
                     // failure: say so on stderr and carry on.
                     crate::baaz_log!("{warning}");
                 }
-                // Re-seat the views before the provider moves: dropping the
-                // last legacy transport ends the old pump, so the old
-                // adapter detaches cleanly when it follows.
-                let transport = connected.legacy.transport;
-                this.session_mcp = connected.legacy.session_mcp;
-                if let Some(active) = &this.active {
-                    active.update(cx, |view, cx| view.reconnected(transport.clone(), cx));
-                }
-                this.client = Some(transport);
-                this.muse_hub = Some(connected.hub);
+                this.session_mcp = hub.session_mcp_granted();
+                this.user_shell = hub.user_shell_granted();
+                this.client = hub.transport();
+                this.muse_slot.set_ready(hub);
                 this.wire = Wire::Ready;
-                this.pump(connected.legacy.events, cx);
-                this.observe_provider(connected.events, cx);
-                this.resume_after_reconnect(resume, cx);
+                // A session the respawned child would not re-attach keeps its
+                // view and history: another window holding it reads as the
+                // lease notice; anything else says what went wrong.
+                for (session_id, error) in refused {
+                    let view = this.find_view(&session_id, cx);
+                    match error.hint() {
+                        provider::RefusalHint::HeldElsewhere => {
+                            crate::baaz_log!("reconnect resume of {session_id} rejected ({error}); lease notice on the view");
+                            if let Some(view) = view {
+                                view.update(cx, |view, cx| view.set_lease_lost(LEASE_NOTICE, cx));
+                            }
+                        }
+                        provider::RefusalHint::StaleHistory => {
+                            crate::baaz_log!("reconnect resume of {session_id} hit a stale history ({error}); history stays");
+                        }
+                        _ => {
+                            crate::baaz_log!("reconnect resume of {session_id} failed: {error}");
+                            if let Some(view) = view {
+                                let text = error.to_string();
+                                view.update(cx, |view, cx| view.show_banner(&text, cx));
+                            }
+                        }
+                    }
+                }
                 cx.notify();
             }
             Err(error) => {
+                this.muse_slot.set_down(error.to_string());
                 this.wire = Wire::Down(error.to_string());
                 this.set_dialog(cx, Dialog {
                     title: conn::provider_title(&error),
@@ -2567,80 +2603,6 @@ impl Harness {
         });
     }
 
-    /// The reconnect's second phase: re-attach the session that was open.
-    ///
-    /// Runs after the handshake settled, on the live child. Success clears
-    /// the lease notice a previous rejection left; a session-scoped rejection
-    /// banners that session's view and marks it read-only until a later
-    /// resume succeeds; a stale sidecar logs one line (the history is intact
-    /// and the next open retries the lease); anything else drops the wire as
-    /// before.
-    fn resume_after_reconnect(
-        &mut self,
-        resume: Option<(String, Option<String>)>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((session_id, cursor)) = resume else { return };
-        let Some(client) = self.client.clone() else { return };
-        let resumed_id = session_id.clone();
-        let mut resume_params = SessionResumeParams {
-            command_id: new_command_id(),
-            session_id: session_id.clone(),
-            cursor: cursor.clone(),
-            exclude_items: Some(true),
-            history: None,
-            config: None,
-            permission_profile: None,
-        };
-        // The terminal relay's route, as on every resume: re-registered
-        // and carried, grant-gated.
-        let bare = resume_params.clone();
-        self.muse_terminal_resume(&mut resume_params);
-        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
-        self.wire_call(cx, work, move |this, result, cx| {
-            // The notice belongs to the resumed session: a switch since owns
-            // its own lease, so anything but the still-open resumed view is
-            // left alone.
-            let open = this.active.clone().filter(|view| view.read(cx).session_id == resumed_id);
-            match result {
-                Ok(resumed) => {
-                    if let Some(view) = open {
-                        view.update(cx, |view, cx| {
-                            view.note_resumed(cx);
-                            // The sandbox follows the mode the session
-                            // reports, whatever it was left under.
-                            view.reconcile_profile(&resumed.session, cx);
-                        });
-                    }
-                    cx.notify();
-                }
-                Err(error) if error.is_stale_sidecar() => {
-                    crate::baaz_log!("reconnect resume hit a stale sidecar ({error}); history stays, lease retries on next open");
-                    cx.notify();
-                }
-                Err(error) if conn::is_session_scoped(&error) => {
-                    let banner = conn::lease_banner(&error);
-                    crate::baaz_log!("reconnect resume rejected ({error}); banner on the view, wire stays up");
-                    if let Some(view) = open {
-                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
-                    }
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.wire = Wire::Down(error.to_string());
-                    this.set_dialog(cx, Dialog {
-                        title: conn::title(&error),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Reconnect",
-                        action: DialogAction::Reconnect,
-                        archive_target: None,
-                    });
-                    cx.notify();
-                }
-            }
-        });
-    }
 
     // ---------------------------------------------------------- billing tier
 

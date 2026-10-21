@@ -18,6 +18,7 @@ pub mod errors;
 pub mod facts;
 mod hub;
 pub mod modes;
+pub mod output;
 pub mod terminal;
 mod translate;
 

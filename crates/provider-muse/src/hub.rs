@@ -437,6 +437,16 @@ impl Core {
     /// Route events produced off the reader thread (a page, a pending pull,
     /// a resolution), under the fold lock so they order with the live ones.
     fn route_produced(&self, session_id: &str, make: impl FnOnce(&mut MuseFold) -> Vec<provider::Delta>) {
+        self.route_produced_then(session_id, make, || None);
+    }
+
+    /// [`Self::route_produced`], with `last` after everything it produced.
+    fn route_produced_then(
+        &self,
+        session_id: &str,
+        make: impl FnOnce(&mut MuseFold) -> Vec<provider::Delta>,
+        last: impl FnOnce() -> Option<ProviderEvent>,
+    ) {
         let mut routed = self.routed.lock().expect("routed mutex");
         let deltas = make(&mut routed.fold);
         let mut out = Vec::new();
@@ -445,6 +455,7 @@ impl Core {
         }
         let Routed { fold, tracker, .. } = &mut *routed;
         out.extend(tracker.changed(fold, session_id));
+        out.extend(last());
         route(&mut routed, &self.connection.0, session_id, out, false);
     }
 
@@ -485,21 +496,25 @@ impl Core {
         .map_err(translate::transport_error)?;
         // The stored session, folded as `session/started` would carry it:
         // the header, the mode, a fork's provenance.
-        let envelope = serde_json::to_value(&result.session).unwrap_or(serde_json::Value::Null);
-        if !envelope.is_null() {
-            self.route_produced(session_id, |fold| {
-                fold.apply(MuseEvent::Notification {
-                    method: "session/started".into(),
-                    params: serde_json::json!({ "session": envelope }),
-                    cursor: None,
-                    session_id: Some(session_id.to_owned()),
-                })
-            });
-        }
+        self.fold_envelope(session_id, &result.session);
         if let Err(text) = crate::modes::reconcile(&client, &result.session) {
             self.notice(session_id, text);
         }
         Ok(Ack::Session { session_id: result.session.session_id, title: result.session.title })
+    }
+
+    /// Fold a session object as the `session/started` that would carry it,
+    /// and route what it moved.
+    fn fold_envelope(&self, session_id: &str, session: &muse_client::schema::Session) {
+        let Ok(envelope) = serde_json::to_value(session) else { return };
+        self.route_produced(session_id, |fold| {
+            fold.apply(MuseEvent::Notification {
+                method: "session/started".into(),
+                params: serde_json::json!({ "session": envelope }),
+                cursor: None,
+                session_id: Some(session_id.to_owned()),
+            })
+        });
     }
 
     /// Put `text` on the session's banner.
@@ -516,35 +531,59 @@ impl Core {
     fn dispatch(&self, lane: &MuseLane, command: Command) -> Result<Ack, ProviderError> {
         match command {
             Command::OpenSession { request_id, workspace, model, model_provider, mode } => {
-                // The relay mints the session id client-side; its lane binds
-                // before the start, so nothing the start streams is lost.
-                let terminal = self.terminal_config(&request_id).map(|config| (request_id.clone(), config));
-                if terminal.is_some() {
-                    lane.bind(&request_id);
-                }
-                let client = self.client()?;
-                let ack = translate::dispatch(
-                    &client,
-                    self,
-                    Command::OpenSession { request_id, workspace, model, model_provider, mode },
-                    terminal,
-                )?;
-                if let Ack::Session { session_id, .. } = &ack {
-                    lane.bind(session_id);
-                }
-                Ok(ack)
-            }
-            Command::ResumeSession { request_id, session_id, cursor, metadata_only, .. } => {
+                // The session's id is minted here, from the request id
+                // (`session/start` takes an exact identity), and the lane
+                // binds before the start: nothing the start streams before
+                // its answer is lost.
+                let session_id = request_id.clone();
                 lane.bind(&session_id);
-                self.resume(request_id, &session_id, cursor, metadata_only)
+                let client = self.client()?;
+                let started = client
+                    .session_start(&muse_client::schema::SessionStartParams {
+                        // No mode, no pick: the host default stands.
+                        permission_profile: mode.map(|mode| muse_adapter::permission_profile(mode).to_owned()),
+                        approval_mode: mode.map(crate::modes::wire_mode),
+                        command_id: request_id,
+                        config: self.terminal_config(&session_id),
+                        model_id: model,
+                        provider_id: model_provider,
+                        session_id: Some(session_id.clone()),
+                        workspace_root: workspace,
+                        workspace_roots: None,
+                    })
+                    .map_err(translate::transport_error)?;
+                // The answer carries the session `session/started` would: the
+                // only report of a mode set at start (no `approvalModeChanged`
+                // follows one).
+                // The id is ours: an answer under another one is a session
+                // this lane never asked for, and nothing keyed by the minted
+                // id could follow it.
+                if started.session.session_id != session_id {
+                    return Err(ProviderError::Rejected {
+                        reason: format!(
+                            "the session started under another id ({}) than the one asked for ({session_id})",
+                            started.session.session_id
+                        ),
+                    });
+                }
+                self.fold_envelope(&session_id, &started.session);
+                Ok(Ack::Session { session_id, title: started.session.title })
             }
-            Command::ForkSession { request_id, session_id, through_turn, metadata_only, mode } => {
+            // Muse histories always page in (`PageTranscript`), so a resume
+            // only attaches: the answer's items would go unread.
+            Command::ResumeSession { request_id, session_id, cursor, .. } => {
+                lane.bind(&session_id);
+                self.resume(request_id, &session_id, cursor, true)
+            }
+            Command::ForkSession { request_id, session_id, through_turn, mode, .. } => {
                 let client = self.client()?;
                 let forked = client
                     .session_fork(&SessionForkParams {
                         command_id: request_id,
                         cut_point: through_turn.map(|last_turn_id| muse_client::schema::ForkCutPoint { last_turn_id }),
-                        exclude_items: metadata_only.then_some(true),
+                        // The fork's history pages in once its lane resumes it,
+                        // like every Muse attach: the answer's items go unread.
+                        exclude_items: Some(true),
                         session_id: session_id.clone(),
                     })
                     .map_err(translate::transport_error)?;
@@ -702,18 +741,38 @@ impl Core {
                 // live stream; the ack only says where the next page starts
                 // (none once a page comes back empty).
                 let next_cursor = if page.events.is_empty() { None } else { page.next_cursor.clone() };
-                let mut failed = None;
-                self.route_produced(&session_id, |fold| match translate::fold_page(fold, page) {
-                    Ok((deltas, _)) => deltas,
-                    Err(error) => {
-                        failed = Some(error);
-                        Vec::new()
-                    }
-                });
+                let failed = std::cell::RefCell::new(None);
+                self.route_produced_then(
+                    &session_id,
+                    |fold| match translate::fold_page(fold, page) {
+                        Ok((deltas, _)) => deltas,
+                        Err(error) => {
+                            *failed.borrow_mut() = Some(error);
+                            Vec::new()
+                        }
+                    },
+                    // After the page's deltas, in the same stream: what the
+                    // caller pages on, so it never reads a page as drawn
+                    // before it is.
+                    || {
+                        failed.borrow().is_none().then(|| ProviderEvent::TranscriptPaged {
+                            session_id: session_id.clone(),
+                            next_cursor: next_cursor.clone(),
+                        })
+                    },
+                );
+                let failed = failed.into_inner();
                 if let Some(error) = failed {
                     return Err(error);
                 }
                 Ok(Ack::TranscriptPage { deltas: Vec::new(), next_cursor })
+            }
+            // The whole stored output, when no length is asked for: paged
+            // in, decoded, capped at [`crate::output::FULL_OUTPUT_CAP`]; the
+            // ack's `complete` is false when the cap cut it.
+            Command::ReadStoredOutput { session_id, item, output, offset: 0, length: None } => {
+                let (content, complete) = crate::output::read_whole(&*self.client()?, &session_id, &item, &output)?;
+                Ok(Ack::StoredOutput { content, complete })
             }
             other => {
                 let session = command_session(&other);

@@ -107,8 +107,16 @@ fn provider_open_work(
     workspace: String,
     epoch: u64,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    muse: Option<MuseOpen>,
 ) -> Result<ProviderOpen, provider::ProviderError> {
     let provider = factory(provider_id)?;
+    // Muse routes the model vendor through the open and starts in the
+    // host's default posture unless a mode was picked; the others always
+    // carry the mode the chip stands on.
+    let (model_provider, mode) = match muse {
+        Some(MuseOpen { model_provider, mode }) => (Some(model_provider), mode),
+        None => (None, Some(mode)),
+    };
     #[cfg(not(test))]
     let (provider, events) = conn::gate(provider);
     // `model: None` on purpose: the chip's display seed (env,
@@ -119,8 +127,8 @@ fn provider_open_work(
         request_id,
         workspace: Some(workspace_bg),
         model: None,
-        model_provider: None,
-        mode: Some(mode),
+        model_provider,
+        mode,
     })?;
     // Tests drain after the send, synchronously on the test
     // executor: no forwarding thread ever wakes the lane task.
@@ -149,6 +157,24 @@ fn provider_open_work(
             reason: format!("OpenSession answered {other:?} instead of a session"),
         }),
     }
+}
+
+/// A Muse reopen's lane, its events and how the resume went: the lane is
+/// kept even when the resume was refused for a reason the view still
+/// opens under (another window holds it; a stale history).
+type MuseReopen = (
+    provider::Provider,
+    futures::channel::mpsc::UnboundedReceiver<provider::ProviderEvent>,
+    Result<(), provider::ProviderError>,
+);
+
+/// What a Muse open carries beyond the others': the model vendor its
+/// requests route to (`meta`, or `echo` in a scripted run), and the mode
+/// only when one was picked — no pick, and the host's default posture
+/// stands.
+pub(crate) struct MuseOpen {
+    model_provider: String,
+    mode: Option<aui_protocol::PermissionMode>,
 }
 
 /// What [`Harness::ensure_boot_session`] should do about the boot session.
@@ -1733,12 +1759,24 @@ impl Harness {
         // The switcher's pick is not muse: the session opens on the provider
         // lane, and `session/start` to muse never fires for it.
         let wanted = ProviderId::parse(&self.new_provider);
-        if wanted != ProviderId::Muse {
-            let workspace = current
+        // Every provider opens on its lane; Muse too, live — its lane rides
+        // the shared child, which the open waits for while it starts. Only
+        // scripted chrome keeps Muse's local draft.
+        if wanted != ProviderId::Muse || !self.scripted_chrome() {
+            let root = current
                 .as_deref()
                 .and_then(|id| self.projects.find_available(id))
-                .map(|project| project.root.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.workspace());
+                .map(|project| project.root.to_string_lossy().into_owned());
+            // A Muse session with no project goes to the default workspace,
+            // which is not a project, so it files as unfiled.
+            let workspace = match (root, wanted) {
+                (Some(root), _) => root,
+                (None, ProviderId::Muse) => projects::default_workspace().to_string_lossy().into_owned(),
+                (None, _) => self.workspace(),
+            };
+            if wanted == ProviderId::Muse {
+                self.ensure_muse_started(cx);
+            }
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
@@ -2101,7 +2139,10 @@ impl Harness {
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
         let wanted = ProviderId::parse(&self.new_provider);
-        if wanted != ProviderId::Muse {
+        if wanted != ProviderId::Muse || !self.scripted_chrome() {
+            if wanted == ProviderId::Muse {
+                self.ensure_muse_started(cx);
+            }
             self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
         }
@@ -2578,6 +2619,21 @@ impl Harness {
             self.reopen_provider(record, window, cx);
             return;
         }
+        // A Muse session, live: a parked view just activates (its lane kept
+        // following), anything else reopens on a lane of the shared child.
+        if !self.args.offline && self.args.replay.is_none() {
+            crate::log::trace_reset();
+            crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
+            if let Some(view) = self.cache_take(&session_id) {
+                crate::log::trace_mark("cache-hit");
+                self.activate(view, quiet, window, cx);
+                crate::log::trace_mark("swap");
+                crate::log::trace_arm_first_frame();
+                return;
+            }
+            self.reopen_muse(session_id, quiet, window, cx);
+            return;
+        }
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`) has no child to
             // resume from: the row opens as a local view, so a capture can
@@ -2700,6 +2756,114 @@ impl Harness {
                     view.backfill(cx)
                 });
             }
+            cx.notify();
+        });
+    }
+
+    /// Reopen a Muse session on a lane of the shared child. The view opens
+    /// on the click, loading — never the new-session hero — with sends and
+    /// picks waiting; the lane attaches when the resume answers, and the
+    /// history pages in after it (the resume is the touch that regenerates
+    /// a stale history, so no page may run before it). A session another
+    /// window holds still opens, read-only under the lease notice.
+    fn reopen_muse(&mut self, session_id: String, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_muse_started(cx);
+        crate::log::trace_mark("cache-miss");
+        let workspace = self.session_workspace(&session_id);
+        let mode = self.provider_open_mode(Some(&workspace), None);
+        self.open(session_id.clone(), false, quiet, window, cx);
+        if let Some(view) = self.find_view(&session_id, cx) {
+            view.update(cx, |view, cx| view.begin_lane_reopen(mode, cx));
+            self.attach_handoff_prefix(&view, cx);
+        }
+        crate::log::trace_mark("swap");
+        crate::log::trace_arm_first_frame();
+        // The terminal relay answers for the stored id: registered before
+        // the resume carries the bridge (unless muse refused it this run).
+        if !self.muse_hub.as_ref().is_some_and(|hub| hub.refuses_resume_bridge()) {
+            self.register_terminal_session(
+                &session_id,
+                std::path::PathBuf::from(workspace),
+                ProviderId::Muse.as_str(),
+            );
+        }
+        let factory = self.provider_factory.clone();
+        let resumed = session_id.clone();
+        let work = move || -> Result<MuseReopen, provider::ProviderError> {
+            let provider = factory(ProviderId::Muse)?;
+            #[cfg(not(test))]
+            let (provider, events) = conn::gate(provider);
+            let resume = provider
+                .send(provider::Command::ResumeSession {
+                    request_id: new_command_id(),
+                    session_id: resumed,
+                    cursor: None,
+                    metadata_only: true,
+                    mode: None,
+                })
+                .map(|_| ());
+            crate::log::trace_mark("resume-ack");
+            #[cfg(test)]
+            let (provider, events) = conn::gate_sync(provider);
+            Ok((provider, events, resume))
+        };
+        self.wire_call_in(cx, work, move |this, result, window, cx| {
+            let view = this.find_view(&session_id, cx).filter(|view| view.read(cx).is_starting());
+            let (mut provider, events, resume) = match result {
+                Ok(opened) => opened,
+                Err(error) => {
+                    crate::baaz_log!("muse reopen of {session_id} could not start: {error}");
+                    if let Some(view) = view {
+                        view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
+                    }
+                    return;
+                }
+            };
+            let Some(view) = view else {
+                // The person moved on and the view is gone: nothing follows.
+                provider.shutdown();
+                return;
+            };
+            let lease = match &resume {
+                Ok(()) => false,
+                // The resume still regenerated the history: page anyway.
+                Err(error) if error.hint() == provider::RefusalHint::StaleHistory => {
+                    crate::baaz_log!("resume of {session_id} hit a stale history ({error}); paging anyway");
+                    false
+                }
+                // Another window holds it: read-only, no dialog, the row
+                // stays selectable.
+                Err(error) if error.hint() == provider::RefusalHint::HeldElsewhere => {
+                    crate::baaz_log!("resume of {session_id} rejected ({error}); lease notice on the view");
+                    true
+                }
+                Err(error) => {
+                    crate::baaz_log!("resume of {session_id} failed: {error}");
+                    provider.shutdown();
+                    let message = error.to_string();
+                    view.update(cx, |view, cx| view.start_failed(message, cx));
+                    if error.severity() == provider::Severity::Dialog {
+                        this.set_dialog(cx, Dialog {
+                            title: error.title(),
+                            detail: error.to_string(),
+                            kind: DialogKind::Error,
+                            primary: "Dismiss",
+                            action: DialogAction::Dismiss,
+                            archive_target: None,
+                        });
+                    }
+                    return;
+                }
+            };
+            crate::baaz_log!("muse lane reopened session={session_id} lease_held={lease}");
+            view.update(cx, |view, cx| {
+                view.attach_provider(session_id.clone(), provider, events, cx);
+                view.start_landed(window, cx);
+                if lease {
+                    view.set_lease_lost(crate::app::LEASE_NOTICE, cx);
+                }
+                view.backfill_lane(cx);
+            });
             cx.notify();
         });
     }
@@ -2921,6 +3085,27 @@ impl Harness {
     /// a mode, and always sent: the adapter starts the child in it and
     /// reports it back, so the chip shows what was asked for until the
     /// child says otherwise — never a default nobody sent.
+    /// A Muse open's extras ([`MuseOpen`]); `None` for any other provider.
+    fn muse_open(&self, provider_id: ProviderId, workspace: Option<&str>, project: Option<&str>) -> Option<MuseOpen> {
+        if provider_id != ProviderId::Muse {
+            return None;
+        }
+        let model_provider = if ProviderId::parse(&self.new_provider) == ProviderId::Muse {
+            self.new_provider.clone()
+        } else {
+            ProviderId::Muse.as_str().to_owned()
+        };
+        let mode = self
+            .args
+            .approval_mode
+            .as_ref()
+            .cloned()
+            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
+            .as_ref()
+            .map(muse_adapter::permission_mode);
+        Some(MuseOpen { model_provider, mode })
+    }
+
     fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
         self.args
             .approval_mode
@@ -2988,9 +3173,10 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
+        let muse = self.muse_open(provider_id, Some(&workspace), project.as_deref());
         let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch, Some(cancelled))
+            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch, Some(cancelled), muse)
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
@@ -3151,7 +3337,12 @@ impl Harness {
         // already has a record, and naming it here made the next ⌘N
         // "reuse" whatever was clicked last — a handoff destination's row
         // reads zero turns, so it passed for unsent and ⌘N did nothing.
-        let fresh = !self.provider_sessions.contains_key(&session_id);
+        // A Muse session's existence is Muse's list, not a record.
+        let fresh = if provider_id == ProviderId::Muse {
+            !self.sessions.iter().any(|entry| entry.id == session_id)
+        } else {
+            !self.provider_sessions.contains_key(&session_id)
+        };
         if fresh {
             match project.clone() {
                 Some(id) => {
@@ -3163,6 +3354,11 @@ impl Harness {
             }
         }
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
+        // A provider that pages its history (Muse) attached without it: an
+        // existing session's turns page in now.
+        if !fresh && crate::providers::pages_history(provider_id) {
+            view.update(cx, |view, cx| view.backfill_lane(cx));
+        }
         // The swap that makes it the visible session: parks the outgoing
         // view, points the event subscription at the new one, focuses the
         // composer — everything `open` does for muse.
@@ -3202,6 +3398,24 @@ impl Harness {
     ) {
         if let Some(id) = project.clone() {
             self.set_override(session_id, |meta| meta.project = Some(id.clone()), cx);
+        }
+        // A Muse session is in Muse's own list: no local record. Its row
+        // goes in now from what the open knows — zero turns, so out of view
+        // until the first send titles it — and no `session/list` round trip
+        // is spent on one row.
+        if provider_id == ProviderId::Muse {
+            if !self.sessions.iter().any(|entry| entry.id == session_id) {
+                let row = sidebar::local_started_row(
+                    session_id,
+                    sidebar::UNNAMED.to_owned(),
+                    project,
+                    Some(workspace),
+                    crate::clock::now_local(),
+                );
+                self.sessions.push(row);
+                self.invalidate_list();
+            }
+            return;
         }
         // The local record: `session/list` only knows muse sessions, so
         // this row is what brings the lane back after a restart — the
@@ -3294,7 +3508,13 @@ impl Harness {
         } else if let Some(effort) = picks.effort_for(provider_id.as_str()).as_deref().and_then(projects::parse_effort) {
             view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
         }
-        let remembered = picks.model_for(provider_id.as_str());
+        let mut remembered = picks.model_for(provider_id.as_str());
+        // A stored Muse default rides only while the cached Muse catalog
+        // still names it: a foreign pick kept through migration would fail
+        // the turn, so the server's default stands instead.
+        if provider_id == ProviderId::Muse {
+            remembered = projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
+        }
         if let Some(model) = remembered {
             view.update(cx, |view, cx| view.set_model(&model, cx));
         }
@@ -3325,9 +3545,10 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
         let epoch = self.provider_open_epoch;
+        let muse = self.muse_open(provider_id, Some(&workspace), project.as_deref());
         let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch, Some(cancelled))
+            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch, Some(cancelled), muse)
         };
         let timed = request_id.clone();
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
@@ -4885,6 +5106,11 @@ impl Harness {
             // the session may earn a generated title, and the record moves
             // to now — the lane's `turn/started`.
             SessionEvent::ProviderTurnAccepted { session_id, prompt, turn_id, .. } => {
+                // A Muse lane's rows, titles and drafts follow Muse's own
+                // `turn/started` on the connection (see `route`).
+                if view.read(cx).provider_kind() == ProviderId::Muse {
+                    return;
+                }
                 let (session_id, prompt, turn_id) =
                     (session_id.clone(), prompt.clone(), turn_id.clone());
                 // A turn that started is a session made real: it is no
@@ -4939,6 +5165,9 @@ impl Harness {
             // row re-reads the open view's pending words, so it stands
             // on the needs-you state while the approval waits.
             SessionEvent::ProviderApprovalsChanged { session_id } => {
+                if view.read(cx).provider_kind() == ProviderId::Muse {
+                    return;
+                }
                 self.sync_row_live(session_id, false, cx);
                 cx.notify();
             }
@@ -4948,6 +5177,22 @@ impl Harness {
             SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
                 let (session_id, turn_id, meta) = (session_id.clone(), turn_id.clone(), meta.clone());
                 let provider_kind = view.read(cx).provider_kind();
+                // A Muse lane's turn: the usage ledger's row, as Muse rows
+                // always were (untagged), stamped with the session's cursor;
+                // its row and byline follow Muse's own `turn/completed` on
+                // the connection (see `route`).
+                if provider_kind == ProviderId::Muse {
+                    let cursor = view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
+                    let row = crate::usage::row_from_finished(
+                        &session_id,
+                        &cursor,
+                        &turn_id,
+                        crate::usage::now_ms(),
+                        &meta,
+                    );
+                    self.wire_call(cx, move || crate::usage::record_backfilled(&[row]), |_this, (), _cx| {});
+                    return;
+                }
                 let provider = provider_kind.as_str().to_owned();
                 // A Claude Code report seeds the next fresh session's
                 // chip: display-only (the argv never sees it — see
@@ -8415,11 +8660,27 @@ mod tests {
     /// A muse child that answers only `session/start`, echoing the id the
     /// start carried, and logs every request line to `log`: what the
     /// start-landing tests drive without a real server.
-    fn starting_client(dir: &std::path::Path, root: &std::path::Path, log: &std::path::Path) -> std::sync::Arc<MuseClient> {
-        starting_client_answering(dir, root, log, None)
+    /// The fake child as the hub every Muse open rides: shaken hands,
+    /// installed as the window's Muse connection — what a live launch has
+    /// once `muse serve` answered.
+    fn install_fake_muse(
+        harness: &mut Harness,
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        log: &std::path::Path,
+        answer: Option<&str>,
+    ) {
+        use provider::ProviderAdapter as _;
+        let client = std::sync::Arc::try_unwrap(starting_client_answering(dir, root, log, answer))
+            .unwrap_or_else(|_| panic!("the fake child is not shared yet"));
+        let hub = provider_muse::MuseHub::from_client(client);
+        hub.lane().connect(&crate::conn::connect_info()).expect("the fake child shakes hands");
+        harness.client = hub.transport();
+        harness.muse_slot.set_ready(hub.clone());
+        harness.muse_hub = Some(hub);
     }
 
-    /// [`starting_client`], answering every start with `answer` as its id
+    /// A fake `muse serve` child, answering every start with `answer` as its id
     /// instead of the one asked for, when one is given.
     fn starting_client_answering(
         dir: &std::path::Path,
@@ -8437,6 +8698,8 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] || continue
   case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"experimentalApi":false,"grantedCapabilities":[],"museHome":"/tmp/fake","platformFamily":"unix","platformOs":"macos","schema":{{"fingerprint":"fake","version":1}},"serverInfo":{{"name":"fake-muse","version":"1.4.11"}},"userAgent":"fake"}}}}\n' "$id";;
     *'"method":"session/start"'*)
       sid=$(printf '%s' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"session":{{"sessionId":"%s","createdAt":"2026-10-16T00:00:00Z","updatedAt":"2026-10-16T00:00:00Z","path":"","status":"idle","turnCount":0,"workspaceRoot":"{root}"}},"viewCursor":"c0"}}}}\n' "$id" "{answered}";;
@@ -8485,7 +8748,7 @@ done
         let log = state.2.join("requests.log");
         let project = vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                install_fake_muse(harness, &state.2, &state.2, &log, None);
                 adopt_for_muse(harness, &state.2)
             })
         });
@@ -8862,7 +9125,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.provider_factory = factory;
-                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                install_fake_muse(harness, &state.2, &state.2, &log, None);
                 let project = adopt_for_muse(harness, &state.2);
                 harness.new_provider = provider.as_str().to_owned();
                 z4_seed_stored_codex(harness, cx);
@@ -8941,7 +9204,7 @@ done
         let log = state.2.join("requests.log");
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                harness.client = Some(starting_client(&state.2, &state.2, &log));
+                install_fake_muse(harness, &state.2, &state.2, &log, None);
                 adopt_for_muse(harness, &state.2);
             })
         });
@@ -8994,7 +9257,7 @@ done
         let log = state.2.join("requests.log");
         let project = vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                harness.client = Some(starting_client_answering(&state.2, &state.2, &log, Some("s-foreign")));
+                install_fake_muse(harness, &state.2, &state.2, &log, Some("s-foreign"));
                 adopt_for_muse(harness, &state.2)
             })
         });

@@ -422,6 +422,86 @@ impl SessionView {
     }
 }
 
+impl SessionView {
+    /// Page a lane's history in, oldest first: the backfill for a session
+    /// its provider opened without items (Muse resumes metadata-only and
+    /// pages, so a long transcript draws page by page instead of after one
+    /// huge answer). Each page's deltas arrive on the lane in order with the
+    /// live stream; the ack only says where the next page starts. The first
+    /// page cues the tail pin ([`SessionEvent::HistoryReady`]); a stale
+    /// history is retried once, as the provider asks.
+    pub fn backfill_lane(&mut self, cx: &mut Context<Self>) {
+        if self.backfill_running {
+            return;
+        }
+        self.loading_history = true;
+        self.backfill_running = true;
+        self.backfill_stale_retried = false;
+        cx.notify();
+        self.backfill_lane_page(None, FIRST_PAGE_LIMIT, true, cx);
+    }
+
+    fn backfill_lane_page(&mut self, cursor: Option<String>, limit: u32, first: bool, cx: &mut Context<Self>) {
+        crate::log::trace_mark("page-request");
+        let command = ProviderCommand::PageTranscript {
+            session_id: self.session_id.clone(),
+            after: cursor.clone(),
+            limit,
+            backward: false,
+        };
+        self.backfill_first = first;
+        self.provider_send(command, cx, move |this, result, cx| {
+            // The page itself lands on the lane, its deltas first and then
+            // `TranscriptPaged` (see `lane_page_landed`): the ack only
+            // reports a page that failed.
+            let next = match result {
+                Ok(_) => return,
+                Err(error) => {
+                    if error.hint() == provider::RefusalHint::StaleHistory && !this.backfill_stale_retried {
+                        crate::baaz_log!("backfill page hit a stale history; retrying once");
+                        this.backfill_stale_retried = true;
+                        this.backfill_lane_page(cursor, limit, first, cx);
+                        return;
+                    }
+                    if error.hint() == provider::RefusalHint::StaleHistory {
+                        this.report_provider_error(&error, cx);
+                    } else {
+                        // What arrived so far stays; the loading row stands
+                        // down and the tail pins.
+                        crate::baaz_log!("backfill page failed: {error}");
+                    }
+                    None
+                }
+            };
+            this.lane_page_landed(next, cx);
+        });
+    }
+
+    /// A page of the lane's backfill has landed in the transcript: cue the
+    /// tail pin after the first, then page on from `next`, or stand the
+    /// loading row down at the end.
+    pub(super) fn lane_page_landed(&mut self, next: Option<String>, cx: &mut Context<Self>) {
+        if !self.backfill_running {
+            return;
+        }
+        self.follow = true;
+        if std::mem::take(&mut self.backfill_first) {
+            crate::log::trace_mark("HistoryReady");
+            cx.emit(SessionEvent::HistoryReady);
+        }
+        match next {
+            Some(next) => self.backfill_lane_page(Some(next), PAGE_LIMIT, false, cx),
+            None => {
+                self.loading_history = false;
+                self.backfill_running = false;
+                let turns = self.session().map_or(0, |session| session.turns.len());
+                crate::baaz_log!("history paged in: session={} turns={turns}", self.session_id);
+            }
+        }
+        cx.notify();
+    }
+}
+
 /// Whether a failed backfill page gets one more attempt:
 /// exactly the stale-sidecar `-32603`, and only once per chain. A second
 /// stale failure — and any other error — reports instead of looping.

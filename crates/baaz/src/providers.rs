@@ -211,6 +211,13 @@ fn binary_name(id: ProviderId) -> Option<&'static str> {
     }
 }
 
+/// Whether a provider re-attaches a stored session without its history and
+/// pages it in afterwards (`Command::PageTranscript`): Muse does, so a long
+/// transcript draws page by page. The others replay it with the resume.
+pub(crate) fn pages_history(id: ProviderId) -> bool {
+    id == ProviderId::Muse
+}
+
 /// The env override naming the binary, when the provider has one.
 fn env_override(id: ProviderId) -> Option<&'static str> {
     match id {
@@ -299,8 +306,79 @@ pub(crate) type ProviderFactory = Arc<dyn Fn(ProviderId) -> Result<Provider, Pro
 /// The production factory: resolve the CLI, hold its adapter behind the
 /// gate, and shake hands. The session itself opens later, with
 /// `Command::OpenSession` on the same background turn.
-pub(crate) fn default_provider_factory(socket: PathBuf) -> ProviderFactory {
-    Arc::new(move |id| open_provider(id, &socket))
+pub(crate) fn default_provider_factory(socket: PathBuf, muse: MuseSlot) -> ProviderFactory {
+    Arc::new(move |id| match id {
+        ProviderId::Muse => muse.lane(),
+        other => open_provider(other, &socket),
+    })
+}
+
+/// How long a Muse open waits for `muse serve` to come up before it fails.
+const MUSE_START_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Where Muse's one shared child stands, for the open path: Muse sessions
+/// are lanes on one hub, not a child each, so the factory hands out a lane
+/// of whatever hub the window connected — waiting while it starts.
+#[derive(Clone, Default)]
+pub(crate) struct MuseSlot {
+    state: Arc<(std::sync::Mutex<MuseState>, std::sync::Condvar)>,
+}
+
+#[derive(Clone, Default)]
+enum MuseState {
+    /// Not up yet: an open waits (the caller asked for it to start).
+    #[default]
+    Starting,
+    /// Connected: lanes ride this hub.
+    Ready(provider_muse::MuseHub),
+    /// It could not start, and why.
+    Down(String),
+}
+
+impl MuseSlot {
+    /// The hub is up.
+    pub(crate) fn set_ready(&self, hub: provider_muse::MuseHub) {
+        self.set(MuseState::Ready(hub));
+    }
+
+    /// It is (re)starting: opens wait.
+    pub(crate) fn set_starting(&self) {
+        self.set(MuseState::Starting);
+    }
+
+    /// It could not start: opens fail with `reason`.
+    pub(crate) fn set_down(&self, reason: String) {
+        self.set(MuseState::Down(reason));
+    }
+
+    fn set(&self, state: MuseState) {
+        let (lock, ready) = &*self.state;
+        *lock.lock().expect("muse slot") = state;
+        ready.notify_all();
+    }
+
+    /// A connected lane on the hub, waiting up to [`MUSE_START_WAIT`] while
+    /// it starts. Blocking: the open path runs it on the background
+    /// executor.
+    fn lane(&self) -> Result<Provider, ProviderError> {
+        use provider::ProviderAdapter as _;
+        let (lock, ready) = &*self.state;
+        let state = lock.lock().expect("muse slot");
+        let (state, _) = ready
+            .wait_timeout_while(state, MUSE_START_WAIT, |state| matches!(state, MuseState::Starting))
+            .expect("muse slot");
+        match &*state {
+            MuseState::Ready(hub) => {
+                let mut lane = hub.lane();
+                lane.connect(&crate::conn::connect_info())?;
+                Ok(Provider::new(lane))
+            }
+            MuseState::Down(reason) => Err(ProviderError::Unavailable { reason: reason.clone() }),
+            MuseState::Starting => Err(ProviderError::Unavailable {
+                reason: format!("Muse did not start within {}s", MUSE_START_WAIT.as_secs()),
+            }),
+        }
+    }
 }
 
 /// This window's terminal socket — what the relay's bridge is pointed at:
@@ -918,6 +996,8 @@ pub enum ExternalApprovalKind {
     CodexUserInput,
     /// Codex `mcpServer/elicitation/request`.
     CodexMcpElicitation,
+    /// Muse `approval/request`: the inline card carries its choices.
+    MuseApproval,
 }
 
 impl ExternalApprovalKind {
@@ -930,6 +1010,7 @@ impl ExternalApprovalKind {
             ExternalApprovalKind::CodexPermissions => "Codex permissions approval",
             ExternalApprovalKind::CodexUserInput => "Codex question",
             ExternalApprovalKind::CodexMcpElicitation => "Codex tool question",
+            ExternalApprovalKind::MuseApproval => "Muse approval",
         }
     }
 }

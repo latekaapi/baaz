@@ -130,6 +130,7 @@ impl Lane<'_> {
             | ProviderEvent::PromptRestored { .. }
             | ProviderEvent::StatusChanged { .. }
             | ProviderEvent::Notice { .. }
+            | ProviderEvent::TranscriptPaged { .. }
             | ProviderEvent::ConnectionRestored => {}
             // The acknowledged turn's streamed id (Claude Code): its
             // deltas count as this turn's from here on.

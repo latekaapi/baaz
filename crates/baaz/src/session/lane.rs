@@ -22,6 +22,15 @@ use crate::providers::{ExternalApproval, ExternalApprovalKind, ProviderId};
 use crate::wire::{ProviderCall as _, SharedProvider};
 use aui_protocol::{ApprovalState, Block, Delta, Turn};
 
+/// A banner's words for a typed refusal: its title, then its reason.
+pub(super) fn refusal_banner(refusal: &provider::Refusal) -> String {
+    if refusal.title.is_empty() {
+        refusal.reason.clone()
+    } else {
+        format!("{}. {}", refusal.title, refusal.reason)
+    }
+}
+
 /// The lost-connection banner's lead: [`provider::ProviderEvent::ConnectionRestored`]
 /// clears a banner that starts with it, and only that one.
 const CONNECTION_LOST: &str = "Provider connection lost: ";
@@ -218,6 +227,19 @@ impl SessionView {
         this
     }
 
+    /// An existing session's view drawn on the click while its lane
+    /// re-attaches: no provider yet, sends and picks waiting in the start
+    /// queue, history loading. [`Self::attach_provider`] takes the lane
+    /// once the resume answers. A no-op on a view that already has a lane.
+    pub(crate) fn begin_lane_reopen(&mut self, mode: aui_protocol::PermissionMode, cx: &mut Context<Self>) {
+        if !matches!(self.lane, Lane::Muse) {
+            return;
+        }
+        self.lane = Lane::Opening(OpeningLane { mode });
+        self.begin_start();
+        self.mark_history_loading(cx);
+    }
+
     /// The opening view's child answered: take the session's real id (the
     /// provisional one renames here and nowhere else in the view), then
     /// the provider and its event stream, exactly once. A second attach —
@@ -397,6 +419,7 @@ impl SessionView {
                 // event shape — the prefix IS the kind tag.
                 let kind = match self.provider_kind() {
                     ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
+                    ProviderId::Muse => ExternalApprovalKind::MuseApproval,
                     _ if approval_id.starts_with(
                         provider_codex::child::MCP_ELICITATION_ID_PREFIX,
                     ) =>
@@ -573,6 +596,12 @@ impl SessionView {
                     self.set_banner(&text, None, cx);
                 }
             }
+            // A backfill page is drawn: page on.
+            provider::ProviderEvent::TranscriptPaged { session_id, next_cursor } => {
+                if session_id == self.session_id {
+                    self.lane_page_landed(next_cursor, cx);
+                }
+            }
             // The shared child is back and this session re-attached: the
             // lost-connection banner stands down.
             provider::ProviderEvent::ConnectionRestored => {
@@ -718,11 +747,39 @@ impl SessionView {
             provider::ProviderError::Unsupported { reason, .. } => {
                 self.set_banner(reason, None, cx);
             }
+            // A typed refusal says how loudly: a dialog for what concerns
+            // the connection, a banner titled by the provider otherwise.
+            provider::ProviderError::Refused(refusal) => match refusal.severity {
+                provider::Severity::Dialog => {
+                    cx.emit(super::SessionEvent::Dialog { title: refusal.title.clone(), detail: refusal.reason.clone() });
+                }
+                provider::Severity::Banner => self.set_banner(&refusal_banner(refusal), None, cx),
+            },
             other => {
                 let text = other.to_string();
                 self.set_banner(&text, None, cx);
             }
         }
+    }
+
+    /// A refusal the person can try again, with the button that would do
+    /// it. "Not now" ([`provider::RefusalHint::RetryLater`]) also retries
+    /// itself once after the backoff, before it deserves a person's
+    /// attention.
+    pub(super) fn report_provider_retryable(
+        &mut self,
+        error: &provider::ProviderError,
+        action: super::BannerAction,
+        cx: &mut Context<Self>,
+    ) {
+        if let provider::ProviderError::Refused(refusal) = error {
+            if refusal.severity == provider::Severity::Banner || refusal.hint == provider::RefusalHint::RetryLater {
+                let auto = refusal.hint == provider::RefusalHint::RetryLater;
+                self.offer_retry(&refusal_banner(refusal), action, auto, cx);
+                return;
+            }
+        }
+        self.report_provider_error(error, cx);
     }
 
     /// Derive the running turn from the folded transcript: the muse lane
@@ -2959,7 +3016,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::with_catalog(vec![
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "sonnet".into(),
                 label: "Sonnet".into(),
@@ -2969,7 +3026,7 @@ mod tests {
                 is_default: false,
                 description: None,
             },
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "haiku".into(),
                 label: "Haiku".into(),
@@ -3721,7 +3778,7 @@ mod tests {
         };
         assert_eq!(levels(vc), 1, "before the catalog: Default only");
         let level = |e: &str| e.to_owned();
-        handle.set_catalog(vec![provider::ModelSummary {
+        handle.set_catalog(vec![provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
             unavailable_modes: Vec::new(),
             id: "opus".into(),
             label: "Opus".into(),

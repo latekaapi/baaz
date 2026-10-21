@@ -49,9 +49,10 @@ impl SessionView {
                 session_id: self.session_id.clone(),
                 command: command_text.clone(),
             };
+            let retry = command_text.clone();
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
-                    this.report_provider_error(&error, cx);
+                    this.report_provider_retryable(&error, BannerAction::RetryShell(retry), cx);
                 }
             });
             cx.notify();
@@ -132,6 +133,9 @@ impl SessionView {
                 }
                 Ok(_) => {
                     this.set_banner("The fork answered without a session.", None, cx);
+                }
+                Err(error) if error.hint() == provider::RefusalHint::BadBoundary => {
+                    this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
                 }
                 Err(error) => this.report_provider_error(&error, cx),
             });

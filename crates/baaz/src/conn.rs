@@ -199,7 +199,7 @@ fn forward<T: Send + 'static>(
 }
 
 /// Bridge one competing crossbeam event stream onto a futures channel.
-fn bridge_events<T: Send + 'static>(events: crossbeam_channel::Receiver<T>) -> UnboundedReceiver<T> {
+pub(crate) fn bridge_events<T: Send + 'static>(events: crossbeam_channel::Receiver<T>) -> UnboundedReceiver<T> {
     let (tx, rx) = unbounded();
     let _ = forward(events, tx);
     rx
