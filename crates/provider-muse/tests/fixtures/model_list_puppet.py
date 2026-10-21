@@ -19,6 +19,12 @@ child's teardown instead. Recording is off unless `--record PATH` is given,
 so the original `roundtrip.rs` (which passes no flags) behaves exactly as
 before.
 
+`--emit-turn` makes the puppet behave like a session host for the hub
+tests: `session/start` and `session/resume` answer with the session id the
+request named, and every `turn/start` is followed by `turn/started`, one
+`agentMessage` item echoing the prompt, and `turn/completed` for that
+session — so events for several sessions interleave on one pipe.
+
 `--emit-bad-tap` makes the puppet send one malformed `approval/request`
 server request right after `initialize`: real enough to travel the reader
 thread, the event pump and the fold, malformed enough that the tap decode
@@ -102,8 +108,12 @@ def canned(method, params, granted=()):
             "userAgent": "fake/0.0.0-test",
         }
     if method == "session/start":
+        if EMIT_TURN and (params or {}).get("sessionId"):
+            session = fake_session(params["sessionId"])
         return {"session": session, "viewCursor": "v:0"}
     if method in ("session/resume", "session/fork", "session/read"):
+        if EMIT_TURN and method == "session/resume" and (params or {}).get("sessionId"):
+            session = fake_session(params["sessionId"])
         return {
             "history": fake_history(),
             "pendingRequests": [],
@@ -122,6 +132,14 @@ def canned(method, params, granted=()):
             "status": "accepted",
         }
     if method == "turn/start":
+        if EMIT_TURN:
+            return {
+                "commandId": command_id,
+                "disposition": "started",
+                "startedNewTurn": True,
+                "status": "accepted",
+                "turnId": "t-" + command_id,
+            }
         return {
             "commandId": command_id,
             "disposition": "started",
@@ -192,7 +210,30 @@ def canned(method, params, granted=()):
     return None
 
 
+EMIT_TURN = False
+CURSOR = [0]
+
+
+def cursor():
+    CURSOR[0] += 1
+    return "v:%d" % CURSOR[0]
+
+
+def emit_turn(params):
+    """A whole short turn for `turn/start`'s session, after its answer."""
+    session_id = params.get("sessionId", "s-1")
+    turn_id = "t-" + params.get("commandId", "cmd-1")
+    text = "".join(part.get("text") or "" for part in params.get("input") or [])
+    note = lambda method, body: send({"jsonrpc": "2.0", "method": method,
+        "params": dict(body, sessionId=session_id, viewCursor=cursor())})
+    note("turn/started", {"turnId": turn_id})
+    note("item/completed", {"item": {"itemId": "i-" + turn_id, "kind": "agentMessage", "turnId": turn_id,
+        "revision": 1, "status": "completed", "text": "echo: " + text}})
+    note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 1})
+
+
 def main():
+    global EMIT_TURN
     record_path = None
     emit_bad_tap = False
     granted = []
@@ -205,8 +246,15 @@ def main():
         elif args[i].startswith("--record="):
             record_path = args[i][len("--record="):]
             i += 1
+        elif args[i] == "--emit-turn":
+            EMIT_TURN = True
+            i += 1
         elif args[i] == "--emit-bad-tap":
             emit_bad_tap = True
+            i += 1
+        elif args[i] == "--grant-shell":
+            # Grant the `!` escape hatch only.
+            granted = ["userShell"]
             i += 1
         elif args[i] == "--grant-mcp":
             # Behave like muse >= 1.3: grant the terminal relay's route.
@@ -244,6 +292,8 @@ def main():
             failure(req_id, -32601, "fake server knows no method " + str(method))
         else:
             result(req_id, payload)
+        if EMIT_TURN and method == "turn/start" and payload is not None:
+            emit_turn(params if isinstance(params, dict) else {})
         if method == "initialize" and not initialized:
             initialized = True
             if emit_bad_tap:

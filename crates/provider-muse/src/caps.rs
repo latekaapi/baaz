@@ -53,6 +53,26 @@ pub fn muse_version_supported(version: &str) -> bool {
     compare_versions(version, MUSE_VERSION_FLOOR) != Ordering::Less
 }
 
+/// [`capabilities_for_version`], with the shell answered by the handshake:
+/// `userShell` granted is native, refused is unavailable, unknown (before
+/// a handshake) stays unverified.
+pub fn capabilities_for_link(version: &str, user_shell: Option<bool>) -> CapabilitySet {
+    let mut states: Vec<(Capability, CapabilityState)> =
+        Capability::all().into_iter().map(|c| (c, capabilities_for_version(version).state(c).clone())).collect();
+    for (capability, state) in states.iter_mut() {
+        if *capability == Capability::SessionShell {
+            *state = match user_shell {
+                Some(true) => CapabilityState::Native,
+                Some(false) => CapabilityState::Unavailable {
+                    reason: "this muse did not grant the user shell at initialize".into(),
+                },
+                None => CapabilityState::Unverified,
+            };
+        }
+    }
+    CapabilitySet::new(states.try_into().expect("one state per capability"))
+}
+
 /// muse's declared set for one agent version. Only
 /// [`Capability::ClientTools`] is version-dependent (gated on
 /// [`MUSE_MCP_VERSION_FLOOR`]); every other command-backed capability is

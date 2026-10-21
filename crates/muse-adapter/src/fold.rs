@@ -210,6 +210,10 @@ pub struct MuseFold {
     /// Session ids in touch order, most recent last — what
     /// [`SESSION_CACHE_LIMIT`] evicts by.
     recent: Vec<String>,
+    /// Sessions that must never be evicted: a hub keeps one fold for a whole
+    /// connection, and a session a view is following has to keep its slots
+    /// however many other sessions pass through.
+    pinned: std::collections::HashSet<String>,
 }
 
 /// How many sessions one fold keeps folded at a time.
@@ -488,6 +492,20 @@ impl MuseFold {
         folded.update_block(slot, block)
     }
 
+    /// Keep `session_id` folded however many other sessions pass through,
+    /// until [`MuseFold::unpin`].
+    pub fn pin(&mut self, session_id: &str) {
+        self.pinned.insert(session_id.to_owned());
+    }
+
+    /// Let `session_id` be evicted again, oldest first, like any other.
+    pub fn unpin(&mut self, session_id: &str) {
+        self.pinned.remove(session_id);
+        if let Some(touched) = self.recent.last().cloned() {
+            self.touch(&touched);
+        }
+    }
+
     /// Forget a session's folded state: its view is closed and nothing will
     /// ask for its transcript again (finding `performance-16`).
     ///
@@ -507,8 +525,9 @@ impl MuseFold {
             self.recent.retain(|id| id != session_id);
             self.recent.push(session_id.to_owned());
         }
-        while self.recent.len() > SESSION_CACHE_LIMIT {
-            let oldest = self.recent.remove(0);
+        while self.recent.len() > SESSION_CACHE_LIMIT + self.pinned.len() {
+            let Some(at) = self.recent.iter().position(|id| !self.pinned.contains(id)) else { break };
+            let oldest = self.recent.remove(at);
             self.sessions.remove(&oldest);
         }
     }
@@ -3401,6 +3420,21 @@ mod tests {
             cursor: None,
             session_id: Some(session_id.to_owned()),
         });
+    }
+
+    #[test]
+    fn a_pinned_session_outlives_any_number_of_others() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "followed");
+        fold.pin("followed");
+        for index in 0..SESSION_CACHE_LIMIT * 3 {
+            started(&mut fold, &format!("s-{index}"));
+        }
+        assert!(fold.session("followed").is_some(), "the pinned session is kept");
+        assert_eq!(fold.session_ids().count(), SESSION_CACHE_LIMIT + 1, "the others still bound");
+        fold.unpin("followed");
+        started(&mut fold, "next");
+        assert!(fold.session("followed").is_none(), "unpinned, it is the oldest again");
     }
 
     #[test]

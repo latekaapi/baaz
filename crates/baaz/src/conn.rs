@@ -50,11 +50,11 @@ pub const REQUESTED_CAPABILITIES: &[&str] = &["userShell", "sessionMcp"];
 /// A live connection: the provider behind its gate, the provider events,
 /// and the transitional legacy bundle sharing the same child.
 pub struct Connected {
-    /// The one way to talk to the provider: the adapter behind the
-    /// enforced capability gate. Every command goes through
-    /// [`Provider::send`]; the raw dispatch is unreachable.
-    pub provider: Provider,
-    /// Provider events, bridged onto a channel a gpui task can await.
+    /// The one `muse serve` child as a hub: a [`Provider`] lane per
+    /// session, every command through the lane's gate.
+    pub hub: provider_muse::MuseHub,
+    /// The hub's connection stream (row facts, connection loss), bridged
+    /// onto a channel a gpui task can await.
     pub events: UnboundedReceiver<ProviderEvent>,
     /// The transitional legacy bundle: same child, raw stream, handshake
     /// facts. Gone with the last legacy view.
@@ -117,9 +117,9 @@ pub fn connect_info() -> ConnectInfo {
 pub fn connect(program: &str) -> Result<Connected, ProviderError> {
     let established = provider_muse::establish(program, &connect_info())?;
     let legacy_events = bridge_events(established.legacy);
-    let (provider, events) = gate(Provider::new(established.adapter));
+    let events = bridge_events(established.hub.connection_events());
     Ok(Connected {
-        provider,
+        hub: established.hub,
         events,
         legacy: Legacy {
             transport: established.transport,

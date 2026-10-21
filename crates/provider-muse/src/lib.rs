@@ -1,13 +1,14 @@
 //! `provider-muse` — the muse implementation of the provider seam.
 //!
-//! [`MuseAdapter`] implements [`ProviderAdapter`] over a [`MuseClient`]
-//! transport and a [`MuseFold`]. Every wire spelling lives here: this is
-//! the only crate in the seam allowed to depend on `muse-client`, and the
-//! per-command translation is in [`translate`]. Spawning the child,
-//! `initialize`, and the schema-fingerprint warning live here too —
-//! [`establish`] is what `baaz`'s connection path calls — while the app's
-//! session views still ride the raw transport until they move onto the
-//! trait (see [`SharedTransport`] and [`MuseAdapter::legacy_events`]).
+//! A [`MuseHub`] owns the one `muse serve` child and its MSP fold; each
+//! session rides it as a [`MuseLane`], a [`ProviderAdapter`] like Claude
+//! Code's and Codex's. Every wire spelling lives here: this is the only
+//! crate in the seam allowed to depend on `muse-client`, and the per-command
+//! translation is in `translate`. Spawning, `initialize` and the
+//! schema-fingerprint warning live here too — [`establish`] is what `baaz`'s
+//! connection path calls. [`MuseAdapter`] is the whole connection as one
+//! adapter, for tests; [`SharedTransport`] and [`MuseHub::legacy_events`]
+//! are transitional.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -15,15 +16,15 @@
 mod caps;
 pub mod errors;
 pub mod facts;
+mod hub;
+pub mod modes;
 pub mod terminal;
 mod translate;
 
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use muse_adapter::MuseFold;
-use muse_client::schema::{ApprovalRequestParams, ClientCapabilities, UserInputRequestParams};
+use crossbeam_channel::Receiver;
+use muse_client::schema::{ApprovalRequestParams, UserInputRequestParams};
 use muse_client::{MuseClient, MuseConfig, MuseEvent};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
@@ -33,224 +34,81 @@ use provider::{
 pub use caps::{
     capabilities_for_version, muse_version_supported, MUSE_MCP_VERSION_FLOOR, MUSE_VERSION_FLOOR,
 };
+pub use hub::{side_of, MuseHub, MuseLane};
 pub use terminal::TerminalRelay;
 pub use translate::{approval_headline, question_headline};
 
-/// The raw transport, shared between the adapter and the app's legacy
-/// session views. Transitional: session views still take an
-/// `Arc<MuseClient>` (they move onto [`Command`] one lane at a time), so
-/// one spawned child is held here and cloned out — never spawned twice.
-/// The follow-up that moves the last view removes this alias with them.
+/// The raw transport, shared between the hub and the application's
+/// transitional paths (account, usage, titles) until they speak neutral
+/// events.
 pub type SharedTransport = Arc<MuseClient>;
 
-/// The muse implementation: neutral [`Command`]s in, MSP on the pipe,
-/// neutral [`Ack`]s and [`ProviderEvent`]s out.
-///
-/// Owns one spawned client (shared with the app's legacy views — see
-/// [`SharedTransport`]) and the fold its events run through. A forwarding
-/// thread pumps the client's event channel into the fold, the provider
-/// channel, and the legacy channel; it ends when the child exits
-/// ([`MuseEvent::Closed`]) or the transport's sender is dropped. The pump
-/// is detached, never joined: legacy holders can outlive any one owner
-/// (a parked session view keeps its transport until it is re-seated), so a
-/// join could wait on a sender that is still legitimately alive — the same
-/// accepted design as the app's event bridge.
+/// The whole connection as one adapter: a [`MuseHub`] lane that sees every
+/// session's events. What tests drive the command arms through; the
+/// application holds a [`MuseHub`] and one [`MuseLane`] per session.
 pub struct MuseAdapter {
-    client: SharedTransport,
-    fold: Arc<Mutex<MuseFold>>,
-    tx: Sender<ProviderEvent>,
-    rx: Receiver<ProviderEvent>,
-    legacy_tx: Sender<MuseEvent>,
-    legacy_rx: Receiver<MuseEvent>,
-    pump: Option<JoinHandle<()>>,
-    /// The agent version the handshake negotiated, for the version-gated
-    /// capabilities. `None` before [`ProviderAdapter::connect`] runs.
-    negotiated: Mutex<Option<String>>,
-    /// Whether `initialize` granted `userShell`. Fixed for the connection
-    /// lifetime; read by the app to decide whether a session may run shell
-    /// commands. `None` before [`ProviderAdapter::connect`] runs.
-    granted_shell: Mutex<Option<bool>>,
-    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Fixed for
-    /// the connection lifetime; the terminal relay rides it, and without
-    /// it there is no route. `None` before [`ProviderAdapter::connect`]
-    /// runs.
-    granted_mcp: Mutex<Option<bool>>,
-    /// Where the terminal relay lives, set by the host before the session
-    /// commands run. `None` means no relay: sessions open exactly as they
-    /// always did.
-    terminal: Mutex<Option<TerminalRelay>>,
-    /// The schema-fingerprint warning from `initialize`, pre-formatted.
-    /// A mismatch is additive evolution, never a failure: the app logs it
-    /// and carries on. `None` when the fingerprints agreed.
-    warning: Mutex<Option<String>>,
+    lane: MuseLane,
 }
 
 impl MuseAdapter {
-    /// Wrap an already-spawned client. Spawning stays outside the seam:
-    /// which binary, which flags, and whose policy are host decisions, not
-    /// provider ones. [`ProviderAdapter::connect`] runs the handshake.
-    /// Use [`establish`] for the full spawn-and-handshake path.
+    /// Wrap an already-spawned client; [`ProviderAdapter::connect`] runs the
+    /// handshake. Spawning stays outside: which binary and flags are host
+    /// decisions. [`MuseHub::connect`] is the full spawn-and-handshake path.
     pub fn new(client: MuseClient) -> Self {
-        Self::shared(Arc::new(client))
+        Self { lane: MuseHub::from_client(client).watch_all() }
     }
 
-    /// Wrap an already-spawned client held in a shared transport, so the
-    /// adapter and the app's legacy views ride one child.
-    pub fn shared(client: SharedTransport) -> Self {
-        let (tx, rx) = unbounded();
-        let (legacy_tx, legacy_rx) = unbounded();
-        Self {
-            client,
-            fold: Arc::new(Mutex::new(MuseFold::new())),
-            tx,
-            rx,
-            legacy_tx,
-            legacy_rx,
-            pump: None,
-            negotiated: Mutex::new(None),
-            granted_shell: Mutex::new(None),
-            granted_mcp: Mutex::new(None),
-            terminal: Mutex::new(None),
-            warning: Mutex::new(None),
-        }
+    /// The hub under this adapter.
+    pub fn hub(&self) -> MuseHub {
+        self.lane.hub()
     }
 
-    /// The shared transport, for the app's legacy session views.
-    /// Transitional with [`SharedTransport`].
-    pub fn transport(&self) -> SharedTransport {
-        Arc::clone(&self.client)
-    }
-
-    /// The raw transport events, in wire order, for the app's legacy pump.
-    /// Cloned receivers are competing consumers: keep exactly one consumer
-    /// and fan out from there.
-    pub fn legacy_events(&self) -> Receiver<MuseEvent> {
-        self.legacy_rx.clone()
-    }
-
-    /// Whether the handshake granted `userShell`. `false` before
-    /// [`ProviderAdapter::connect`] runs.
+    /// Whether the handshake granted `userShell`.
     pub fn user_shell_granted(&self) -> bool {
-        self.granted_shell.lock().expect("granted mutex").unwrap_or(false)
+        self.hub().user_shell_granted()
     }
 
-    /// Whether the handshake granted `sessionMcp` (muse ≥ 1.3). `false`
-    /// before [`ProviderAdapter::connect`] runs — fail closed, so a
-    /// session never carries a bridge the server would silently drop.
+    /// Whether the handshake granted `sessionMcp` (muse ≥ 1.3).
     pub fn session_mcp_granted(&self) -> bool {
-        self.granted_mcp.lock().expect("granted mutex").unwrap_or(false)
+        self.hub().session_mcp_granted()
     }
 
-    /// Point the terminal relay at the bridge and socket before the
-    /// session commands run. The relay still rides only on the grant (see
-    /// [`Self::session_mcp_granted`]): set without a grant, sessions open
-    /// exactly as they always did.
-    pub fn set_terminal_relay(
-        &self,
-        bridge: std::path::PathBuf,
-        socket: std::path::PathBuf,
-    ) {
-        *self.terminal.lock().expect("terminal mutex") =
-            Some(TerminalRelay { bridge, socket });
+    /// Point the terminal relay at the bridge and socket (see
+    /// [`MuseHub::set_terminal_relay`]).
+    pub fn set_terminal_relay(&self, bridge: std::path::PathBuf, socket: std::path::PathBuf) {
+        self.hub().set_terminal_relay(bridge, socket);
     }
 
-    /// The bridge `config` for `session_id`, or `None` when there is no
-    /// route: no relay was set, or `initialize` did not grant `sessionMcp`.
-    fn terminal_config_for(&self, session_id: &str) -> Option<muse_client::schema::SessionConfig> {
-        if !self.session_mcp_granted() {
-            return None;
-        }
-        self.terminal
-            .lock()
-            .expect("terminal mutex")
-            .as_ref()
-            .map(|relay| relay.session_config(session_id))
-    }
-
-    /// The schema-fingerprint warning from `initialize`, pre-formatted for
-    /// the log. `None` when the fingerprints agreed — the common case.
+    /// The schema-fingerprint warning from `initialize`.
     pub fn schema_warning(&self) -> Option<String> {
-        self.warning.lock().expect("warning mutex").clone()
+        self.hub().schema_warning()
     }
 
-    /// Forward one transport event: fan it out to the legacy channel, fold
-    /// it, emit its deltas, and raise the tap on the shoulder a server
-    /// request needs. Returns `false` when the pump should stop.
-    fn forward(
-        fold: &Mutex<MuseFold>,
-        tx: &Sender<ProviderEvent>,
-        legacy: &Sender<MuseEvent>,
-        tracker: &mut facts::FactTracker,
-        event: MuseEvent,
-    ) -> bool {
-        // The legacy fan-out first: every transport event reaches the raw
-        // channel whole, whatever the fold makes of it. Best-effort — a
-        // gone consumer must not stall the provider channel.
-        let _ = legacy.send(event.clone());
-        match event {
-            MuseEvent::Closed(code) => {
-                let _ = tx.send(ProviderEvent::ConnectionLost {
-                    reason: match code {
-                        Some(code) => format!("the agent process exited ({code})"),
-                        None => "the agent process exited".into(),
-                    },
-                });
-                false
-            }
-            MuseEvent::Notification { ref session_id, ref method, ref params, .. } => {
-                // Cloned before the fold consumes the event; the borrow
-                // ends here, so the move below is legal.
-                let session = session_id.clone();
-                let method = method.clone();
-                let params = params.clone();
-                let mut fold = fold.lock().expect("fold mutex");
-                let deltas = fold.apply(event);
-                // The fold resolves the session id the way it filed the
-                // event (`session/started` carries it inside `session`).
-                let session = session.or_else(|| fold.last_touched().map(str::to_owned));
-                if !deltas.is_empty() {
-                    let _ = tx.send(ProviderEvent::Deltas { session_id: session.clone(), deltas });
-                }
-                if let Some(session) = session {
-                    for fact in tracker.after(&mut fold, &session, &method, &params) {
-                        let _ = tx.send(fact);
-                    }
-                }
-                true
-            }
-            MuseEvent::ServerRequest { method, params, .. } => {
-                let tap = match tap_for(&method, &params) {
-                    Ok(tap) => tap,
-                    // The card still arrives through the fold below; without
-                    // this the app would show it with no prompt attached and
-                    // look like it is waiting on nothing. The closed event
-                    // enum has no prompt-shaped error, so the failure rides
-                    // the only error-shaped event — and the pump continues,
-                    // because one bad prompt must not end the session.
-                    Err(error) => {
-                        let _ = tx.send(ProviderEvent::ConnectionLost {
-                            reason: error.to_string(),
-                        });
-                        None
-                    }
-                };
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned);
-                let deltas = fold
-                    .lock()
-                    .expect("fold mutex")
-                    .apply(MuseEvent::ServerRequest { id: request_id(&params), method, params });
-                if !deltas.is_empty() {
-                    let _ = tx.send(ProviderEvent::Deltas { session_id, deltas });
-                }
-                if let Some(tap) = tap {
-                    let _ = tx.send(tap);
-                }
-                true
-            }
-        }
+    /// The raw transport events, in wire order (transitional).
+    pub fn legacy_events(&self) -> Receiver<MuseEvent> {
+        self.hub().legacy_events()
+    }
+}
+
+impl ProviderAdapter for MuseAdapter {
+    fn id(&self) -> ProviderId {
+        self.lane.id()
+    }
+    fn connect(&mut self, client: &ConnectInfo) -> Result<Handshake, ProviderError> {
+        self.lane.connect(client)
+    }
+    fn capabilities(&self) -> CapabilitySet {
+        self.lane.capabilities()
+    }
+    fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
+        self.lane.dispatch(command)
+    }
+    fn events(&self) -> Receiver<ProviderEvent> {
+        self.lane.events()
+    }
+    fn shutdown(&mut self) {
+        self.hub().shutdown();
+        self.lane.shutdown();
     }
 }
 
@@ -260,7 +118,7 @@ impl MuseAdapter {
 /// A KNOWN method whose params fail to decode is a caller-visible error:
 /// dropping it would cost the person the prompt while the card still
 /// appears, so the app would look like it is waiting on nothing.
-fn tap_for(
+pub(crate) fn tap_for(
     method: &str,
     params: &serde_json::Value,
 ) -> Result<Option<ProviderEvent>, ProviderError> {
@@ -290,147 +148,6 @@ fn tap_for(
             }))
         }
         _ => Ok(None),
-    }
-}
-
-/// The session id the terminal relay answers for on this command: a fresh
-/// open mints it client-side (`request_id` doubles as the new session's
-/// exact identity, registered with the service before the send), a resume
-/// names the stored session. Every other command carries no route.
-fn command_terminal_session(command: &Command) -> Option<String> {
-    match command {
-        Command::OpenSession { request_id, .. } => Some(request_id.clone()),
-        Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
-        _ => None,
-    }
-}
-
-/// A stand-in id for re-wrapping a server request after its tap was read:
-/// the fold only needs *an* id, and the params already carry the real one
-/// (`approvalId` / `userInputId`), so nothing here invents identity.
-fn request_id(params: &serde_json::Value) -> serde_json::Value {
-    params
-        .get("approvalId")
-        .or_else(|| params.get("userInputId"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null)
-}
-
-impl ProviderAdapter for MuseAdapter {
-    fn id(&self) -> ProviderId {
-        aui_protocol::Provider::Muse
-    }
-
-    fn connect(&mut self, client: &ConnectInfo) -> Result<Handshake, ProviderError> {
-        if self.pump.is_some() {
-            return Err(ProviderError::Rejected { reason: "already connected".into() });
-        }
-        let (result, warning) = self
-            .client
-            .initialize(
-                &client.client_name,
-                &client.client_version,
-                ClientCapabilities {
-                    // Sign-in is on the wire now (D22): `account/*` is
-                    // experimental, so the opt-in is required — without it
-                    // every account method answers `-32601` /
-                    // `experimentalRequired`. `userShell` is the `!` escape
-                    // hatch, requested below through the neutral
-                    // `ConnectInfo::capabilities`.
-                    experimental_api: Some(true),
-                    opt_out_notification_methods: None,
-                    requested_capabilities: if client.capabilities.is_empty() {
-                        None
-                    } else {
-                        Some(client.capabilities.clone())
-                    },
-                    ..Default::default()
-                },
-            )
-            .map_err(translate::transport_error)?;
-        let live = self.client.events();
-        let fold = Arc::clone(&self.fold);
-        let tx = self.tx.clone();
-        let legacy = self.legacy_tx.clone();
-        let pump = std::thread::Builder::new()
-            .name("provider-muse-pump".into())
-            .spawn(move || {
-                let mut tracker = facts::FactTracker::new();
-                while let Ok(event) = live.recv() {
-                    if !Self::forward(&fold, &tx, &legacy, &mut tracker, event) {
-                        break;
-                    }
-                }
-            })
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("could not start the event pump: {error}"),
-            })?;
-        self.pump = Some(pump);
-        let version = result.server_info.version.clone();
-        *self.negotiated.lock().expect("negotiated mutex") = Some(version.clone());
-        *self.granted_shell.lock().expect("granted mutex") =
-            Some(result.granted_capabilities.iter().any(|c| c.as_wire() == Some("userShell")));
-        *self.granted_mcp.lock().expect("granted mutex") =
-            Some(result.granted_capabilities.iter().any(|c| c.as_wire() == Some("sessionMcp")));
-        *self.warning.lock().expect("warning mutex") = warning.map(|warning| format!("{warning:?}"));
-        Ok(Handshake {
-            provider: aui_protocol::Provider::Muse,
-            agent_name: result.server_info.name,
-            agent_version: version,
-        })
-    }
-
-    fn capabilities(&self) -> CapabilitySet {
-        // Before connect no version was negotiated: assume the floor, so
-        // the set is the supported one and nothing version-gated is
-        // promised. No command maps to `ClientTools`, so the pre-connect
-        // assumption never blocks a send.
-        let version = self.negotiated.lock().expect("negotiated mutex").clone();
-        match version {
-            Some(version) => caps::capabilities_for_version(&version),
-            None => caps::capabilities_for_version(caps::MUSE_VERSION_FLOOR),
-        }
-    }
-
-    fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
-        // `dispatch` takes `&self` and only the page arm touches the
-        // fold, so the fold lives behind a mutex while the client — already
-        // safe to share — stays directly owned. Commands stay concurrent
-        // everywhere except the fold lock. The `Unavailable` refusal happens
-        // before this runs, in `provider::Provider::send`, which is the only
-        // path that reaches here.
-        //
-        // The open and resume arms read the terminal relay through
-        // `&self`: the bridge `config` rides only on the `sessionMcp`
-        // grant, so an ungranted server (or an unset relay) sends exactly
-        // what it always sent.
-        let terminal = command_terminal_session(&command).and_then(|session_id| {
-            self.terminal_config_for(&session_id)
-                .map(|config| (session_id, config))
-        });
-        translate::dispatch(&self.client, &self.fold, command, terminal)
-    }
-
-    fn events(&self) -> Receiver<ProviderEvent> {
-        self.rx.clone()
-    }
-
-    fn shutdown(&mut self) {
-        // Best-effort early hang-up when this adapter holds the last
-        // transport clone; otherwise the drop chain cleans the child up
-        // when the legacy holders let go.
-        if let Some(client) = Arc::get_mut(&mut self.client) {
-            client.shutdown();
-        }
-        // Detach, never join — see the struct docs. The pump ends when the
-        // transport's sender is dropped.
-        self.pump.take();
-    }
-}
-
-impl Drop for MuseAdapter {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
 
@@ -464,41 +181,38 @@ pub fn spawn(program: &str) -> Result<MuseClient, ProviderError> {
     .map_err(translate::transport_error)
 }
 
-/// What spawning and shaking hands produced: the adapter (which moves
-/// behind the [`Provider`](provider::Provider) gate), the shared transport
-/// and raw event stream the app's legacy views still ride, and the neutral
-/// handshake facts the app logs.
+/// What spawning and shaking hands produced: the hub, the transitional
+/// raw transport and event stream, and the neutral handshake facts the app
+/// logs.
 pub struct Established {
-    /// The connected adapter. Move it into a [`Provider`](provider::Provider);
-    /// the raw dispatch is reachable only through its gate.
-    pub adapter: MuseAdapter,
-    /// The one spawned child, shared with the legacy views.
+    /// The hub: one lane per session, plus the connection stream.
+    pub hub: MuseHub,
+    /// The one spawned child (transitional).
     pub transport: SharedTransport,
-    /// The raw transport events, in wire order. Single consumer.
+    /// The raw transport events, in wire order (transitional). Single consumer.
     pub legacy: Receiver<MuseEvent>,
     /// Who answered, neutrally.
     pub handshake: Handshake,
-    /// The schema-fingerprint warning, pre-formatted for the log, or `None`
-    /// when the fingerprints agreed.
+    /// The schema-fingerprint warning, pre-formatted for the log.
     pub warning: Option<String>,
     /// Whether `initialize` granted `userShell`.
     pub user_shell: bool,
-    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3): the
-    /// terminal relay's route. `false` means no route — sessions open
-    /// exactly as they always did.
+    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3).
     pub session_mcp: bool,
 }
 
-/// Spawn `muse serve` ([`spawn`]) and shake hands over it: identify the
-/// client (requesting its [`ConnectInfo::capabilities`]) and learn who
-/// answered. Blocking: run it on the background executor.
+/// Spawn `muse serve` ([`spawn`]) and shake hands over it. Blocking.
 pub fn establish(program: &str, client: &ConnectInfo) -> Result<Established, ProviderError> {
-    let transport = Arc::new(spawn(program)?);
-    let mut adapter = MuseAdapter::shared(Arc::clone(&transport));
-    let handshake = adapter.connect(client)?;
-    let legacy = adapter.legacy_events();
-    let warning = adapter.schema_warning();
-    let user_shell = adapter.user_shell_granted();
-    let session_mcp = adapter.session_mcp_granted();
-    Ok(Established { adapter, transport, legacy, handshake, warning, user_shell, session_mcp })
+    let hub = MuseHub::connect(program, client)?;
+    let transport = hub.transport().ok_or_else(|| ProviderError::Unavailable { reason: "Muse is not running".into() })?;
+    let handshake = hub.handshake().ok_or_else(|| ProviderError::Unavailable { reason: "Muse is not running".into() })?;
+    Ok(Established {
+        legacy: hub.legacy_events(),
+        transport,
+        handshake,
+        warning: hub.schema_warning(),
+        user_shell: hub.user_shell_granted(),
+        session_mcp: hub.session_mcp_granted(),
+        hub,
+    })
 }

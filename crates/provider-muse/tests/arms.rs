@@ -162,6 +162,9 @@ fn every_command_arm_sends_its_method_params_and_ack() {
         extra_args: vec![
             "--record".to_owned(),
             records.to_string_lossy().into_owned(),
+            // The shell arm needs the grant: an ungranted shell is refused
+            // before the wire.
+            "--grant-shell".to_owned(),
         ],
     })
     .expect("fake server spawns — is python3 on PATH?");
@@ -594,8 +597,8 @@ fn every_command_arm_sends_its_method_params_and_ack() {
             }),
             check_ack: Box::new(|ack| match ack {
                 Ack::TranscriptPage { deltas, next_cursor } => {
-                    assert!(deltas.is_empty(), "the empty page folds to no deltas");
-                    assert_eq!(next_cursor.as_deref(), Some("v:2"));
+                    assert!(deltas.is_empty(), "a page's deltas travel the lane, never the ack");
+                    assert_eq!(next_cursor, None, "an empty page is the end, whatever cursor it names");
                 }
                 other => panic!("expected a transcript page, got {other:?}"),
             }),
@@ -729,10 +732,14 @@ fn every_command_arm_sends_its_method_params_and_ack() {
         // Exactly one new wire request per command: the record is flushed
         // before the puppet answers, so it is on disk by now.
         let all = read_records(&records);
+        // A Muse mode pick is two wire steps: the sandbox profile (a
+        // metadata-only `session/resume`) and the mode itself, last when
+        // the pick tightens access.
+        let new_requests = if name == "select-approval-mode" { 2 } else { 1 };
         assert_eq!(
             all.len(),
-            seen + 1,
-            "{name}: expected exactly one new recorded request"
+            seen + new_requests,
+            "{name}: expected exactly {new_requests} new recorded request(s)"
         );
         seen = all.len();
         let record = &all[all.len() - 1];
@@ -755,13 +762,20 @@ fn every_command_arm_sends_its_method_params_and_ack() {
     let _ = std::fs::remove_file(&records);
     // The pump reports the child's exit as one connection notice, then
     // stops — the same contract `roundtrip.rs` pins down.
+    // Facts the commands moved arrive before it; nothing connection-level
+    // follows it.
     let rx = adapter.events();
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(provider::ProviderEvent::ConnectionLost { .. }) => {}
-        other => panic!("expected the single exit notice, got {other:?}"),
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(provider::ProviderEvent::ConnectionLost { .. }) => break,
+            Ok(_) => continue,
+            other => panic!("expected the single exit notice, got {other:?}"),
+        }
     }
-    assert!(
-        rx.recv_timeout(Duration::from_secs(1)).is_err(),
-        "the exit notice must arrive exactly once"
-    );
+    while let Ok(event) = rx.recv_timeout(Duration::from_secs(1)) {
+        assert!(
+            !matches!(event, provider::ProviderEvent::ConnectionLost { .. }),
+            "the exit notice must arrive exactly once"
+        );
+    }
 }

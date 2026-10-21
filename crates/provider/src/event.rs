@@ -151,6 +151,18 @@ pub enum ProviderEvent {
         /// What is waiting on the person, as the provider names it.
         attention: Vec<String>,
     },
+    /// Words the provider wants on the session's banner: something it did
+    /// on its own that the person should know (a sandbox it could not
+    /// restore after a resume). Not an error of any command.
+    Notice {
+        /// The owning session.
+        session_id: String,
+        /// The banner's words.
+        text: String,
+    },
+    /// The connection is back after a [`ProviderEvent::ConnectionLost`]:
+    /// followed sessions were re-attached and resume from where they were.
+    ConnectionRestored,
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.
     ConnectionLost {
