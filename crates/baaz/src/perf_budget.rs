@@ -24,6 +24,18 @@ use std::time::Instant;
 use crate::index::IndexEntry;
 use crate::search::{SessionRow, SyncRow};
 
+/// Criterion for the in-crate benches (docs/51 P2): baaz is a binary, so
+/// the render-cache and sidebar benches run as ignored tests —
+/// `cargo test -p baaz --release --bin baaz bench_ -- --ignored --nocapture
+/// --test-threads=1`. Short windows: they hold a line, they are not a lab.
+#[cfg(test)]
+pub(crate) fn bench_criterion() -> criterion::Criterion {
+    criterion::Criterion::default()
+        .warm_up_time(std::time::Duration::from_secs(1))
+        .measurement_time(std::time::Duration::from_secs(3))
+        .sample_size(30)
+}
+
 /// Sessions in the synthetic store: the owner's count on 2026-10-16.
 pub const SESSIONS: usize = 2_600;
 

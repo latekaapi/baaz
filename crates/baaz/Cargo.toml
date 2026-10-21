@@ -69,6 +69,12 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSArray"] }
 raw-window-handle = "0.6"
 
+# The render-cache and sidebar benches (docs/51 P2) run criterion from
+# ignored tests: baaz is a binary crate, so a `benches/` target cannot reach
+# the code it would time. No plots, no rayon.
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
+
 [package.metadata.cargo-machete]
 # `gpui_platform` has no direct `use` in this crate's source, so cargo-machete
 # flags it, but it is not dead: its `test-support` feature is what makes
