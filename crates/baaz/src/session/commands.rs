@@ -165,7 +165,7 @@ impl SessionView {
         // The wire never gives the prompt back, so the fold has to remember it
         // before the command leaves: a retraction identifies the submission by
         // `commandId` and by nothing else.
-        self.fold.record_command(&self.session_id, &command_id, &text);
+        self.remember_command(&command_id, &text);
         // Plan mode is the one thing that makes the model-visible text differ
         // from the person's: `/plan ` fires the bundled skill (see plan.rs).
         let quoted = quoted_prompt(&self.quotes, &text);
@@ -209,7 +209,7 @@ impl SessionView {
         let request_id = new_command_id();
         // The wire never gives the prompt back, so the fold remembers it
         // before the command leaves: `retry_turn` resubmits it from here.
-        self.fold.record_command(&self.session_id, &request_id, &text);
+        self.remember_command(&request_id, &text);
         // Plan mode prefixes the model-visible input, exactly as on the
         // muse lane; the display text stays the person's words.
         let quoted = quoted_prompt(&self.quotes, &text);
@@ -235,8 +235,7 @@ impl SessionView {
         // the adapter acks. The provider's own user turn replaces it in
         // place when it lands, so the hero is gone on the very next
         // frame instead of waiting on the child's echo.
-        let landed = self.fold.apply_deltas(
-            &self.session_id,
+        let landed = self.store.apply_deltas(
             vec![Delta::TurnStarted {
                 turn: Turn::User {
                     id: optimistic_id.clone(),
@@ -368,7 +367,10 @@ impl SessionView {
         match result {
             Ok(ack) => {
                 if ack.disposition == TurnStartDisposition::Queued {
-                    self.fold.record_queued(&self.session_id, &ack.turn_id, &ack.command_id, &text);
+                    let session_id = self.session_id.clone();
+                    self.muse_fold.record_queued(&session_id, &ack.turn_id, &ack.command_id, &text);
+                    self.store.record_command(&ack.command_id, &text);
+                    self.muse_mirror_sync(Vec::new());
                     self.submitting = false;
                 } else if planning {
                     // The plan card is appended when this turn's reply lands.
@@ -432,7 +434,7 @@ impl SessionView {
             return;
         };
         let command_id = new_command_id();
-        self.fold.record_command(&self.session_id, &command_id, &text);
+        self.remember_command(&command_id, &text);
         self.append_history(text.clone(), cx);
         // The provider lane steers with `expected_turn`, the race guard
         // that keeps input for turn A out of turn B.
@@ -1380,8 +1382,7 @@ impl SessionView {
         }
         self.plan_seq += 1;
         let id = format!("plan-{}", self.plan_seq);
-        self.fold.append_client_block(
-            &self.session_id,
+        self.append_client_block(
             &id,
             Block::Plan { id: id.clone(), items, sections, state: PlanState::Proposed },
         );
@@ -1404,7 +1405,7 @@ impl SessionView {
     /// and restarts; the newest recorded submission covers a turn whose
     /// `userMessage` has not echoed yet.
     pub fn last_user_text(&self) -> Option<String> {
-        let sent = self.fold.side(&self.session_id)?.command_text.values().next_back().cloned();
+        let sent = self.store.last_command_text().map(str::to_owned);
         let said = self.session()?.turns.iter().rev().find_map(|turn| match turn {
             Turn::User { text, .. } => Some(text.clone()),
             _ => None,
@@ -1423,7 +1424,7 @@ impl SessionView {
     /// folded user turn, which covers replays and restarts that recorded
     /// nothing.
     pub fn first_prompt_text(&self) -> Option<String> {
-        let sent = self.fold.side(&self.session_id)?.command_text.values().next_back().cloned();
+        let sent = self.store.last_command_text().map(str::to_owned);
         let said = self.session()?.turns.iter().rev().find_map(|turn| match turn {
             Turn::User { text, .. } => Some(text.clone()),
             _ => None,
@@ -1467,7 +1468,7 @@ impl SessionView {
                 let Block::Plan { items, sections, .. } = &block else { return };
                 let replaced =
                     Block::Plan { id: id.to_owned(), items: items.clone(), sections: sections.clone(), state };
-                self.fold.replace_client_block(&self.session_id, id, replaced);
+                self.replace_client_block(id, replaced);
                 self.follow = true;
             }
         }
@@ -1957,9 +1958,7 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 // A transcript already in the session, not a fresh one.
-                view.fold.append_client_block(
-                    "s-turns",
-                    "t-seed",
+                view.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
                 );
                 assert!(view.has_turns(), "the session has turns in it");
@@ -2351,9 +2350,7 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 // A transcript already in the session, not a fresh one.
-                view.fold.append_client_block(
-                    "s-effort-turns",
-                    "t-seed",
+                view.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
                 );
                 assert!(view.has_turns(), "the session has turns in it");
@@ -2582,9 +2579,7 @@ mod tests {
         // so as a failure rather than reading as an in-place swap.
         vc.update(|_, cx| {
             view.update(cx, |view, _cx| {
-                view.fold.append_client_block(
-                    "s-setprovider",
-                    "t-seed",
+                view.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
                 );
             });

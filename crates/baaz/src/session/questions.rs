@@ -35,9 +35,9 @@ impl SessionView {
     /// one showing — the first whose answer is not yet gathered.
     pub(super) fn wizards(&self) -> HashMap<String, (aui::transcript::Wizard, bool)> {
         let mut out = HashMap::new();
-        let Some(side) = self.fold.side(&self.session_id) else { return out };
+        let side = self.store.side();
         let agent = self.provider_kind().label();
-        for (input_id, request) in side.pending_inputs.iter() {
+        for (input_id, request) in side.pending_prompts.iter() {
             let total = request.questions.len();
             if total < 2 {
                 continue;
@@ -60,8 +60,7 @@ impl SessionView {
     /// back, so it shows again with its pick.
     pub fn wizard_back(&mut self, block_id: String, cx: &mut Context<Self>) {
         let Some((input_id, question_id)) = block_id.split_once(':') else { return };
-        let Some(side) = self.fold.side(&self.session_id) else { return };
-        let Some(request) = side.pending_inputs.get(input_id) else { return };
+        let Some(request) = self.store.side().pending_prompts.get(input_id) else { return };
         let Some(at) = request.questions.iter().position(|q| q.id == question_id) else { return };
         let Some(previous) = at.checked_sub(1).and_then(|i| request.questions.get(i)).map(|q| q.id.clone()) else { return };
         if let Some(gathered) = self.answers.get_mut(input_id) {
@@ -88,14 +87,13 @@ impl SessionView {
     /// one MSP request may carry several questions and each is its own card.
     pub(super) fn question(&self, block_id: &str) -> Option<Pending> {
         let (input_id, question_id) = block_id.split_once(':')?;
-        let side = self.fold.side(&self.session_id)?;
-        let request = side.pending_inputs.get(input_id)?;
+        let request = self.store.side().pending_prompts.get(input_id)?;
         let question = request.questions.iter().find(|q| q.id == question_id)?;
         Some(Pending {
             input_id: input_id.to_owned(),
             question_id: question_id.to_owned(),
-            multi: matches!(question.selection.mode, UserInputSelectionMode::Multiple),
-            labels: question.options.iter().map(|o| o.label.clone()).collect(),
+            multi: question.multi,
+            labels: question.labels.clone(),
             questions: request.questions.len(),
         })
     }

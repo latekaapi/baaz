@@ -15,8 +15,8 @@ impl SessionView {
     /// `retryDelayMs` — so the moment each one was observed is the app's to
     /// remember and the countdown is the app's to derive.
     pub(super) fn observe_clocks(&mut self, cx: &mut Context<Self>) {
-        let Some(side) = self.fold.side(&self.session_id) else { return };
-        let pending: Vec<String> = side.pending_inputs.keys().cloned().collect();
+        let side = self.store.side();
+        let pending: Vec<String> = side.pending_prompts.keys().cloned().collect();
         let retry = side.retry.as_ref().map(|r| format!("{}:{}", r.turn_id, r.attempt));
         for id in &pending {
             self.question_started.entry(id.clone()).or_insert_with(crate::clock::now_instant);
@@ -56,10 +56,10 @@ impl SessionView {
 
     /// How long each pending question has left, keyed by its block id.
     pub(super) fn countdowns(&self) -> HashMap<String, (u64, u64)> {
-        let Some(side) = self.fold.side(&self.session_id) else { return HashMap::new() };
+        let side = self.store.side();
         let mut out = HashMap::new();
-        for (input_id, request) in &side.pending_inputs {
-            let Some(total) = request.auto_resolution_ms else { continue };
+        for (input_id, request) in &side.pending_prompts {
+            let Some(total) = request.auto_resolve_ms else { continue };
             let Some(started) = self.question_started.get(input_id) else { continue };
             let remaining = total.saturating_sub(crate::clock::elapsed_since(*started).as_millis() as u64);
             for question in &request.questions {
@@ -82,7 +82,7 @@ impl SessionView {
         self.wire_call(cx, move || client.approval_list_pending(&params), move |this, result, cx| {
             let Ok(pending) = result else { return };
             let fold = |this: &mut Self, method: &str, value: &serde_json::Value| {
-                this.fold.apply(MuseEvent::Notification {
+                this.muse_apply(MuseEvent::Notification {
                     method: method.to_owned(),
                     params: value.clone(),
                     cursor: value.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned),
@@ -109,11 +109,8 @@ impl SessionView {
     /// both counts join here — a Codex approval waiting below must light
     /// the same banner a legacy one does.
     pub(super) fn waiting_on_you(&self) -> Option<(usize, usize)> {
-        let (legacy_approvals, questions) = self
-            .fold
-            .side(&self.session_id)
-            .map(|side| (side.pending_approvals.len(), side.pending_inputs.len()))
-            .unwrap_or((0, 0));
+        let side = self.store.side();
+        let (legacy_approvals, questions) = (side.pending_approvals.len(), side.pending_prompts.len());
         let approvals = legacy_approvals + self.external_approvals.pending().len();
         (approvals + questions > 0).then_some((approvals, questions))
     }
@@ -121,9 +118,9 @@ impl SessionView {
     /// The live retry row's data: attempt, bound, what is left of the backoff,
     /// and the reason the provider gave.
     pub(super) fn retry_countdown(&self) -> Option<(u32, u32, u64, String)> {
-        let retry = self.fold.side(&self.session_id)?.retry.clone()?;
+        let retry = self.store.side().retry.clone()?;
         let started = self.retry_started.as_ref()?.1;
-        let remaining = retry.retry_delay_ms.saturating_sub(crate::clock::elapsed_since(started).as_millis() as u64);
+        let remaining = retry.delay_ms.saturating_sub(crate::clock::elapsed_since(started).as_millis() as u64);
         Some((retry.attempt, retry.max_attempts, remaining, retry.reason))
     }
 }

@@ -105,7 +105,7 @@ impl SessionView {
             MuseEvent::Notification { cursor, .. } => cursor.clone(),
             MuseEvent::ServerRequest { .. } | MuseEvent::Closed(_) => None,
         };
-        let deltas = self.fold.apply(event);
+        let deltas = self.muse_apply(event);
         let changed = !deltas.is_empty();
         // The mode may have moved under an open mode menu.
         self.sync_mode_menu_check(cx);
@@ -117,7 +117,8 @@ impl SessionView {
         // button was clicked — never by the fold's `commandId` echo, which
         // may be missing or arrive on another tick. The echo, when present,
         // is the same text and is drained so it cannot land twice.
-        let restored = self.fold.take_restored_prompt(&self.session_id);
+        let session_id = self.session_id.clone();
+        let restored = self.muse_fold.take_restored_prompt(&session_id);
         if let Some(turn_id) = unqueued.as_deref() {
             if let Some(pending) = self.unqueueing.remove(turn_id) {
                 let _ = restored;
@@ -167,7 +168,7 @@ impl SessionView {
     /// The scan over the in-memory fold is cheap; the sqlite insert runs on
     /// the background executor.
     pub(super) fn record_created_files(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.fold.session(&self.session_id) else { return };
+        let Some(session) = self.store.session() else { return };
         let mut records = Vec::new();
         for block in session.turns.iter().flat_map(|turn| turn.blocks()) {
             let aui_protocol::Block::ToolCall { kind, target, .. } = block else { continue };
@@ -350,7 +351,7 @@ impl SessionView {
                                 MuseEvent::Notification { cursor, .. } => cursor.clone(),
                                 MuseEvent::ServerRequest { .. } | MuseEvent::Closed(_) => None,
                             };
-                            for delta in this.fold.apply(event) {
+                            for delta in this.muse_apply(event) {
                                 let Delta::TurnFinished { turn_id, meta } = delta else { continue };
                                 if let Some(cursor) = &cursor {
                                     rows.push(crate::usage::row_from_finished(
@@ -709,8 +710,9 @@ for line in sys.stdin:
     ) {
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.record_command("s-1", "c-q", queued_text);
-                view.fold.record_queued("s-1", "t-q", "c-q", queued_text);
+                view.remember_command("c-q", queued_text);
+                view.muse_fold.record_queued("s-1", "t-q", "c-q", queued_text);
+                view.muse_mirror_sync(Vec::new());
             });
             view.update(cx, |view, cx| {
                 view.apply(unqueue_event("turn/started", serde_json::json!({"turnId": "t-run"})), cx)
@@ -1087,7 +1089,7 @@ for line in sys.stdin:
         queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
         wait_for_wire(&stub, vc, "turn/unqueue");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| view.fold.record_command("s-1", "c-r", "the retracted words"));
+            view.update(cx, |view, _| view.remember_command("c-r", "the retracted words"));
             view.update(cx, |view, cx| {
                 view.apply(unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q"})), cx)
             })
@@ -1114,7 +1116,7 @@ for line in sys.stdin:
         queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
         wait_for_wire(&stub, vc, "turn/unqueue");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| view.fold.record_command("s-1", "c-r", "the retracted words"));
+            view.update(cx, |view, _| view.remember_command("c-r", "the retracted words"));
             view.update(cx, |view, cx| {
                 view.apply(
                     unqueue_event("turn/retracted", serde_json::json!({"turnId": "t-r", "commandId": "c-r"})),
@@ -1180,7 +1182,7 @@ for line in sys.stdin:
         assert_eq!(pending_prompt_of(&view, vc), None);
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).banner, None);
-            let queued = view.read(cx).fold.side("s-1").map(|s| s.queued.len()).unwrap_or(999);
+            let queued = view.read(cx).store.side().queued.len();
             assert_eq!(queued, 0, "the row leaves the strip");
         });
         vc.run_until_parked();

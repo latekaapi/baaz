@@ -45,6 +45,7 @@ mod command;
 pub mod env_path;
 mod error;
 mod event;
+pub mod facts;
 pub mod scripted;
 mod traits;
 pub mod usage;
