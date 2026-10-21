@@ -17,6 +17,7 @@ mod caps;
 pub mod errors;
 pub mod facts;
 mod hub;
+pub mod oneshot;
 pub mod modes;
 pub mod output;
 pub mod replay;

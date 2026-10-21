@@ -213,3 +213,27 @@ fn account_changes_reach_the_connection_stream_and_no_session_lane() {
         "a session lane never sees account events: {heard:?}"
     );
 }
+
+#[test]
+fn a_one_shot_completion_answers_from_its_own_side_session() {
+    let records = std::env::temp_dir().join(format!("provider-muse-oneshot-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&records);
+    let (hub, app_lane) = hub(&["--emit-turn", "--record", records.to_str().unwrap()]);
+    resume(&app_lane, "s-real");
+    let reply = hub
+        .complete("side-1", "/tmp/side", "Name this", "baaz auto-title", Duration::from_secs(5))
+        .expect("the side turn answers");
+    assert_eq!(reply, "echo: Name this");
+    let heard = collect(&app_lane, |_| false);
+    assert!(sessions_of(&heard).iter().all(|id| id == "s-real"), "the side session stays off the app's lanes: {heard:?}");
+    assert!(!hub.followed().contains(&"side-1".to_owned()), "the side binding is gone once answered");
+    let text = std::fs::read_to_string(&records).expect("records");
+    let start = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["method"] == "session/start")
+        .expect("a side session started");
+    assert_eq!(start["params"]["sessionId"], "side-1");
+    assert_eq!(start["params"]["workspaceRoot"], "/tmp/side");
+    let _ = std::fs::remove_file(&records);
+}

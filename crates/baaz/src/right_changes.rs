@@ -80,15 +80,6 @@ pub(crate) struct ChangesUi {
     pub row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>>>,
 }
 
-/// What a Muse side session is drafting (docs/43 §2.6; owner 2026-10-17:
-/// drafts on the session's own provider, Muse through its side sessions
-/// as titles are).
-#[derive(Clone, Debug)]
-pub(crate) struct DraftJob {
-    pub root: PathBuf,
-    pub kind: DraftKind,
-}
-
 /// Which field a draft fills.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DraftKind {
@@ -256,7 +247,7 @@ impl Harness {
         let root = root.to_path_buf();
         let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
-            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt) }).await;
+            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt, None) }).await;
             if std::env::var("BAAZ_DRAFT_TRACE").as_deref() == Ok("1") {
                 eprintln!("baaz: draft reply {:?}", reply.as_ref().map(|t| t.chars().take(120).collect::<String>()));
             }
@@ -493,7 +484,7 @@ impl Harness {
                 let _ = this.update(cx, |this: &mut Self, cx| this.draft_on_muse(&r, DraftKind::PrBody, muse_prompt, cx));
             }
             let draft = match provider.filter(|p| crate::utility::supports(*p)) {
-                Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, model.as_deref(), &prompt).ok() }).await,
+                Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, model.as_deref(), &prompt, None).ok() }).await,
                 None => None,
             };
             let _ = this.update(cx, |this: &mut Self, cx| {

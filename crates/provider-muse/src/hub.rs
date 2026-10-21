@@ -323,6 +323,33 @@ impl MuseHub {
     }
 }
 
+impl MuseHub {
+    /// The current child, or why there is none.
+    pub(crate) fn client(&self) -> Result<Arc<MuseClient>, ProviderError> {
+        self.core.client()
+    }
+
+    /// Route `session_id`'s events to `tx` until the returned guard drops:
+    /// a lane of the hub's own, for work no app lane follows.
+    pub(crate) fn bind_private(&self, session_id: &str, tx: Sender<ProviderEvent>) -> PrivateBinding {
+        self.core.bind(session_id, &tx);
+        PrivateBinding { core: Arc::clone(&self.core), session_id: session_id.to_owned(), tx }
+    }
+}
+
+/// A private binding ([`MuseHub::bind_private`]); unbinds on drop.
+pub(crate) struct PrivateBinding {
+    core: Arc<Core>,
+    session_id: String,
+    tx: Sender<ProviderEvent>,
+}
+
+impl Drop for PrivateBinding {
+    fn drop(&mut self) {
+        self.core.unbind(&self.session_id, &self.tx);
+    }
+}
+
 impl Core {
     fn client(&self) -> Result<Arc<MuseClient>, ProviderError> {
         self.link
