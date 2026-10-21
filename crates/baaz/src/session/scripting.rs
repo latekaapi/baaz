@@ -282,9 +282,7 @@ impl SessionView {
     pub fn first_user_title(&self) -> Option<String> {
         let session = self.session()?;
         let mut submissions: Vec<&str> = Vec::new();
-        if let Some(side) = self.fold.side(&self.session_id) {
-            submissions.extend(side.command_text.values().map(String::as_str));
-        }
+        submissions.extend(self.store.command_ids().filter_map(|id| self.store.command_text(id)));
         crate::sessions::first_user_title(&submissions, &session.turns)
     }
 

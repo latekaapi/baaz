@@ -931,7 +931,7 @@ impl SessionView {
     pub(super) fn status_text(&self, cx: &gpui::App) -> String {
         let context = self.context();
         let branch = self.session().and_then(|s| s.branch.clone()).unwrap_or_else(|| "—".to_owned());
-        let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
+        let queued = self.store.side().queued.len();
         let _ = cx;
         format!(
             "Model: {}\nApproval mode: {}\nReasoning effort: {}\nPlan mode: {}\nContext: {}\nSession tokens: {} prompt · {} output · {} total\nQueued: {queued}\nSession: {}\nWorkspace: {}\nBranch: {branch}",

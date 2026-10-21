@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-muse", "crates/provider-claude-code", "crates/provider-codex", "crates/mcp-bridge"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/session-store", "crates/provider-muse", "crates/provider-claude-code", "crates/provider-codex", "crates/mcp-bridge"]
 
 [workspace.package]
 version = "0.1.0"
@@ -62,6 +62,7 @@ aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.6.1" }
 muse-client = { path = "crates/muse-client" }
 muse-adapter = { path = "crates/muse-adapter" }
 provider = { path = "crates/provider" }
+session-store = { path = "crates/session-store" }
 provider-muse = { path = "crates/provider-muse" }
 
 [profile.dev]

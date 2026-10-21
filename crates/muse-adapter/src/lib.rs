@@ -38,9 +38,24 @@
 
 pub mod failure;
 mod fold;
+pub mod mirror;
 mod side;
 mod slots;
 
 pub use failure::{humanize, Failure};
 pub use fold::{permission_mode, permission_profile, MuseFold, GAP_ABORT_PREFIX, SESSION_CACHE_LIMIT};
 pub use side::{QueuedTurn, SideState};
+pub use mirror::{neutral_side, Mirror};
+
+/// MSP's per-stage approval race guard as the seam's opaque stage token
+/// ([`provider::Command::DecideApproval`]): the guard serialized. Only Muse
+/// code encodes and decodes it; the neutral side never looks inside.
+pub fn stage_token(requirement: &muse_client::schema::ApprovalRequirementRef) -> String {
+    serde_json::to_string(requirement).expect("stage token serializes")
+}
+
+/// Decode a [`stage_token`] back to MSP's guard; `None` for a token this
+/// code did not mint.
+pub fn parse_stage_token(token: &str) -> Option<muse_client::schema::ApprovalRequirementRef> {
+    serde_json::from_str(token).ok()
+}

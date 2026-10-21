@@ -82,13 +82,13 @@ fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
 /// the token [`Command::ListPending`] minted, and only this adapter
 /// encodes and decodes it.
 fn encode_stage_token(requirement: &ApprovalRequirementRef) -> String {
-    serde_json::to_string(requirement).expect("stage token serializes")
+    muse_adapter::stage_token(requirement)
 }
 
 /// Decode a stage token back to MSP's guard. A token this adapter did not
 /// mint is a refusal, not a guess.
 fn decode_stage_token(token: &str) -> Result<ApprovalRequirementRef, ProviderError> {
-    serde_json::from_str(token).map_err(|_| ProviderError::Rejected {
+    muse_adapter::parse_stage_token(token).ok_or_else(|| ProviderError::Rejected {
         reason: "the approval stage token is not one this backend issued".into(),
     })
 }

@@ -342,7 +342,7 @@ impl SessionView {
     /// Steady-state frames share one snapshot: re-snapshot only when the fold
     /// grew or shrank under us, or when `follow` says the content changed.
     pub(super) fn sync_render_cache(&mut self) {
-        let live_len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
+        let live_len = self.store.session().map(|s| s.turns.len()).unwrap_or(0);
         // The cache holds more than the fold: the view-side handoff prefix
         // and its one divider, minus the hidden pack bubble and the pack's
         // hidden acknowledgement.
@@ -1014,7 +1014,7 @@ impl SessionView {
         // The fold names the turns it wrote since the last refresh (perf
         // P1, docs/51 #6). Taken once: both paths below read the same set.
         let dirty =
-            if self.fold.session(&self.session_id).is_some() { self.fold.take_dirty(&self.session_id) } else { None };
+            if self.store.session().is_some() { self.store.take_dirty() } else { None };
         if let Some(dirty) = dirty.as_ref() {
             if self.refresh_render_suffix(dirty) {
                 return;
@@ -1027,7 +1027,7 @@ impl SessionView {
     /// counted. What a fresh session, a handoff view, a removed turn or a
     /// toggle takes; streaming takes [`Self::refresh_render_suffix`].
     fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>) {
-        if self.fold.session(&self.session_id).is_some() {
+        if self.store.session().is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
             // costs one turn's clone rather than the transcript's
@@ -1052,7 +1052,7 @@ impl SessionView {
             // turns stay in history, only undrawn.
             let empty: &[Turn] = &[];
             let own: &[Turn] =
-                self.fold.session(&self.session_id).map(|s| s.turns.as_slice()).unwrap_or(empty);
+                self.store.session().map(|s| s.turns.as_slice()).unwrap_or(empty);
             let hidden = crate::handoff_snapshot::first_pack_user_id(
                 own,
                 self.handoff_pack_full.as_deref(),
@@ -1178,7 +1178,7 @@ impl SessionView {
         if self.suffix_inputs != Some((self.toggled_gen, self.fold_finished_turns)) {
             return false;
         }
-        let Some(session) = self.fold.session(&self.session_id) else { return false };
+        let Some(session) = self.store.session() else { return false };
         let own = &session.turns;
         let old_len = self.cached_turns.len();
         if old_len == 0 || own.len() < old_len || self.row_counts.len() != old_len + 1 {
@@ -1264,7 +1264,7 @@ impl SessionView {
                 }
                 if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } = block
                 {
-                    if self.fold.stored_output(&self.session_id, id).is_some() {
+                    if self.store.side().stored_outputs.contains_key(id.as_str()) {
                         let state = match self.full_outputs.get(id) {
                             Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
                             Some(full_output::Fetch::Ready { lines, capped }) => {
@@ -1430,7 +1430,7 @@ impl SessionView {
 
     /// An assistant turn's prose, for Copy: every text block joined.
     pub(super) fn assistant_text(&self, turn_id: &str) -> Option<String> {
-        let session = self.fold.session(&self.session_id)?;
+        let session = self.store.session()?;
         session.turns.iter().find_map(|turn| match turn {
             Turn::Assistant { id, blocks, .. } if id == turn_id => {
                 let texts: Vec<&str> = blocks
@@ -1494,7 +1494,7 @@ impl SessionView {
     /// user turn is one view, an assistant turn's first text block is the
     /// source the step holds. `None` for a turn with no text to hold.
     fn step_turn_source(&self, index: usize) -> Option<(String, String)> {
-        self.fold.session(&self.session_id).and_then(|session| {
+        self.store.session().and_then(|session| {
             session.turns.get(index).and_then(|turn| match turn {
                 Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
                 Turn::Assistant { id, blocks, .. } => blocks.iter().find_map(|block| match block {
@@ -1561,7 +1561,7 @@ impl SessionView {
     /// hold the capture shows is the hold a person sees.
     pub(crate) fn step_copy(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(index) = rest.trim().parse::<usize>() else { return };
-        let Some(session) = self.fold.session(&self.session_id).cloned() else { return };
+        let Some(session) = self.store.session().cloned() else { return };
         let Some(turn) = session.turns.get(index) else { return };
         match turn {
             Turn::User { id, text, .. } => {
@@ -1576,7 +1576,7 @@ impl SessionView {
     /// Open every tool group for a screenshot: group keys default closed, so
     /// marking them toggled opens them; calls default open.
     pub(crate) fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.fold.session(&self.session_id).cloned() else {
+        let Some(session) = self.store.session().cloned() else {
             return;
         };
         for turn in &session.turns {
@@ -1742,7 +1742,7 @@ impl SessionView {
             // the `reminderChild` tail (memory reminders), not stuck.
             let finishing = self.on_reminder_tail();
             let elapsed = (elapsed > 0).then(|| transcript::elapsed(elapsed));
-            let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
+            let queued = self.store.side().queued.len();
             // Blocked on the person, the tail is not memory reminders: the
             // turn waits for an approval or an answer, and saying otherwise
             // misnames the wait on the approval's own screen.
@@ -1946,7 +1946,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// The queued strip: exactly what `SideState::queued` holds, in server
     /// order.
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let side = self.fold.side(&self.session_id)?;
+        let side = self.store.side();
         if side.queued.is_empty() {
             return None;
         }
@@ -1955,7 +1955,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .queued
             .iter()
             .map(|q| {
-                let row = QueueStripRow::new(q.turn_id.clone(), side.queued_text(q).to_owned());
+                let row = QueueStripRow::new(
+                    q.turn_id.clone(),
+                    self.store.command_text(&q.request_id).unwrap_or_default().to_owned(),
+                );
                 if editing.get(&q.turn_id).is_some_and(|pending| pending.kind == Unqueue::Edit) {
                     row.editing()
                 } else {
@@ -1972,13 +1975,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // The row's text, captured now: by the time `turn/unqueued`
             // lands the fold may no longer be able to echo it back.
             let text = this
-                .fold
-                .side(&this.session_id)
-                .and_then(|live| {
-                    let row = live.queued_turn(id.as_ref())?;
-                    Some(live.queued_text(row).to_owned())
-                })
-                .unwrap_or_default();
+                .store
+                .side()
+                .queued
+                .iter()
+                .find(|row| row.turn_id == id.as_ref())
+                .and_then(|row| this.store.command_text(&row.request_id))
+                .unwrap_or_default()
+                .to_owned();
             this.unqueue(id.as_ref(), why, text, cx);
         });
         Some(
@@ -3584,10 +3588,8 @@ mod tests {
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session("dest-1", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "dest-1",
-                    vec![
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_reply("a2", "Got it — ready to continue…"),
@@ -3644,10 +3646,8 @@ mod tests {
         let view = handoff_destination(vc, "dest-r", "codex");
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session("dest-r", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "dest-r",
-                    vec![
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.apply_deltas(vec![
                         // A replay substitutes the summary for the whole pack.
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_user("u-pack", "Handed off from Muse: the goal"),
@@ -3686,10 +3686,8 @@ mod tests {
         let view = handoff_destination(vc, "dest-k", "codex");
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session("dest-k", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "dest-k",
-                    vec![aui_protocol::Delta::TurnStarted {
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_user("u1", "A real first prompt"),
                     }],
                 );
@@ -3717,10 +3715,8 @@ mod tests {
         let view_b = handoff_destination(vc, "hop-b", "claude-code");
         vc.update(|_, cx| {
             view_b.update(cx, |view, _| {
-                view.fold.ensure_session("hop-b", aui_protocol::Provider::Claude, "m", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "hop-b",
-                    vec![aui_protocol::Delta::TurnStarted {
+                view.store.ensure_live(aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_reply("ab", "Got it — ready to continue…"),
                     }],
                 );
@@ -3750,10 +3746,8 @@ mod tests {
         let view_c = handoff_destination(vc, "hop-c", "codex");
         vc.update(|_, cx| {
             view_c.update(cx, |view, _| {
-                view.fold.ensure_session("hop-c", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "hop-c",
-                    vec![aui_protocol::Delta::TurnStarted {
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_reply("ac", "Got it — ready to continue…"),
                     }],
                 );
@@ -3801,11 +3795,9 @@ mod tests {
         let reason = "model `gpt-6-astra` does not exist or you lack access";
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session("dest-f", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
                 // turn/started, then the pack's terminal failure.
-                view.fold.apply_deltas(
-                    "dest-f",
-                    vec![
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -3838,10 +3830,8 @@ mod tests {
         let view_display = handoff_destination(vc, "dest-fd", "muse");
         vc.update(|_, cx| {
             view_display.update(cx, |view, _| {
-                view.fold.ensure_session("dest-fd", aui_protocol::Provider::Muse, "m", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "dest-fd",
-                    vec![
+                view.store.ensure_live(aui_protocol::Provider::Muse, "m", "/tmp/ws");
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", display) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -3879,10 +3869,8 @@ mod tests {
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session("dest-ok", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.fold.apply_deltas(
-                    "dest-ok",
-                    vec![
+                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_reply("a-pack", "Got it — ready to continue…"),
@@ -3924,15 +3912,11 @@ mod tests {
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session(
-                    "dest-recoverable",
-                    aui_protocol::Provider::Codex,
+                view.store.ensure_live(aui_protocol::Provider::Codex,
                     "gpt-5",
                     "/tmp/ws",
                 );
-                view.fold.apply_deltas(
-                    "dest-recoverable",
-                    vec![
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -3983,15 +3967,11 @@ mod tests {
         let reason = "model `gpt-6-astra` does not exist or you lack access";
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.fold.ensure_session(
-                    "dest-terminal",
-                    aui_protocol::Provider::Codex,
+                view.store.ensure_live(aui_protocol::Provider::Codex,
                     "gpt-5",
                     "/tmp/ws",
                 );
-                view.fold.apply_deltas(
-                    "dest-terminal",
-                    vec![
+                view.store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {

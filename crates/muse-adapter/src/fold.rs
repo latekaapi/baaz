@@ -115,6 +115,9 @@ struct Folded {
     /// as (a `ToolCall` block's id is its item's id). The app fetches the full
     /// bytes with `item/readOutput`.
     stored_outputs: HashMap<String, msp::OutputRef>,
+    /// Bumped on every write to [`Folded::stored_outputs`], so a mirror can
+    /// tell the map moved without comparing it.
+    stored_gen: u64,
     /// The other order, which a backfill produces: the item's refusal reason,
     /// keyed by its `commandId`, waiting for the approval that gated it.
     ///
@@ -283,6 +286,13 @@ impl MuseFold {
         item_id: &str,
     ) -> Option<&msp::OutputRef> {
         self.sessions.get(session_id)?.stored_outputs.get(item_id)
+    }
+
+    /// Every stored-output reference of a session, with a counter that moves
+    /// whenever the set does: `(generation, item id → reference id)`.
+    pub fn stored_outputs(&self, session_id: &str) -> Option<(u64, impl Iterator<Item = (&str, &str)>)> {
+        let folded = self.sessions.get(session_id)?;
+        Some((folded.stored_gen, folded.stored_outputs.iter().map(|(item, r)| (item.as_str(), r.id.as_str()))))
     }
 
     /// Every Muse session id this fold has seen, in id order.
@@ -605,6 +615,7 @@ impl Folded {
             seen_requests: HashMap::new(),
             awaiting_reason: HashMap::new(),
             stored_outputs: HashMap::new(),
+            stored_gen: 0,
             item_reasons: HashMap::new(),
             group_gen: 0,
             open_groups: HashMap::new(),
@@ -1345,9 +1356,12 @@ impl Folded {
             match (&item.truncated, &item.output_ref) {
                 (Some(true), Some(output_ref)) => {
                     self.stored_outputs.insert(item.item_id.clone(), output_ref.clone());
+                    self.stored_gen += 1;
                 }
                 _ => {
-                    self.stored_outputs.remove(&item.item_id);
+                    if self.stored_outputs.remove(&item.item_id).is_some() {
+                        self.stored_gen += 1;
+                    }
                 }
             }
         }

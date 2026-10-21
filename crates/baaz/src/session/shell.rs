@@ -43,7 +43,7 @@ impl SessionView {
             self.banner = None;
             self.banner_action = None;
             let command_id = new_command_id();
-            self.fold.record_command(&self.session_id, &command_id, &format!("!{command_text}"));
+            self.remember_command(&command_id, &format!("!{command_text}"));
             let command = ProviderCommand::RunShell {
                 request_id: command_id,
                 session_id: self.session_id.clone(),
@@ -76,7 +76,7 @@ impl SessionView {
         // The shell item is filed under its own `commandId`, and so is any
         // approval it raises, so remembering the text here is what makes the
         // retry offer honest.
-        self.fold.record_command(&self.session_id, &command_id, &format!("!{command_text}"));
+        self.remember_command(&command_id, &format!("!{command_text}"));
         let params = SessionUserShellParams {
             command_id,
             command_text: command_text.clone(),

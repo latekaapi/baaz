@@ -66,7 +66,7 @@ impl SessionView {
     /// same client-authored write the plan card uses.
     pub(crate) fn append_handoff_card(&mut self, card_id: &str, card: Block, cx: &mut Context<Self>) {
         self.handoff_card = Some(card.clone());
-        self.fold.append_client_block(&self.session_id, card_id, card);
+        self.append_client_block(card_id, card);
         self.follow = true;
         cx.notify();
     }
@@ -78,7 +78,7 @@ impl SessionView {
             return;
         }
         self.handoff_card = Some(card.clone());
-        self.fold.replace_client_block(&self.session_id, card_id, card);
+        self.replace_client_block(card_id, card);
         self.follow = true;
         cx.notify();
     }
@@ -138,7 +138,7 @@ impl SessionView {
             (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
             _ => return false,
         };
-        let Some(session) = self.fold.session(&self.session_id) else { return false };
+        let Some(session) = self.store.session() else { return false };
         let mut turns = session.turns.iter();
         for turn in turns.by_ref() {
             let is_pack = match turn {
@@ -157,7 +157,7 @@ impl SessionView {
             (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
             _ => return None,
         };
-        let session = self.fold.session(&self.session_id)?;
+        let session = self.store.session()?;
         let mut turns = session.turns.iter();
         for turn in turns.by_ref() {
             let is_pack = match turn {
@@ -262,7 +262,7 @@ impl SessionView {
         self.banner = None;
         self.submitting = true;
         let request_id = new_command_id();
-        self.fold.record_command(&self.session_id, &request_id, &display);
+        self.remember_command(&request_id, &display);
         // The provider echoes the whole pack; the bubble shows the short
         // summary, including across a restart (the record mirrors the map
         // for the replayed history).
@@ -323,7 +323,7 @@ impl SessionView {
         self.banner = None;
         self.submitting = true;
         let command_id = new_command_id();
-        self.fold.record_command(&self.session_id, &command_id, &display);
+        self.remember_command(&command_id, &display);
         let params = TurnStartParams {
             command_id,
             session_id: self.session_id.clone(),

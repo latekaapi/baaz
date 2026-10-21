@@ -52,7 +52,7 @@ use aui::transcript::{
     StatusLead,
 };
 use aui_icons::IconName;
-use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
+use aui_protocol::{ActivityState, Block, Delta, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
 use aui_tokens::scale;
 use gpui::{
     div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, Entity,
@@ -65,12 +65,12 @@ use gpui_kit::base::{h_flex, v_flex};
 use muse_adapter::MuseFold;
 use muse_client::schema::{
     ApprovalDecideParams, ApprovalListPendingParams, ApprovalMode, ApprovalResolutionSummary,
-    ContextPressureLevel, ContextUsage, ErrorKind, ForkCutPoint, ModelCatalogEntry,
+    ErrorKind, ForkCutPoint, ModelCatalogEntry,
     ModelListParams, ModelSelection, SessionCompactParams, SessionForkParams,
     SessionSetApprovalModeParams, SessionSetModelParams, SessionUserShellParams, TurnInputPart,
     TurnInterruptParams, TurnStartDisposition, TurnStartParams, TurnStartResult, TurnSteerParams,
     TurnUnqueueParams, UserInputAnswer, UserInputAnswerParams, UserInputCancelParams,
-    UserInputClarification, UserInputClarifyParams, UserInputSelectionMode, ViewPageParams,
+    UserInputClarification, UserInputClarifyParams, ViewPageParams,
     UnframedViewNotification,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
@@ -636,7 +636,14 @@ struct StartQueue {
 pub struct SessionView {
     /// The Muse session id this view follows.
     pub session_id: String,
-    fold: MuseFold,
+    /// What the view renders, for every lane: the transcript, the facts
+    /// beside it, the changed turns and the prompts this view sent.
+    store: session_store::SessionStore,
+    /// The Muse lane's MSP translator. Its every step is mirrored into
+    /// [`Self::store`]; nothing renders from it. Unused on a provider lane,
+    /// and gone once Muse rides the seam (docs/63 step 5).
+    muse_fold: MuseFold,
+    muse_mirror: muse_adapter::Mirror,
     /// The child, or `None` for a replayed capture, which has no child at all.
     client: Option<Arc<MuseClient>>,
     /// A `--replay` session: the transcript is a file, and every command is
@@ -1064,7 +1071,7 @@ pub struct SessionView {
     full_outputs: HashMap<String, full_output::Fetch>,
     /// A synthetic `session/contextUsage`, for a scripted capture of a pressure
     /// state the echo provider cannot reach.
-    fake_context: Option<ContextUsage>,
+    fake_context: Option<provider::facts::ContextReading>,
     focus: FocusHandle,
     tasks: Vec<Task<()>>,
     /// Held only while a turn runs, so the elapsed time advances.
@@ -1191,8 +1198,10 @@ impl SessionView {
         let workspace_key = workspace.clone();
         let sent_items = crate::sent::load(&session_id);
         Self {
+            store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
             session_id,
-            fold: MuseFold::new(),
+            muse_fold: MuseFold::new(),
+            muse_mirror: muse_adapter::Mirror::new(),
             client: None,
             replay: false,
             provider_id,
@@ -1355,7 +1364,52 @@ impl SessionView {
 
     /// The folded transcript, once anything has arrived.
     pub fn session(&self) -> Option<&Session> {
-        self.fold.session(&self.session_id)
+        self.store.session()
+    }
+
+    /// Fold one Muse event through the lane's translator and mirror the
+    /// step into the store; returns the deltas that landed there.
+    pub(crate) fn muse_apply(&mut self, event: MuseEvent) -> Vec<Delta> {
+        let deltas = self.muse_fold.apply(event);
+        self.muse_mirror_sync(deltas)
+    }
+
+    /// Mirror the translator's current step into the store: `deltas` are
+    /// what it returned (empty for a bookkeeping change such as a queued row).
+    pub(crate) fn muse_mirror_sync(&mut self, deltas: Vec<Delta>) -> Vec<Delta> {
+        let id = self.session_id.clone();
+        self.muse_mirror.sync(&mut self.muse_fold, &id, deltas, &mut self.store)
+    }
+
+    /// Remember the text a request was sent with — in the store for every
+    /// lane, and in the Muse translator too while this is a Muse view, which
+    /// hands it back on a retraction or an unqueue.
+    pub(crate) fn remember_command(&mut self, request_id: &str, text: &str) {
+        self.store.record_command(request_id, text);
+        if !self.is_provider_lane() {
+            let id = self.session_id.clone();
+            self.muse_fold.record_command(&id, request_id, text);
+        }
+    }
+
+    /// Append a client-authored block in a turn of its own (`id`).
+    pub(crate) fn append_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
+        if self.is_provider_lane() {
+            return self.store.append_client_block(id, block);
+        }
+        let session_id = self.session_id.clone();
+        let deltas = self.muse_fold.append_client_block(&session_id, id, block);
+        self.muse_mirror_sync(deltas)
+    }
+
+    /// Replace the first block of a client-authored turn.
+    pub(crate) fn replace_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
+        if self.is_provider_lane() {
+            return self.store.replace_client_block(id, block);
+        }
+        let session_id = self.session_id.clone();
+        let deltas = self.muse_fold.replace_client_block(&session_id, id, block);
+        self.muse_mirror_sync(deltas)
     }
 
     /// B8c: the cached Changes-pane edit list when it is still fresh — `Some`
@@ -1421,7 +1475,7 @@ impl SessionView {
     /// The last view cursor the fold observed, which is what a reconnect's
     /// `session/resume` needs.
     pub fn last_cursor(&self) -> Option<String> {
-        self.fold.side(&self.session_id).map(|s| s.last_cursor.clone()).filter(|c| !c.is_empty())
+        Some(self.store.side().cursor.clone()).filter(|c| !c.is_empty())
     }
 
     /// Which registry entry this session was created on, read off the id
@@ -1536,11 +1590,7 @@ impl SessionView {
         if let Some(pending) = self.pending_model.as_deref() {
             return pending.to_owned();
         }
-        if let Some(id) = self
-            .fold
-            .side(&self.session_id)
-            .and_then(|s| s.model.as_ref().map(|m| m.model_id.clone()))
-        {
+        if let Some(id) = self.store.side().model.as_ref().map(|m| m.id.clone()) {
             return id;
         }
         if let Some(id) = self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()) {
@@ -1757,11 +1807,11 @@ impl SessionView {
         if !crate::providers::uses_legacy_pump(self.provider_kind()) {
             return self.provider_context();
         }
-        let side = self.fold.side(&self.session_id);
-        let cumulative = side.map(|s| s.cumulative.clone()).unwrap_or_default();
-        let usage = self.fake_context.clone().or_else(|| side.and_then(|s| s.context.clone()));
+        let side = self.store.side();
+        let cumulative = side.totals.clone();
+        let usage = self.fake_context.clone().or_else(|| side.context.clone());
         let (used, window, pressure) = match usage {
-            Some(usage) => (usage.used_tokens, usage.window_tokens, pressure(&usage.pressure)),
+            Some(usage) => (usage.used_tokens, usage.window_tokens, pressure(usage.pressure)),
             None => (cumulative.total_tokens, None, ContextPressure::Normal),
         };
         ContextMeterState {
@@ -1874,7 +1924,7 @@ impl SessionView {
         use aui_protocol::ApprovalState;
         let mut approval: Option<String> = None;
         let mut question: Option<String> = None;
-        if let Some(session) = self.fold.session(&self.session_id) {
+        if let Some(session) = self.store.session() {
             for turn in session.turns.iter() {
                 // A turn that is over settles its cards for row purposes:
                 // the fold moves a card off Pending only on a server echo,
@@ -2125,7 +2175,7 @@ impl SessionView {
             return;
         }
         let session_id = self.session_id.clone();
-        self.fold.apply(MuseEvent::Notification {
+        self.muse_apply(MuseEvent::Notification {
             method: "session/started".to_owned(),
             params: serde_json::json!({ "session": session }),
             cursor: None,
@@ -2226,18 +2276,20 @@ impl SessionView {
                     }
                 }
             }
-            self.fold.apply(event);
+            self.muse_fold.apply(event);
         }
         // The capture names its own session; the view was opened on whatever the
         // caller guessed, so it follows the file rather than the guess.
-        if let Some(id) = self.fold.session_ids().next() {
-            self.session_id = id.to_owned();
+        if let Some(id) = self.muse_fold.session_ids().next().map(str::to_owned) {
+            self.session_id = id;
         }
+        let id = self.session_id.clone();
+        self.muse_mirror.sync_whole(&mut self.muse_fold, &id, &mut self.store);
         if let Some(turn_id) = open_turns.get(&self.session_id) {
             self.running = Some(Running { turn_id: turn_id.clone(), started: crate::clock::now_instant() });
         }
         for (command_id, text) in sent {
-            self.fold.record_command(&self.session_id, &command_id, &text);
+            self.remember_command(&command_id, &text);
         }
         self.observe_clocks(cx);
         self.follow = true;
@@ -2250,8 +2302,9 @@ impl SessionView {
     pub fn begin_bench_replay(&mut self, session_id: String, sent: Vec<(String, String)>, cx: &mut Context<Self>) {
         self.replay = true;
         self.session_id = session_id;
+        self.store.rename(&self.session_id);
         for (command_id, text) in sent {
-            self.fold.record_command(&self.session_id, &command_id, &text);
+            self.remember_command(&command_id, &text);
         }
         self.follow = true;
         cx.notify();
@@ -2709,29 +2762,25 @@ fn compact_count(n: u64) -> String {
 /// A level this build has never seen is `Normal`: the server owns the
 /// thresholds, and inventing a colour for a word we cannot read would be worse
 /// than drawing the calm one.
-fn pressure(level: &ContextPressureLevel) -> ContextPressure {
+fn pressure(level: provider::facts::ContextPressure) -> ContextPressure {
     match level {
-        ContextPressureLevel::Warning => ContextPressure::Warning,
-        ContextPressureLevel::Blocked => ContextPressure::Blocked,
-        _ => ContextPressure::Normal,
+        provider::facts::ContextPressure::Warning => ContextPressure::Warning,
+        provider::facts::ContextPressure::Blocked => ContextPressure::Blocked,
+        provider::facts::ContextPressure::Normal => ContextPressure::Normal,
     }
 }
 
 /// `used/window/pressure`, the `--steps context:` payload.
-fn parse_context(spec: &str) -> Option<ContextUsage> {
+fn parse_context(spec: &str) -> Option<provider::facts::ContextReading> {
     let mut parts = spec.split('/');
     let used: u64 = parts.next()?.parse().ok()?;
     let window: u64 = parts.next()?.parse().ok()?;
-    let level = match parts.next().unwrap_or("normal") {
-        "warning" => ContextPressureLevel::Warning,
-        "blocked" => ContextPressureLevel::Blocked,
-        _ => ContextPressureLevel::Normal,
+    let pressure = match parts.next().unwrap_or("normal") {
+        "warning" => provider::facts::ContextPressure::Warning,
+        "blocked" => provider::facts::ContextPressure::Blocked,
+        _ => provider::facts::ContextPressure::Normal,
     };
-    Some(ContextUsage {
-        pressure: level,
-        used_tokens: used,
-        window_tokens: (window > 0).then_some(window),
-    })
+    Some(provider::facts::ContextReading { pressure, used_tokens: used, window_tokens: (window > 0).then_some(window) })
 }
 
 /// The protocol's effort tier as MSP spells it.

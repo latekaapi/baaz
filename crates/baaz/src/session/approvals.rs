@@ -26,11 +26,8 @@ impl SessionView {
             self.decide_provider_approval(approval_id, choice_id, feedback, cx);
             return;
         }
-        let Some(requirement_id) = self
-            .fold
-            .side(&self.session_id)
-            .and_then(|side| side.pending_approvals.get(&approval_id))
-            .map(|request| request.current_requirement_id.clone())
+        let Some(requirement_id) =
+            self.store.side().pending_approvals.get(&approval_id).and_then(|token| muse_adapter::parse_stage_token(token))
         else {
             // Nothing pending under that id: the resolution already landed.
             // Ordinary, but not silent — a press that reaches here and says
@@ -76,7 +73,9 @@ impl SessionView {
             // Somebody else — a policy, the judge, another window — got there
             // first, and the error carries the winning resolution.
             Some(ErrorKind::ApprovalAlreadyResolved) => {
-                self.fold.resolve_approval(&self.session_id, approval_id, resolution_of(error));
+                let session_id = self.session_id.clone();
+                let deltas = self.muse_fold.resolve_approval(&session_id, approval_id, resolution_of(error));
+                self.muse_mirror_sync(deltas);
                 self.follow = true;
                 cx.notify();
             }
@@ -93,7 +92,9 @@ impl SessionView {
                 self.set_banner("That choice is no longer offered for this command.", None, cx);
             }
             Some(ErrorKind::ApprovalNotFound) => {
-                self.fold.resolve_approval(&self.session_id, approval_id, None);
+                let session_id = self.session_id.clone();
+                let deltas = self.muse_fold.resolve_approval(&session_id, approval_id, None);
+                self.muse_mirror_sync(deltas);
                 self.follow = true;
                 self.set_banner("Muse no longer knows about that approval.", None, cx);
             }
@@ -158,8 +159,7 @@ impl SessionView {
     /// truncated body alone.
     pub fn show_full_output(&mut self, block_id: String, cx: &mut Context<Self>) {
         let Some(client) = self.wire_client(cx) else { return };
-        let Some(output_ref) = self.fold.stored_output(&self.session_id, &block_id).cloned()
-        else {
+        let Some(output_ref) = self.store.side().stored_outputs.get(&block_id).cloned() else {
             return;
         };
         if matches!(self.full_outputs.get(&block_id), Some(full_output::Fetch::Fetching)) {
@@ -169,7 +169,6 @@ impl SessionView {
         self.refresh_render_cache();
         cx.notify();
         let session_id = self.session_id.clone();
-        let output_ref = output_ref.id.clone();
         let fetch_id = block_id.clone();
         // Every MSP request can block, so the pages run here and the card is
         // replaced below, on the server's result.
@@ -208,15 +207,12 @@ impl SessionView {
     /// A fresh `turn/start`'s `commandId` **equals** its `turnId`, which is what
     /// makes the command-text map a turn-text map for free.
     pub(super) fn remembered_text(&self, turn_id: &str) -> Option<String> {
-        self.fold.side(&self.session_id)?.command_text.get(turn_id).cloned()
+        self.store.command_text(turn_id).map(str::to_owned)
     }
 
     /// Which failed turns the retry button may be offered on.
     pub(super) fn retryable_turns(&self) -> HashSet<String> {
-        self.fold
-            .side(&self.session_id)
-            .map(|side| side.command_text.keys().cloned().collect())
-            .unwrap_or_default()
+        self.store.command_ids().map(str::to_owned).collect()
     }
 
     /// A failure the person can try again, with the button that would do it.
@@ -456,7 +452,7 @@ impl SessionView {
         crate::baaz_log!("provider approval {approval_id}: the provider holds nothing under that id; dropping the card");
         self.external_approvals.resolve(approval_id);
         self.close_feedback_for(approval_id);
-        let pending = self.fold.session(&self.session_id).and_then(|session| {
+        let pending = self.store.session().and_then(|session| {
             session.turns.iter().find_map(|turn| {
                 let index = turn.blocks().iter().position(|block| {
                     matches!(block, Block::Approval { id, state: ApprovalState::Pending, .. } if id == approval_id)
@@ -468,7 +464,7 @@ impl SessionView {
             if let Block::Approval { state, .. } = &mut block {
                 *state = ApprovalState::Denied;
             }
-            self.fold.apply_deltas(&self.session_id, vec![Delta::BlockUpdated { turn_id, block_index, block }]);
+            self.store.apply_deltas(vec![Delta::BlockUpdated { turn_id, block_index, block }]);
         }
         self.follow = true;
         cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });

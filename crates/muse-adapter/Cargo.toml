@@ -12,6 +12,8 @@ description = "Folds Muse (MSP) view events into the `aui-protocol` session mode
 aui-protocol = { workspace = true }
 chrono = { workspace = true }
 muse-client = { workspace = true }
+provider = { workspace = true }
+session-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

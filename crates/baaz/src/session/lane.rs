@@ -235,6 +235,7 @@ impl SessionView {
         }
         if session_id != self.session_id {
             let provisional = std::mem::replace(&mut self.session_id, session_id);
+            self.store.rename(&self.session_id);
             // What the person sent while opening was recorded under the
             // provisional id: it moves to the real one, beside anything
             // already recorded there, never dropped.
@@ -261,7 +262,8 @@ impl SessionView {
         let agent = provider.id();
         let id = self.session_id.clone();
         let workspace = self.workspace.clone();
-        self.fold.ensure_session(&id, agent, String::new(), workspace);
+        let _ = id;
+        self.store.ensure_live(agent, String::new(), workspace);
         self.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)), unreported_mode: None });
         // A (re)opened lane may have missed an approval or a question while
         // it was away: pull the pending set, the way the muse lane's
@@ -370,7 +372,8 @@ impl SessionView {
                     .collect();
                 let deltas = self.reconcile_optimistic(deltas);
                 let session_id = self.session_id.clone();
-                let landed = self.fold.apply_deltas(&session_id, deltas);
+                let _ = &session_id;
+                let landed = self.store.apply_deltas(deltas);
                 if !landed.is_empty() {
                     self.follow = true;
                     self.note_provider_deltas(&landed, cx);
@@ -424,7 +427,7 @@ impl SessionView {
                     Lane::Provider(lane) => lane.unreported_mode.take().is_some(),
                     _ => false,
                 };
-                if self.fold.set_session_mode(&session_id, mode) || was_unreported {
+                if self.store.set_mode(mode) || was_unreported {
                     self.sync_mode_menu_check(cx);
                     cx.notify();
                 }
@@ -792,8 +795,7 @@ impl SessionView {
         if let Some(at) = self.pending_optimistic.iter().position(|pending| pending.id == turn_id) {
             self.pending_optimistic.remove(at);
         }
-        let removed = self.fold.apply_deltas(
-            &self.session_id,
+        let removed = self.store.apply_deltas(
             vec![Delta::TurnRemoved { turn_id: turn_id.to_owned() }],
         );
         if !removed.is_empty() {
@@ -830,10 +832,10 @@ impl SessionView {
         let take = echoes.min(self.pending_optimistic.len());
         let removed: Vec<String> =
             self.pending_optimistic.drain(..take).map(|pending| pending.id).collect();
-        let shift = match self.fold.session(&self.session_id).and_then(|session| session.turns.last()) {
+        let shift = match self.store.session().and_then(|session| session.turns.last()) {
             Some(Turn::Assistant { blocks, .. }) if blocks.is_empty() => self
-                .fold
-                .session(&self.session_id)
+                .store
+                .session()
                 .and_then(|session| session.turns.last().cloned())
                 .filter(|turn| !self.completed_turns.contains(turn.id())),
             _ => None,
