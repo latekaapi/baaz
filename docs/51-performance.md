@@ -1,6 +1,6 @@
 # 51 — Performance: measure, then make Baaz instant (plan, 2026-10-16)
 
-Status: **approved 2026-10-16; P0 merged 2026-10-17; M merged 2026-10-18 (§6); P1 on `perf/p1` (§7).** No code written. Evidence: static audits of Baaz + agentic-ui (2026-10-16),
+Status: **approved 2026-10-16; P0 merged 2026-10-17; M merged 2026-10-18 (§6); P1 (§7) and its Muse-list rest (§8) and P2 (§9) on main 2026-10-21.** Evidence: static audits of Baaz + agentic-ui (2026-10-16),
 sqlite measurements on **copies** of the real databases (`/private/tmp/claude-501/perf-audit/`), Zed's source
 (`zed@5504e87`) and the peers' code and issue trackers. Live numbers (first frame, switch, send) have **not** been
 taken yet — step M below does that first.
@@ -194,3 +194,56 @@ and every fork, which used to re-read all 27 pages each time.
 Offline budgets (`--perf-store`, scripted 2,600-row server — the wire itself is Muse's): `store.list_cache_load_ms`
 (read the saved copy), `store.list_newer_ms` (the newer-rows listing and merge) and `store.list_newer_pages` (budget
 **1**: a listing that falls back to every page reads 13 there and fails).
+
+Found on the way and fixed (each its own commit, 2026-10-21):
+- **Labels flipped between three ladders** (boot rows: index only; list join: wire first, cut to 80; `rejoin`: index,
+  uncut), so 63–64 rows rewrote their search row on every launch. One `sidebar::label_ladder` now; boot rows join the
+  saved list. Warm boots write **0** search rows (were 63).
+- **A second boot install dropped every boot row** when the index reconcile landed before the list reply.
+- **The sidebar showed skeleton rows until the list reply** (1.4 s typically, 20 s once) although the boot rows were
+  built at ~0.5 s: the D3 screen's `loading` waited for `session/list` again, undoing P0 #2. Rows paint at
+  `first-rows-painted` +593 ms now (list reply +2,119 ms in the same run); index-only boot rows keep their empty-filter
+  exemption (`turns_unknown`), rows joined from the saved list are filtered like the reply's.
+
+Still open here: the list reply joins all 2,661 rows on the UI thread (`list-applied` 64–144 ms) after every finished
+Muse turn, although the incremental listing knows which rows changed.
+
+## 9. P2 — hold the line (2026-10-21)
+
+**Benches (criterion 0.5.1, no default features).** Release, this machine:
+
+| Bench | Where | Result |
+|---|---|---|
+| `fold/replay/synthetic-stress-300` (1,291 events) | `cargo bench -p muse-adapter` | 2.55 ms (~2.0 µs an event) |
+| `fold/replay/synthetic-stress-hetero` | 〃 | 3.32 ms |
+| `fold/tail/stress-300_last_200` (at length) | 〃 | 383 µs (~1.9 µs an event: no growth) |
+| `parse_markdown/2048` · `/20480` · `/102400` | agentic-ui `cargo bench -p aui --bench markdown` | 47 µs · 374 µs · **1.90 ms** |
+| `parse_markdown_settled/json_400_rows` | 〃 | 32 µs |
+| `render_cache/stream_turn_at_300` (one turn, ~6 events, apply + refresh) | baaz, ignored test `bench_render_cache` | 192 µs |
+| `render_cache/stream_turn_at_3000` | 〃 | **1.07 ms** |
+| `render_cache/full_300` | 〃 | 110 µs |
+| `visible_sessions/2600_after_a_change` | baaz, ignored test `bench_visible_sessions` | 2.3 ms |
+| `visible_sessions/2600_cached` | 〃 | 22 ns |
+
+Baaz is a binary crate, so its two benches run criterion from ignored tests:
+`cargo test -p baaz --release --bin baaz bench_ -- --ignored --nocapture --test-threads=1`. Every bench asserts its
+input folded (the first render-cache run timed an empty view — wrong session id — at 52 µs and looked plausible).
+
+What they show, for later work, not fixed here: **a new turn costs O(transcript) in the render cache** (5.6× from 300
+to 3,000 turns; P1 made chunks *inside* a turn cheap, `refresh_render_suffix`, not a turn's arrival); a **100 KB
+answer re-parses in 1.9 ms per chunk** (#6 settled-prefix markdown still open); `visible_sessions` rebuilds in 2.3 ms
+on the UI thread after every list change.
+
+**Frames-requested-by counter (agentic-ui `aui_motion::frames`).** `aui_motion::request_frame(window)`
+(`#[track_caller]`) replaces `window.request_animation_frame()` at every call site in aui-motion, aui and Baaz, and
+`looping`/`synced` count each redraw their wake causes against their caller, so every frame asked for is attributed
+to a `file:line`. Baaz prints `baaz-perf frames=N by file:line=n …` beside its `renders=N/2s` trace line
+(`BAAZ_TRACE=1`), and `perf-budgets.py` gates **`idle.frame_requests` at 0**, naming the call sites on a miss —
+the always-rendering bug of #4 would have failed with its culprit's line.
+
+**Idle CPU with the window visible.** The full release run (all budgets pass but one) measured `idle.cpu_pct`
+**0.6–0.8 %** against 0.5 on four runs, with `idle.renders` 0 and `idle.frame_requests` 0. `sample(1)`: gpui's
+`CVDisplayLink` thread fires every vsync and wakes the main thread (`gpui_macos::window::step`) although nothing
+renders. gpui stops the link only when the window is occluded, which is why earlier runs — the test window behind the
+owner's apps — read 0.0–0.1 % and docs/61 saw one 0.6. A visible idle Baaz costs ~0.7 % CPU at 120 Hz. Fixing it is a
+gpui-pre change (stop the link when no frame is requested); the budget is unchanged and the number is real.
