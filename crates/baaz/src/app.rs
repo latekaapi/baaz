@@ -1188,9 +1188,6 @@ pub struct Harness {
     /// D6: the Page screen's float (pill, notes panel) over its native page.
     pub(crate) page_float: Option<crate::overlay::Overlay>,
     pub(crate) page_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
-    /// The note popover's window over the pane's native page (D6 follow-up).
-    pub(crate) page_note: Option<crate::overlay::Overlay>,
-    pub(crate) page_note_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The open tab menu's anchor: the clicked row's bounds, reported by
@@ -1757,8 +1754,6 @@ impl Harness {
             corner_pending: None,
             page_float: None,
             page_float_pending: None,
-            page_note: None,
-            page_note_pending: None,
             main_window: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
@@ -6284,7 +6279,6 @@ impl Harness {
         self.sync_overlay(window, cx);
         self.sync_corner(window, cx);
         self.sync_page_float(window, cx);
-        self.sync_page_note(window, cx);
         // The pane's page takes a Shift + sideways swipe as the strip's
         // (docs/43 §3): what the native wheel router claims by.
         #[cfg(feature = "cef")]

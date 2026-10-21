@@ -61,11 +61,6 @@ pub(crate) enum OverlayKind {
     /// the agent pill while the agent acts, the notes panel while
     /// annotating. Never takes the keyboard, like the corner.
     PageFloat,
-    /// D6 follow-up (docs/60 §3 item 3): a new pin's note popover over the
-    /// right pane's native page — Cancel / Save and the note's text field.
-    /// The one page overlay that takes the keyboard: drawn in the main
-    /// window it sat under the page, and nothing could be typed.
-    PageNote,
 }
 
 /// A notes-panel click, run on the main window.
@@ -84,10 +79,6 @@ const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
 /// 2 px, and the 2 px margin it was clipped the drop (and the dropdown's
 /// 4 px enter slide).
 const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
-/// The note popover's box (aui `note_popover`: 236 wide; path, a two-line
-/// field and the buttons).
-const NOTE_W: f32 = 236.0;
-const NOTE_H: f32 = 132.0;
 
 /// Take macOS's own chrome off an overlay window, and keep it from ever
 /// becoming the main window.
@@ -205,21 +196,6 @@ impl Render for OverlayView {
                 if !handle.is_focused(window) {
                     window.focus(&handle, cx);
                 }
-            }
-        }
-        // The note's field: made by the pane's render, which can land after
-        // this window opened, so it is focused here on each render (as the
-        // modal's query field is) rather than once at open.
-        if kind == OverlayKind::PageNote {
-            let input = self.baaz.read_with(cx, |baaz, cx| baaz.existing_browser(cx).and_then(|state| state.read(cx).open_note()).and_then(|note| note.input)).ok().flatten();
-            if let Some(input) = input {
-                let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
-                if !handle.is_focused(window) {
-                    // The input's own focus (as the Field's), not a bare
-                    // handle focus: it also arms the input's text handling.
-                    input.update(cx, |input, cx| input.focus(window, cx));
-                }
-                trace(format_args!("note field focused={}", handle.is_focused(window)));
             }
         }
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
@@ -549,113 +525,6 @@ impl Harness {
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
     }
 
-    /// Where the note popover floats, in screen space: clear of the pin's
-    /// element (14 right of it, 14 down — the pane's own placement), held
-    /// inside the page. `None` unless a note is open over the pane's live
-    /// native page.
-    fn wanted_page_note(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if self.mode != crate::layout::Mode::Sessions || !self.layout.right_open || self.right_strip_moving || self.settings_page.open {
-            return None;
-        }
-        if crate::layout::right_kind(&self.layout) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
-            return None;
-        }
-        let state = self.existing_browser(cx)?;
-        let page = state.read(cx);
-        if !page.is_native() || page.obscured() {
-            return None;
-        }
-        let note = page.open_note()?;
-        let (origin, size) = (note.origin, note.size);
-        let rect = page.page_rect()?;
-        let pad = gpui::px(SHADOW_PAD);
-        let (w, h) = (gpui::px(NOTE_W) + pad * 2.0, gpui::px(NOTE_H) + pad * 2.0);
-        let left = (rect.left() + gpui::px(origin.0 + size.0 + 14.0) - pad).min(rect.right() - w).max(rect.left());
-        let top = (rect.top() + gpui::px(origin.1 + 14.0) - pad).min(rect.bottom() - h).max(rect.top());
-        Some(Bounds::new(window.bounds().origin + gpui::point(left, top), gpui::size(w, h)))
-    }
-
-    /// Open, move or close the note window. It takes the keyboard on open
-    /// and puts it in the note's field; it closes when the note does (Save,
-    /// Cancel, Escape) and moves by reopening, like the float.
-    pub(crate) fn sync_page_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = self.wanted_page_note(window, cx);
-        let current = self.page_note.as_ref().map(|o| o.bounds).or(self.page_note_pending);
-        if wanted == current {
-            return;
-        }
-        if let Some(old) = self.page_note.take() {
-            let handle = old.handle;
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
-        }
-        self.page_note_pending = wanted;
-        let Some(bounds) = wanted else {
-            return;
-        };
-        let input = self.existing_browser(cx).and_then(|state| state.read(cx).open_note()).and_then(|note| note.input);
-        #[cfg(target_os = "macos")]
-        never_main_panels();
-        let baaz = cx.entity().downgrade();
-        cx.spawn(async move |this, cx| {
-            let opened = cx.update(|cx| {
-                let options = WindowOptions {
-                    titlebar: None,
-                    focus: true,
-                    show: true,
-                    kind: WindowKind::PopUp,
-                    is_movable: false,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    ..Default::default()
-                };
-                cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window, OverlayKind::PageNote);
-                    cx.new(|cx| {
-                        let focus = cx.focus_handle();
-                        window.focus(&focus, cx);
-                        if let Some(input) = input {
-                            input.update(cx, |input, cx| input.focus(window, cx));
-                        }
-                        OverlayView { baaz, kind: OverlayKind::PageNote, focus, seen_active: true }
-                    })
-                })
-            });
-            let _ = this.update(cx, |this, cx| {
-                match opened {
-                    Ok(handle) if this.page_note_pending == Some(bounds) => {
-                        this.page_note_pending = None;
-                        this.page_note = Some(Overlay { handle: handle.into(), kind: OverlayKind::PageNote, bounds, print: 0 });
-                    }
-                    Ok(handle) => {
-                        let handle: AnyWindowHandle = handle.into();
-                        cx.defer(move |cx| {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        });
-                    }
-                    Err(_) => this.page_note_pending = None,
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The note popover in its window: the pin's path, the shared note
-    /// field, Cancel / Save. Its buttons answer the page's state.
-    fn render_page_note(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let state = self.existing_browser(cx)?;
-        let aui_webview::OpenNote { path, input, .. } = state.read(cx).open_note()?;
-        let mut popover = aui::workbench::note_popover("page-note", path, "").on_action(move |action, _, cx| {
-            state.update(cx, |state, cx| state.answer_note(action, cx));
-        });
-        if let Some(input) = input {
-            popover = popover.input(input);
-        }
-        Some(div().p(gpui::px(SHADOW_PAD)).child(popover).into_any_element())
-    }
-
     /// Open, move or close the Page float window (the corner's dance).
     pub(crate) fn sync_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.wanted_page_float(window, cx);
@@ -897,7 +766,6 @@ impl Harness {
                 stack
             }
             OverlayKind::PageFloat => self.render_page_float(cx),
-            OverlayKind::PageNote => self.render_page_note(cx),
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
@@ -1214,13 +1082,6 @@ impl Harness {
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
             OverlayKind::Corner | OverlayKind::PageFloat => {}
-            // Escape in the note cancels it, as the popover's Cancel does.
-            OverlayKind::PageNote => {
-                if let Some(state) = self.existing_browser(cx) {
-                    state.update(cx, |state, cx| state.answer_note(aui::workbench::NoteAction::Cancel, cx));
-                }
-                cx.notify();
-            }
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {
