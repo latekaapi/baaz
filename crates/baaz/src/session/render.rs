@@ -2927,6 +2927,100 @@ impl InlineProgress {
 mod tests {
     use super::*;
 
+    /// The render cache (docs/51 #6, P2): one streamed turn's events at the
+    /// end of a 300-turn-and-growing session — apply plus
+    /// `refresh_render_cache` per event, the work streaming costs before
+    /// layout, which must not grow with the transcript — and the
+    /// whole-transcript refresh a fresh or handoff view takes.
+    #[gpui::test]
+    #[ignore = "bench: run with --ignored --nocapture"]
+    fn bench_render_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        use super::super::events::bench_support::{capture_events, last_turn_lines, renamed_turn};
+        let events = capture_events("synthetic-stress-300.jsonl");
+        let last_turn = last_turn_lines("synthetic-stress-300.jsonl", "t-stress-300");
+        let vc = cx.add_empty_window();
+        vc.update(|window, cx| {
+            let new_view = |window: &mut Window, cx: &mut gpui::App| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: "/tmp/bench-render-cache".to_owned(),
+                    overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                // The capture's own session id: any other folds nothing.
+                let session_id = "synthetic-stress-300".to_owned();
+                cx.new(|cx| crate::session::SessionView::new(session_id, None, host, window, cx))
+            };
+            let mut c = crate::perf_budget::bench_criterion();
+            // A view holding the capture plus `extra` more turns (the
+            // capture's last turn, renamed), each iteration streaming one
+            // turn more into it. Rebuilt (untimed) every 50 turns, so each
+            // bench measures at its own length and the two lengths compare:
+            // the per-turn cost must not grow with the transcript.
+            let mut next = 0usize;
+            let grown_view = |extra: usize, next: &mut usize, window: &mut Window, cx: &mut gpui::App| {
+                let view = new_view(window, cx);
+                view.update(cx, |view, cx| {
+                    for event in &events {
+                        view.apply(event.clone(), cx);
+                    }
+                    for _ in 0..extra {
+                        *next += 1;
+                        for event in renamed_turn(&last_turn, *next) {
+                            view.apply(event, cx);
+                        }
+                    }
+                    view.refresh_render_cache();
+                });
+                view
+            };
+            for (label, extra) in [("render_cache/stream_turn_at_300", 0usize), ("render_cache/stream_turn_at_3000", 2_700)] {
+                let mut view = grown_view(extra, &mut next, window, cx);
+                let base = view.read(cx).cached_turns.len();
+                assert!(base >= 300 + extra, "the capture and {extra} more turns folded: {base}");
+                let mut appended = 0usize;
+                c.bench_function(label, |b| {
+                    b.iter_custom(|iters| {
+                        let mut total = std::time::Duration::ZERO;
+                        for _ in 0..iters {
+                            if appended == 50 {
+                                view = grown_view(extra, &mut next, window, cx);
+                                appended = 0;
+                            }
+                            next += 1;
+                            appended += 1;
+                            let turn = renamed_turn(&last_turn, next);
+                            let at = std::time::Instant::now();
+                            view.update(cx, |view, cx| {
+                                for event in turn {
+                                    view.apply(event, cx);
+                                    view.refresh_render_cache();
+                                }
+                            });
+                            total += at.elapsed();
+                        }
+                        total
+                    })
+                });
+                assert!(view.read(cx).cached_turns.len() > base, "the streamed turns landed");
+            }
+            let view = new_view(window, cx);
+            view.update(cx, |view, cx| {
+                for event in &events {
+                    view.apply(event.clone(), cx);
+                }
+                view.refresh_render_cache();
+                assert!(view.cached_turns.len() >= 300, "the capture folded: {} turns", view.cached_turns.len());
+            });
+            c.bench_function("render_cache/full_300", |b| {
+                b.iter(|| view.update(cx, |view, _| view.refresh_render_full(None)))
+            });
+            c.final_summary();
+        });
+    }
+
     fn workspace() -> PathBuf {
         PathBuf::from("/Users/someone/Projects/baaz")
     }

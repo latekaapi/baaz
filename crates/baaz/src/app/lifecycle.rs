@@ -6938,6 +6938,50 @@ mod tests {
         lane_restore(state);
     }
 
+    /// `visible_sessions` (docs/51 P2): the sidebar's filtered, collapsed,
+    /// sorted rows over 2,600 sessions — rebuilt after any list change (a
+    /// finished turn, a rename, a pin) and served from its cache otherwise.
+    /// A criterion run from an ignored test (baaz is a binary crate; see
+    /// `perf_budget::bench_criterion`).
+    #[gpui::test]
+    #[ignore = "bench: run with --ignored --nocapture"]
+    fn bench_visible_sessions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("bench-visible-sessions");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let base = crate::clock::now_local();
+                harness.sessions = (0..crate::perf_budget::SESSIONS)
+                    .map(|i| {
+                        let mut entry = chain_muse_entry(&format!("s-{i:05}"), &format!("Session {i}"), (i % 7) as u64);
+                        entry.updated = base - chrono::Duration::minutes(i as i64);
+                        entry.hidden = i % 23 == 0;
+                        entry.pinned = i % 97 == 0;
+                        entry.workspace = Some(format!("/work/project-{}", i % 12));
+                        entry
+                    })
+                    .collect();
+                harness.sessions_loaded = true;
+                harness.index_loaded = true;
+                harness.invalidate_list();
+                let shown = harness.visible_sessions(cx).len();
+                assert!(shown > 2_000, "the filter keeps the non-empty, unhidden rows: {shown}");
+                let mut c = crate::perf_budget::bench_criterion();
+                c.bench_function("visible_sessions/2600_after_a_change", |b| {
+                    b.iter(|| {
+                        harness.invalidate_list();
+                        harness.visible_sessions(cx).len()
+                    })
+                });
+                c.bench_function("visible_sessions/2600_cached", |b| b.iter(|| harness.visible_sessions(cx).len()));
+                c.final_summary();
+            });
+        });
+        lane_restore(state);
+    }
+
     /// Perf P1: an override edit that changes nothing settles nothing. A
     /// provider reopen re-states the project its session already has, and
     /// that used to rejoin the list and rebuild the search rows — 75 ms of

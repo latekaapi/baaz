@@ -428,6 +428,57 @@ fn should_retry_stale_page(error: &MuseError, retried: bool) -> bool {
     !retried && error.is_stale_sidecar()
 }
 
+/// Capture loaders for the render-cache bench (`render.rs`), kept here so
+/// the wire types stay in the files that already speak them (the seam
+/// ratchet, `tests/seam_ratchet.rs`).
+#[cfg(test)]
+pub(crate) mod bench_support {
+    /// The server→client events of a `fixtures/msp` capture.
+    pub(crate) fn capture_events(name: &str) -> Vec<muse_client::MuseEvent> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp").join(name);
+        let text = std::fs::read_to_string(&path).expect("capture is readable");
+        text.lines()
+            .filter_map(|line| line.strip_prefix("<-- "))
+            .filter_map(|body| muse_client::frame::parse_line(body).ok().flatten())
+            .filter_map(muse_client::MuseEvent::from_frame)
+            .collect()
+    }
+
+    /// The raw `<--` bodies of one turn of a capture, `turn/started` to
+    /// `turn/completed`.
+    pub(crate) fn last_turn_lines(name: &str, turn: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp").join(name);
+        let text = std::fs::read_to_string(&path).expect("capture is readable");
+        let needle = format!("\"{turn}\"");
+        text.lines()
+            .filter_map(|line| line.strip_prefix("<-- "))
+            .filter(|body| body.contains(&needle))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `lines` as events of a new turn `n`: every id the fold keys on made
+    /// unique, the session id kept.
+    pub(crate) fn renamed_turn(lines: &[String], n: usize) -> Vec<muse_client::MuseEvent> {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(j, body)| {
+                let mut body = body
+                    .replace("t-stress-300", &format!("t-bench-{n}"))
+                    .replace("i-stress-", &format!("i-bench-{n}-"))
+                    .replace("call_stress_300", &format!("call_bench_{n}"));
+                if let Some(at) = body.find("\"v:stress:") {
+                    let end = body[at + 1..].find('"').map(|e| at + 1 + e).unwrap_or(at);
+                    body.replace_range(at..=end, &format!("\"v:bench:{n}:{j}\""));
+                }
+                muse_client::frame::parse_line(&body).ok().flatten().and_then(muse_client::MuseEvent::from_frame)
+            })
+            .collect()
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
