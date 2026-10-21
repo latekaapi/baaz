@@ -248,6 +248,20 @@ both themes.
 8. **Esc** goes back from a pushed full output or image wherever the keyboard is (the window's Esc chain),
    after the Recent pages menu and the file preview.
 
+### 2.12 One bar per screen (owner, 2026-10-21; canvas v53 `D6OneBar`)
+Supersedes the Page's pane row + nav row (§2.2, §2.7) and the Files filter row (§2.4):
+- **Page, with a page showing:** no pane row. The nav row is the screen's one bar at the pane row's metrics (32, opaque
+  L1, padding 0 6, gap 2): back, forward, reload; the address on the Well (28, r 6, edge) with a 22 px **Recent pages**
+  chevron (r 4, lit 9 % while open) at its right end; annotate, screenshot, open in Browse; a 1 × 16 hairline; ✕. The
+  menu hangs 2 px under the bar from the address field's left edge and ends 6 in from the pane's right edge. No fade.
+  "No page yet" keeps the pane row (glyph, "Page", ✕).
+- **Files, filtering:** the bar itself is the field (Well 28, search 12, query, count faint mono), a hairline, ✕ —
+  which closes the filter (as Esc); the next ✕ closes the pane. At rest the row is unchanged.
+- Changes and the pushed views were one row already and are unchanged.
+- Every right-pane scroll container is locked to its axis per gesture (a sideways swipe never scrolls a vertical list).
+- HTML, SVG and PDF files (from Files or a transcript link) open in the Page; Files rows have a context menu (Open in
+  default app, Reveal in Finder; View source for HTML, SVG, Markdown; folders Reveal only).
+
 ## 3. Motion (Emil's rules)
 - **Strip slide** (a toggle while open, or **Shift** + a two-finger sideways swipe in the pane — one screen per swipe, snapping; owner 2026-10-21: a plain sideways swipe only scrolls the content under it and never switches screens):
   the screens translate together, **240 ms ease-out**; nothing fades, the pane's width and row do not move apart

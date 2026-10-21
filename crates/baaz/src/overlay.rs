@@ -601,14 +601,19 @@ impl Harness {
         if self.right_cache.page_menu && !crate::right_page::page_covered(page, &self.right_cache) {
             let rows = crate::right_page::recent_rows(page);
             let width = page.page_rect().map(|r| f32::from(r.size.width)).unwrap_or(400.0);
-            let menu = crate::right_page::recent_menu(&rows, width, cx);
+            let menu = crate::right_page::recent_menu(&rows, crate::right_page::recent_menu_room(true, width), cx);
             let close = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
             return Some(
                 div()
                     .size_full()
                     .relative()
                     .on_mouse_down(gpui::MouseButton::Left, close)
-                    .child(div().absolute().left(gpui::px(6.0)).top(gpui::px(2.0)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu))
+                    .child({
+                        // The window starts at the bar's top: the menu hangs
+                        // from the address field, 2 px under the bar.
+                        let (left, top) = crate::right_page::recent_menu_seat(true, width);
+                        div().absolute().left(gpui::px(left)).top(gpui::px(top)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu)
+                    })
                     .into_any_element(),
             );
         }

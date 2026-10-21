@@ -684,25 +684,36 @@ pub(crate) fn render_screen(
                 (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
             }
             (RightKind::Browser, _) => {
-                let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close);
+                // One bar (owner 2026-10-21, canvas D6OneBar): while a page
+                // shows, the nav row is the screen's only row — it carries
+                // the Recent pages chevron and ✕ — and the pane row goes.
+                let merged = crate::right_page::shows_page(browser.state, cx);
                 // Over a native page the menu sits in its own window: a press
                 // anywhere else in this one closes it (live 2026-10-19).
                 let overlay_menu = cache.page_menu
                     && browser.state.is_some_and(|st| st.read(cx).is_native() && !crate::right_page::page_covered(st.read(cx), cache));
-                // (The in-window menu closes itself on an outside press; this
-                // one would also fire on a press inside it, before its click.)
-                let row = if overlay_menu {
-                    div()
-                        .on_mouse_down_out(cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx)))
-                        .child(row)
-                        .into_any_element()
+                let close_menu = cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
+                let row = if merged {
+                    div().into_any_element()
                 } else {
-                    row.into_any_element()
+                    let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close);
+                    // (The in-window menu closes itself on an outside press;
+                    // this one would also fire on a press inside it.)
+                    if overlay_menu {
+                        div().on_mouse_down_out(close_menu).child(row).into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
                 };
-                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, cache, width, cx);
-                let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cx);
+                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, cache, width, merged, cx);
+                let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cache.page_menu, cx);
                 let body = match menu {
                     Some(menu) => div().relative().size_full().child(body).child(menu).into_any_element(),
+                    None if merged && overlay_menu => div()
+                        .size_full()
+                        .on_mouse_down_out(cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx)))
+                        .child(body)
+                        .into_any_element(),
                     None => body,
                 };
                 (row, body, false)
@@ -755,15 +766,11 @@ pub(crate) fn render_screen(
 }
 
 /// Whether a screen's body opens on opaque chrome of its own right under
-/// the pane row — the Page's nav row, the open Files filter — which the
-/// row's fade must not veil. A pushed view opens on content.
-fn opens_on_chrome(kind: RightKind, pushed: bool, filter_open: bool) -> bool {
-    !pushed
-        && match kind {
-            RightKind::Browser => true,
-            RightKind::Files => filter_open,
-            _ => false,
-        }
+/// the pane row — the Page's nav row — which the row's fade must not veil.
+/// A pushed view opens on content. (The Files filter used to be a second
+/// row there too; since 2026-10-21 it is the row itself.)
+fn opens_on_chrome(kind: RightKind, pushed: bool, _filter_open: bool) -> bool {
+    !pushed && matches!(kind, RightKind::Browser)
 }
 
 impl Harness {
@@ -3103,7 +3110,7 @@ mod tests {
     fn the_row_fade_never_veils_a_screens_own_chrome() {
         use super::opens_on_chrome;
         assert!(opens_on_chrome(RightKind::Browser, false, false), "the Page's nav row");
-        assert!(opens_on_chrome(RightKind::Files, false, true), "the open Files filter");
+        assert!(!opens_on_chrome(RightKind::Files, false, true), "the filter is the row now; the tree scrolls under the fade");
         assert!(!opens_on_chrome(RightKind::Files, false, false), "the tree scrolls under the fade");
         assert!(!opens_on_chrome(RightKind::Changes, false, false));
         assert!(!opens_on_chrome(RightKind::Browser, true, false), "a pushed view opens on content");

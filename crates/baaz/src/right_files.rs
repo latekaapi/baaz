@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aui::workbench::{
-    code_skeleton, code_view, file_tree, filter_field, image_facts, image_missing, image_view, markdown_view, pane_action, pane_row, pushed_row,
+    code_skeleton, code_view, file_tree, filter_bar, image_facts, image_missing, image_view, markdown_view, pane_action, pane_row, pushed_row,
     secondary_action, skeleton_rows, state_block, FileNode, FileTreeAction,
 };
 use aui_icons::{FileType, IconName};
@@ -250,7 +250,7 @@ pub(crate) fn files_screen(
     let ui = &cache.files_ui;
     let filter_open = ui.filter.is_some();
     let search_root = root.clone();
-    let row = pane_row("right-row-files", IconName::Folder, "Files")
+    let mut row = pane_row("right-row-files", IconName::Folder, "Files")
         .action(pane_action("right-files-filter", IconName::Search, "Filter files").toggled(filter_open).on_click(cx.listener(move |this: &mut Harness, _, window, cx| {
             if this.right_cache.files_ui.filter.is_some() {
                 this.close_files_filter(cx);
@@ -319,7 +319,8 @@ pub(crate) fn files_screen(
     }
     let key_root = root.clone();
     let key_nodes = nodes;
-    let mut body = v_flex()
+    let (bar_root, bar_nodes) = (key_root.clone(), key_nodes.clone());
+    let body = v_flex()
         .id("right-files-body")
         .size_full()
         .track_focus(focus)
@@ -330,8 +331,22 @@ pub(crate) fn files_screen(
                 cx.stop_propagation();
             }
         }));
+    // One bar (owner 2026-10-21, canvas D6OneBar): while filtering, the
+    // row itself is the field — no second row under it.
     if let Some(filter) = &ui.filter {
-        body = body.child(filter_field("right-files-filter-field", filter, count.map(SharedString::from), window, cx));
+        // The field's keys (Esc, ↑ ↓, ⏎) reach the tree's handler as they
+        // did when the field sat inside the body.
+        row = filter_bar("right-files-filter-field", filter, count.map(SharedString::from), cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
+            this.close_files_filter(cx);
+        }), window, cx)
+        .key_context("RightFiles")
+        .on_key_down(cx.listener(move |this: &mut Harness, e: &gpui::KeyDownEvent, window, cx| {
+            let key = e.keystroke.key.as_str();
+            if this.files_key(key, e.keystroke.modifiers.platform, &bar_nodes, &bar_root, window, cx) {
+                cx.stop_propagation();
+            }
+        }))
+        .into_any_element();
     }
     let body = body.child(div().flex_1().min_h(px(0.0)).child(t)).into_any_element();
     (row, body)

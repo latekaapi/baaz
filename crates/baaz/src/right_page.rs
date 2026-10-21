@@ -117,10 +117,36 @@ pub(crate) fn page_row(row: PaneRow, open: bool, state: Option<&Entity<WebviewSt
     row
 }
 
+/// Whether the Page screen shows a page (not the "No page yet" state): then
+/// its nav row is the screen's one bar and the pane row goes.
+pub(crate) fn shows_page(state: Option<&Entity<WebviewState>>, cx: &gpui::App) -> bool {
+    state.is_some_and(|s| !is_blank(&s.read(cx).url()))
+}
+
+/// Where the Recent pages menu hangs, inside the screen: under the bar from
+/// the address field's left edge when the bar is merged, else from the old
+/// pane row's title.
+pub(crate) fn recent_menu_seat(merged: bool, width: f32) -> (f32, f32) {
+    if merged {
+        (aui::workbench::page_address_left(width), aui::workbench::RECENT_MENU_TOP)
+    } else {
+        (6.0, 2.0)
+    }
+}
+
+/// The pane width the menu sizes itself from, so that from its seat it ends
+/// 6 in from the pane's right edge (the menu is `min(320, w − 12)` wide).
+/// Live 2026-10-21: hung from the address field at full width it ran past
+/// the pane's edge and lost its right corner.
+pub(crate) fn recent_menu_room(merged: bool, width: f32) -> f32 {
+    let (left, _) = recent_menu_seat(merged, width);
+    width - left + 6.0
+}
+
 /// The menu drawn inside the window, for a page that is not a native view
 /// (the scripted page captures and tests run); a native page gets it in its
 /// overlay window ([`crate::overlay`]), since it draws above gpui.
-pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, cache: &crate::right::RightCache, width: f32, cx: &mut Context<Harness>) -> Option<AnyElement> {
+pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, cache: &crate::right::RightCache, width: f32, merged: bool, cx: &mut Context<Harness>) -> Option<AnyElement> {
     let state = state?;
     // In the window unless a live native page is showing (that one gets the
     // overlay window): a covered page — its error page, say — hides it.
@@ -128,9 +154,10 @@ pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState
     if !open || native_showing {
         return None;
     }
-    let menu = recent_menu(&recent_rows(state.read(cx)), width, cx);
+    let menu = recent_menu(&recent_rows(state.read(cx)), recent_menu_room(merged, width), cx);
     let close = cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
-    Some(div().absolute().left(px(6.0)).top(px(2.0)).on_mouse_down_out(close).child(menu).into_any_element())
+    let (left, top) = recent_menu_seat(merged, width);
+    Some(div().absolute().left(px(left)).top(px(top)).on_mouse_down_out(close).child(menu).into_any_element())
 }
 
 /// The menu itself, its rows wired to the session's page.
@@ -143,7 +170,7 @@ pub(crate) fn recent_menu(rows: &[RecentRow], width: f32, cx: &mut Context<Harne
 }
 
 /// The Page screen's body.
-pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, address: Option<Entity<InputState>>, cx: &mut Context<Harness>) -> AnyElement {
+pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, address: Option<Entity<InputState>>, menu_open: bool, cx: &mut Context<Harness>) -> AnyElement {
     let Some(state) = browser.state else {
         return if pane_open {
             state_block("right-browser-loading", IconName::Globe, "Opening the page").into_any_element()
@@ -164,12 +191,28 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
         return no_page_state("right-page-none", field, agent, cx).into_any_element();
     }
     let weak = cx.weak_entity();
-    let pane = aui_webview::webview_pane("right-browser", state)
+    let has_recent = !state.read(cx).recent_pages().is_empty();
+    let mut pane = aui_webview::webview_pane("right-browser", state)
         .agent(SharedString::from(agent.to_string()))
         .on_intent(move |intent, window, cx| {
             let _ = weak.update(cx, |harness, cx| harness.handle_browser_intent(intent, window, cx));
         })
-        .into_any_element();
+        .on_close({
+            let weak = cx.weak_entity();
+            move |_, cx| {
+                let _ = weak.update(cx, |this, cx| this.toggle_right(cx));
+            }
+        });
+    if has_recent {
+        let weak = cx.weak_entity();
+        pane = pane.recent_pages(menu_open, move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                let open = !this.right_cache.page_menu;
+                this.set_page_menu(open, cx);
+            });
+        });
+    }
+    let pane = pane.into_any_element();
     // Couldn't load / crashed: Baaz's own page over the page area, under the
     // nav row, so another address is one field away (canvas D6StatesPage;
     // live 2026-10-19 the row went with the page).
@@ -219,5 +262,16 @@ mod tests {
         assert_eq!(load_failure_words("net::ERR_CONNECTION_REFUSED"), "refused the connection.");
         assert_eq!(load_failure_words("net::ERR_SOMETHING"), "did not load (ERR_SOMETHING).");
         assert!(is_blank("about:blank") && is_blank(" ") && !is_blank("https://x"));
+    }
+
+    /// The menu hangs from the address field and still ends inside the pane.
+    #[test]
+    fn the_recent_menu_fits_from_the_address_field() {
+        for width in [280.0, 400.0, 720.0] {
+            let (left, top) = recent_menu_seat(true, width);
+            let menu = aui::workbench::recent_menu_width(recent_menu_room(true, width));
+            assert!(left + menu <= width - 6.0 + 0.5, "width {width}: {left} + {menu}");
+            assert_eq!(top, aui::workbench::RECENT_MENU_TOP);
+        }
     }
 }
