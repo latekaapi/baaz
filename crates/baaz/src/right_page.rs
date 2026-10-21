@@ -90,11 +90,18 @@ impl Harness {
 }
 
 /// Whether the Page screen draws over the page, so the native view hides:
-/// no page yet, couldn't load, crashed, or a full output / image pushed on
-/// the Page screen (live 2026-10-19: the page drew over the output view).
+/// no page yet, couldn't load, crashed, a full output / image pushed on the
+/// Page screen (live 2026-10-19: the page drew over the output view), or a
+/// pin's note open — the note is typed in this window, over the page's
+/// fresh picture (owner 2026-10-21: a note drawn in its own window over the
+/// live page showed a caret but took no keys).
 pub(crate) fn page_covered(state: &WebviewState, cache: &crate::right::RightCache) -> bool {
     let page_screen = crate::right::screen_index(crate::layout::RightKind::Browser);
-    cache.pushed.contains_key(&page_screen) || is_blank(&state.url()) || state.load_failed().is_some() || state.crashed().is_some()
+    cache.pushed.contains_key(&page_screen)
+        || is_blank(&state.url())
+        || state.load_failed().is_some()
+        || state.crashed().is_some()
+        || state.open_note().is_some()
 }
 
 /// The Recent pages rows for `state`: newest first, the page on screen checked.
