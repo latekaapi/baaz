@@ -211,6 +211,11 @@ ENTRIES = {
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
+    # The Files tree scrolled a little: the pane row's fade is back over
+    # the rows (at the tree's top it is not — owner 2026-10-21, "text is
+    # getting cut under the shadow"). Offline, no baseline yet.
+    "right-files-scrolled": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:files;files-reveal:crates/baaz/src;wheel:-60@1240,400"]},
     # The Files pane previewing a small file: the same preview a tree
     # click opens (header plus the file's own bytes), reached through the
     # click's own `files-select:` verb. No baseline yet — generate on main
