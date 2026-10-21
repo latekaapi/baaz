@@ -1282,8 +1282,38 @@ impl Harness {
         let pending = self.titles_pending.clone();
         let sides = self.side_sessions.clone();
         let mut rows = Vec::new();
+        let present: std::collections::HashSet<String> = self.sessions.iter().map(|e| e.id.clone()).collect();
+        // The saved `session/list` first ([`crate::list_cache`]): each row
+        // joins exactly as the list reply will join it, so its label — and
+        // the search row built from it — does not change when the reply
+        // lands. Before this, ~60 rows whose wire title differs from the
+        // index label rewrote their search row on every launch. Only what
+        // may have moved since the copy was saved stays at its zero value,
+        // as for the index rows below: idle, no attention, no title read.
+        let mut joined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(listed) = self.saved_list.clone() {
+            for session in &listed.sessions {
+                if present.contains(&session.session_id) {
+                    continue;
+                }
+                let mut entry = sidebar::SessionEntry::join_cached(
+                    session,
+                    self.index.get(&session.session_id),
+                    self.overrides.get(&session.session_id),
+                    &projects,
+                    &mut canon,
+                );
+                entry.provisional = true;
+                entry.running = false;
+                entry.attention.clear();
+                entry.needs_title = false;
+                Self::apply_title_flags(&pending, &sides, &mut entry);
+                joined.insert(entry.id.clone());
+                rows.push(entry);
+            }
+        }
         for (session_id, index) in &self.index {
-            if self.sessions.iter().any(|e| e.id == *session_id) {
+            if present.contains(session_id) || joined.contains(session_id) {
                 continue;
             }
             let Some(mut entry) = sidebar::SessionEntry::provisional(
@@ -1361,6 +1391,14 @@ impl Harness {
         // per row per project: this runs on the UI thread on every index
         // load, list reply and override edit (perf audit 2026-10-16).
         let mut canon = crate::projects::CanonicalCache::default();
+        // The list rows by id, for the label ladder the list join reads
+        // ([`sidebar::label_ladder`]): without them a rejoin fell back to the
+        // index label, uncut, and the next list reply flipped it back.
+        let listed = self.saved_list.clone();
+        let wire: HashMap<&str, &muse_client::schema::Session> = listed
+            .as_deref()
+            .map(|l| l.sessions.iter().map(|s| (s.session_id.as_str(), s)).collect())
+            .unwrap_or_default();
         for entry in &mut self.sessions {
             if entry.provider.is_some() {
                 continue;
@@ -1403,10 +1441,7 @@ impl Harness {
             let meta = self.overrides.get(&entry.id);
             let index = self.index.get(&entry.id);
             let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let generated =
-                meta.and_then(|m| m.generated_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let label = name.or(generated).or_else(|| index.and_then(IndexEntry::label)).or(derived);
+            let label = sidebar::label_ladder(meta, wire.get(entry.id.as_str()).copied(), index);
             // Same rule as [`SessionEntry::join`]: a user-given name always
             // earns the first prompt below it, any other label only when it
             // does not already say it.
@@ -1421,7 +1456,7 @@ impl Harness {
             // speaks for it: keep that label rather than blanking it to the
             // fallback on every override write.
             match label {
-                Some(label) => entry.label = label.to_owned(),
+                Some(label) => entry.label = sidebar::one_line(label),
                 None if !entry.replayed => entry.label = crate::sidebar::UNNAMED.to_owned(),
                 None => {}
             }
@@ -6737,6 +6772,86 @@ mod tests {
                 harness.sessions.push(marked);
                 let ids: Vec<String> = harness.search_session_rows().into_iter().map(|row| row.session_id).collect();
                 assert_eq!(ids, vec!["s-plain".to_owned()], "only the ordinary session is searchable");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Speed P1 (docs/61 §4a): the boot rows, the list reply and every
+    /// rejoin read one label ladder, so no search row changes as they take
+    /// turns. Before, a row whose wire title differed from its index label,
+    /// or whose label ran past 80 characters, flipped between the two and
+    /// rewrote its search row on every launch (63 rows on the owner's store).
+    #[gpui::test]
+    fn boot_rows_reply_and_rejoin_read_one_label(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("saved-list-boot-rows");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let wire: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+            "sessionId": "s-chain",
+            "createdAt": "2026-10-01T00:00:00Z",
+            "updatedAt": "2026-10-20T00:00:00Z",
+            "lastActivityAt": "2026-10-20T00:00:00Z",
+            "path": "/tmp/s-chain.jsonl",
+            "status": "running",
+            "turnCount": 3,
+            "title": "Wire title",
+            "activeTurnId": null, "forkedFrom": null, "modelId": null, "providerId": null,
+            "workspaceRoot": "/tmp/w",
+        }))
+        .expect("a list row");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.index.insert(
+                    "s-chain".into(),
+                    IndexEntry { title: "Index title".into(), updated_at_us: Some(1), ..Default::default() },
+                );
+                let reply = |harness: &mut Harness| {
+                    let joined = SessionEntry::join(&wire, harness.index.get("s-chain"), None, &harness.projects);
+                    harness.sessions = sidebar::merge_session_list(vec![joined], &harness.sessions);
+                    harness.invalidate_list();
+                    harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect::<Vec<_>>()
+                };
+                // The index alone: the label moves when the reply lands.
+                harness.install_provisional_rows();
+                let boot: Vec<_> =
+                    harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                assert_eq!(boot[0].0, "Index title");
+                assert_ne!(boot, reply(harness), "without the saved list the row is rewritten");
+                // With the saved list: nothing moves.
+                harness.sessions.clear();
+                harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+                    sessions: vec![wire.clone()],
+                    ..Default::default()
+                }));
+                harness.install_provisional_rows();
+                let row = harness.sessions.iter().find(|e| e.id == "s-chain").expect("a boot row");
+                assert!(row.provisional && !row.running && !row.needs_title, "wire facts that may have moved stay zero");
+                let boot: Vec<_> =
+                    harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                assert_eq!(boot[0].0, "Wire title");
+                assert_eq!(boot, reply(harness), "the reply changes no search row");
+                // Nor does a rejoin after it (every index refresh and override
+                // edit runs one): it used to read the index label, uncut.
+                harness.rejoin();
+                let rejoined: Vec<_> =
+                    harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                assert_eq!(rejoined, boot, "a rejoin reads the same ladder as the join");
+                // A label past 80 characters is cut the same way on both paths.
+                let long = "word ".repeat(40);
+                harness.index.get_mut("s-chain").expect("indexed").title = long.clone();
+                let mut untitled = wire.clone();
+                untitled.title = None;
+                harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+                    sessions: vec![untitled.clone()],
+                    ..Default::default()
+                }));
+                harness.rejoin();
+                let row = harness.sessions.iter().find(|e| e.id == "s-chain").expect("a row");
+                let joined = SessionEntry::join(&untitled, harness.index.get("s-chain"), None, &harness.projects);
+                assert_eq!(row.label, joined.label, "rejoin and join agree on a long label");
+                assert!(row.label.ends_with('\u{2026}'));
             });
         });
         lane_restore(state);
