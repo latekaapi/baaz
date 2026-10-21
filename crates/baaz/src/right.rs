@@ -12,6 +12,7 @@
 //! [`complete_file_preview`]. Every other action button is inert by owner
 //! decision and says so through [`inert`].
 
+use aui::util::ScrollAxisLock as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2060,6 +2061,7 @@ fn files_pane_from(
         .aria_label("Files")
         .size_full()
         .overflow_y_scroll()
+        .scroll_axis_locked()
         .track_scroll(&scroll)
         .child(tree)
         .into_any_element()
@@ -2177,6 +2179,7 @@ fn file_preview_pane(
         .aria_label(format!("File preview: {}", preview.name))
         .size_full()
         .overflow_y_scroll()
+        .scroll_axis_locked()
         .track_scroll(&scroll)
         .child(header)
         .child(body)

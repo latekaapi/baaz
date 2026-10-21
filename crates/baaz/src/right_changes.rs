@@ -5,6 +5,7 @@
 //! itself is [`crate::git_ops`]; this module owns the screen's state, its
 //! actions and its drawing. Nothing here touches the disk on the render path.
 
+use aui::util::ScrollAxisLock as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -831,6 +832,7 @@ pub(crate) fn changes_screen(
             .id("right-changes-scroll")
             .size_full()
             .overflow_y_scroll()
+            .scroll_axis_locked()
             .track_scroll(&scroll)
             // The sticky row is decided in render: a scroll re-renders, after
             // the wheel has moved the offset (live 2026-10-19: it never stuck).
@@ -1038,6 +1040,7 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window:
         .id("right-pr-form")
         .size_full()
         .overflow_y_scroll()
+        .scroll_axis_locked()
         .p(px(12.0))
         .pb(px(64.0))
         .gap(px(12.0))

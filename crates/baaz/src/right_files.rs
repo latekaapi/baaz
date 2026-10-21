@@ -4,6 +4,7 @@
 //! link's lines), Markdown that reads like an answer, an image, a file Baaz
 //! does not show, a file that is gone.
 
+use aui::util::ScrollAxisLock as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -391,7 +392,7 @@ fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width:
             }
             view.into_any_element()
         }
-        PreviewContent::Markdown { text } => div().id("right-file-md").size_full().overflow_y_scroll().child(markdown_view("right-file-md-body", text.clone(), cx)).into_any_element(),
+        PreviewContent::Markdown { text } => div().id("right-file-md").size_full().overflow_y_scroll().scroll_axis_locked().child(markdown_view("right-file-md-body", text.clone(), cx)).into_any_element(),
         PreviewContent::Card { .. } => {
             let open_abs = abs.clone();
             state_block("right-file-notshown", IconName::File, preview.name.clone())
