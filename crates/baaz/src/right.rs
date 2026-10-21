@@ -673,6 +673,7 @@ pub(crate) fn render_screen(
     if back_since.is_some() {
         browser.window.request_animation_frame();
     }
+    let files_root = project.as_ref().map(|(root, _)| root.clone());
     let (row, body, pushed): (AnyElement, AnyElement, bool) = if let Some(view) = cache.pushed.get(&screen) {
         let (row, body) = crate::right_views::pushed_screen(screen, view, width, browser.window, cx);
         (row, body, true)
@@ -731,6 +732,10 @@ pub(crate) fn render_screen(
         }
     };
     let chrome_under_row = opens_on_chrome(kind, pushed, cache.files_ui.filter.is_some());
+    // The tree's scroll offset, read from the handle it tracks: a wheel
+    // scroll notifies this view, so the fade follows it frame by frame.
+    let tree_scrolled = files_root.as_ref().is_some_and(|root| cache.files_scroll_for(root).offset().y < px(-0.5));
+    let fade = fade_under_row(kind, pushed, chrome_under_row, tree_scrolled);
     // A pushed view slides 8 px in from the right and fades in, 160 ms
     // ease-out (docs/43 §3).
     let body = if pushed {
@@ -761,8 +766,23 @@ pub(crate) fn render_screen(
         // the address field (owner 2026-10-21: "the address bar is getting
         // hidden under the Page header's shadow"; the locked boards draw
         // the nav row above the fade).
-        .when(!chrome_under_row, |screen| screen.child(aui::workbench::pane_row_fade(cx)))
+        //
+        // The Files tree takes it only once it has scrolled: at its top the
+        // first row sits 4 px under the row, inside the 24 px fade, and read
+        // as cut off (owner 2026-10-21: "text is getting cut under the
+        // shadow").
+        .when(fade, |screen| screen.child(aui::workbench::pane_row_fade(cx)))
         .into_any_element()
+}
+
+/// Whether the pane row's fade draws over this screen's body: never over a
+/// screen's own chrome ([`opens_on_chrome`]), and over the Files tree only
+/// while it is scrolled — nothing is under the row at its top.
+fn fade_under_row(kind: RightKind, pushed: bool, chrome_under_row: bool, tree_scrolled: bool) -> bool {
+    if chrome_under_row {
+        return false;
+    }
+    pushed || !matches!(kind, RightKind::Files) || tree_scrolled
 }
 
 /// Whether a screen's body opens on opaque chrome of its own right under
@@ -3104,6 +3124,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+
+    /// Owner 2026-10-21 (screenshot): the Files tree's first row read as
+    /// cut off under the pane row's fade. At the top of the tree there is no
+    /// fade; scrolled, there is; a preview (pushed) and other screens keep it.
+    #[test]
+    fn the_files_tree_takes_the_row_fade_only_once_scrolled() {
+        use super::fade_under_row;
+        assert!(!fade_under_row(RightKind::Files, false, false, false), "the tree at its top");
+        assert!(fade_under_row(RightKind::Files, false, false, true), "the tree scrolled");
+        assert!(fade_under_row(RightKind::Files, true, false, false), "a preview pushed over Files");
+        assert!(fade_under_row(RightKind::Changes, false, false, false), "Changes keeps it");
+        assert!(!fade_under_row(RightKind::Browser, false, true, true), "never over the Page's own chrome");
+    }
 
     /// Owner 2026-10-21: the address field sat under the pane row's fade.
     #[test]

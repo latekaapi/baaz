@@ -972,18 +972,24 @@ impl Harness {
         cx.notify();
     }
 
-    /// `wheel:<dy>`: dispatch one synthetic wheel event at the window centre
+    /// `wheel:<dy>[@<x>,<y>]`: dispatch one synthetic wheel event at the
+    /// window centre (or at window point `x,y`, e.g. over the right pane)
     /// and log the transcript's pixel offset before and after — the
     /// palette-scroll instrument: over the open palette the
     /// palette's list scrolls and the transcript never moves, while over the
     /// bare transcript the same wheels move it. Free: no turn, no wire.
     pub(crate) fn step_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let dy: f32 = rest.trim().parse().unwrap_or(0.0);
+        let (dy, at) = rest.split_once('@').unwrap_or((rest, ""));
+        let dy: f32 = dy.trim().parse().unwrap_or(0.0);
         let before = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
         let size = window.bounds().size;
+        let position = at
+            .split_once(',')
+            .and_then(|(x, y)| Some(point(px(x.trim().parse().ok()?), px(y.trim().parse().ok()?))))
+            .unwrap_or(point(size.width * 0.5, size.height * 0.5));
         window.dispatch_event(
             PlatformInput::ScrollWheel(ScrollWheelEvent {
-                position: point(size.width * 0.5, size.height * 0.5),
+                position,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                 ..Default::default()
             }),
