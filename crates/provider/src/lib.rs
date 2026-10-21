@@ -56,7 +56,7 @@ pub use aui_protocol::Delta;
 pub use capability::{Capability, CapabilitySet, CapabilityState};
 pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
 pub use crossbeam_channel::Receiver;
-pub use error::ProviderError;
+pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter};
 pub use usage::{window_label, UsageReport, UsageWindow};

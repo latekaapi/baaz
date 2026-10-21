@@ -14,6 +14,7 @@
 
 mod caps;
 pub mod errors;
+pub mod facts;
 pub mod terminal;
 mod translate;
 
@@ -179,6 +180,7 @@ impl MuseAdapter {
         fold: &Mutex<MuseFold>,
         tx: &Sender<ProviderEvent>,
         legacy: &Sender<MuseEvent>,
+        tracker: &mut facts::FactTracker,
         event: MuseEvent,
     ) -> bool {
         // The legacy fan-out first: every transport event reaches the raw
@@ -195,13 +197,24 @@ impl MuseAdapter {
                 });
                 false
             }
-            MuseEvent::Notification { ref session_id, .. } => {
+            MuseEvent::Notification { ref session_id, ref method, ref params, .. } => {
                 // Cloned before the fold consumes the event; the borrow
                 // ends here, so the move below is legal.
                 let session = session_id.clone();
-                let deltas = fold.lock().expect("fold mutex").apply(event);
+                let method = method.clone();
+                let params = params.clone();
+                let mut fold = fold.lock().expect("fold mutex");
+                let deltas = fold.apply(event);
+                // The fold resolves the session id the way it filed the
+                // event (`session/started` carries it inside `session`).
+                let session = session.or_else(|| fold.last_touched().map(str::to_owned));
                 if !deltas.is_empty() {
-                    let _ = tx.send(ProviderEvent::Deltas { session_id: session, deltas });
+                    let _ = tx.send(ProviderEvent::Deltas { session_id: session.clone(), deltas });
+                }
+                if let Some(session) = session {
+                    for fact in tracker.after(&mut fold, &session, &method, &params) {
+                        let _ = tx.send(fact);
+                    }
                 }
                 true
             }
@@ -342,8 +355,9 @@ impl ProviderAdapter for MuseAdapter {
         let pump = std::thread::Builder::new()
             .name("provider-muse-pump".into())
             .spawn(move || {
+                let mut tracker = facts::FactTracker::new();
                 while let Ok(event) = live.recv() {
-                    if !Self::forward(&fold, &tx, &legacy, event) {
+                    if !Self::forward(&fold, &tx, &legacy, &mut tracker, event) {
                         break;
                     }
                 }

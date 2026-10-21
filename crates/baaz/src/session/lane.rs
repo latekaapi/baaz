@@ -486,6 +486,81 @@ impl SessionView {
                 self.follow = true;
                 cx.notify();
             }
+            // The facts beside the transcript, whole: the meter, the queue,
+            // the retry clock, what waits on the person, the cursor.
+            provider::ProviderEvent::SessionFacts { session_id, side } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                self.store.set_side(side);
+                self.sync_mode_menu_check(cx);
+                self.observe_clocks(cx);
+                cx.notify();
+            }
+            provider::ProviderEvent::HeaderChanged { session_id, header } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                if self.store.set_header(&header) {
+                    cx.notify();
+                }
+            }
+            // A turn running before it says anything: the stop button and
+            // the working row stand on it. A start for a turn this view saw
+            // complete is a re-delivered start (a resume's replay), never
+            // new work.
+            provider::ProviderEvent::TurnRunning { session_id, turn_id } => {
+                if session_id != self.session_id || self.completed_turns.contains(&turn_id) {
+                    return;
+                }
+                self.running = Some(super::Running { turn_id, started: crate::clock::now_instant() });
+                self.submitting = false;
+                self.last_tick_secs = None;
+                self.start_ticker(cx);
+                cx.notify();
+            }
+            // How a turn ended, beyond its footer: the plan card for a plan
+            // turn, the created files for search, the sign-in hint for a
+            // failure that means the credential is gone.
+            provider::ProviderEvent::TurnSettled { session_id, turn_id, outcome } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                if self.completed_turns.len() >= super::MAX_COMPLETED_TURNS {
+                    self.completed_turns.clear();
+                }
+                self.completed_turns.insert(turn_id.clone());
+                if self.running.as_ref().is_some_and(|running| running.turn_id == turn_id) {
+                    self.clear_running();
+                }
+                self.submitting = false;
+                self.plan_completed(&turn_id, cx);
+                self.record_created_files(cx);
+                if let provider::facts::TurnOutcome::Failed { message, signed_out: true } = outcome {
+                    cx.emit(super::SessionEvent::SignedOut { message: message.unwrap_or_default() });
+                }
+                cx.notify();
+            }
+            // A submission's words handed back: by the intent the row's
+            // button recorded when it was a reclaimed queue row, else to the
+            // composer.
+            provider::ProviderEvent::PromptRestored { session_id, turn_id, text } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                match turn_id.and_then(|turn_id| self.unqueueing.remove(&turn_id)) {
+                    Some(pending) => match pending.kind {
+                        super::Unqueue::Remove => {}
+                        super::Unqueue::Edit => self.restore_prompt(pending.text, cx),
+                        super::Unqueue::Steer => self.steer_text(pending.text, cx),
+                    },
+                    None => self.restore_prompt(text, cx),
+                }
+                cx.notify();
+            }
+            // A row's status: the application's, for sessions no view
+            // follows; a view has its own transcript to read.
+            provider::ProviderEvent::StatusChanged { .. } => {}
             provider::ProviderEvent::ConnectionLost { reason } => {
                 // Hang up the lane's provider: it will never deliver again.
                 if let Lane::Provider(lane) = &self.lane {
@@ -1312,6 +1387,70 @@ mod tests {
         });
     }
 
+    /// The facts a provider reports beside its transcript drive the same
+    /// surfaces Muse's fold used to: the running turn and its settle, the
+    /// queue strip, a prompt handed back, a failure that means signed out.
+    #[gpui::test]
+    fn facts_running_settled_and_restored_prompts_reach_the_view(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view_as(vc, "s-1", "meta");
+        let send = |event: provider::ProviderEvent| tx.unbounded_send(event).expect("the lane channel is open");
+        send(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: "t-1".into() });
+        let mut side = provider::facts::SessionSide::default();
+        side.queued.push(provider::facts::QueuedTurn { turn_id: "t-q".into(), request_id: "r-q".into() });
+        side.cursor = "c-9".into();
+        send(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.running.as_ref().map(|r| r.turn_id.as_str()), Some("t-1"), "running before any delta");
+            assert_eq!(view.store.side().queued.len(), 1, "the queue strip has its row");
+            assert_eq!(view.last_cursor().as_deref(), Some("c-9"), "a reconnect resumes after the cursor");
+        });
+        // A reclaimed row whose button asked for Edit: its words go back to
+        // the composer by that intent.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.unqueueing.insert(
+                    "t-q".into(),
+                    super::super::PendingUnqueue { kind: super::super::Unqueue::Edit, text: "later".into() },
+                );
+            })
+        });
+        send(provider::ProviderEvent::PromptRestored {
+            session_id: "s-1".into(),
+            turn_id: Some("t-q".into()),
+            text: "later".into(),
+        });
+        send(provider::ProviderEvent::TurnSettled {
+            session_id: "s-1".into(),
+            turn_id: "t-1".into(),
+            outcome: provider::facts::TurnOutcome::Completed,
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.running.is_none(), "the settle stands the turn down");
+            assert!(view.completed_turns.contains("t-1"));
+            assert_eq!(view.pending_prompt.as_deref(), Some("later"), "the words are back in the composer");
+            assert!(view.unqueueing.is_empty(), "the intent was used once");
+        });
+        // A re-delivered start for the settled turn marks nothing running.
+        send(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: "t-1".into() });
+        // Another session's facts are not this view's.
+        send(provider::ProviderEvent::SessionFacts {
+            session_id: "other".into(),
+            side: provider::facts::SessionSide::default(),
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.running.is_none());
+            assert_eq!(view.store.side().queued.len(), 1);
+        });
+    }
+
     #[gpui::test]
     fn question_raised_is_recorded_and_connection_loss_banners(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -1772,7 +1911,7 @@ mod tests {
                             },
                         ],
                     });
-                    Ok(provider::Ack::TurnAccepted { turn_id })
+                    Ok(provider::Ack::TurnAccepted { turn_id, queued: false })
                 }
                 provider::Command::SteerInput { .. } => Ok(provider::Ack::Accepted),
                 provider::Command::InterruptTurn { session_id, turn, .. } => {
@@ -1979,6 +2118,7 @@ mod tests {
                         provider::SubmissionPart::Image {
                             base64_data: "aGVsbG8=".to_owned(),
                             media_type: "image/png".to_owned(),
+                            size: Some((1, 1)),
                         },
                     ],
                     "text plus the composer's image, in order"

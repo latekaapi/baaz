@@ -30,6 +30,9 @@ pub enum SubmissionPart {
         base64_data: String,
         /// e.g. `"image/png"`.
         media_type: String,
+        /// Pixel width and height, when known: a backend that sizes its
+        /// image budget up front reads them.
+        size: Option<(u32, u32)>,
     },
 }
 

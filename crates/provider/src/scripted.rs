@@ -182,7 +182,7 @@ impl ProviderAdapter for ScriptedProvider {
                 for event in self.script_for(&session_id, &text) {
                     let _ = self.inner.tx.send(event);
                 }
-                Ok(Ack::TurnAccepted { turn_id: "a-latest".into() })
+                Ok(Ack::TurnAccepted { turn_id: "a-latest".into(), queued: false })
             }
             Command::FollowSession { .. } => Ok(Ack::Accepted),
             other => Err(ProviderError::unsupported(

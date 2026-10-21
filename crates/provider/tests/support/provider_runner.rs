@@ -122,6 +122,13 @@ impl Lane<'_> {
             ProviderEvent::QuestionRaised { headline, .. } => {
                 turn.asked.push(format!("QUESTION {headline}"));
             }
+            // Facts beside the transcript: nothing a live mode run reads.
+            ProviderEvent::SessionFacts { .. }
+            | ProviderEvent::HeaderChanged { .. }
+            | ProviderEvent::TurnRunning { .. }
+            | ProviderEvent::TurnSettled { .. }
+            | ProviderEvent::PromptRestored { .. }
+            | ProviderEvent::StatusChanged { .. } => {}
             // The acknowledged turn's streamed id (Claude Code): its
             // deltas count as this turn's from here on.
             ProviderEvent::TurnIdentified { accepted, turn_id: streamed, .. } => {
@@ -160,7 +167,7 @@ impl Lane<'_> {
             })
             .map_err(|error| format!("SubmitInput: {error}"))?;
         let turn_id = match ack {
-            Ack::TurnAccepted { turn_id } => turn_id,
+            Ack::TurnAccepted { turn_id, .. } => turn_id,
             other => return Err(format!("SubmitInput answered {other:?}")),
         };
         let mut seen = TurnSeen::default();

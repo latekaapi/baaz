@@ -66,13 +66,31 @@ fn reasoning_effort(level: Option<&str>) -> Option<muse_client::schema::Reasonin
     }
 }
 
+/// The text parts of a submission, joined: what a retraction hands back
+/// when the submission carried no display text.
+fn submission_text(parts: &[SubmissionPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            SubmissionPart::Text(text) => Some(text.as_str()),
+            SubmissionPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// A neutral submission part, translated to the wire's content part.
 fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
     use muse_client::schema::TurnInputPart as Wire;
     match part {
         SubmissionPart::Text(text) => Wire::text(text),
-        SubmissionPart::Image { base64_data, media_type } => {
-            Wire::image(base64_data, media_type)
+        SubmissionPart::Image { base64_data, media_type, size } => {
+            let mut part = Wire::image(base64_data, media_type);
+            if let Some((width, height)) = size {
+                part.width = Some(width);
+                part.height = Some(height);
+            }
+            part
         }
     }
 }
@@ -135,6 +153,13 @@ pub fn question_headline(request: &UserInputRequestParams) -> String {
 /// A transport failure, translated to the neutral error. The wire detail
 /// stays behind the seam; only the human reason crosses it.
 pub fn transport_error(error: MuseError) -> ProviderError {
+    crate::errors::refusal(&error)
+}
+
+/// The shape-only translation: the child gone or slow is `Unavailable`,
+/// anything else `Rejected` with the wire's words. What
+/// [`crate::errors::refusal`] falls back to for errors that carry no kind.
+pub(crate) fn transport_error_unclassified(error: &MuseError) -> ProviderError {
     match error {
         MuseError::Closed => {
             ProviderError::Unavailable { reason: "the agent process exited".into() }
@@ -142,14 +167,14 @@ pub fn transport_error(error: MuseError) -> ProviderError {
         MuseError::Timeout(method) => {
             ProviderError::Unavailable { reason: format!("the agent never answered {method}") }
         }
-        MuseError::Io(error) => {
-            ProviderError::Unavailable { reason: format!("agent I/O failed: {error}") }
+        MuseError::Io(io) => {
+            ProviderError::Unavailable { reason: format!("agent I/O failed: {io}") }
         }
-        MuseError::Rpc(error) => {
-            ProviderError::Rejected { reason: format!("refused ({}): {}", error.code, error.message) }
+        MuseError::Rpc(rpc) => {
+            ProviderError::Rejected { reason: format!("refused ({}): {}", rpc.code, rpc.message) }
         }
-        MuseError::Json(error) => {
-            ProviderError::Rejected { reason: format!("unusable answer: {error}") }
+        MuseError::Json(json) => {
+            ProviderError::Rejected { reason: format!("unusable answer: {json}") }
         }
         MuseError::Protocol(line) => {
             ProviderError::Rejected { reason: format!("unframable reply: {line}") }
@@ -316,6 +341,13 @@ pub fn dispatch(
             Ok(Ack::Accepted)
         }
         Command::SubmitInput { request_id, session_id, parts, display_text, effort } => {
+            // The wire never gives a prompt back: a retraction or an unqueue
+            // names the submission by its command id alone, so the words
+            // are remembered before the command leaves.
+            let text = display_text.clone().unwrap_or_else(|| submission_text(&parts));
+            fold.lock().expect("fold mutex").record_command(&session_id, &request_id, &text);
+            let command_id = request_id.clone();
+            let session = session_id.clone();
             let result = client
                 .turn_start(&TurnStartParams {
                     command_id: request_id,
@@ -328,9 +360,14 @@ pub fn dispatch(
                     workspace_roots: None,
                 })
                 .map_err(transport_error)?;
-            Ok(Ack::TurnAccepted { turn_id: result.turn_id })
+            let queued = result.disposition == muse_client::schema::TurnStartDisposition::Queued;
+            if queued {
+                fold.lock().expect("fold mutex").record_queued(&session, &result.turn_id, &command_id, &text);
+            }
+            Ok(Ack::TurnAccepted { turn_id: result.turn_id, queued })
         }
         Command::SteerInput { request_id, session_id, expected_turn, parts, effort } => {
+            fold.lock().expect("fold mutex").record_command(&session_id, &request_id, &submission_text(&parts));
             client
                 .turn_steer(&TurnSteerParams {
                     command_id: request_id,

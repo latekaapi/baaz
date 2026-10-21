@@ -94,6 +94,7 @@ pub struct Legacy {
 pub fn provider_title(error: &ProviderError) -> String {
     match error {
         ProviderError::Unavailable { .. } => "Muse disconnected".into(),
+        ProviderError::Refused(refusal) => refusal.title.clone(),
         ProviderError::Rejected { .. } | ProviderError::Unsupported { .. } => {
             "Something went wrong".into()
         }
