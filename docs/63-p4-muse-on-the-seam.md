@@ -1,6 +1,6 @@
 # 63 — P4: Muse onto the provider seam (plan, 2026-10-21)
 
-Status: **plan; building.** Implements docs/50 §4 P4 as decided there (§6 decisions unchanged). Nothing here changes a
+Status: **built** (all eight steps, 2026-10-22; §6). Implements docs/50 §4 P4 as decided there (§6 decisions unchanged). Nothing here changes a
 docs/50 decision; it only fixes the order. Evidence: two read-only inventories of the tree at `b2fc333` plus reading
 `session/lane.rs`, `session/commands.rs`, `session/events.rs`, `app.rs` connect/pump/route, `provider*/src`. Line
 numbers are as of `b2fc333`.
@@ -86,31 +86,29 @@ Then: docs/64 handoff, tracker, memory. Baselines are regenerated on main at pus
 - **Parked Muse views** start receiving their own events once each has a lane (today only the open view does). That
   is the intended fix, but it is new behaviour: checked live in step 4.
 
-## 6. Progress — PAUSED 2026-10-21 late (owner asked to pause at a logical point)
+## 6. Progress — ALL EIGHT STEPS BUILT (2026-10-21/22), committed on harness main, NOT pushed
 
-| Step | State | Commit |
+| Step | Commit | As built |
 |---|---|---|
-| 1 Neutral session store | **done**; tests, clippy, headless `store` budgets green. **Owed:** live BaazCheck look (a `--replay` capture + a Claude Code session), the windowed budgets (`boot/open/switch/stream/idle`) and the 18-entry probe — all deferred because the owner was at the keyboard (HIDIdleTime 0). | `adf3d28` |
-| 2 Seam vocabulary | **done**; tests + clippy green. Nothing consumes the new Muse events until step 4. | `19ddb85` |
-| 3–8 | not started | — |
+| 1 Neutral session store | `adf3d28` | `crates/session-store`; views render from it. |
+| 2 Seam vocabulary | `19ddb85` | facts / turn settled / prompt restored / status / notices; typed refusals; queued acks. |
+| 3 Muse hub | `eaa9c96` | `provider_muse::MuseHub`: one child, a lane per session, fold pinned for bound sessions, orphan buffer, reconnect + resume of followed sessions. |
+| 4 Views ride lanes | `ecc3634` | Muse new/resume/fork/replay through the provider open path; **one short live Muse turn** (PONG) proved the demux. |
+| 5 Muse lane gone from views | `1daa488` | `Lane::Muse`, the view's `MuseFold`, every `is_provider_lane()` fork in production code. |
+| 6a Account + usage | `686529f` | `AccountLane`, `LoginOutcome`, `ReadUsage`/`Ack::Usage`, `AccountChanged`/`LoginCompleted`/`UsageChanged` on the connection stream; tier decides from `UsageReport`. |
+| 6b One-shot completions | `75ac929` | `MuseHub::complete` (side session, private lane, settle, read back); titles/bylines/summaries/drafts all through `utility::complete`; the job maps and harvests gone. **One short live side turn** (muse-spark-1.3, PONG, 14.8 s). |
+| 6c Off the raw transport | `e1c45ca` | pump, route, `Harness.client`, `conn::Legacy`, `legacy_events`; rows from `TurnRunning`/`TurnSettled`/`StatusChanged`; reconnect on `ConnectionLost` (seen live: SIGKILL of `muse serve` → respawn). |
+| 7 One registry | `9684d3b` | Muse rows through `ListSessions` (+`updated_after`) as a widened `SessionSummary`; Baaz-owned `ListedRow` keeps the saved list readable (live: owner's 2,661-row copy → 1 page, `mode=Newer`); derived titles via `ReadSession` → `Ack::SessionRead`; `SessionEntry.provider: ProviderId` always set; neutral `Attention`. |
+| 8 Last mentions | `352ac09` | `crates/baaz` drops `muse-client` + `muse-adapter`; `PermissionMode` for modes; Baaz-owned model row; registry properties replace `uses_legacy_pump`; ratchet absolute (no mention, no manifest entry, no lane forks). |
 
-**Resume here:**
-1. If the owner is away (HIDIdleTime ≥ 180 s), run the owed step-1 checks first: `scripts/bundle.sh`, then
-   BaazCheck on `--replay fixtures/msp/synthetic-stress-300.jsonl` and on a Claude Code session; then
-   `python3 scripts/perf-budgets.py --binary target/release/baaz` and the probe in CLAUDE.md. A defect = its own
-   fix commit before step 3.
-2. Step 3 (Muse hub) as in §3. Design notes from steps 1–2 that it builds on:
-   - Muse-only reactions move *into* the adapter: already-resolved/not-found approvals resolve in the hub's fold
-     and go out as deltas; the stage token is filled from the fold when the view sends none; profile moves on
-     `SelectApprovalMode`; backfill is the view sending `PageTranscript` (Muse's capability says paging) and
-     folding `Ack::TranscriptPage` deltas — keep the first-page `HistoryReady` cue and the one stale-history retry
-     (`RefusalHint::StaleHistory`).
-   - Bind a lane to its session id **before** the send: open mints the id client-side (`request_id`, a bare uuid
-     muse ≥ 1.3 accepts), resume names it; events for unbound sessions go to the connection stream.
-   - Pin attached sessions in the hub's fold (`SESSION_CACHE_LIMIT` evicts otherwise).
-   - `provider_muse::facts::FactTracker` already turns the fold's state into `SessionFacts`/`HeaderChanged`/
-     `TurnRunning`/`TurnSettled`/`PromptRestored`/`StatusChanged`; the lane already handles each
-     (`session/lane.rs` `on_provider_event`).
-3. Working tree notes: `Cargo.lock` shows modified (local `[patch]` + the new `session-store` crate) — never commit
-   it; the repin at push regenerates it. Disk had 12 GB free at start; `target/debug` was wiped and rebuilt
-   (~74 GB free after).
+Every step: workspace tests (2,108 at the end, 0 failed), clippy clean, all perf budgets, the 18-entry probe (only the
+intended right-files / right-files-reveal changes), and a BaazCheck run (screen locked throughout: logs + the app's own
+`--screenshot`).
+
+**Not done — the honest remainder.** `crates/baaz` names no Muse wire, but about 24 app-level branches in
+`app/lifecycle.rs` (plus a few in `app.rs`, `app/titles.rs`, `right_changes.rs`) still ask `== ProviderId::Muse`:
+the open/reopen paths (a Muse session has no Baaz record; it reopens with `ResumeSession`), Muse's start parameters
+(model provider, mode), the boot catalog warm-up, and the two turn handlers whose Muse rows now come from the hub's
+connection stream rather than the view's events. Commands go through one path; these open and row paths still
+branch by name. Folding them into registry properties (or making Muse keep Baaz records like the others) is the
+next piece of P4 — see docs/64 §4.
