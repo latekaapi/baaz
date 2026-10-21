@@ -201,7 +201,11 @@ pub struct Folds {
     pub open_attachment: Option<CardHandler>,
     /// D4: a quote at the top of a bubble was pressed: the id of the turn it
     /// was quoted from, to scroll back to.
-    pub scroll_to_turn: Option<CardHandler>,
+    pub scroll_to_turn: Option<QuoteClickHandler>,
+    /// A sent quote's source span flashing now (docs/43 §0): its turn, the
+    /// span, and the tint's strength (1 → 0). Painted where the turn holds
+    /// no selection of its own.
+    pub span_flash: Option<(String, MessageSelection, f32)>,
     /// Q1b: tool-call id → the wall time (epoch ms) its block first
     /// appeared, snapshotted once per frame by the session view. Live
     /// run rows tick from the run's first member start, never from summed
@@ -577,6 +581,8 @@ pub type PlanHandler = Rc<dyn Fn(String, PlanAction, &mut Window, &mut App)>;
 /// card is the whole argument, because which card it was is the only thing the
 /// app needs in order to know what to send.
 pub type CardHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+/// A sent quote was pressed: its source turn and its words.
+pub type QuoteClickHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
 
 /// What the full-output view needs from a shell card.
 #[derive(Clone, Debug)]
@@ -1608,7 +1614,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             }
             if let Some(scroll) = &folds.scroll_to_turn {
                 let scroll = scroll.clone();
-                turn = turn.on_quote(move |source, window, cx| scroll(source, window, cx));
+                turn = turn.on_quote(move |source, words, window, cx| scroll(source, words, window, cx));
             }
             // The how-long-ago caption under the bubble, beside the action
             // rail. A turn the wire never timed draws no caption and keeps
@@ -1628,7 +1634,10 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             // span path replaces the legacy single-cell selection — a drag
             // that starts in one paragraph and ends in another, or in a
             // code block, highlights everything between.
-            turn = turn.span_selection(folds.span_held.get(id).map(|(_, held)| held));
+            turn = match (folds.span_held.get(id), folds.span_flash.as_ref().filter(|(t, _, _)| t == id)) {
+                (None, Some((_, span, strength))) => turn.span_selection(Some(span)).span_strength(*strength),
+                (held, _) => turn.span_selection(held.map(|(_, held)| held)),
+            };
             if let Some(on_event) = &folds.span_event {
                 let on_event = on_event.clone();
                 let (turn_id, source) = (id.clone(), text.clone());
@@ -1973,7 +1982,11 @@ fn text_card(
     // — the library scopes keys to the markdown view, and a turn holds
     // several. The source that travels back with an event is still exactly
     // this block's text, so ⌘C copies what was dragged.
-    turn = turn.span_selection(folds.span_held.get(turn_id).map(|(_, held)| held));
+    // A sent quote's source flashes here once (docs/43 §0), fading.
+    turn = match (folds.span_held.get(turn_id), folds.span_flash.as_ref().filter(|(t, _, _)| t == turn_id)) {
+        (None, Some((_, span, strength))) => turn.span_selection(Some(span)).span_strength(*strength),
+        (held, _) => turn.span_selection(held.map(|(_, held)| held)),
+    };
     if let Some(on_event) = &folds.span_event {
         let on_event = on_event.clone();
         let (owner, source) = (turn_id.to_owned(), text.to_owned());
@@ -3094,6 +3107,7 @@ mod tests {
             sent: Rc::new(HashMap::new()),
             open_attachment: None,
             scroll_to_turn: None,
+            span_flash: None,
             tool_starts: Rc::new(HashMap::new()),
         }
     }

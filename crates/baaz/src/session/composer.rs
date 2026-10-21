@@ -1151,7 +1151,10 @@ impl SessionView {
                 quote_of: None,
             });
         }
-        for quote in self.quotes.drain(..) {
+        for quote in std::mem::take(&mut self.quotes) {
+            if let (Some(source), Some(span)) = (&quote.source, &quote.span) {
+                self.sent_quote_spans.insert((source.clone(), quote.text.clone()), span.clone());
+            }
             // A code quote says so in `meta` (`code` / `code:<lang>`), which
             // the sent bubble's quote block reads (docs/43 §0).
             let meta = quote.code.map(|(lang, _)| if lang.is_empty() { "code".to_string() } else { format!("code:{lang}") });

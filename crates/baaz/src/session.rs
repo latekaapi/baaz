@@ -264,6 +264,10 @@ pub(crate) struct QuoteAnchor {
 /// output (lines, capped) when one landed.
 pub type ToolOutputNow = (Vec<String>, bool, Option<i32>, Option<(Vec<String>, bool)>);
 
+/// How long a sent quote's source span flashes, fading out: the Changes
+/// rows' flash (right_changes `FLASH`).
+pub(crate) const QUOTE_FLASH: std::time::Duration = std::time::Duration::from_millis(900);
+
 /// One quotation in the composer (D4): the words and their source turn.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QuoteDraft {
@@ -275,6 +279,9 @@ pub(crate) struct QuoteDraft {
     pub source: Option<String>,
     /// A code quote: its language (may be empty) and line count.
     pub code: Option<(String, usize)>,
+    /// The selection it was quoted from, so the sent quote can flash its
+    /// source span when clicked (docs/43 §0). None for a hook's output.
+    pub span: Option<aui::transcript::MessageSelection>,
 }
 
 /// An unsent composer's content: the text plus the images and files waiting
@@ -812,6 +819,15 @@ pub struct SessionView {
     /// A sent quote's way back to its source in flight (docs/43 §0): the
     /// start, the from / to scroll offsets, and the turn it lands on.
     quote_scroll: Option<(std::time::Instant, gpui::Point<Pixels>, gpui::Point<Pixels>, gpui::ListOffset)>,
+    /// The spans sent quotes were taken from, by (source turn, words): what
+    /// a click on the sent quote flashes. This session's quotes only — a
+    /// reopened session scrolls back without the flash.
+    sent_quote_spans: HashMap<(String, String), aui::transcript::MessageSelection>,
+    /// The span to flash once the quote's scroll lands: (turn, span).
+    quote_flash_pending: Option<(String, aui::transcript::MessageSelection)>,
+    /// The source span flashing now (docs/43 §0 "flashes the source span's
+    /// tint once"): start, turn, span. Fades over [`QUOTE_FLASH`].
+    quote_flash: Option<(std::time::Instant, String, aui::transcript::MessageSelection)>,
     /// The transcript box in window coordinates (the bar's frame).
     transcript_bounds: Option<gpui::Bounds<Pixels>>,
     /// The turn whose copy button shows the success check, if any: set on
@@ -1236,6 +1252,9 @@ impl SessionView {
             quote_anchor: None,
             quote_dismiss: false,
             quote_scroll: None,
+            sent_quote_spans: HashMap::new(),
+            quote_flash_pending: None,
+            quote_flash: None,
             transcript_bounds: None,
             copied_turn: None,
             last_tick_secs: None,
@@ -2366,13 +2385,26 @@ impl SessionView {
     /// text — quoting text already quoted adds nothing — and give the field
     /// the keyboard with the caret after any draft.
     pub(crate) fn add_quote(&mut self, text: String, source: Option<String>, code: Option<(String, usize)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_quote_with_span(text, source, code, None, window, cx);
+    }
+
+    /// [`Self::add_quote`] remembering the selection it came from.
+    pub(crate) fn add_quote_with_span(
+        &mut self,
+        text: String,
+        source: Option<String>,
+        code: Option<(String, usize)>,
+        span: Option<aui::transcript::MessageSelection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim_end().to_string();
         if text.is_empty() || self.quotes.iter().any(|q| q.text == text) {
             self.focus_composer(window, cx);
             return;
         }
         self.quote_seq += 1;
-        self.quotes.push(QuoteDraft { id: format!("quote-{}", self.quote_seq), text, source, code });
+        self.quotes.push(QuoteDraft { id: format!("quote-{}", self.quote_seq), text, source, code, span });
         let draft = self.draft_text(cx);
         let end = position_of(&draft, draft.len());
         self.composer.update(cx, |state, cx| state.set_cursor_position(end, window, cx));
