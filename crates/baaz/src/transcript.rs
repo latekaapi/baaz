@@ -1826,7 +1826,7 @@ fn block(
         Block::ToolCall { .. } => match block.as_tool_call() {
             Some(call) => match skill_load_name(&call) {
                 Some(name) => skill_load_row(id, name, folds, cx),
-                None => tool_call_card(key, id, &call, folds),
+                None => tool_call_card(key, turn_id, id, &call, folds),
             },
             None => generic_card(key, id, "tool", "done", "", folds),
         },
@@ -2339,7 +2339,35 @@ fn goal_block_card(
 /// One tool invocation as its card: the body the lone `Block::ToolCall` would
 /// have shown, with the same fold toggle and full-output fetch keyed by the
 /// call's own id (so grouped calls behave like lone ones).
-fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> AnyElement {
+/// The span owner a tool card's output selects under: its turn and call,
+/// so the output's one cell (`code0`) never shares a key with the turn's own
+/// fences. [`output_owner_turn`] maps it back.
+pub fn output_owner(turn_id: &str, call_id: &str) -> String {
+    format!("{turn_id}{OUTPUT_OWNER}{call_id}")
+}
+
+const OUTPUT_OWNER: &str = "#output:";
+
+/// The turn a span owner belongs to: itself, or a tool output's turn.
+pub fn output_owner_turn(owner: &str) -> &str {
+    owner.split_once(OUTPUT_OWNER).map(|(turn, _)| turn).unwrap_or(owner)
+}
+
+/// A tool's output as the Markdown source its span is read from: one fence
+/// around the drawn text, so copy and Quote slice it as a code block
+/// (`code0`) with `lang`. The fence outgrows any backtick run inside.
+pub fn output_source(text: &str, lang: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}{lang}\n{text}\n{fence}\n")
+}
+
+/// The selected range of a tool output's one cell, from a held span.
+fn output_range(span: &MessageSelection) -> Option<std::ops::Range<usize>> {
+    (span.anchor.cell == span.focus.cell).then(|| span.anchor.offset.min(span.focus.offset)..span.anchor.offset.max(span.focus.offset))
+}
+
+fn tool_call_card(key: &str, turn_id: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> AnyElement {
     let block_id = call.id.clone();
     let full = folds.full_output.get(&block_id);
     let mut body = call.body.clone();
@@ -2410,6 +2438,7 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         _ => (call.verb.clone(), display_target(call, &folds.workspace_root, &home_dir())),
     };
     let unfold = unfold_key(key);
+    let shown_body = body.clone();
     let mut card = tool_card(id, verb, target, call.status, body)
         .duration_ms(call.duration_ms)
         .diff_stat(call.diff_stat)
@@ -2418,6 +2447,32 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     // A web result's title is the link (D4): it opens like a link in prose.
     if let Some(on_link) = folds.link.clone() {
         card = card.on_link(move |url, window, cx| on_link(LinkTarget::Url(url), window, cx));
+    }
+    // The output selects as one code cell (D6 follow-up; docs/43 §0): a
+    // drag over a shell's output, or a read's, quotes as code.
+    let output = match &shown_body {
+        ToolBody::Shell { output_lines, .. } if !output_lines.is_empty() => Some((aui::transcript::output_text(output_lines, true), "shell".to_string())),
+        ToolBody::Read { output_lines, .. } if !output_lines.is_empty() => {
+            let lang = std::path::Path::new(&call.target).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            Some((aui::transcript::output_text(output_lines, false), lang))
+        }
+        _ => None,
+    };
+    if let (Some((text, lang)), Some(on_event)) = (output, folds.span_event.clone()) {
+        let owner = output_owner(turn_id, &call.id);
+        let source = output_source(&text, &lang);
+        // Its held span, else a sent quote's source flashing here, fading.
+        let flash = folds.span_flash.as_ref().filter(|(o, _, _)| *o == owner && !folds.span_held.contains_key(&owner));
+        let (range, strength) = match (folds.span_held.get(&owner), flash) {
+            (Some((_, span)), _) => (output_range(span), 1.0),
+            (None, Some((_, span, strength))) => (output_range(span), *strength),
+            (None, None) => (None, 1.0),
+        };
+        card = card
+            .selectable_output(aui::transcript::SelectionKey::new("code0"), range, None, move |event, window, cx| {
+                on_event(owner.clone(), source.clone(), event, window, cx)
+            })
+            .output_selection_strength(strength);
     }
     card.on_intent({
         let toggle = folds.toggle.clone();
