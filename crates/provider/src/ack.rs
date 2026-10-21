@@ -75,6 +75,51 @@ pub struct PendingQuestion {
     pub headline: String,
 }
 
+/// Which credential a provider runs on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountLane {
+    /// No credential: the sign-in screen.
+    LoggedOut,
+    /// An API key from the environment.
+    EnvKey,
+    /// A stored API key.
+    ApiKey,
+    /// An account sign-in (OAuth / device code).
+    AccountLogin,
+    /// A lane this build has no name for, as the provider spells it.
+    Other(String),
+}
+
+impl AccountLane {
+    /// Whether a credential is in effect.
+    pub fn signed_in(&self) -> bool {
+        !matches!(self, AccountLane::LoggedOut)
+    }
+
+    /// Whether the credential is an API key (stored or from the
+    /// environment).
+    pub fn is_api_key(&self) -> bool {
+        matches!(self, AccountLane::EnvKey | AccountLane::ApiKey)
+    }
+}
+
+/// How a sign-in flow ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoginOutcome {
+    /// Signed in.
+    Granted,
+    /// The person refused it.
+    Denied,
+    /// It timed out before anyone approved it.
+    Expired,
+    /// It was cancelled.
+    Cancelled,
+    /// It failed (a bad key, a server fault).
+    Failed,
+    /// An outcome this build has no name for, as the provider spells it.
+    Other(String),
+}
+
 /// What a command returned.
 ///
 /// `PartialEq` but not `Eq`: [`Delta`] is only partially comparable.
@@ -136,6 +181,14 @@ pub enum Ack {
         /// Display label for the credential in effect, when the provider
         /// sends one. Never key material.
         label: Option<String>,
+        /// Which credential is in effect.
+        lane: AccountLane,
+    },
+    /// The provider's latest usage reading, `None` when it has observed
+    /// nothing yet (a cold host answers before any turn). Never a guess.
+    Usage {
+        /// The reading.
+        report: Option<crate::UsageReport>,
     },
     /// A device-code flow started: the user completes it in a browser.
     /// Both fields are absent for the synchronous key-storing flow.

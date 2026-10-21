@@ -252,6 +252,7 @@ impl Command {
             | Command::UnfollowSession { .. }
             | Command::ReadStoredOutput { .. } => Capability::Transcript,
             Command::ReadAccount
+            | Command::ReadUsage
             | Command::BeginLogin { .. }
             | Command::CancelLogin
             | Command::LogOut => Capability::Account,

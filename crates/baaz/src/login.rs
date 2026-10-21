@@ -15,7 +15,8 @@
 //! * [`Harness::probe_account`] asks `account/read`, which is the **only**
 //!   sign-in signal — `model/list` answers from the provider catalog while
 //!   logged out, so it never was one (**D27**).
-//! * [`Harness::apply_account`] turns one [`AccountState`] into [`Auth`], and
+//! * [`Harness::apply_account`] turns one account reading (lane and label)
+//!   into [`Auth`], and
 //!   the probe answer and the `account/changed` notification share it exactly.
 //! * [`Harness::login_intent`] is where every button, the Escape walk and the
 //!   `--login-steps` verbs arrive.
@@ -46,10 +47,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Entity, Focusable as _, Sha
 use gpui_kit::base::v_flex;
 use gpui_kit::base::input::InputState;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use muse_client::schema::{
-    AccountLoginCompletedParams, AccountLoginOutcome, AccountLoginStartParams, AccountLoginType,
-    AccountState, AccountStateKind,
-};
+use provider::{AccountLane, Ack, Command, LoginOutcome, ProviderError};
 
 use crate::app::Harness;
 use crate::auth::{self, Identity};
@@ -149,13 +147,16 @@ impl Harness {
     /// `account/read` is the only sign-in signal (`model/list` answers from
     /// the provider catalog while logged out, so it never was one).
     pub(crate) fn probe_account(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
+        if !self.muse_slot.is_ready() {
+            return;
+        }
+        let slot = self.muse_slot.clone();
         crate::log::boot_mark("account/read-sent");
         self.wire_call(
             cx,
             move || {
                 let at = std::time::Instant::now();
-                let out = client.account_read();
+                let out = slot.control().and_then(|lane| lane.send(Command::ReadAccount)).and_then(account_of);
                 crate::log::boot_mark(&format!(
                     "account/read-work-done ok={} in={}ms",
                     out.is_ok(),
@@ -164,9 +165,9 @@ impl Harness {
                 out
             },
             |this, result, cx| match result {
-            Ok(state) => {
+            Ok((lane, label)) => {
                 crate::log::boot_mark("account/read-reply");
-                this.apply_account(state, cx)
+                this.apply_account(lane, label, cx)
             }
             Err(error) => {
                 // The wire is up but the probe failed: say so and show
@@ -182,19 +183,19 @@ impl Harness {
         });
     }
 
-    /// Rebuild [`Auth`] from an [`AccountState`] — the probe answer and the
-    /// `account/changed` notification share this exactly.
+    /// Rebuild [`Auth`] from an account reading — the probe answer and the
+    /// `AccountChanged` event share this exactly.
     ///
     /// `loggedOut` clears the shell and shows the login screen (with the
     /// "removed outside the app" dialog when a signed-in session loses its
     /// credential); any other lane signs in, loads the sessions, and works
     /// out the tier — the TUI probe for `accountLogin`, pay-as-you-go by
     /// construction for the key lanes.
-    pub(crate) fn apply_account(&mut self, state: AccountState, cx: &mut Context<Self>) {
-        let lane = state.state.as_wire().unwrap_or("unknown").to_owned();
-        match Identity::from_account(&state) {
+    pub(crate) fn apply_account(&mut self, lane: AccountLane, label: Option<String>, cx: &mut Context<Self>) {
+        let name = lane_name(&lane);
+        match Identity::from_account(&lane, label) {
             Some(identity) => {
-                crate::baaz_log!("account → {lane}");
+                crate::baaz_log!("account → {name}");
                 let api_key = identity.is_api_key();
                 // The status service reads this live connection, never a
                 // second one: remember what it said and re-probe Muse so
@@ -317,22 +318,18 @@ impl Harness {
     /// device state (D26). Nothing here is logged but the state name.
     pub(crate) fn start_device_flow(&mut self, cx: &mut Context<Self>) {
         self.login.method = Some(LoginMethod::Account);
-        let Some(client) = self.client.clone() else {
+        if !self.muse_slot.is_ready() {
             self.set_login_state(
                 LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
                 cx,
             );
             return;
-        };
+        }
         self.set_login_state(LoginState::Starting, cx);
-        let work = move || {
-            client.account_login_start(&AccountLoginStartParams {
-                api_key: None,
-                r#type: AccountLoginType::DeviceCode,
-            })
-        };
+        let slot = self.muse_slot.clone();
+        let work = move || slot.control().and_then(|lane| lane.send(Command::BeginLogin { api_key: None }));
         self.wire_call(cx, work, |this, result, cx| match result {
-            Ok(start) => match (start.verification_url, start.user_code) {
+            Ok(Ack::LoginChallenge { verification_url, user_code }) => match (verification_url, user_code) {
                 (Some(url), Some(code)) => {
                     this.login.url = Some(url.clone());
                     this.login.code = Some(code.clone());
@@ -357,9 +354,19 @@ impl Harness {
                     );
                 }
             },
+            Ok(other) => {
+                crate::baaz_log!("account/loginStart answered {other:?}");
+                this.set_login_state(
+                    LoginState::Error {
+                        message: "The server started no device flow.".into(),
+                        method: Some(LoginMethod::Account),
+                    },
+                    cx,
+                );
+            }
             Err(error) => {
                 this.set_login_state(
-                    LoginState::Error { message: error.to_string().into(), method: Some(LoginMethod::Account) },
+                    LoginState::Error { message: error_words(&error).into(), method: Some(LoginMethod::Account) },
                     cx,
                 );
             }
@@ -380,7 +387,7 @@ impl Harness {
         if trimmed.is_empty() {
             return;
         }
-        let Some(client) = self.client.clone() else {
+        if !self.muse_slot.is_ready() {
             self.set_login_state(
                 LoginState::ApiKey {
                     can_submit: false,
@@ -389,15 +396,11 @@ impl Harness {
                 cx,
             );
             return;
-        };
+        }
         self.login.method = Some(LoginMethod::ApiKey);
         self.set_login_state(LoginState::Validating, cx);
-        let work = move || {
-            client.account_login_start(&AccountLoginStartParams {
-                api_key: Some(trimmed),
-                r#type: AccountLoginType::ApiKey,
-            })
-        };
+        let slot = self.muse_slot.clone();
+        let work = move || slot.control().and_then(|lane| lane.send(Command::BeginLogin { api_key: Some(trimmed) }));
         // `wire_call_in` for the window the field-clear needs.
         self.wire_call_in(cx, work, |this, result, window, cx| {
             let api_key = this.login.api_key.clone();
@@ -410,7 +413,7 @@ impl Harness {
                     this.set_login_state(
                         LoginState::ApiKey {
                             can_submit: false,
-                            error: Some(error.to_string().into()),
+                            error: Some(error_words(&error).into()),
                         },
                         cx,
                     );
@@ -426,9 +429,12 @@ impl Harness {
     pub(crate) fn cancel_login_flow(&mut self, cx: &mut Context<Self>) {
         self.login.reset_to_choose();
         cx.notify();
-        let Some(client) = self.client.clone() else { return };
+        if !self.muse_slot.is_ready() {
+            return;
+        }
+        let slot = self.muse_slot.clone();
         cx.background_spawn(async move {
-            let _ = client.account_login_cancel();
+            let _ = slot.control().and_then(|lane| lane.send(Command::CancelLogin));
         })
         .detach();
     }
@@ -451,17 +457,19 @@ impl Harness {
     }
 
     pub(crate) fn logout(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        if !self.muse_slot.is_ready() {
             self.forget_muse_rows(cx);
             self.auth = Auth::SignedOut;
             self.login.reset_to_choose();
             cx.notify();
             return;
-        };
-        self.wire_call(cx, move || client.account_logout(), |this, result, cx| match result {
-            Ok(state) => match Identity::from_account(&state) {
+        }
+        let slot = self.muse_slot.clone();
+        let work = move || slot.control().and_then(|lane| lane.send(Command::LogOut)).and_then(account_of);
+        self.wire_call(cx, work, |this, result, cx| match result {
+            Ok((lane, label)) => match Identity::from_account(&lane, label) {
                 Some(identity) => {
-                    let env_key = identity.lane == AccountStateKind::EnvKey;
+                    let env_key = identity.lane == AccountLane::EnvKey;
                     this.auth = Auth::SignedIn(identity);
                     if env_key {
                         this.overlays.update(cx, |overlays, _| {
@@ -497,7 +505,7 @@ impl Harness {
             Err(error) => {
                 this.set_dialog(cx, Dialog {
                     title: "Sign out failed".into(),
-                    detail: error.to_string(),
+                    detail: error_words(&error),
                     kind: DialogKind::Error,
                     primary: "Dismiss",
                     action: DialogAction::Dismiss,
@@ -507,25 +515,16 @@ impl Harness {
         });
     }
 
-    /// One `account/*` notification, folded before the session view sees
-    /// anything. `account/changed` rebuilds [`Auth`] exactly as
-    /// [`Self::probe_account`] does — a signed-in lane while on the login
-    /// screen enters the app with no reconnect (D25) — and
-    /// `account/loginCompleted` advances the login screen's own state. A
-    /// frame that does not decode is stderr and nothing else: the wire owns
-    /// the flow, and a malformed outcome must not move the screen.
-    pub(crate) fn route_account(&mut self, method: &str, params: &serde_json::Value, cx: &mut Context<Self>) {
-        match method {
-            "account/changed" => match serde_json::from_value::<AccountState>(params.clone()) {
-                Ok(state) => self.apply_account(state, cx),
-                Err(error) => crate::baaz_log!("ignoring malformed account/changed: {error}"),
-            },
-            "account/loginCompleted" => {
-                match serde_json::from_value::<AccountLoginCompletedParams>(params.clone()) {
-                    Ok(completed) => self.on_login_completed(completed, cx),
-                    Err(error) => crate::baaz_log!("ignoring malformed account/loginCompleted: {error}"),
-                }
-            }
+    /// The connection's account events: `AccountChanged` rebuilds [`Auth`]
+    /// exactly as [`Self::probe_account`] does — a signed-in lane while on
+    /// the login screen enters the app with no reconnect (D25) — and
+    /// `LoginCompleted` advances the login screen's own state. The hub drops
+    /// a frame that does not decode: the wire owns the flow, and a
+    /// malformed outcome must not move the screen.
+    pub(crate) fn on_account_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
+        match event {
+            provider::ProviderEvent::AccountChanged { lane, label } => self.apply_account(lane, label, cx),
+            provider::ProviderEvent::LoginCompleted { outcome, message } => self.on_login_completed(outcome, message, cx),
             _ => {}
         }
     }
@@ -537,31 +536,31 @@ impl Harness {
     /// the running method — the full error card, except an API-key `failed`,
     /// which goes back to the key form so the key can be fixed;
     /// `cancelled` returns to the method choice unless already there.
-    pub(crate) fn on_login_completed(&mut self, completed: AccountLoginCompletedParams, cx: &mut Context<Self>) {
-        let message = completed.message.filter(|message| !message.trim().is_empty());
+    pub(crate) fn on_login_completed(&mut self, outcome: LoginOutcome, message: Option<String>, cx: &mut Context<Self>) {
+        let message = message.filter(|message| !message.trim().is_empty());
         // The outcome and its display message are the server's typed
         // vocabulary — never the URL, the code or a key — so a headless run
         // can be followed from stderr.
         crate::baaz_log!(
             "loginCompleted → {}{}",
-            completed.outcome.as_wire().unwrap_or("unknown"),
+            outcome_name(&outcome),
             message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()
         );
-        match completed.outcome {
-            AccountLoginOutcome::Granted => {
+        match outcome {
+            LoginOutcome::Granted => {
                 self.set_login_state(LoginState::Success, cx);
             }
-            AccountLoginOutcome::Denied | AccountLoginOutcome::Expired | AccountLoginOutcome::Failed => {
-                let fallback = match completed.outcome {
-                    AccountLoginOutcome::Denied => "The sign-in request was denied.",
-                    AccountLoginOutcome::Expired => "The sign-in request expired before it was approved.",
+            LoginOutcome::Denied | LoginOutcome::Expired | LoginOutcome::Failed => {
+                let fallback = match outcome {
+                    LoginOutcome::Denied => "The sign-in request was denied.",
+                    LoginOutcome::Expired => "The sign-in request expired before it was approved.",
                     _ => "Sign-in failed.",
                 };
                 let text: SharedString =
                     message.unwrap_or_else(|| fallback.to_owned()).into();
                 // An API-key failure belongs on the key form, where the key
                 // can be fixed — not on the error card with its way back.
-                if completed.outcome == AccountLoginOutcome::Failed
+                if outcome == LoginOutcome::Failed
                     && self.login.method == Some(LoginMethod::ApiKey)
                 {
                     self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
@@ -572,7 +571,7 @@ impl Harness {
                     );
                 }
             }
-            AccountLoginOutcome::Cancelled => {
+            LoginOutcome::Cancelled => {
                 if !matches!(self.login.state, LoginState::Choose) {
                     self.login.reset_to_choose();
                     cx.notify();
@@ -580,7 +579,7 @@ impl Harness {
             }
             // An outcome a newer server invented: the honest card is the
             // method's error, with the server's message when it sent one.
-            AccountLoginOutcome::Unknown(_) => {
+            LoginOutcome::Other(_) => {
                 let text: SharedString =
                     message.unwrap_or_else(|| "The sign-in ended in a way this build does not understand.".to_owned())
                         .into();
@@ -712,7 +711,7 @@ impl Harness {
             // draws, and anything needing the wire quietly does nothing.
             LoginSample::SignedIn => {
                 self.auth = Auth::SignedIn(Identity {
-                    lane: AccountStateKind::AccountLogin,
+                    lane: AccountLane::AccountLogin,
                     name: "Sample".into(),
                     email: String::new(),
                 });
@@ -821,5 +820,46 @@ impl Harness {
                     .child(div().w_full().flex_none().child(card)),
             )
             .into_any_element()
+    }
+}
+
+/// The lane and label an account ack carries.
+fn account_of(ack: Ack) -> Result<(AccountLane, Option<String>), ProviderError> {
+    match ack {
+        Ack::Account { lane, label, .. } => Ok((lane, label)),
+        other => Err(ProviderError::Rejected { reason: format!("an account read answered {other:?}") }),
+    }
+}
+
+/// A lane's name in the `account → …` log line (the wire's spelling, as
+/// before).
+fn lane_name(lane: &AccountLane) -> &str {
+    match lane {
+        AccountLane::LoggedOut => "loggedOut",
+        AccountLane::EnvKey => "envKey",
+        AccountLane::ApiKey => "apiKey",
+        AccountLane::AccountLogin => "accountLogin",
+        AccountLane::Other(name) => name,
+    }
+}
+
+/// An outcome's name in the `loginCompleted → …` log line.
+fn outcome_name(outcome: &LoginOutcome) -> &str {
+    match outcome {
+        LoginOutcome::Granted => "granted",
+        LoginOutcome::Denied => "denied",
+        LoginOutcome::Expired => "expired",
+        LoginOutcome::Cancelled => "cancelled",
+        LoginOutcome::Failed => "failed",
+        LoginOutcome::Other(name) => name,
+    }
+}
+
+/// What a refused account call shows: the provider's reason, never a
+/// wire code.
+fn error_words(error: &ProviderError) -> String {
+    match error {
+        ProviderError::Refused(refusal) => refusal.reason.clone(),
+        other => other.to_string(),
     }
 }

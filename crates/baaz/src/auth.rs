@@ -19,13 +19,13 @@
 
 use std::path::PathBuf;
 
-use muse_client::schema::{AccountState, AccountStateKind};
+use provider::AccountLane;
 
 /// Who the credential belongs to, as the sidebar footer shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
-    /// Which wire lane this identity came from.
-    pub lane: AccountStateKind,
+    /// Which credential lane this identity came from.
+    pub lane: AccountLane,
     /// The wire's `label`, or the stored `user_full_name` when the label is
     /// absent — or a lane fallback when both are missing.
     pub name: String,
@@ -38,14 +38,14 @@ impl Identity {
     /// wire `label` never wins over the stored name — it stays on the
     /// record only so [`Self::display_name`] can fall back past it to the
     /// email. `None` for `loggedOut`: no lane, no identity.
-    pub fn from_account(state: &AccountState) -> Option<Identity> {
-        if state.state == AccountStateKind::LoggedOut {
+    pub fn from_account(lane: &AccountLane, label: Option<String>) -> Option<Identity> {
+        if !lane.signed_in() {
             return None;
         }
         let (stored_name, stored_email) = stored_name_and_email();
-        let name = pick_name(state.label.clone(), stored_name, &state.state);
+        let name = pick_name(label, stored_name, lane);
         Some(Identity {
-            lane: state.state.clone(),
+            lane: lane.clone(),
             name,
             email: stored_email.unwrap_or_default(),
         })
@@ -86,8 +86,8 @@ impl Identity {
     /// plan, never a meter.
     pub fn display_name(&self) -> String {
         match self.lane {
-            AccountStateKind::EnvKey => return "API key (environment)".to_owned(),
-            AccountStateKind::ApiKey => return "API key".to_owned(),
+            AccountLane::EnvKey => return "API key (environment)".to_owned(),
+            AccountLane::ApiKey => return "API key".to_owned(),
             _ => {}
         }
         if !Self::is_id_like(&self.name) {
@@ -108,7 +108,7 @@ impl Identity {
     /// Whether this identity bills pay-as-you-go by construction: the
     /// `apiKey` and `envKey` lanes.
     pub fn is_api_key(&self) -> bool {
-        matches!(self.lane, AccountStateKind::ApiKey | AccountStateKind::EnvKey)
+        self.lane.is_api_key()
     }
 }
 
@@ -120,7 +120,7 @@ impl Identity {
 fn pick_name(
     label: Option<String>,
     stored: Option<String>,
-    lane: &AccountStateKind,
+    lane: &AccountLane,
 ) -> String {
     let label = label.filter(|label| !label.trim().is_empty());
     let clean = label.clone().filter(|label| !Identity::is_id_like(label));
@@ -128,7 +128,7 @@ fn pick_name(
         .or(stored)
         .or(label)
         .unwrap_or_else(|| match lane {
-            AccountStateKind::EnvKey | AccountStateKind::ApiKey => "API key".to_owned(),
+            AccountLane::EnvKey | AccountLane::ApiKey => "API key".to_owned(),
             _ => "Signed in".to_owned(),
         })
 }
@@ -214,37 +214,32 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn state(kind: AccountStateKind, label: Option<&str>) -> AccountState {
-        AccountState {
-            avatar_url: None,
-            credential_required: true,
-            label: label.map(str::to_owned),
-            state: kind,
-        }
+    fn identity(lane: AccountLane, label: Option<&str>) -> Option<Identity> {
+        Identity::from_account(&lane, label.map(str::to_owned))
     }
 
     #[test]
     fn logged_out_has_no_identity() {
-        assert_eq!(Identity::from_account(&state(AccountStateKind::LoggedOut, Some("nobody"))), None);
+        assert_eq!(identity(AccountLane::LoggedOut, Some("nobody")), None);
     }
 
     #[test]
     fn the_wire_label_wins_over_the_store() {
-        let identity = Identity::from_account(&state(AccountStateKind::AccountLogin, Some("Ada Lovelace")))
+        let ada = identity(AccountLane::AccountLogin, Some("Ada Lovelace"))
             .expect("signed-in lane");
-        assert_eq!(identity.name, "Ada Lovelace");
-        assert_eq!(identity.display_name(), "Ada Lovelace");
-        assert!(!identity.is_api_key());
-        assert_eq!(identity.initial(), "A");
+        assert_eq!(ada.name, "Ada Lovelace");
+        assert_eq!(ada.display_name(), "Ada Lovelace");
+        assert!(!ada.is_api_key());
+        assert_eq!(ada.initial(), "A");
     }
 
     #[test]
     fn the_key_lanes_name_themselves_and_bill_pay_as_you_go() {
-        let stored = Identity::from_account(&state(AccountStateKind::ApiKey, None)).expect("signed-in lane");
+        let stored = identity(AccountLane::ApiKey, None).expect("signed-in lane");
         assert!(stored.is_api_key());
         assert_eq!(stored.display_name(), "API key");
         assert_eq!(stored.initial(), "A");
-        let env = Identity::from_account(&state(AccountStateKind::EnvKey, None)).expect("signed-in lane");
+        let env = identity(AccountLane::EnvKey, None).expect("signed-in lane");
         assert!(env.is_api_key());
         assert_eq!(env.display_name(), "API key (environment)");
         assert_eq!(env.initial(), "A");
@@ -253,12 +248,12 @@ mod tests {
     #[test]
     fn the_key_lanes_initial_comes_from_the_footer_not_the_wire_label() {
         let stored =
-            Identity::from_account(&state(AccountStateKind::ApiKey, Some("stored key"))).expect("signed-in lane");
+            identity(AccountLane::ApiKey, Some("stored key")).expect("signed-in lane");
         assert_eq!(stored.name, "stored key");
         assert_eq!(stored.display_name(), "API key");
         assert_eq!(stored.initial(), "A");
         let env =
-            Identity::from_account(&state(AccountStateKind::EnvKey, Some("stored key"))).expect("signed-in lane");
+            identity(AccountLane::EnvKey, Some("stored key")).expect("signed-in lane");
         assert_eq!(env.display_name(), "API key (environment)");
         assert_eq!(env.initial(), "A");
     }
@@ -281,29 +276,29 @@ mod tests {
             pick_name(
                 Some("27681631238169".into()),
                 Some("Ada Lovelace".into()),
-                &AccountStateKind::AccountLogin
+                &AccountLane::AccountLogin
             ),
             "Ada Lovelace"
         );
         assert_eq!(
-            pick_name(Some("27681631238169".into()), None, &AccountStateKind::AccountLogin),
+            pick_name(Some("27681631238169".into()), None, &AccountLane::AccountLogin),
             "27681631238169"
         );
         let by_email = Identity {
-            lane: AccountStateKind::AccountLogin,
+            lane: AccountLane::AccountLogin,
             name: "27681631238169".into(),
             email: "latekaapi@gmail.com".into(),
         };
         assert_eq!(by_email.display_name(), "latekaapi@gmail.com");
         assert_eq!(by_email.initial(), "L");
         let bare = Identity {
-            lane: AccountStateKind::AccountLogin,
+            lane: AccountLane::AccountLogin,
             name: "27681631238169".into(),
             email: String::new(),
         };
         assert_eq!(bare.display_name(), "Signed in");
         let clean = Identity {
-            lane: AccountStateKind::AccountLogin,
+            lane: AccountLane::AccountLogin,
             name: "Ada Lovelace".into(),
             email: "ada@example.com".into(),
         };
@@ -312,10 +307,8 @@ mod tests {
 
     #[test]
     fn an_unknown_lane_is_still_signed_in() {
-        let identity =
-            Identity::from_account(&state(AccountStateKind::Unknown("futureLane".to_owned()), None))
-                .expect("open enum");
-        assert!(!identity.is_api_key());
-        assert_eq!(identity.display_name(), identity.name);
+        let future = identity(AccountLane::Other("futureLane".to_owned()), None).expect("open enum");
+        assert!(!future.is_api_key());
+        assert_eq!(future.display_name(), future.name);
     }
 }

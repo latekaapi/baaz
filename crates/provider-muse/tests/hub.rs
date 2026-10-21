@@ -192,3 +192,24 @@ fn a_page_lands_on_the_lane_and_then_says_so() {
         "the page's landing is in the stream: {heard:?}"
     );
 }
+
+#[test]
+fn account_changes_reach_the_connection_stream_and_no_session_lane() {
+    let (hub, lane) = hub(&[]);
+    resume(&lane, "s-1");
+    let rows = hub.connection_events();
+    lane.send(Command::LogOut).expect("log out");
+    let mut account = None;
+    let until = Instant::now() + Duration::from_secs(5);
+    while account.is_none() && Instant::now() < until {
+        if let Ok(ProviderEvent::AccountChanged { lane, .. }) = rows.recv_timeout(Duration::from_millis(100)) {
+            account = Some(lane);
+        }
+    }
+    assert_eq!(account, Some(provider::AccountLane::LoggedOut), "the app hears the sign-out");
+    let heard = collect(&lane, |_| false);
+    assert!(
+        !heard.iter().any(|event| matches!(event, ProviderEvent::AccountChanged { .. })),
+        "a session lane never sees account events: {heard:?}"
+    );
+}

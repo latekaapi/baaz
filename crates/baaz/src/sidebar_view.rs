@@ -2821,13 +2821,12 @@ mod tests {
 
     /// B3c: a throwaway signed-in window on the hermetic state above.
     fn b3c_window(vc: &mut gpui::VisualTestContext, args: crate::Args) -> Entity<Harness> {
-        use muse_client::schema::AccountStateKind;
         vc.update(|window, cx| {
             let baaz =
                 cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
             baaz.update(cx, |h, _| {
                 h.auth = crate::login::Auth::SignedIn(crate::auth::Identity {
-                    lane: AccountStateKind::AccountLogin,
+                    lane: provider::AccountLane::AccountLogin,
                     name: "Probe".into(),
                     email: String::new(),
                 });

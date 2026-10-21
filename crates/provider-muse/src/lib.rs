@@ -22,6 +22,7 @@ pub mod output;
 pub mod replay;
 pub mod terminal;
 mod translate;
+pub mod usage;
 
 use std::sync::Arc;
 

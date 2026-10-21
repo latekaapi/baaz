@@ -1910,6 +1910,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "read-stored-output",
                 "the CLI exposes no stored-output reference; page the stored transcript instead",
             )),
+            // The reading the fold holds, the same peek `read_usage` makes.
+            Command::ReadUsage => Ok(Ack::Usage { report: self.read_usage() }),
             Command::ReadAccount => {
                 let fold = self.fold.lock().expect("fold mutex");
                 let label = fold.account().label();
@@ -1924,7 +1926,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // means "no login observed", never "definitely logged out".
                 // A fresh or logged-out CLI reads false — fail closed, never
                 // claim a login nobody checked.
-                Ok(Ack::Account { signed_in: label.is_some(), label })
+                Ok(Ack::Account {
+                    signed_in: label.is_some(),
+                    lane: if label.is_some() { provider::AccountLane::AccountLogin } else { provider::AccountLane::LoggedOut },
+                    label,
+                })
             }
             Command::BeginLogin { .. } => Err(ProviderError::unsupported(
                 "begin-login",
@@ -1981,7 +1987,7 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new("claude");
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         assert!(
-            matches!(ack, Ack::Account { signed_in: false, label: None }),
+            matches!(ack, Ack::Account { signed_in: false, label: None, .. }),
             "no reading seen, no login claimed: {ack:?}"
         );
     }
@@ -2581,7 +2587,7 @@ mod tests {
         adapter.fold.lock().expect("fold mutex").apply(&frame);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         match ack {
-            Ack::Account { signed_in: true, label: Some(label) } => {
+            Ack::Account { signed_in: true, label: Some(label), .. } => {
                 assert!(label.contains("97%"), "live meter label: {label}");
             }
             other => panic!("expected signed-in account with a label, got {other:?}"),

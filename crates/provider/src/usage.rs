@@ -13,7 +13,8 @@
 pub struct UsageWindow {
     /// The card label, from the window's length ([`window_label`]).
     pub label: String,
-    /// Fraction used, 0.0–1.0.
+    /// Fraction used: 0.0–1.0, above 1.0 when the provider reports usage
+    /// over the budget.
     pub used_fraction: f64,
     /// Unix time the window resets, when the provider reported one.
     pub resets_at: Option<i64>,

@@ -62,7 +62,7 @@ impl Harness {
         // while the probe runs.
         self.push_tier(cx);
         let program = self.args.program.clone();
-        let client = self.client.clone();
+        let slot = self.muse_slot.clone();
         self.wire_call(
             cx,
             move || {
@@ -71,7 +71,7 @@ impl Harness {
                 // makes the decision reachable from a test without a live
                 // connection. A provisional pay-as-you-go re-probes here, on
                 // the background path, while the banner keeps Checking.
-                let read = client.as_ref().and_then(|client| tier::read_usage_value(client));
+                let read = read_usage(&slot);
                 tier::probe_primary_confirmed(
                     read.as_ref(),
                     tier::auth_mtime(),
@@ -131,7 +131,7 @@ impl Harness {
         cx.notify();
     }
 
-    /// Fold one `usage/changed` notification into the tier in place: the
+    /// Fold one usage reading (`UsageChanged`) into the tier in place: the
     /// footer meter and the banner follow through [`Self::push_tier`].
     ///
     /// A frame that does not decode keeps the known tier — it never clears
@@ -141,10 +141,10 @@ impl Harness {
     /// [`tier::remember`] exactly as a probe answer is, and persisted
     /// beside it as the Muse usage snapshot, so the account menu shows
     /// the newest reading with its true age.
-    pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
-        let admitted = tier::wire_settles_kind(params, self.tier.as_ref());
-        if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()).filter(|_| admitted) {
-            tier::remember_observed(&tier, tier::wire_names_plan(params));
+    pub(crate) fn apply_usage_changed(&mut self, report: &provider::UsageReport, cx: &mut Context<Self>) {
+        let admitted = tier::report_settles_kind(report, self.tier.as_ref());
+        if let Some(tier) = tier::tier_from_report_current(report, tier::auth_mtime()).filter(|_| admitted) {
+            tier::remember_observed(&tier, tier::report_names_plan(report));
             // The snapshot carries the notification's own arrival time,
             // and a tier with no numbers never wipes the last good one:
             // the rows keep it with "unavailable now" beside it.
@@ -152,7 +152,7 @@ impl Harness {
                 crate::provider_status::record_muse_snapshot_at(
                     Some(tier.footer_label()),
                     tier.usage_fraction().map(f64::from),
-                    tier::observed_secs_from_changed_params(params),
+                    report.observed_at,
                 );
             } else {
                 crate::provider_status::note_muse_unavailable_now();
@@ -164,14 +164,14 @@ impl Harness {
     }
 
     /// A quiet Muse usage re-read for the account menu: the wire only
-    /// ([`tier::read_usage_value`]), never the pty scrape, never a toast.
+    /// (`Command::ReadUsage`), never the pty scrape, never a toast.
     /// A current observation replaces the tier and the stored Muse
     /// snapshot; anything else — a cold host, a stale frame, a failed
     /// read — keeps what the menu had. The caller marks Muse refreshing;
     /// this clears it and repaints either way, so the "Refreshing…" row
     /// always settles.
     pub(crate) fn refresh_muse_usage(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+        let slot = self.muse_slot.clone();
         let held = self.tier.clone();
         self.wire_call(
             cx,
@@ -180,13 +180,14 @@ impl Harness {
                 // on "Refreshing…": the completion below still runs and
                 // clears it (and the 20 s guard bounds a hang).
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
-                    let observed_at =
-                        value.as_ref().and_then(tier::observed_secs_from_read_value);
+                    let report = read_usage(&slot)?;
+                    let observed_at = report.observed_at;
                     // A numeric-id reading never decides the plan kind.
-                    let value = value.filter(|value| tier::wire_settles_kind(value, held.as_ref()))?;
-                    let named = tier::wire_names_plan(&value);
-                    tier::tier_from_read_current(&value, tier::auth_mtime()).map(|tier| (tier, observed_at, named))
+                    if !tier::report_settles_kind(&report, held.as_ref()) {
+                        return None;
+                    }
+                    let named = tier::report_names_plan(&report);
+                    tier::tier_from_report_current(&report, tier::auth_mtime()).map(|tier| (tier, observed_at, named))
                 }));
                 outcome.ok().flatten()
             },
@@ -212,6 +213,27 @@ impl Harness {
                 cx.notify();
             },
         );
+    }
+}
+
+/// Muse's latest usage reading over the control lane: `None` when Muse is
+/// not up, the read failed, or the host has observed nothing yet. Blocking:
+/// call it on a background thread. A failed read never stops the app and
+/// never becomes [`Tier::Unavailable`] directly.
+fn read_usage(slot: &crate::providers::MuseSlot) -> Option<provider::UsageReport> {
+    match slot.control().and_then(|lane| lane.send(provider::Command::ReadUsage)) {
+        Ok(provider::Ack::Usage { report }) => {
+            crate::baaz_log!("usage read → {}", if report.is_some() { "a reading" } else { "nothing observed yet" });
+            report
+        }
+        Ok(other) => {
+            crate::baaz_log!("usage read answered {other:?}");
+            None
+        }
+        Err(error) => {
+            crate::baaz_log!("usage read failed: {error}");
+            None
+        }
     }
 }
 

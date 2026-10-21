@@ -14,7 +14,7 @@
 //! miss an arm that builds the right object and calls the wrong client
 //! method; asserting the method alone would miss the reviewer's mutation
 //! (emptying `SubmitInput`'s `input`). Where the result maps back into an
-//! [`Ack`], the ack is asserted too. All 28 variants are covered; none is
+//! [`Ack`], the ack is asserted too. All 29 variants are covered; none is
 //! skipped.
 //!
 //! These tests prove the adapter sends the method and params it intends to.
@@ -655,11 +655,26 @@ fn every_command_arm_sends_its_method_params_and_ack() {
             // A no-params call: the client omits `params` entirely.
             expected_params: Value::Null,
             check_ack: Box::new(|ack| match ack {
-                Ack::Account { signed_in, label } => {
+                Ack::Account { signed_in, label, lane } => {
                     assert!(signed_in);
                     assert_eq!(label.as_deref(), Some("fake@example.com"));
+                    assert_eq!(lane, provider::AccountLane::ApiKey);
                 }
                 other => panic!("expected account state, got {other:?}"),
+            }),
+        },
+        Case {
+            name: "read-usage",
+            method: "usage/read",
+            command: Prepared::Ready(Command::ReadUsage),
+            expected_params: Value::Null,
+            check_ack: Box::new(|ack| match ack {
+                Ack::Usage { report: Some(report) } => {
+                    assert_eq!(report.plan.as_deref(), Some("max"));
+                    assert_eq!(report.observed_at, Some(1_700_000_000));
+                    assert_eq!(report.windows.len(), 2);
+                }
+                other => panic!("expected a usage reading, got {other:?}"),
             }),
         },
         Case {
@@ -697,8 +712,9 @@ fn every_command_arm_sends_its_method_params_and_ack() {
             command: Prepared::Ready(Command::LogOut),
             expected_params: Value::Null,
             check_ack: Box::new(|ack| match ack {
-                Ack::Account { signed_in, label } => {
+                Ack::Account { signed_in, label, lane } => {
                     assert!(!signed_in);
+                    assert_eq!(lane, provider::AccountLane::LoggedOut);
                     assert_eq!(label, None);
                 }
                 other => panic!("expected account state, got {other:?}"),
@@ -706,7 +722,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
         },
     ];
 
-    assert_eq!(cases.len(), 28, "one row per Command variant");
+    assert_eq!(cases.len(), 29, "one row per Command variant");
 
     for Case { name, method, command, expected_params, check_ack } in cases {
         let command = match command {

@@ -199,6 +199,15 @@ def canned(method, params, granted=()):
             "label": "fake@example.com",
             "state": "apiKey",
         }
+    if method == "usage/read":
+        return {
+            "usage": {
+                "observedAtMs": 1700000000500,
+                "tier": "max",
+                "weekly": {"resetsAtMs": 1700100000000, "usedPercent": 40},
+                "window": {"resetsAtMs": 1700010000000, "usedPercent": 12, "windowDurationMins": 300},
+            }
+        }
     if method == "account/loginStart":
         return {
             "userCode": "CODE-1",
@@ -295,6 +304,13 @@ def main():
             result(req_id, payload)
         if EMIT_TURN and method == "turn/start" and payload is not None:
             emit_turn(params if isinstance(params, dict) else {})
+        if method == "account/logout":
+            # As muse does: the lane change follows as a notification.
+            send({
+                "jsonrpc": "2.0",
+                "method": "account/changed",
+                "params": {"credentialRequired": False, "state": "loggedOut"},
+            })
         if method == "initialize" and not initialized:
             initialized = True
             if emit_bad_tap:

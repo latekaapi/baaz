@@ -7,7 +7,7 @@
 //! [`ProviderError`] with no wire type leaking across.
 
 use muse_client::schema::{
-    AccountLoginStartParams, AccountLoginType, AccountStateKind, ApprovalDecideParams,
+    AccountLoginStartParams, AccountLoginType, ApprovalDecideParams,
     ApprovalMode, ApprovalRequirementRef, ApprovalSubject, ItemReadOutputParams,
     ModelSelection, SessionCompactParams, SessionForkParams, SessionListParams,
     SessionReadParams, SessionResumeParams, SessionSetApprovalModeParams, SessionSetModelParams,
@@ -563,12 +563,10 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             Ok(Ack::StoredOutput { content: result.content, complete: result.eof })
         }
-        Command::ReadAccount => {
-            let state = client.account_read().map_err(transport_error)?;
-            Ok(Ack::Account {
-                signed_in: state.state != AccountStateKind::LoggedOut,
-                label: state.label,
-            })
+        Command::ReadAccount => Ok(crate::usage::account_ack(client.account_read().map_err(transport_error)?)),
+        Command::ReadUsage => {
+            let value = client.request("usage/read", None).map_err(transport_error)?;
+            Ok(Ack::Usage { report: crate::usage::report_from_read(&value) })
         }
         Command::BeginLogin { api_key } => {
             let result = client
@@ -590,13 +588,7 @@ pub fn dispatch(
             let result = client.account_login_cancel().map_err(transport_error)?;
             Ok(Ack::LoginCancelled { cancelled: result.cancelled })
         }
-        Command::LogOut => {
-            let state = client.account_logout().map_err(transport_error)?;
-            Ok(Ack::Account {
-                signed_in: state.state != AccountStateKind::LoggedOut,
-                label: state.label,
-            })
-        }
+        Command::LogOut => Ok(crate::usage::account_ack(client.account_logout().map_err(transport_error)?)),
     }
 }
 

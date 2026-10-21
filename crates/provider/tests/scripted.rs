@@ -150,6 +150,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             command @ Command::UnfollowSession { .. } => Some((command, "unfollow-session")),
             command @ Command::ReadStoredOutput { .. } => Some((command, "read-stored-output")),
             command @ Command::ReadAccount => Some((command, "read-account")),
+            command @ Command::ReadUsage => Some((command, "read-usage")),
             command @ Command::BeginLogin { .. } => Some((command, "begin-login")),
             command @ Command::CancelLogin => Some((command, "cancel-login")),
             command @ Command::LogOut => Some((command, "log-out")),
@@ -247,6 +248,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             length: None,
         },
         Command::ReadAccount,
+        Command::ReadUsage,
         Command::BeginLogin { api_key: None },
         Command::CancelLogin,
         Command::LogOut,
@@ -261,7 +263,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
     }
     // Backstop for edits to the list itself (duplicates, dropped entries):
     // new variants are caught by `classify`, not by this count.
-    assert_eq!(refused.len(), 25, "the refusal list drifted from the 25 unimplemented commands");
+    assert_eq!(refused.len(), 26, "the refusal list drifted from the 26 unimplemented commands");
     refused
 }
 

@@ -16,8 +16,9 @@
 //! Since muse 1.3.0 the numbers the card shows are on the wire, typed:
 //! `usage/read` answers `UsageReadResult { usage: Option<SubscriptionUsage> }`
 //! and the server emits `usage/changed` as observations land. Those are the
-//! primary oracle now ([`tier_from_usage`], [`read_usage_value`],
-//! [`observation_is_current`]): on `Some(usage)` made after the current
+//! primary oracle now — they reach Baaz through the Muse lane as neutral
+//! [`provider::UsageReport`]s (`Command::ReadUsage`, `UsageChanged`) —
+//! ([`tier_from_report`], [`observation_is_current`]): on a reading made after the current
 //! credential was installed the tier is built directly from it and cached
 //! through [`remember`] exactly as a probe answer is. The wire carries no
 //! credential identity, so anything older belongs to a previous login and
@@ -68,8 +69,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use muse_client::schema::{SubscriptionUsage, UsageReadResult};
-use muse_client::MuseClient;
+use provider::{UsageReport, UsageWindow};
 
 /// The ceiling on one probe, start to finish.
 const PROBE_CEILING: Duration = Duration::from_secs(20);
@@ -359,7 +361,7 @@ pub struct Cached {
     /// observation naming its plan in words. A wire observation carrying
     /// only the opaque numeric tier id (muse 1.4.x) is numbers, not a plan
     /// kind — a pay-as-you-go login gets those too (see
-    /// [`wire_settles_kind`]). An unconfirmed subscription is never served
+    /// [`report_settles_kind`]). An unconfirmed subscription is never served
     /// from the cache: the next boot asks the card. Absent in files older
     /// builds wrote, which therefore re-probe once.
     #[serde(default)]
@@ -524,7 +526,7 @@ pub fn remember(tier: &Tier) {
 }
 
 /// [`remember`] for a wire observation admitted through
-/// [`wire_settles_kind`]: its kind is confirmed only when it named its plan
+/// [`report_settles_kind`]: its kind is confirmed only when it named its plan
 /// (`named`) or a confirmed subscription for this same login stands behind
 /// it — a numeric-id reading refreshes the numbers and nothing else.
 pub fn remember_observed(tier: &Tier, named: bool) {
@@ -955,7 +957,7 @@ fn complete(tier: &Tier) -> bool {
 // The wire oracle (muse 1.3.0): `usage/read` first, `usage/changed` live
 // ---------------------------------------------------------------------------
 
-/// Build a [`Tier::Subscription`] from one wire observation.
+/// Build a [`Tier::Subscription`] from one Muse usage reading.
 ///
 /// `plan` is the provider's subscription tier id verbatim when it names the
 /// plan in words, else the generic label (muse 1.4.0 sends an opaque numeric
@@ -978,24 +980,44 @@ fn complete(tier: &Tier) -> bool {
 /// stale observation belongs to a previous login and must never become the
 /// tier: trusting it would show a subscription while the login bills
 /// pay-as-you-go rates with no blocking banner.
-pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
+pub fn tier_from_report(report: &UsageReport) -> Option<Tier> {
+    let (window, weekly) = muse_windows(report)?;
     let mut resets = Vec::new();
-    if let Some(clause) = reset_clause(usage.window.resets_at_ms, false) {
+    if let Some(clause) = window.resets_at.and_then(|at| reset_clause(at as u64 * 1000, false)) {
         resets.push(clause);
     }
-    if let Some(clause) = reset_clause(usage.weekly.resets_at_ms, true) {
+    if let Some(clause) = weekly.resets_at.and_then(|at| reset_clause(at as u64 * 1000, true)) {
         resets.push(clause);
     }
-    Tier::Subscription {
+    Some(Tier::Subscription {
         // The wire may carry an opaque numeric tier id (muse 1.4.0), never
         // a name: with no previous reading this reads as the generic label,
         // and the admitting callers restore the last human name below.
-        plan: resolve_plan_name(&usage.tier, None),
-        current_pct: Some(usage.window.used_percent),
-        weekly_pct: Some(usage.weekly.used_percent),
+        plan: resolve_plan_name(report.plan.as_deref().unwrap_or_default(), None),
+        current_pct: Some(percent(window)),
+        weekly_pct: Some(percent(weekly)),
         resets,
         usage_unavailable: false,
-    }
+    })
+}
+
+/// A Muse reading's two windows: the current one first, the weekly block
+/// second (the order `provider_muse::usage::report_from` keeps). `None`
+/// for a reading with fewer.
+fn muse_windows(report: &UsageReport) -> Option<(&UsageWindow, &UsageWindow)> {
+    Some((report.windows.first()?, report.windows.get(1)?))
+}
+
+/// A window's used fraction back as the card's whole percent, over-quota
+/// values included.
+fn percent(window: &UsageWindow) -> u32 {
+    (window.used_fraction * 100.0).round().max(0.0) as u32
+}
+
+/// [`tier_from_report`] over the wire shape, for the tests that build one.
+#[cfg(test)]
+pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
+    tier_from_report(&provider_muse::usage::report_from(usage)).expect("a wire reading has both windows")
 }
 
 /// One wire reset clause: the card's words rendered from the stamp, carrying
@@ -1057,26 +1079,34 @@ pub fn tier_from_changed(params: &serde_json::Value) -> Option<Tier> {
     serde_json::from_value::<SubscriptionUsage>(params.clone()).ok().map(|usage| tier_from_usage(&usage))
 }
 
-/// One `usage/changed` notification's params → the tier it names, when the
-/// observation belongs to the credential now installed.
+/// One usage reading → the tier it names, when the observation belongs to
+/// the credential now installed.
 ///
-/// [`tier_from_changed`] decodes and builds; this admits in between. A
+/// [`tier_from_report`] builds; this admits in between. A
 /// notification stamped before the current credential was installed belongs
 /// to a previous login — the wire carries no account identity — and reads as
 /// `None`, so the caller keeps what it had instead of painting another
 /// login's plan. The build still goes through the pure arm, so the tested
 /// wording stays in one place.
-pub fn tier_from_changed_current(
-    params: &serde_json::Value,
-    auth_mtime_secs: Option<u64>,
-) -> Option<Tier> {
-    let usage: SubscriptionUsage = serde_json::from_value(params.clone()).ok()?;
-    if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
+pub fn tier_from_report_current(report: &UsageReport, auth_mtime_secs: Option<u64>) -> Option<Tier> {
+    if !report_is_current(report, auth_mtime_secs) {
         return None;
     }
-    let mut tier = tier_from_usage(&usage);
-    restore_known_plan(&mut tier, &usage.tier, auth_mtime_secs);
+    let mut tier = tier_from_report(report)?;
+    restore_known_plan(&mut tier, report.plan.as_deref().unwrap_or_default(), auth_mtime_secs);
     Some(tier)
+}
+
+/// [`tier_from_report_current`] over `usage/changed` params, for tests.
+#[cfg(test)]
+pub fn tier_from_changed_current(params: &serde_json::Value, auth_mtime_secs: Option<u64>) -> Option<Tier> {
+    tier_from_report_current(&provider_muse::usage::report_from_changed(params)?, auth_mtime_secs)
+}
+
+/// Whether a reading belongs to the credential now installed
+/// ([`observation_is_current`], in the reading's whole seconds).
+fn report_is_current(report: &UsageReport, auth_mtime_secs: Option<u64>) -> bool {
+    report.observed_at.is_some_and(|at| observation_is_current(at.max(0) as u64 * 1000, auth_mtime_secs))
 }
 
 /// One reset clause in the card's own register, from an epoch-millisecond
@@ -1118,36 +1148,22 @@ pub fn observation_is_current(observed_at_ms: u64, auth_mtime_secs: Option<u64>)
     }
 }
 
-/// Issue `usage/read` on a live connection and return the result object as
-/// read: `Some` on any answer (including the `{}` cold host), `None` on a
-/// read failure.
-///
-/// Blocking: call it on a background thread. The edge of the decision, not
-/// the decision: the caller admits the observation through
-/// [`tier_from_read_current`] (see [`probe_primary`]) rather than trusting
-/// whatever the host last saw. A failed read never stops the app and never
-/// becomes [`Tier::Unavailable`] directly.
-pub fn read_usage_value(client: &MuseClient) -> Option<serde_json::Value> {
-    client.request("usage/read", None).ok()
+
+/// Whether a reading names its plan in words — the only reading that says
+/// which kind of plan the login is on.
+pub fn report_names_plan(report: &UsageReport) -> bool {
+    report.plan.as_deref().is_some_and(is_human_plan_name)
 }
 
-/// The raw `tier` a wire usage value carries: a `usage/changed` params
-/// object, or a `usage/read` result (under `usage`).
-fn wire_raw_tier(value: &serde_json::Value) -> Option<&str> {
-    value
-        .get("tier")
-        .or_else(|| value.get("usage").and_then(|usage| usage.get("tier")))
-        .and_then(serde_json::Value::as_str)
-}
-
-/// Whether a wire usage value names its plan in words — the only wire
-/// reading that says which kind of plan the login is on.
+/// [`report_names_plan`] over a wire value (`usage/changed` params or a
+/// `usage/read` result), for tests.
+#[cfg(test)]
 pub fn wire_names_plan(value: &serde_json::Value) -> bool {
-    wire_raw_tier(value).is_some_and(is_human_plan_name)
+    wire_report(value).is_some_and(|report| report_names_plan(&report))
 }
 
-/// Whether a wire usage observation may become the tier, given the tier
-/// `held` now.
+/// Whether a usage observation may become the tier, given the tier `held`
+/// now.
 ///
 /// The `/upgrade` card is the oracle for subscription versus
 /// pay-as-you-go. Since muse 1.4.0 the wire's `tier` is an opaque numeric
@@ -1159,45 +1175,27 @@ pub fn wire_names_plan(value: &serde_json::Value) -> bool {
 /// already known; it never decides the kind — never over a pay-as-you-go,
 /// never over an unknown plan. A reading that names its plan in words
 /// still settles the kind, as it always did.
+pub fn report_settles_kind(report: &UsageReport, held: Option<&Tier>) -> bool {
+    report_names_plan(report) || matches!(held, Some(Tier::Subscription { .. }))
+}
+
+/// [`report_settles_kind`] over a wire value, for tests.
+#[cfg(test)]
 pub fn wire_settles_kind(value: &serde_json::Value, held: Option<&Tier>) -> bool {
-    wire_names_plan(value) || matches!(held, Some(Tier::Subscription { .. }))
+    wire_report(value).is_some_and(|report| report_settles_kind(&report, held))
 }
 
-/// The gated arm: decode, admit, build.
-///
-/// [`tier_from_read_value`] decodes and builds; this admits in between. An
-/// observation stamped before the current credential was installed belongs
-/// to a previous login — the wire carries no account identity — and reads as
-/// `None`, falling through to the scrape. The build still goes through the
-/// pure arm, so the tested wording stays in one place.
-pub fn tier_from_read_current(
-    value: &serde_json::Value,
-    auth_mtime_secs: Option<u64>,
-) -> Option<Tier> {
-    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
-    let usage = result.usage.as_ref()?;
-    if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
-        return None;
-    }
-    let mut tier = tier_from_usage(usage);
-    restore_known_plan(&mut tier, &usage.tier, auth_mtime_secs);
-    Some(tier)
+/// A wire usage value — a `usage/read` result or `usage/changed` params —
+/// as the reading the hub would hand over.
+#[cfg(test)]
+pub fn wire_report(value: &serde_json::Value) -> Option<UsageReport> {
+    provider_muse::usage::report_from_read(value).or_else(|| provider_muse::usage::report_from_changed(value))
 }
 
-/// A `usage/read` result value's wire-observation time in whole seconds:
-/// the host's arrival stamp, so the stored Muse snapshot carries its true
-/// age rather than the re-read's. `None` when the value holds no
-/// observation (the `{}` cold host, a failed read).
-pub fn observed_secs_from_read_value(value: &serde_json::Value) -> Option<i64> {
-    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
-    result.usage.map(|usage| (usage.observed_at_ms / 1000) as i64)
-}
-
-/// A `usage/changed` notification's wire-observation time in whole seconds
-/// (see [`observed_secs_from_read_value`]).
-pub fn observed_secs_from_changed_params(params: &serde_json::Value) -> Option<i64> {
-    let usage: SubscriptionUsage = serde_json::from_value(params.clone()).ok()?;
-    Some((usage.observed_at_ms / 1000) as i64)
+/// [`tier_from_report_current`] over a `usage/read` result, for tests.
+#[cfg(test)]
+pub fn tier_from_read_current(value: &serde_json::Value, auth_mtime_secs: Option<u64>) -> Option<Tier> {
+    tier_from_report_current(&provider_muse::usage::report_from_read(value)?, auth_mtime_secs)
 }
 
 /// Whether the tier carries usable numbers for the Muse usage snapshot: a
@@ -1224,7 +1222,7 @@ pub fn cached_probed_at() -> Option<u64> {
 /// Decide the primary oracle's answer from an already-read `usage/read`
 /// result object.
 ///
-/// Testable by construction: the wire read ([`read_usage_value`]) and the
+/// Testable by construction: the wire read (`Command::ReadUsage`) and the
 /// scrape ([`probe`]) both live outside, so a test drives this directly with
 /// a fixed result object and a recording fallback — no live connection, no
 /// pseudo-terminal. A current observation ([`tier_from_read_current`])
@@ -1288,16 +1286,16 @@ pub fn is_auth_fresh(auth_mtime_secs: Option<u64>, now_secs: u64) -> bool {
 /// Every error is a `String` that is safe to show: it names what went wrong,
 /// never what the terminal said.
 pub fn probe_primary_confirmed(
-    read: Option<&serde_json::Value>,
+    read: Option<&UsageReport>,
     auth_mtime_secs: Option<u64>,
     now_secs: u64,
     mut fallback: impl FnMut() -> Result<Tier, String>,
     sleep: impl Fn(),
 ) -> Result<Tier, String> {
     // Only a reading that names its plan answers for the card: a numeric
-    // id is not evidence of a subscription ([`wire_settles_kind`]).
+    // id is not evidence of a subscription ([`report_settles_kind`]).
     if let Some(tier) =
-        read.filter(|value| wire_names_plan(value)).and_then(|value| tier_from_read_current(value, auth_mtime_secs))
+        read.filter(|report| report_names_plan(report)).and_then(|report| tier_from_report_current(report, auth_mtime_secs))
     {
         return Ok(tier);
     }
@@ -2957,7 +2955,7 @@ mod tests {
         let read = test_read((mtime + 60) * 1000);
         let calls = std::cell::Cell::new(0);
         let tier = probe_primary_confirmed(
-            Some(&read),
+            wire_report(&read).as_ref(),
             Some(mtime),
             mtime + 3600,
             scripted_probe(vec![Ok(Tier::PayAsYouGo)], &calls),
@@ -3041,14 +3039,14 @@ mod usage_fraction_tests {
     /// never decides the kind; a reading naming its plan still does.
     #[test]
     fn a_numeric_wire_reading_never_decides_the_plan_kind() {
-        let numeric = serde_json::json!({"tier": "27681631238169137", "observedAtMs": 1});
-        let named = serde_json::json!({"tier": "Muse Code High Usage", "observedAtMs": 1});
+        let numeric = serde_json::to_value(wire_usage("27681631238169137")).expect("encodes");
+        let named = serde_json::to_value(wire_usage("Muse Code High Usage")).expect("encodes");
         assert!(!wire_settles_kind(&numeric, Some(&Tier::PayAsYouGo)), "never over a pay-as-you-go");
         assert!(!wire_settles_kind(&numeric, None), "never over an unknown plan");
         assert!(!wire_settles_kind(&numeric, Some(&Tier::Unavailable("x".into()))));
         assert!(wire_settles_kind(&numeric, Some(&test_subscription())), "it refreshes a known subscription");
         assert!(wire_settles_kind(&named, Some(&Tier::PayAsYouGo)), "a named plan still settles the kind");
-        let read = serde_json::json!({"usage": {"tier": "27681631238169137"}});
+        let read = serde_json::json!({"usage": numeric});
         assert!(!wire_names_plan(&read), "the usage/read shape too");
     }
 
@@ -3062,7 +3060,7 @@ mod usage_fraction_tests {
         read["usage"]["tier"] = serde_json::json!("27681631238169137");
         let calls = std::cell::Cell::new(0);
         let tier = probe_primary_confirmed(
-            Some(&read),
+            wire_report(&read).as_ref(),
             Some(mtime),
             mtime + 3600,
             scripted_probe(vec![Ok(Tier::PayAsYouGo), Ok(Tier::PayAsYouGo)], &calls),

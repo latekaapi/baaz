@@ -151,6 +151,27 @@ pub enum ProviderEvent {
         /// What is waiting on the person, as the provider names it.
         attention: Vec<String>,
     },
+    /// The credential in effect changed (a sign-in finished elsewhere, a
+    /// sign-out, a key appeared in the environment): connection-level.
+    AccountChanged {
+        /// The lane now.
+        lane: crate::AccountLane,
+        /// Its display label, when the provider sends one.
+        label: Option<String>,
+    },
+    /// A sign-in flow this client started finished.
+    LoginCompleted {
+        /// How it ended.
+        outcome: crate::LoginOutcome,
+        /// The provider's display words for a refusal, when it sent any.
+        /// Never key material.
+        message: Option<String>,
+    },
+    /// A new usage reading landed: connection-level.
+    UsageChanged {
+        /// The reading.
+        report: crate::UsageReport,
+    },
     /// Words the provider wants on the session's banner: something it did
     /// on its own that the person should know (a sandbox it could not
     /// restore after a resume). Not an error of any command.
