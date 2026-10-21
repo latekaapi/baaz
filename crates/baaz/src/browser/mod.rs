@@ -1939,6 +1939,13 @@ impl Harness {
                             view.append_draft_block(block, window, cx);
                             view.set_annotation_draft(batch, cx);
                         });
+                        // The batch now lives in the composer: the panel
+                        // empties, as the spec's "the batch becomes the
+                        // annotation turn" means (owner 2026-10-21: the
+                        // list stayed after Send). Annotate stays on.
+                        let key = self.browser_key(cx);
+                        let state = self.browser_for(&key, false, window, cx);
+                        state.update(cx, |state, cx| state.clear_annotations(cx));
                         cx.notify();
                     }
                     None => {
