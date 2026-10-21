@@ -6279,6 +6279,16 @@ impl Harness {
         self.sync_overlay(window, cx);
         self.sync_corner(window, cx);
         self.sync_page_float(window, cx);
+        // The pane's page takes a Shift + sideways swipe as the strip's
+        // (docs/43 §3): what the native wheel router claims by.
+        #[cfg(feature = "cef")]
+        crate::browser::PANE_PAGE_LIVE.with(|live| {
+            live.set(
+                self.mode == crate::layout::Mode::Sessions
+                    && self.layout.right_open
+                    && crate::layout::right_kind(&self.layout) == crate::layout::RightKind::Browser,
+            )
+        });
         // B7fix2: one idle-time Browser warmup, outside render — the first
         // signed-in frame builds the webview when a restore left the pane
         // open on Browser, so even the boot frame never constructs. Once

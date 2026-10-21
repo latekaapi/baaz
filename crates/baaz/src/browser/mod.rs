@@ -4035,6 +4035,70 @@ impl Harness {
             }
         });
         self.tasks.push(task);
+        self.install_cef_wheel_router(cx);
+    }
+
+    /// The native wheel router (D6 follow-up; docs/43 §3): the right pane's
+    /// page is a child window, so a Shift + sideways swipe over it went to
+    /// the page and the strip never moved. The shim's monitor asks
+    /// [`page_wheel_claimed`] (plain state only); a claimed swipe is queued
+    /// and replayed into the active window as the wheel event it is, so
+    /// the pane's own Shift-swipe listener moves the strip unchanged.
+    #[cfg(feature = "cef")]
+    fn install_cef_wheel_router(&mut self, cx: &mut Context<Self>) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<aui_cef::PageWheel>();
+        aui_cef::set_wheel_router(page_wheel_claimed, move |wheel| {
+            let _ = tx.unbounded_send(wheel);
+        });
+        let task = cx.spawn(async move |_, cx| {
+            use futures::StreamExt as _;
+            while let Some(wheel) = rx.next().await {
+                cx.update(|cx| {
+                    let Some(target) = cx.active_window() else { return };
+                    let _ = target.update(cx, |_, window, cx| {
+                        window.dispatch_event(gpui::PlatformInput::ScrollWheel(page_wheel_event(&wheel)), cx);
+                    });
+                });
+            }
+        });
+        self.tasks.push(task);
+    }
+}
+
+#[cfg(feature = "cef")]
+thread_local! {
+    /// Whether the right pane shows its Page in Sessions mode this frame:
+    /// the one place a Shift + sideways swipe over a native page is the
+    /// pane's (set by the render, read by the native wheel router).
+    pub(crate) static PANE_PAGE_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a Shift-held wheel over a native page is the pane strip's: the
+/// pane shows its Page, and the swipe is sideways (|dx| > 2|dy|, the strip
+/// listener's own rule). Plain state only — it runs inside AppKit's monitor.
+#[cfg(feature = "cef")]
+pub(crate) fn page_wheel_claimed(wheel: &aui_cef::PageWheel) -> bool {
+    PANE_PAGE_LIVE.with(|live| live.get()) && wheel.dx.abs() > 2.0 * wheel.dy.abs()
+}
+
+/// The gpui wheel event a claimed page swipe replays as: Shift held, the
+/// precise deltas as pixels (a mouse's as lines), its phase.
+#[cfg(feature = "cef")]
+pub(crate) fn page_wheel_event(wheel: &aui_cef::PageWheel) -> gpui::ScrollWheelEvent {
+    let delta = if wheel.precise {
+        gpui::ScrollDelta::Pixels(gpui::point(gpui::px(wheel.dx as f32), gpui::px(wheel.dy as f32)))
+    } else {
+        gpui::ScrollDelta::Lines(gpui::point(wheel.dx as f32, wheel.dy as f32))
+    };
+    gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(wheel.x as f32), gpui::px(wheel.y as f32)),
+        delta,
+        modifiers: gpui::Modifiers { shift: true, ..Default::default() },
+        touch_phase: match wheel.phase {
+            aui_cef::WheelPhase::Started => gpui::TouchPhase::Started,
+            aui_cef::WheelPhase::Moved => gpui::TouchPhase::Moved,
+            aui_cef::WheelPhase::Ended => gpui::TouchPhase::Ended,
+        },
     }
 }
 
@@ -5364,3 +5428,37 @@ mod tests {
         routing_restore(state);
     }
 }
+
+#[cfg(all(test, feature = "cef"))]
+mod page_wheel_tests {
+    use super::{page_wheel_claimed, page_wheel_event, PANE_PAGE_LIVE};
+    use aui_cef::{PageWheel, WheelPhase};
+
+    fn swipe(dx: f64, dy: f64, phase: WheelPhase) -> PageWheel {
+        PageWheel { x: 1200.0, y: 300.0, dx, dy, phase, precise: true }
+    }
+
+    /// D6 follow-up: a Shift + sideways swipe over the pane's live page is
+    /// the strip's; a vertical one, or any swipe while the pane shows no
+    /// page (Browse mode's page, a closed pane), stays the page's.
+    #[test]
+    fn only_a_sideways_swipe_over_the_panes_page_is_claimed() {
+        PANE_PAGE_LIVE.with(|live| live.set(true));
+        assert!(page_wheel_claimed(&swipe(-40.0, 3.0, WheelPhase::Moved)));
+        assert!(!page_wheel_claimed(&swipe(4.0, 30.0, WheelPhase::Moved)), "vertical scrolls the page");
+        PANE_PAGE_LIVE.with(|live| live.set(false));
+        assert!(!page_wheel_claimed(&swipe(-40.0, 3.0, WheelPhase::Moved)), "not the pane's page");
+    }
+
+    /// The replay is the event the strip's listener expects: Shift held,
+    /// pixel deltas, the gesture's phase, at the pointer.
+    #[test]
+    fn a_claimed_swipe_replays_as_a_shift_wheel() {
+        let event = page_wheel_event(&swipe(-40.0, 3.0, WheelPhase::Started));
+        assert!(event.modifiers.shift);
+        assert_eq!(event.touch_phase, gpui::TouchPhase::Started);
+        assert_eq!(event.position, gpui::point(gpui::px(1200.0), gpui::px(300.0)));
+        assert!(matches!(event.delta, gpui::ScrollDelta::Pixels(p) if p == gpui::point(gpui::px(-40.0), gpui::px(3.0))));
+    }
+}
+
