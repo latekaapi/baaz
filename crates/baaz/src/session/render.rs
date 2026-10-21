@@ -291,6 +291,35 @@ impl SessionView {
         }
     }
 
+    /// A sent quote was pressed (docs/43 §0): scroll back to its source
+    /// turn, then flash the span it was taken from, once the scroll lands.
+    pub(super) fn scroll_to_quote(&mut self, turn: &str, words: &str, cx: &mut Context<Self>) {
+        self.quote_flash_pending = self.sent_quote_spans.get(&(turn.to_string(), words.trim_end().to_string())).map(|span| (turn.to_string(), span.clone()));
+        self.scroll_to_turn(turn, cx);
+        if self.quote_scroll.is_none() {
+            self.start_quote_flash();
+        }
+    }
+
+    fn start_quote_flash(&mut self) {
+        if let Some((turn, span)) = self.quote_flash_pending.take() {
+            self.quote_flash = Some((std::time::Instant::now(), turn, span));
+        }
+    }
+
+    /// The flashing source span for the folds: its turn, span and tint
+    /// strength now (1 → 0, linear, as the Changes rows fade); clears itself
+    /// when done. The render asks for the next frame while it runs.
+    pub(super) fn quote_flash_now(&mut self) -> Option<(String, aui::transcript::MessageSelection, f32)> {
+        let (at, turn, span) = self.quote_flash.clone()?;
+        let elapsed = at.elapsed();
+        if elapsed >= super::QUOTE_FLASH {
+            self.quote_flash = None;
+            return None;
+        }
+        Some((turn, span, 1.0 - elapsed.as_secs_f32() / super::QUOTE_FLASH.as_secs_f32()))
+    }
+
     /// One frame of a quote's scroll back to its source.
     pub(super) fn step_quote_scroll(&mut self, window: &mut Window) {
         let Some((at, from, to, target)) = self.quote_scroll else { return };
@@ -298,6 +327,8 @@ impl SessionView {
         if t >= 1.0 {
             self.list_state.scroll_to(target);
             self.quote_scroll = None;
+            self.start_quote_flash();
+            window.request_animation_frame();
             return;
         }
         let eased = 1.0 - (1.0 - t).powi(3);
@@ -458,6 +489,13 @@ impl SessionView {
             // and every event carries its turn's markdown source back, so
             // the fold slices the exact view the person dragged in.
             span_held: Rc::clone(&self.span_held),
+            span_flash: {
+                let flash = self.quote_flash_now();
+                if flash.is_some() {
+                    window.request_animation_frame();
+                }
+                flash
+            },
             span_event: {
                 let changed = cx.listener(
                     |this: &mut Self,
@@ -582,8 +620,8 @@ impl SessionView {
                 Some(Rc::new(move |path: String, window: &mut Window, cx: &mut gpui::App| open(&path, window, cx)))
             },
             scroll_to_turn: {
-                let scroll = cx.listener(|this: &mut Self, turn: &String, _, cx| this.scroll_to_turn(turn, cx));
-                Some(Rc::new(move |turn: String, window: &mut Window, cx: &mut gpui::App| scroll(&turn, window, cx)))
+                let scroll = cx.listener(|this: &mut Self, (turn, words): &(String, String), _, cx| this.scroll_to_quote(turn, words, cx));
+                Some(Rc::new(move |turn: String, words: String, window: &mut Window, cx: &mut gpui::App| scroll(&(turn, words), window, cx)))
             },
             tool_starts: Rc::new(self.tool_first_seen.clone()),
         }
@@ -3091,6 +3129,54 @@ mod tests {
         assert_eq!(parse_link_lines("src/main.rs#section"), None);
     }
 
+    /// docs/43 §0: a sent quote's click scrolls back to its source and
+    /// flashes the span it was quoted from, once, fading; a quote whose
+    /// span is unknown (a reopened session) scrolls without a flash.
+    #[gpui::test]
+    fn a_sent_quote_flashes_its_source_span_once(cx: &mut gpui::TestAppContext) {
+        use aui::transcript::{MessageSelection, SelectionEndpoint, SelectionKey};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+        });
+        let span = MessageSelection::new(
+            SelectionEndpoint { cell: SelectionKey::new("p0"), offset: 2 },
+            SelectionEndpoint { cell: SelectionKey::new("p0"), offset: 9 },
+        )
+        .expect("a span");
+        // Quoting keeps the span with the draft …
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| view.add_quote_with_span("the words".into(), Some("t-1".into()), None, Some(span.clone()), window, cx));
+            assert_eq!(view.read(cx).quotes[0].span.as_ref(), Some(&span));
+        });
+        // … and a sent one is remembered by its source and words.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.sent_quote_spans.insert(("t-1".into(), "the words".into()), span.clone());
+            })
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.scroll_to_quote("t-1", "the words\n", cx);
+                let (turn, flashed, strength) = view.quote_flash_now().expect("the source flashes");
+                assert_eq!((turn.as_str(), &flashed), ("t-1", &span));
+                assert!(strength > 0.5 && strength <= 1.0, "it starts near full tint: {strength}");
+                view.quote_flash = view.quote_flash.take().map(|(_, t, s)| (std::time::Instant::now() - super::super::QUOTE_FLASH, t, s));
+                assert!(view.quote_flash_now().is_none(), "once: it ends after the flash");
+                view.scroll_to_quote("t-1", "other words", cx);
+                assert!(view.quote_flash_now().is_none(), "no span known, no flash");
+            })
+        });
+    }
+
     /// B9: a plain URL click emits an in-app open, never the system
     /// browser; a ⌘-click (and a `mailto:` link) stays external.
     #[gpui::test]
@@ -3935,7 +4021,7 @@ impl SessionView {
         });
         self.quote_anchor = None;
         self.clear_selection(cx);
-        self.add_quote(text, Some(turn_id), code, window, cx);
+        self.add_quote_with_span(text, Some(turn_id), code, Some(span), window, cx);
     }
 
     /// `quote`: the selection bar's Quote, for scripted captures.
