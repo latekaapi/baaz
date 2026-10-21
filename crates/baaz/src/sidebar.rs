@@ -129,6 +129,11 @@ pub struct SessionEntry {
     /// wire answers — but only labelled index entries ever become provisional,
     /// which is what keeps the index's own zero-turn rows out.
     pub provisional: bool,
+    /// The row's turn count is not known yet: a boot row built from the
+    /// index alone, which knows no turn count, so the empty filter leaves
+    /// it alone. A boot row joined from the saved `session/list` knows its
+    /// turns and is filtered like the row the reply will bring.
+    pub turns_unknown: bool,
     /// The row's `workspace_root`: canonicalized when the path exists,
     /// verbatim otherwise. What project resolution reads — never the current
     /// project, so a worktree session keeps its own folder.
@@ -317,6 +322,7 @@ impl SessionEntry {
             title_pending: false,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace,
             project,
             project_name,
@@ -420,6 +426,7 @@ impl SessionEntry {
             title_pending: false,
             local: false,
             provisional: true,
+            turns_unknown: true,
             workspace,
             project,
             project_name,
@@ -510,6 +517,7 @@ impl SessionEntry {
             title_pending: false,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace,
             project,
             project_name,
@@ -566,6 +574,7 @@ impl SessionEntry {
             last_ask: None,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace,
             project,
             project_name,
@@ -942,6 +951,7 @@ pub fn local_started_row(
         last_ask: None,
         local: true,
         provisional: false,
+        turns_unknown: false,
         workspace,
         project,
         project_name: None,
@@ -2954,6 +2964,7 @@ mod tests {
             last_ask: None,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace: None,
             project: None,
             project_name: None,

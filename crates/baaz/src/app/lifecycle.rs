@@ -3646,6 +3646,7 @@ impl Harness {
                         last_ask: None,
                         local: false,
                         provisional: false,
+                        turns_unknown: false,
                         workspace: None,
                         project: meta.and_then(|m| m.project.clone()),
                         project_name: None,
@@ -6890,6 +6891,48 @@ mod tests {
                 harness.index.insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() });
                 harness.install_provisional_rows();
                 assert_eq!(ids(harness), ["s-a", "s-b", "s-c", "s-d"], "nothing drops, the new row joins");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// The boot rows paint before the list reply (docs/51 P0 #2): the
+    /// skeleton stays only until the index lands, or while there is no row
+    /// to show. The D3 screen waited for `session/list` again.
+    #[gpui::test]
+    fn the_sidebar_paints_boot_rows_before_the_list_reply(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("boot-rows-paint");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.sessions.retain(|e| e.local);
+                assert!(harness.sidebar_loading(), "nothing has landed");
+                harness.index_loaded = true;
+                assert!(harness.sidebar_loading(), "the index landed empty: still nothing to paint");
+                harness.index.insert("s-a".into(), IndexEntry { title: "A".into(), ..Default::default() });
+                harness.install_provisional_rows();
+                assert!(!harness.sessions_loaded, "the wire has not answered");
+                assert!(!harness.sidebar_loading(), "boot rows paint without waiting for the list");
+                // A zero-turn session from the saved list is filtered as empty
+                // now, as the reply's row will be; an index-only row, whose turn
+                // count nobody knows yet, still shows.
+                let zero: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+                    "sessionId": "s-zero", "createdAt": "2026-10-01T00:00:00Z",
+                    "updatedAt": "2026-10-20T00:00:00Z", "path": "/tmp/z.jsonl", "status": "idle",
+                    "turnCount": 0, "title": "Zero", "activeTurnId": null, "forkedFrom": null,
+                    "modelId": null, "providerId": null, "workspaceRoot": "/tmp/w",
+                }))
+                .expect("a list row");
+                harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+                    sessions: vec![zero],
+                    ..Default::default()
+                }));
+                harness.install_provisional_rows();
+                let visible: Vec<String> = harness.visible_sessions(cx).iter().map(|e| e.id.clone()).collect();
+                assert!(visible.contains(&"s-a".to_owned()), "the index-only row shows");
+                assert!(!visible.contains(&"s-zero".to_owned()), "a known-empty row is filtered before the reply too");
             });
         });
         lane_restore(state);
@@ -10646,6 +10689,7 @@ done
             last_ask: None,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace: None,
             project: None,
             project_name: None,
