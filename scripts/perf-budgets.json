@@ -77,6 +77,11 @@
           "unit": "renders",
           "measured": 0
         },
+        "idle.frame_requests": {
+          "budget": 0,
+          "measured": 0,
+          "unit": "frames"
+        },
         "stream.long_1000_element_p99_ms": {
           "budget": 0.6,
           "measured": 0.19
@@ -119,11 +124,11 @@
         },
         "store.list_cache_load_ms": {
           "budget": 30,
-          "measured": 2.8
+          "measured": 2.45
         },
         "store.list_newer_ms": {
           "budget": 40,
-          "measured": 3.9
+          "measured": 3.25
         },
         "store.list_newer_pages": {
           "budget": 1,
@@ -162,6 +167,11 @@
           "budget": 0,
           "unit": "renders",
           "measured": 0
+        },
+        "idle.frame_requests": {
+          "budget": 0,
+          "measured": 0,
+          "unit": "frames"
         },
         "stream.long_1000_element_p99_ms": {
           "budget": 0.6,

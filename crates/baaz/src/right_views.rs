@@ -204,7 +204,7 @@ pub(crate) fn pushed_screen(screen: usize, view: &Pushed, width: f32, window: &m
         Pushed::Output(out) => {
             let running = out.running_since.map(|t| t.elapsed().as_secs());
             if running.is_some() {
-                window.request_animation_frame();
+                aui_motion::request_frame(window);
             }
             let title = output_title(&out.command, out.exit, out.time.clone().map(Into::into), running, cx);
             let ready = matches!(out.lines, OutputLines::Ready { .. });
