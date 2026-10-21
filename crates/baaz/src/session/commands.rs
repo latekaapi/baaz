@@ -168,7 +168,8 @@ impl SessionView {
         self.fold.record_command(&self.session_id, &command_id, &text);
         // Plan mode is the one thing that makes the model-visible text differ
         // from the person's: `/plan ` fires the bundled skill (see plan.rs).
-        let model_text = if self.plan { plan::prefix(&text) } else { text.clone() };
+        let quoted = quoted_prompt(&self.quotes, &text);
+        let model_text = if self.plan { plan::prefix(&quoted) } else { quoted };
         let params = TurnStartParams {
             command_id,
             session_id: self.session_id.clone(),
@@ -211,7 +212,8 @@ impl SessionView {
         self.fold.record_command(&self.session_id, &request_id, &text);
         // Plan mode prefixes the model-visible input, exactly as on the
         // muse lane; the display text stays the person's words.
-        let model_text = if self.plan { plan::prefix(&text) } else { text.clone() };
+        let quoted = quoted_prompt(&self.quotes, &text);
+        let model_text = if self.plan { plan::prefix(&quoted) } else { quoted };
         // The provider echoes the whole model-visible input; the bubble
         // shows what the person typed, including across a restart (the
         // record mirrors the map for replayed histories).
@@ -1596,8 +1598,58 @@ pub(super) fn apply_muse_mode_pick(
     MusePickOutcome::Applied
 }
 
+
+/// The model-visible prompt: the composer's quotes ahead of the person's
+/// words (docs/43 §0) — prose as a Markdown blockquote, a code quote as a
+/// fence in its language — then the typed text. The bubble shows the typed
+/// text with the quote blocks drawn from the attachments; this is what the
+/// model reads. (Live 2026-10-21: quotes reached the bubble but never the
+/// model — Claude Code answered "Which two?" to a quoted pair of lines.)
+pub(crate) fn quoted_prompt(quotes: &[super::QuoteDraft], text: &str) -> String {
+    if quotes.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for quote in quotes {
+        match &quote.code {
+            Some((lang, _)) => {
+                let longest = quote.text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+                let fence = "`".repeat(longest.max(2) + 1);
+                out.push_str(&format!("{fence}{lang}\n{}\n{fence}\n\n", quote.text));
+            }
+            None => {
+                for line in quote.text.lines() {
+                    out.push_str(if line.is_empty() { ">" } else { "> " });
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(text);
+    out.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    /// Live 2026-10-21: a quoted pair of lines reached the bubble but not
+    /// the model. The prompt carries every quote ahead of the words.
+    #[test]
+    fn quotes_ride_ahead_of_the_typed_words() {
+        use super::super::QuoteDraft;
+        let q = |text: &str, code: Option<(&str, usize)>| QuoteDraft { id: "q".into(), text: text.into(), source: Some("t".into()), code: code.map(|(l, n)| (l.into(), n)), span: None };
+        assert_eq!(super::quoted_prompt(&[], "hi"), "hi");
+        assert_eq!(
+            super::quoted_prompt(&[q("first line\n\nsecond", None)], "Why?"),
+            "> first line\n>\n> second\n\nWhy?"
+        );
+        assert_eq!(
+            super::quoted_prompt(&[q("-rw big.txt\ndrwx docs", Some(("shell", 2))), q("a ``` b", Some(("", 1)))], "Which is a folder?"),
+            "```shell\n-rw big.txt\ndrwx docs\n```\n\n````\na ``` b\n````\n\nWhich is a folder?"
+        );
+    }
+
     use super::*;
 
     /// Open a view on one provider lane: no child, no wire — the catalog
