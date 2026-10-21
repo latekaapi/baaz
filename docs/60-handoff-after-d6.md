@@ -2,6 +2,15 @@
 
 Read this first in the next session. It replaces docs/40 §4 as the "where are we" for the build.
 
+## 0. Update 2026-10-21 (later the same day) — pushed
+
+Both of the owner's 21 Oct bug rounds are fixed, live-verified on BaazCheck and **pushed**: agentic-ui tagged
+**v0.6.0** (main `2adb791`), Baaz main `c73df8c` pinned to it, visual baselines regenerated on main (probe clean).
+Round 1: diff hover, effort race + "last pick, everywhere", the fade over the Page nav row, clickable code-span
+paths/URLs, Files HTML→Page + context menu. Round 2: one bar per screen (docs/43 §2.12), PDFs render in the Page
+(aui-cef had cancelled Chromium's PDF viewer), sideways swipes no longer scroll vertical lists. §1's "nothing is
+pushed" and "at push time" lines below are history; §3's open items still stand.
+
 ## 1. State of the code
 
 | Repo | Branch | Head | Ahead of GitHub | Notes |
