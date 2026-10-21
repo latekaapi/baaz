@@ -279,9 +279,10 @@ pub(crate) struct QuoteDraft {
     pub source: Option<String>,
     /// A code quote: its language (may be empty) and line count.
     pub code: Option<(String, usize)>,
-    /// The selection it was quoted from, so the sent quote can flash its
+    /// The selection it was quoted from and the span owner holding it (the
+    /// turn, or a tool output's owner), so the sent quote can flash its
     /// source span when clicked (docs/43 §0). None for a hook's output.
-    pub span: Option<aui::transcript::MessageSelection>,
+    pub span: Option<(String, aui::transcript::MessageSelection)>,
 }
 
 /// An unsent composer's content: the text plus the images and files waiting
@@ -822,11 +823,11 @@ pub struct SessionView {
     /// The spans sent quotes were taken from, by (source turn, words): what
     /// a click on the sent quote flashes. This session's quotes only — a
     /// reopened session scrolls back without the flash.
-    sent_quote_spans: HashMap<(String, String), aui::transcript::MessageSelection>,
-    /// The span to flash once the quote's scroll lands: (turn, span).
+    sent_quote_spans: HashMap<(String, String), (String, aui::transcript::MessageSelection)>,
+    /// The span to flash once the quote's scroll lands: (owner, span).
     quote_flash_pending: Option<(String, aui::transcript::MessageSelection)>,
     /// The source span flashing now (docs/43 §0 "flashes the source span's
-    /// tint once"): start, turn, span. Fades over [`QUOTE_FLASH`].
+    /// tint once"): start, span owner, span. Fades over [`QUOTE_FLASH`].
     quote_flash: Option<(std::time::Instant, String, aui::transcript::MessageSelection)>,
     /// The transcript box in window coordinates (the bar's frame).
     transcript_bounds: Option<gpui::Bounds<Pixels>>,
@@ -2394,7 +2395,7 @@ impl SessionView {
         text: String,
         source: Option<String>,
         code: Option<(String, usize)>,
-        span: Option<aui::transcript::MessageSelection>,
+        span: Option<(String, aui::transcript::MessageSelection)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

@@ -294,7 +294,7 @@ impl SessionView {
     /// A sent quote was pressed (docs/43 §0): scroll back to its source
     /// turn, then flash the span it was taken from, once the scroll lands.
     pub(super) fn scroll_to_quote(&mut self, turn: &str, words: &str, cx: &mut Context<Self>) {
-        self.quote_flash_pending = self.sent_quote_spans.get(&(turn.to_string(), words.trim_end().to_string())).map(|span| (turn.to_string(), span.clone()));
+        self.quote_flash_pending = self.sent_quote_spans.get(&(turn.to_string(), words.trim_end().to_string())).cloned();
         self.scroll_to_turn(turn, cx);
         if self.quote_scroll.is_none() {
             self.start_quote_flash();
@@ -3129,6 +3129,48 @@ mod tests {
         assert_eq!(parse_link_lines("src/main.rs#section"), None);
     }
 
+    /// D6 follow-up (docs/43 §0): a selection in a tool's output quotes as
+    /// code — its text exactly, language "shell", the turn as its source —
+    /// and the span stays with the output's owner for the flash.
+    #[gpui::test]
+    fn a_selection_in_tool_output_quotes_as_shell_code(cx: &mut gpui::TestAppContext) {
+        use aui::transcript::{MessageSelection, SelectionEndpoint, SelectionKey};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+        });
+        let lines: Vec<String> = vec!["$ cargo test".into(), "\u{1b}[32mok\u{1b}[0m 12 passed".into(), "``` not a fence".into()];
+        let text = aui::transcript::output_text(&lines, true);
+        let source = crate::transcript::output_source(&text, "shell");
+        let owner = crate::transcript::output_owner("t-1", "call-9");
+        let start = text.find("ok 12").expect("stripped");
+        let end = text.len();
+        let span = MessageSelection::new(
+            SelectionEndpoint { cell: SelectionKey::new("code0"), offset: start },
+            SelectionEndpoint { cell: SelectionKey::new("code0"), offset: end },
+        )
+        .expect("a span");
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                std::rc::Rc::make_mut(&mut view.span_held).insert(owner.clone(), (source.clone(), span.clone()));
+                view.quote_selection_step(window, cx);
+                let quote = view.quotes.first().cloned().expect("a quote");
+                assert_eq!(quote.text, "ok 12 passed\n``` not a fence", "the output's own text, ANSI stripped, fence kept intact");
+                assert_eq!(quote.source.as_deref(), Some("t-1"), "the source is the turn");
+                assert_eq!(quote.code, Some(("shell".to_string(), 2)), "a shell code quote of two lines");
+                assert_eq!(quote.span.as_ref().map(|(o, _)| o.as_str()), Some(owner.as_str()), "the flash goes to the output");
+            })
+        });
+    }
+
     /// docs/43 §0: a sent quote's click scrolls back to its source and
     /// flashes the span it was quoted from, once, fading; a quote whose
     /// span is unknown (a reopened session) scrolls without a flash.
@@ -3154,13 +3196,13 @@ mod tests {
         .expect("a span");
         // Quoting keeps the span with the draft …
         vc.update(|window, cx| {
-            view.update(cx, |view, cx| view.add_quote_with_span("the words".into(), Some("t-1".into()), None, Some(span.clone()), window, cx));
-            assert_eq!(view.read(cx).quotes[0].span.as_ref(), Some(&span));
+            view.update(cx, |view, cx| view.add_quote_with_span("the words".into(), Some("t-1".into()), None, Some(("t-1".into(), span.clone())), window, cx));
+            assert_eq!(view.read(cx).quotes[0].span.as_ref().map(|(_, s)| s), Some(&span));
         });
         // … and a sent one is remembered by its source and words.
         vc.update(|_, cx| {
             view.update(cx, |view, _| {
-                view.sent_quote_spans.insert(("t-1".into(), "the words".into()), span.clone());
+                view.sent_quote_spans.insert(("t-1".into(), "the words".into()), ("t-1".into(), span.clone()));
             })
         });
         vc.update(|_, cx| {
@@ -4021,7 +4063,11 @@ impl SessionView {
         });
         self.quote_anchor = None;
         self.clear_selection(cx);
-        self.add_quote_with_span(text, Some(turn_id), code, Some(span), window, cx);
+        // A tool output's span is held under its own owner; the quote's
+        // source is the turn it belongs to (what the click scrolls back to).
+        let owner = turn_id.clone();
+        let turn_id = crate::transcript::output_owner_turn(&turn_id).to_string();
+        self.add_quote_with_span(text, Some(turn_id), code, Some((owner, span)), window, cx);
     }
 
     /// `quote`: the selection bar's Quote, for scripted captures.
