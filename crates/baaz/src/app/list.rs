@@ -605,7 +605,7 @@ impl Harness {
                 !entry.hidden
                     && !entry.archived
                     && !entry.provisional
-                    && entry.provider.is_none()
+                    && entry.provider.lists_sessions()
                     && entry.is_empty()
                     && !active.as_deref().is_some_and(|id| id == entry.id)
             })
@@ -854,7 +854,10 @@ impl Harness {
     /// line, never a dialog, and the session stays untitled-marked so a later
     /// pass retries once the sidecar has regenerated under a lease.
     pub(super) fn derive_titles(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.muse_transport() else { return };
+        if !self.muse_slot.is_ready() {
+            return;
+        }
+        let slot = self.muse_slot.clone();
         let wanted: Vec<String> = self
             .sessions
             .iter()
@@ -869,18 +872,25 @@ impl Harness {
         }
         self.titled.extend(wanted.iter().cloned());
         let work = move || {
+            let Ok(lane) = slot.control() else { return Vec::new() };
             wanted
                 .into_iter()
                 .map(|session_id| {
-                    let read = client.session_read(&muse_client::schema::SessionReadParams {
+                    let read = lane.send(provider::Command::ReadSession {
                         session_id: session_id.clone(),
-                        exclude_items: Some(false),
+                        metadata_only: false,
                     });
                     match read {
-                        Ok(read) => (session_id, first_shell_command(&read), false),
+                        Ok(provider::Ack::SessionRead { first_shell_command, .. }) => (
+                            session_id,
+                            first_shell_command.as_deref().and_then(crate::sessions::shell_title),
+                            false,
+                        ),
+                        Ok(_) => (session_id, None, false),
                         Err(error) => {
                             crate::baaz_log!("session/read for a title failed: {error}");
-                            (session_id, None, error.is_stale_sidecar())
+                            let stale = error.hint() == provider::RefusalHint::StaleHistory;
+                            (session_id, None, stale)
                         }
                     }
                 })

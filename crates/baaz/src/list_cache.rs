@@ -39,6 +39,99 @@ pub trait Row: Clone + PartialEq + Serialize + DeserializeOwned {
     fn compact(&mut self);
 }
 
+/// One Muse row as Baaz holds and saves it: the seam's
+/// [`provider::SessionSummary`] fields the sidebar reads, under the wire's
+/// own JSON keys, so a copy saved before the listing went through the seam
+/// reads back unchanged (the keys it does not name are ignored).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedRow {
+    /// The session id.
+    pub session_id: String,
+    /// The name someone gave it in Muse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Muse's own title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The first prompt, as a preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_prompt: Option<String>,
+    /// Where it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    /// The workspace's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Created, RFC 3339.
+    pub created_at: String,
+    /// Content last moved, RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// Record last touched, RFC 3339.
+    pub updated_at: String,
+    /// `running` while a turn runs; anything else is not running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Exchanges so far.
+    #[serde(default)]
+    pub turn_count: u64,
+    /// What waits on the person, by name ([`provider::facts::Attention`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Vec<String>>,
+}
+
+impl ListedRow {
+    /// A turn is running.
+    pub fn running(&self) -> bool {
+        self.status.as_deref() == Some("running")
+    }
+
+    /// What waits on the person.
+    pub fn attention(&self) -> Vec<provider::facts::Attention> {
+        self.attention.iter().flatten().map(|name| provider::facts::Attention::parse(name)).collect()
+    }
+}
+
+impl From<provider::SessionSummary> for ListedRow {
+    fn from(row: provider::SessionSummary) -> Self {
+        Self {
+            session_id: row.session_id,
+            name: row.name,
+            title: row.title,
+            first_user_prompt: row.first_prompt,
+            workspace_root: row.workspace,
+            branch: row.branch,
+            created_at: row.created_at,
+            last_activity_at: row.last_activity_at,
+            updated_at: row.updated_at,
+            status: Some(if row.running { "running" } else { "idle" }.to_owned()),
+            turn_count: row.turns,
+            attention: (!row.attention.is_empty())
+                .then(|| row.attention.iter().map(|flag| flag.name().to_owned()).collect()),
+        }
+    }
+}
+
+impl Row for ListedRow {
+    fn id(&self) -> &str {
+        &self.session_id
+    }
+    fn updated_at(&self) -> &str {
+        &self.updated_at
+    }
+    fn activity_at(&self) -> &str {
+        self.last_activity_at.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&self.created_at)
+    }
+    fn compact(&mut self) {
+        // The join reads these for an 80-character label and a prompt-prefix
+        // side marker; nothing in Baaz reads past the first 1,000.
+        for text in [&mut self.title, &mut self.first_user_prompt, &mut self.name].into_iter().flatten() {
+            keep_prefix(text);
+        }
+    }
+}
+
 /// How much of a free-text field a held row keeps: what the index read keeps
 /// too (`substr(…, 1, 1000)`, [`crate::index`]), far past the 80-character
 /// label.
@@ -259,6 +352,52 @@ pub fn list<R: Row, E: std::fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy saved before the listing went through the seam holds Muse's
+    /// whole wire rows; it reads back as the neutral row, keys it does not
+    /// name ignored, running and attention intact — so the first launch on
+    /// this build asks for newer rows only, not 27 pages.
+    #[test]
+    fn a_copy_saved_from_wire_rows_reads_back_as_neutral_rows() {
+        let saved = serde_json::json!({
+            "version": VERSION,
+            "source": "/muse/index.db",
+            "full_at_ms": 5,
+            "sessions": [{
+                "sessionId": "s1", "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-20T00:00:00Z",
+                "lastActivityAt": "2026-10-19T00:00:00Z", "path": "/x.jsonl", "status": "running",
+                "turnCount": 4, "title": "Wire title", "generatedName": "ignored", "branch": "main",
+                "attention": ["approvalPending", "somethingNew"], "activeTurnId": null, "workspaceRoot": "/w",
+            }],
+        });
+        let copy: ListCache<ListedRow> = serde_json::from_value(saved).expect("an old copy reads");
+        let row = &copy.sessions[0];
+        assert!(row.running());
+        assert_eq!(row.turn_count, 4);
+        assert_eq!(row.branch.as_deref(), Some("main"));
+        assert_eq!(
+            row.attention(),
+            vec![provider::facts::Attention::ApprovalPending, provider::facts::Attention::Other("somethingNew".into())]
+        );
+        assert_eq!(row.activity_at(), "2026-10-19T00:00:00Z");
+    }
+
+    #[test]
+    fn a_seam_row_becomes_the_held_row() {
+        let row = ListedRow::from(provider::SessionSummary {
+            session_id: "s2".into(),
+            running: true,
+            turns: 2,
+            attention: vec![provider::facts::Attention::InputPending],
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            ..Default::default()
+        });
+        assert!(row.running());
+        assert_eq!(row.attention(), vec![provider::facts::Attention::InputPending]);
+        assert_eq!(row.updated_at(), "u");
+        assert_eq!(row.activity_at(), "c", "no activity yet: the creation time");
+    }
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct Session {

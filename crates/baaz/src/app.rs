@@ -2,19 +2,17 @@
 //!
 //! # Thread model
 //!
-//! One provider per process, owned here behind an [`Arc`](std::sync::Arc)
-//! as [`SharedProvider`](crate::wire::SharedProvider), sharing its one
-//! spawned child with the legacy [`MuseClient`] transport session views
-//! still ride (see [`crate::conn::Legacy`]). The child already runs its own
-//! reader and writer threads, so the pipe never touches the UI thread.
-//! Two directions cross the boundary:
+//! Every session rides a provider lane ([`provider::Provider`]): Claude Code
+//! and Codex a child each, Muse a lane of the one `muse serve` hub the window
+//! connects ([`crate::conn::connect`], held in [`Harness::muse_slot`]). The
+//! children run their own reader and writer threads, so no pipe touches the
+//! UI thread. Two directions cross the boundary:
 //!
-//! * **Events in.** [`crate::conn::connect`] hands back two `futures`
-//!   receivers, each fed by one bridging thread: provider events and the
-//!   raw transport events. A single foreground task drains the raw stream
-//!   and calls [`SessionView::apply`], so folding happens on the UI thread
-//!   in wire order and a frame always renders a consistent transcript; a
-//!   second task observes the provider stream.
+//! * **Events in.** Each view drains its own lane's events on a foreground
+//!   task, in the lane's order, so a frame always renders a consistent
+//!   transcript. The hub's connection stream — every Muse session's row
+//!   facts, sign-in, usage, the child's exit — is bridged onto one
+//!   `futures` receiver the window drains (`on_hub_event`).
 //! * **Commands out.** Every request blocks, so every one of them runs on
 //!   `background_spawn` and returns through `update`. The UI thread issues
 //!   intents and never waits, and [`crate::wire::WireCall`] is the one shape
@@ -29,7 +27,7 @@
 //!
 //! # What lives elsewhere
 //!
-//! [`Harness`] keeps the fields, boot, connect, route and `render`, but most
+//! [`Harness`] keeps the fields, boot, connect, the hub's events and `render`, but most
 //! of its concerns have their own modules and reach back in through one call
 //! per seam:
 //!
@@ -78,8 +76,6 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Root;
-use muse_client::schema::SessionListParams;
-use muse_client::{MuseClient, MuseError};
 use provider::ProviderEvent;
 
 use crate::auth::Identity;
@@ -1136,7 +1132,7 @@ pub struct Harness {
     /// the next listing asks Muse only for rows newer than its newest. Loaded
     /// from disk by the first index read (or by the first listing, whichever
     /// runs first); `None` until then, and the listing reads the file itself.
-    pub(crate) saved_list: Option<std::sync::Arc<crate::list_cache::ListCache<muse_client::schema::Session>>>,
+    pub(crate) saved_list: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>>,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
     /// Which half of the window the person is in (B2a-H2): sessions or
@@ -2193,13 +2189,6 @@ impl Harness {
                 this.muse_unavailable(error.to_string(), cx);
             }
         });
-    }
-
-    /// The Muse child, while it is up — transitional: Muse's session list
-    /// and its derived titles still read it until those rows come through
-    /// the seam.
-    pub(crate) fn muse_transport(&self) -> Option<Arc<MuseClient>> {
-        self.muse_hub.as_ref().filter(|_| self.muse_slot.is_ready()).and_then(|hub| hub.transport())
     }
 
     /// Muse is not running (off, missing, or failed to start): the sidebar
@@ -6101,23 +6090,6 @@ impl Harness {
 
 }
 
-/// F10. The first `userShell` command in a session's history, as a row title.
-///
-/// A session with no user prompt still did something, and what it did is the
-/// only honest thing to call it. `session/read` makes no model call.
-fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<String> {
-    // The server decides what it serves, never the client: `mode: inline`
-    // fills `items`, a snapshot fills `snapshot.state.items`, and both carry
-    // the same item schema. Reading only the first would be a title that
-    // depended on how big the session happened to be.
-    let inline = read.history.items.iter().flatten();
-    let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
-    inline
-        .chain(snapshot)
-        .filter(|item| item.kind == muse_client::schema::ItemKind::UserShell)
-        .find_map(|item| item.command_text.as_deref().and_then(crate::sessions::shell_title))
-}
-
 impl Harness {
     /// Everything a frame changes before it draws anything: the window title,
     /// a resize left armed by a release the window never saw, the `--replay`
@@ -9947,7 +9919,7 @@ mod tests {
                     provider::ProviderEvent::StatusChanged {
                         session_id: "s-bg".into(),
                         running: true,
-                        attention: vec!["approvalPending".into()],
+                        attention: vec![provider::facts::Attention::ApprovalPending],
                     },
                     cx,
                 );
@@ -10012,7 +9984,7 @@ mod tests {
                 archived: false,
                 description: String::new(),
                 replayed: false,
-                provider: None,
+                provider: crate::providers::ProviderId::Muse,
                 named: false,
                 needs_title: false,
                 side_marker: false,

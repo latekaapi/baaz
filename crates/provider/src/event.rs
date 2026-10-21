@@ -148,8 +148,8 @@ pub enum ProviderEvent {
         session_id: String,
         /// A turn is running.
         running: bool,
-        /// What is waiting on the person, as the provider names it.
-        attention: Vec<String>,
+        /// What is waiting on the person.
+        attention: Vec<crate::facts::Attention>,
     },
     /// The credential in effect changed (a sign-in finished elsewhere, a
     /// sign-out, a key appeared in the environment): connection-level.

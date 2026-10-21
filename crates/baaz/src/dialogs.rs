@@ -1945,7 +1945,7 @@ mod tests {
                         archived: false,
                         description: "the ask".into(),
                         replayed: false,
-                        provider: None,
+                        provider: crate::providers::ProviderId::Muse,
                         named: true,
                         needs_title: false,
                         side_marker: false,

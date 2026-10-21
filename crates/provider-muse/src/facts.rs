@@ -78,7 +78,7 @@ impl FactTracker {
                 let attention = params
                     .get("attention")
                     .and_then(Value::as_array)
-                    .map(|flags| flags.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                    .map(|flags| flags.iter().filter_map(Value::as_str).map(provider::facts::Attention::parse).collect())
                     .unwrap_or_default();
                 out.push(ProviderEvent::StatusChanged { session_id: session_id.to_owned(), running, attention });
             }

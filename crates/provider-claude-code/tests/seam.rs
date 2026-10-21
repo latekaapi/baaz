@@ -110,7 +110,7 @@ fn stored_history_serves_read_and_page_but_never_guesses() {
     let ack = adapter
         .dispatch(Command::ReadSession { session_id: "sess-stored".into(), metadata_only: false })
         .expect("stored session reads");
-    assert!(matches!(ack, Ack::Session { session_id, .. } if session_id == "sess-stored"));
+    assert!(matches!(ack, Ack::SessionRead { session_id, .. } if session_id == "sess-stored"));
 
     let ack = adapter
         .dispatch(Command::PageTranscript {

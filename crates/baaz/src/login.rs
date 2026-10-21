@@ -453,7 +453,7 @@ impl Harness {
         if self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind() == crate::providers::ProviderId::Muse) {
             self.active = None;
         }
-        self.sessions.retain(|entry| entry.provider.is_some());
+        self.sessions.retain(|entry| entry.provider != crate::providers::ProviderId::Muse);
         self.invalidate_list();
     }
 

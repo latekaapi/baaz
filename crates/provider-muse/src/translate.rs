@@ -275,24 +275,17 @@ pub fn dispatch(
                 title: result.session.title,
             })
         }
-        Command::ListSessions { cursor, limit, workspace } => {
+        Command::ListSessions { cursor, limit, workspace, updated_after } => {
             let result = client
                 .session_list(&SessionListParams {
                     cursor,
                     limit,
-                    updated_after: None,
+                    updated_after,
                     workspace_root: workspace,
                 })
                 .map_err(transport_error)?;
             Ok(Ack::SessionIndex {
-                sessions: result
-                    .sessions
-                    .into_iter()
-                    .map(|session| SessionSummary {
-                        session_id: session.session_id,
-                        title: session.title,
-                    })
-                    .collect(),
+                sessions: result.sessions.into_iter().map(summary_of).collect(),
                 next_cursor: result.next_cursor,
             })
         }
@@ -303,9 +296,11 @@ pub fn dispatch(
                     session_id,
                 })
                 .map_err(transport_error)?;
-            Ok(Ack::Session {
+            let first_shell_command = first_shell_command(&result);
+            Ok(Ack::SessionRead {
                 session_id: result.session.session_id,
                 title: result.session.title,
+                first_shell_command,
             })
         }
         Command::CompactSession { request_id, session_id, through_turn } => {
@@ -592,6 +587,44 @@ pub fn dispatch(
     }
 }
 
+/// One `session/list` row as the seam's row.
+pub(crate) fn summary_of(session: muse_client::schema::Session) -> SessionSummary {
+    SessionSummary {
+        session_id: session.session_id,
+        title: session.title,
+        name: session.name,
+        first_prompt: session.first_user_prompt,
+        workspace: session.workspace_root,
+        branch: session.branch,
+        created_at: session.created_at,
+        last_activity_at: session.last_activity_at,
+        updated_at: session.updated_at,
+        running: matches!(session.status, muse_client::schema::SessionStatus::Running),
+        turns: session.turn_count,
+        attention: session
+            .attention
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|flag| flag.as_wire().map(provider::facts::Attention::parse))
+            .collect(),
+    }
+}
+
+/// The first `userShell` command in a read's history, verbatim (markers and
+/// all), skipping blank ones. The server decides what it serves: `mode:
+/// inline` fills `items`, a snapshot fills `snapshot.state.items`, and both
+/// carry the same item schema — reading only one would be a label that
+/// depended on how big the session happened to be.
+pub(crate) fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<String> {
+    let inline = read.history.items.iter().flatten();
+    let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
+    inline
+        .chain(snapshot)
+        .filter(|item| item.kind == muse_client::schema::ItemKind::UserShell)
+        .filter_map(|item| item.command_text.clone())
+        .find(|text| !text.trim().trim_start_matches(['!', '$']).trim().is_empty())
+}
+
 /// Fold one page of transcript notifications to deltas. Paging is the one
 /// command whose ack carries transcript, so it needs the fold — it lives on
 /// the adapter, next to the pump, rather than in [`dispatch`].
@@ -653,4 +686,36 @@ pub fn model_summaries(models: &[muse_client::schema::ModelCatalogEntry]) -> Vec
 /// unless `backward` asks for the head end first.
 pub fn page_direction(backward: bool) -> Option<ViewPageDirection> {
     backward.then_some(ViewPageDirection::Backward)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listed_row_and_a_read_map_onto_the_seam() {
+        let session: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1", "createdAt": "c", "updatedAt": "u", "lastActivityAt": "a", "path": "",
+            "status": "running", "turnCount": 3, "name": "n", "firstUserPrompt": "p", "branch": "b",
+            "workspaceRoot": "/w", "attention": ["inputPending"],
+            "activeTurnId": null, "forkedFrom": null, "modelId": null, "providerId": null,
+        }))
+        .expect("a wire row");
+        let row = summary_of(session);
+        assert!(row.running);
+        assert_eq!((row.turns, row.name.as_deref(), row.first_prompt.as_deref()), (3, Some("n"), Some("p")));
+        assert_eq!((row.workspace.as_deref(), row.branch.as_deref()), (Some("/w"), Some("b")));
+        assert_eq!(row.attention, vec![provider::facts::Attention::InputPending]);
+        let read: muse_client::schema::SessionReadResult = serde_json::from_value(serde_json::json!({
+            "history": {"mode": "inline", "items": [
+                {"itemId": "i1", "kind": "userShell", "revision": 1, "status": "completed", "commandText": "!  "},
+                {"itemId": "i2", "kind": "userShell", "revision": 1, "status": "completed", "commandText": "!cargo test"},
+            ]},
+            "pendingRequests": [],
+            "session": {"sessionId": "s1", "path": "", "createdAt": "c", "updatedAt": "u", "turnCount": 1, "status": "idle"},
+            "viewCursor": "v",
+        }))
+        .expect("a read");
+        assert_eq!(first_shell_command(&read).as_deref(), Some("!cargo test"), "the first non-blank command, verbatim");
+    }
 }

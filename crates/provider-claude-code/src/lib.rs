@@ -1562,13 +1562,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 Ok(Ack::SessionIndex {
                     sessions: ids
                         .into_iter()
-                        .map(|session_id| SessionSummary { session_id, title: None })
+                        .map(|session_id| SessionSummary { session_id, ..Default::default() })
                         .collect(),
                     next_cursor: None,
                 })
             }
             Command::ReadSession { session_id, .. } => match self.find_stored(&session_id) {
-                Some(_) => Ok(Ack::Session { session_id, title: None }),
+                Some(_) => Ok(Ack::SessionRead { session_id, title: None, first_shell_command: None }),
                 None => Err(ProviderError::Unavailable {
                     reason: format!(
                         "no stored transcript for session {session_id}: refusing to guess a \

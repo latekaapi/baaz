@@ -18,6 +18,9 @@ use aui::nav::{Byline, DateGroup, ProjectGroup, RowDensity, RowStatus, RowStatus
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
+use crate::list_cache::ListedRow;
+use crate::providers::ProviderId;
+use provider::facts::Attention;
 use crate::layout::Layout;
 use crate::projects::Projects;
 use crate::sessions::SessionMeta;
@@ -76,11 +79,11 @@ pub struct SessionEntry {
     /// A `--replay` capture, labelled by file rather than by the index. No
     /// store source speaks for its label, so a rejoin keeps it.
     pub replayed: bool,
-    /// Which provider serves this session, when it is not muse: the wire
-    /// id (`"claude-code"`, `"codex"`). `None` is the muse lane.
-    /// [`Self::summary`] turns it into the row's provider mark, and the
-    /// list merge keeps these rows — `session/list` never names them.
-    pub provider: Option<String>,
+    /// Which provider serves this session. [`Self::summary`] turns it into
+    /// the row's provider mark, and the list merge keeps the rows of
+    /// providers that keep no list of their own
+    /// ([`ProviderId::lists_sessions`]) — a listing never names them.
+    pub provider: ProviderId,
     /// Named with `/name` or the row's pencil. A named session with no turns
     /// is somebody's draft, not noise, so the empty filter leaves it alone.
     pub named: bool,
@@ -146,12 +149,11 @@ pub struct SessionEntry {
     /// `project · branch` fallback. Resolved beside [`Self::project`];
     /// `None` renders the branch alone (or empty space with neither).
     pub project_name: Option<String>,
-    /// The wire's attention flags (`Session.attention`, muse 1.3.0): a
-    /// pending approval or question parked on a session other than the open
-    /// one. Absence is a non-assertion — nothing pending, or a `notLoaded`
-    /// row whose pending source declined to answer — so an empty vec reads
-    /// exactly as `None` did on the wire.
-    pub attention: Vec<muse_client::schema::AttentionFlag>,
+    /// What waits on the person (the listing's or a status broadcast's
+    /// attention): a pending approval or question parked on a session other
+    /// than the open one. Absence is a non-assertion — nothing pending, or
+    /// a row whose pending source declined to answer.
+    pub attention: Vec<Attention>,
     /// The pending approval's exact command, when the open session holds
     /// one: the context line's first priority, and what the status line's
     /// `Needs approval` stands on. The wire carries flags only, never text,
@@ -182,7 +184,7 @@ pub struct SessionEntry {
 /// on content and never precedes `created_at`, so the row sorts and reads by
 /// it; with no content record yet it falls back to `created_at`, which a
 /// resume cannot advance either. `updated_at` stays deliberately unread.
-fn activity_time(session: &muse_client::schema::Session) -> DateTime<Local> {
+fn activity_time(session: &ListedRow) -> DateTime<Local> {
     session
         .last_activity_at
         .as_deref()
@@ -200,7 +202,7 @@ fn activity_time(session: &muse_client::schema::Session) -> DateTime<Local> {
 /// known; see [`SessionEntry::join`] for the order and why.
 pub(crate) fn label_ladder<'a>(
     meta: Option<&'a SessionMeta>,
-    wire: Option<&'a muse_client::schema::Session>,
+    wire: Option<&'a ListedRow>,
     index: Option<&'a IndexEntry>,
 ) -> Option<&'a str> {
     fn pick(value: Option<&str>) -> Option<&str> {
@@ -241,7 +243,7 @@ impl SessionEntry {
     /// The session id is never a title. "Session 01a081ef" tells a person
     /// nothing they can act on, and it reads like something went wrong.
     pub fn join(
-        session: &muse_client::schema::Session,
+        session: &ListedRow,
         index: Option<&IndexEntry>,
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
@@ -254,7 +256,7 @@ impl SessionEntry {
     /// distinct root. Row-for-row identical to [`Self::join`]: the cache is
     /// a pure memo within the pass.
     pub fn join_cached(
-        session: &muse_client::schema::Session,
+        session: &ListedRow,
         index: Option<&IndexEntry>,
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
@@ -295,7 +297,7 @@ impl SessionEntry {
             label: one_line(text),
             updated: activity_time(session),
             created: parse_time(&session.created_at),
-            running: matches!(session.status, muse_client::schema::SessionStatus::Running),
+            running: session.running(),
             // A destination's wire count includes its hidden pack
             // exchange; the row matches the transcript (§8.4).
             turns: visible_turns(
@@ -315,7 +317,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: None,
+            provider: ProviderId::Muse,
             named: name.is_some(),
             needs_title: label.is_none(),
             side_marker,
@@ -326,7 +328,7 @@ impl SessionEntry {
             workspace,
             project,
             project_name,
-            attention: session.attention.clone().unwrap_or_default(),
+            attention: session.attention(),
             approval_command: None,
             pending_question: None,
             turn_started: None,
@@ -419,7 +421,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: None,
+            provider: ProviderId::Muse,
             named: name.is_some(),
             needs_title: false,
             side_marker,
@@ -510,7 +512,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: Some(record.provider.clone()),
+            provider: ProviderId::parse(&record.provider),
             named: name.is_some(),
             needs_title: false,
             side_marker: false,
@@ -566,7 +568,7 @@ impl SessionEntry {
             archived: false,
             description: String::new(),
             replayed: true,
-            provider: None,
+            provider: ProviderId::Muse,
             named: false,
             needs_title: false,
             side_marker,
@@ -649,12 +651,9 @@ impl SessionEntry {
     /// after the transition, and the attention flags after it. The flags
     /// ride present-only-when-nonempty, so an absent list clears — the
     /// broadcast is the whole truth, not a delta.
-    pub fn apply_status_changed(&mut self, running: bool, attention: &[String]) {
+    pub fn apply_status_changed(&mut self, running: bool, attention: &[Attention]) {
         self.running = running;
-        self.attention = attention
-            .iter()
-            .filter_map(|flag| serde_json::from_value(serde_json::Value::String(flag.clone())).ok())
-            .collect();
+        self.attention = attention.to_vec();
     }
 
     /// Fold a `turn/completed` terminal into the row: a failed turn records
@@ -676,17 +675,14 @@ impl SessionEntry {
     /// Unknown flag values never count (the schema declares the domain
     /// open; a future kind is not an approval).
     pub fn needs_approval(&self) -> bool {
-        use muse_client::schema::AttentionFlag;
-        self.approval_text().is_some()
-            || self.attention.iter().any(|flag| matches!(flag, AttentionFlag::ApprovalPending))
+        self.approval_text().is_some() || self.attention.contains(&Attention::ApprovalPending)
     }
 
     /// Whether the row asked a question: a live prompt on the open session,
     /// or the wire's `inputPending` flag on any other. Like
     /// [`Self::needs_approval`], unknown flags never count.
     pub fn asked(&self) -> bool {
-        use muse_client::schema::AttentionFlag;
-        self.question_text().is_some() || self.attention.iter().any(|flag| matches!(flag, AttentionFlag::InputPending))
+        self.question_text().is_some() || self.attention.contains(&Attention::InputPending)
     }
 
     /// The row's state verdict, against `now`: which sentence names it and
@@ -804,7 +800,7 @@ impl SessionEntry {
     /// muse row carries none.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
-        if let Some(provider) = self.provider.as_deref().and_then(provider_mark) {
+        if let Some(provider) = self.provider.row_mark() {
             row = row.provider(provider);
         }
         // Option B's context priority: the live approval/question override
@@ -942,7 +938,7 @@ pub fn local_started_row(
         archived: false,
         description: String::new(),
         replayed: false,
-        provider: None,
+        provider: ProviderId::Muse,
         named: false,
         needs_title: false,
         side_marker: false,
@@ -1109,7 +1105,7 @@ pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) ->
     merged.extend(
         existing
             .iter()
-            .filter(|entry| (entry.local || entry.provider.is_some()) && !listed.contains(&entry.id))
+            .filter(|entry| (entry.local || !entry.provider.lists_sessions()) && !listed.contains(&entry.id))
             .cloned(),
     );
     merged
@@ -1125,7 +1121,7 @@ pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) ->
     // Provider-lane rows are the window's own, like locals: the wire never
     // lists them, so they never count toward (or against) a match.
     let listed: Vec<&SessionEntry> =
-        existing.iter().filter(|entry| !entry.local && entry.provider.is_none()).collect();
+        existing.iter().filter(|entry| !entry.local && entry.provider.lists_sessions()).collect();
     listed.len() == wire.len() && listed.iter().zip(wire.iter()).all(|(a, b)| a == &b)
 }
 
@@ -2332,7 +2328,7 @@ mod tests {
     /// third line draws.
     #[test]
     fn status_vocabulary_per_state() {
-        use muse_client::schema::AttentionFlag;
+        use Attention;
         let now = Local::now();
         let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
         // Running with its own elapsed.
@@ -2358,7 +2354,7 @@ mod tests {
         let mut flagged_approval = entry("flagged-approval");
         flagged_approval.turns = 2;
         flagged_approval.updated = ago(8);
-        flagged_approval.attention = vec![AttentionFlag::ApprovalPending];
+        flagged_approval.attention = vec![Attention::ApprovalPending];
         assert_eq!(flagged_approval.row_status(now).text().as_ref(), "Needs approval");
         // A pending question quotes its words; the bare flag reads `Asked`.
         let mut asked = entry("asked");
@@ -2369,7 +2365,7 @@ mod tests {
         let mut flagged_asked = entry("flagged-asked");
         flagged_asked.turns = 4;
         flagged_asked.updated = ago(8);
-        flagged_asked.attention = vec![AttentionFlag::InputPending];
+        flagged_asked.attention = vec![Attention::InputPending];
         assert_eq!(flagged_asked.row_status(now).text().as_ref(), "Asked");
         // The last turn's terminal error, with the session's elapsed.
         let mut failed = entry("failed");
@@ -2396,16 +2392,16 @@ mod tests {
     /// future flag the schema left open lights nothing.
     #[test]
     fn attention_flags_map_to_their_states_only() {
-        use muse_client::schema::AttentionFlag;
+        use Attention;
         let mut both = entry("both");
-        both.attention = vec![AttentionFlag::ApprovalPending, AttentionFlag::InputPending];
+        both.attention = vec![Attention::ApprovalPending, Attention::InputPending];
         assert!(both.needs_approval());
         assert!(both.asked());
         // Approval outranks the question, mirroring the transcript's own
         // phase priority.
         assert_eq!(both.row_status(Local::now()).text().as_ref(), "Needs approval");
         let mut future = entry("future");
-        future.attention = vec![AttentionFlag::Unknown("somethingNew".into())];
+        future.attention = vec![Attention::Other("somethingNew".into())];
         assert!(!future.needs_approval());
         assert!(!future.asked());
         assert_eq!(future.row_status(Local::now()).text().as_ref(), "No reply yet");
@@ -2421,7 +2417,7 @@ mod tests {
     fn status_changed_folds_running_and_attention() {
         let mut row = entry("s");
         row.turns = 2;
-        row.apply_status_changed(true, &["approvalPending".to_owned()]);
+        row.apply_status_changed(true, &[Attention::ApprovalPending]);
         assert!(row.running);
         assert!(row.needs_approval());
         assert_eq!(row.row_status(Local::now()).text().as_ref(), "Needs approval");
@@ -2501,7 +2497,7 @@ mod tests {
     #[test]
     fn every_state_keeps_the_three_line_height() {
         use aui::nav::context_line_kind;
-        use muse_client::schema::AttentionFlag;
+        use Attention;
         let now = Local::now();
         let mut running = entry("running");
         running.running = true;
@@ -2512,7 +2508,7 @@ mod tests {
         lined.last_ask = Some("tighten validation".into());
         lined.description = "patched the validator".into();
         let mut approval = entry("approval");
-        approval.attention = vec![AttentionFlag::ApprovalPending];
+        approval.attention = vec![Attention::ApprovalPending];
         approval.last_ask = Some("install it".into());
         let mut asked = entry("asked");
         asked.pending_question = Some("Which bucket?".into());
@@ -2579,33 +2575,13 @@ mod tests {
 
     /// A `session/list` row as muse 1.2.1 serves it: the index-era members
     /// plus the new derivations, each settable per test.
-    fn wire_session() -> muse_client::schema::Session {
-        muse_client::schema::Session {
-            active_turn_id: None,
-            approval_mode: None,
-            attention: None,
-            branch: None,
-            created_at: "2026-09-13T10:00:00Z".into(),
-            created_by_client: None,
-            first_user_prompt: None,
-            forked_from: None,
-            generated_name: None,
-            kind: None,
-            last_activity_at: None,
-            model_id: None,
-            name: None,
-            name_origin: None,
-            parent_session_id: None,
-            path: String::new(),
-            permission_state: None,
-            provider_id: None,
+    fn wire_session() -> ListedRow {
+        ListedRow {
             session_id: "s1".into(),
-            side_from: None,
-            status: muse_client::schema::SessionStatus::Idle,
-            title: None,
-            turn_count: 0,
+            created_at: "2026-09-13T10:00:00Z".into(),
             updated_at: "2026-09-13T10:00:00Z".into(),
-            workspace_root: None,
+            status: Some("idle".into()),
+            ..Default::default()
         }
     }
 
@@ -2954,7 +2930,7 @@ mod tests {
             archived: false,
             description: String::new(),
             replayed: false,
-            provider: None,
+            provider: ProviderId::Muse,
             named: false,
             needs_title: false,
             side_marker: false,
@@ -3881,7 +3857,7 @@ mod tests {
         let provider = SessionEntry::provider_row(&provider_record(), None, &projects);
         let merged = merge_session_list(Vec::new(), std::slice::from_ref(&provider));
         assert_eq!(merged.len(), 1, "the provider row survives an empty reply");
-        assert_eq!(merged[0].provider.as_deref(), Some("claude-code"));
+        assert_eq!(merged[0].provider, ProviderId::ClaudeCode);
         // A reply that matches the muse rows still applies wholesale with
         // a provider row standing beside them.
         let wire = SessionEntry::join(&wire_session(), None, None, &projects);
@@ -3982,7 +3958,7 @@ mod tests {
         assert_eq!(row.id, "chain-c", "the head is what is listed");
         assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
         assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
-        assert!(row.provider.is_none(), "the muse head wears no provider mark");
+        assert_eq!(row.provider.row_mark(), None, "the muse head wears no provider mark");
     }
 
     /// The collapsed row keeps the head's own recency: no reorder jump
@@ -4208,21 +4184,21 @@ mod tests {
     /// honest turns. Y2a3: a live turn ORs across members too.
     #[test]
     fn the_collapsed_head_carries_the_chains_state() {
-        use muse_client::schema::AttentionFlag;
+        use Attention;
         let (provider, overrides) = chain_stores();
         let mut rows = chain_rows(&provider);
         rows[0].pinned = true;
         rows[0].running = true;
-        rows[0].attention = vec![AttentionFlag::ApprovalPending];
-        rows[1].attention = vec![AttentionFlag::InputPending];
+        rows[0].attention = vec![Attention::ApprovalPending];
+        rows[1].attention = vec![Attention::InputPending];
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 1);
         let head = &collapsed[0];
         assert!(head.running, "a live turn on a member shows on the one row (Y2a3)");
         assert!(head.pinned, "pin rides the head even though the source holds it");
         assert!(
-            head.attention.contains(&AttentionFlag::ApprovalPending)
-                && head.attention.contains(&AttentionFlag::InputPending),
+            head.attention.contains(&Attention::ApprovalPending)
+                && head.attention.contains(&Attention::InputPending),
             "needs-you from any member shows on the one row, drew {:?}",
             head.attention
         );

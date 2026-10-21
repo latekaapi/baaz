@@ -7,8 +7,7 @@
 //! translation is in `translate`. Spawning, `initialize` and the
 //! schema-fingerprint warning live here too — [`establish`] is what `baaz`'s
 //! connection path calls. [`MuseAdapter`] is the whole connection as one
-//! adapter, for tests; [`SharedTransport`] and [`MuseHub::transport`] are
-//! transitional.
+//! adapter, for tests.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

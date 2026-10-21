@@ -114,6 +114,9 @@ pub enum Command {
         limit: Option<u32>,
         /// Only sessions in this workspace.
         workspace: Option<String>,
+        /// Only sessions whose record moved strictly after this RFC 3339
+        /// stamp ([`crate::SessionSummary::updated_at`]); absent lists all.
+        updated_after: Option<String>,
     },
     /// Read a stored session without attaching to it.
     ReadSession {

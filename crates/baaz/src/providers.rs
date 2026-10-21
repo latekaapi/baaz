@@ -51,6 +51,25 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
+    /// Whether the provider keeps its own session list (Muse's
+    /// `session/list`), which Baaz reads and merges; the others' sessions
+    /// are Baaz's own records (`provider-sessions.json`), which survive any
+    /// listing.
+    pub fn lists_sessions(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The provider mark a sidebar row wears after its tags. Muse's rows
+    /// wear none: the sidebar's baselines were drawn when Muse was the only
+    /// provider.
+    pub fn row_mark(self) -> Option<aui_icons::Provider> {
+        match self {
+            ProviderId::Muse => None,
+            ProviderId::ClaudeCode => Some(aui_icons::Provider::Claude),
+            ProviderId::Codex => Some(aui_icons::Provider::Codex),
+        }
+    }
+
     /// Every entry in the registry, in switcher order.
     pub fn all() -> [ProviderId; 3] {
         [ProviderId::Muse, ProviderId::ClaudeCode, ProviderId::Codex]
