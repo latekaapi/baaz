@@ -124,8 +124,12 @@ impl SessionView {
                 self.restore_prompt(text, cx);
                 return;
             }
-            // No billing guard here: the tier banner is a muse-account
-            // surface and never applies to a provider lane.
+            // The billing guard holds the send while the pay-as-you-go
+            // banner stands (only a Muse session ever carries it).
+            if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
+                self.restore_prompt(text, cx);
+                return;
+            }
             self.submit_on_provider(text, cx);
             return;
         }
@@ -269,6 +273,12 @@ impl SessionView {
     ) {
         crate::log::send_mark("ack");
         match result {
+            // Queued behind the running turn: the queue strip shows it, not
+            // a bubble — its user turn arrives when it starts.
+            Ok(provider::Ack::TurnAccepted { queued: true, .. }) => {
+                self.submitting = false;
+                self.remove_optimistic_turn(&optimistic_id);
+            }
             Ok(provider::Ack::TurnAccepted { turn_id, .. }) => {
                 // Events can beat acks: when the adapter already said
                 // which turn this ack names, use the streamed id; else
@@ -309,7 +319,7 @@ impl SessionView {
                 // the person keeps their words. An `Unsupported` refusal
                 // shows its reason, never silence.
                 self.remove_optimistic_turn(&optimistic_id);
-                self.report_provider_error(&error, cx);
+                self.report_provider_retryable(&error, BannerAction::RetryTurn(text.clone()), cx);
                 self.restore_prompt(text, cx);
             }
         }
@@ -685,7 +695,7 @@ impl SessionView {
             self.leave_auto_if_unsupported(cx);
             return;
         }
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if self.is_provider_lane() || !crate::providers::uses_legacy_pump(self.provider_kind()) {
             let command = ProviderCommand::SelectModel {
                 request_id: new_command_id(),
                 session_id: self.session_id.clone(),
@@ -856,13 +866,29 @@ impl SessionView {
             .filter(|row| !row.unavailable_modes.is_empty())
             .map(|row| (row.id.clone(), row.unavailable_modes.clone()))
             .collect();
+        let muse = self.provider_kind() == ProviderId::Muse;
         self.models = rows
             .into_iter()
             .map(|row| ModelCatalogEntry {
+                // Muse's own tiers, default and notes ride the row: the
+                // effort menu reads them off it (`muse_effort_options`).
+                variants: (muse && !row.efforts.is_empty()).then(|| {
+                    muse_client::schema::ModelReasoningEffortVariants::Tiers(row.efforts.clone())
+                }),
+                default_reasoning_effort: row.default_effort.clone(),
+                reasoning_effort_variants: (!row.effort_notes.is_empty()).then(|| {
+                    row.effort_notes
+                        .iter()
+                        .map(|(tier, description)| muse_client::schema::ModelDescribedReasoningEffort {
+                            description: Some(description.clone()),
+                            tier: tier.clone(),
+                        })
+                        .collect()
+                }),
                 context_limit: None,
                 cost: None,
                 description: row.description,
-                display_label: row.label,
+                display_label: if muse { SessionView::muse_row_label(&row.id, &row.label) } else { row.label },
                 is_active: row.active,
                 is_default: row.is_default,
                 model_id: row.id,
@@ -870,7 +896,6 @@ impl SessionView {
                 profile_id: None,
                 provider_id: provider_id.to_owned(),
                 release_date: None,
-                ..Default::default()
             })
             .collect();
         // The session's model names no catalog row (Codex serves models its
@@ -1132,10 +1157,10 @@ impl SessionView {
                 session_id: self.session_id.clone(),
                 through_turn: None,
             };
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    this.report_provider_error(&error, cx);
-                }
+            self.provider_send(command, cx, move |this, result, cx| match result {
+                Ok(provider::Ack::Noop { reason }) => this.toast("Nothing to compact", reason, cx),
+                Ok(_) => {}
+                Err(error) => this.report_provider_error(&error, cx),
             });
             return;
         }
@@ -1212,6 +1237,10 @@ impl SessionView {
                     queue.models = true;
                     self.models_error = Some("Models list once the session has started…".to_owned());
                     cx.notify();
+                    return;
+                }
+                if self.lane_attached() {
+                    self.request_provider_models(cx);
                     return;
                 }
                 let Some(client) = self.wire_client(cx) else {
@@ -1512,6 +1541,7 @@ pub(crate) fn interrupt_found_turn_over(error: &MuseError) -> bool {
 /// child) is a banner, never a settle.
 fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
     match error {
+        provider::ProviderError::Refused(refusal) => refusal.hint == provider::RefusalHint::TurnOver,
         provider::ProviderError::Rejected { reason } => {
             reason.contains("nothing to stop") || reason.contains("no running turn")
         }
@@ -1705,7 +1735,7 @@ mod tests {
             .iter()
             .map(|row| {
                 let id = row.get("id").and_then(serde_json::Value::as_str).expect("row id");
-                provider::ModelSummary {
+                provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                     unavailable_modes: Vec::new(),
                     id: id.to_owned(),
                     label: row
@@ -1745,7 +1775,7 @@ mod tests {
     /// off-catalog intersection differs from the union.
     fn claude_fixture_catalog() -> Vec<provider::ModelSummary> {
         vec![
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "default".into(),
                 label: "Default (recommended)".into(),
@@ -1761,7 +1791,7 @@ mod tests {
                         .into(),
                 ),
             },
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "opus[1m]".into(),
                 label: "Opus (1M context)".into(),
@@ -1777,7 +1807,7 @@ mod tests {
                         .into(),
                 ),
             },
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "claude-fable-5-1[1m]".into(),
                 label: "Fable".into(),
@@ -1794,7 +1824,7 @@ mod tests {
                         .into(),
                 ),
             },
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 unavailable_modes: Vec::new(),
                 id: "sonnet".into(),
                 label: "Sonnet".into(),
@@ -1807,7 +1837,7 @@ mod tests {
                 is_default: false,
                 description: Some("Sonnet 5 · Efficient for routine tasks (claude-sonnet-5)".into()),
             },
-            provider::ModelSummary {
+            provider::ModelSummary { default_effort: None, effort_notes: Vec::new(),
                 // Haiku's row omits `supportsAutoMode`: the CLI refuses
                 // `set_permission_mode{auto}` on it.
                 unavailable_modes: vec![aui_protocol::PermissionMode::OnRequest],

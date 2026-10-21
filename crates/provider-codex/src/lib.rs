@@ -1149,6 +1149,8 @@ impl ProviderAdapter for CodexAdapter {
                         .into_iter()
                         .filter(|row| !row.hidden || row.id == active)
                         .map(|row| ModelSummary {
+                            default_effort: None,
+                            effort_notes: Vec::new(),
                             unavailable_modes: Vec::new(),
                             active: row.id == active,
                             label: row.label,

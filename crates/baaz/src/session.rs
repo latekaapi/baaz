@@ -878,6 +878,9 @@ pub struct SessionView {
     /// A stale-sidecar page failure was already retried once in this backfill
     /// chain: the second failure reports instead.
     backfill_stale_retried: bool,
+    /// The lane backfill's page in flight is its first: the tail-pin cue
+    /// follows it.
+    backfill_first: bool,
     /// The lease is gone — the session is open in another window (or the
     /// child that held it exited) — so nothing is sent until a later resume
     /// succeeds. `Some` is the banner text, re-shown on
@@ -914,7 +917,7 @@ pub struct SessionView {
     /// Answers gathered so far for a multi-question request, keyed by
     /// `userInputId` then `questionId`. MSP settles the whole prompt at once, so
     /// the app holds the earlier answers until the last question is answered.
-    answers: HashMap<String, HashMap<String, muse_client::schema::UserInputAnswer>>,
+    answers: HashMap<String, HashMap<String, provider::QuestionAnswer>>,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     question_started: HashMap<String, Instant>,
@@ -1277,6 +1280,7 @@ impl SessionView {
             loading_history: false,
             backfill_running: false,
             backfill_stale_retried: false,
+            backfill_first: false,
             lease_notice: None,
             banner: None,
             banner_is_mode_fallback: false,
@@ -2075,7 +2079,9 @@ impl SessionView {
     /// session has no muse account behind it, so the banner never lands
     /// there and never gates its send.
     pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
+        // The billing tier is Muse's account: no other provider's session
+        // carries its banner or its guard, whichever lane it rides.
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
             return;
         }
         if self.tier_banner != banner {

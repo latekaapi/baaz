@@ -106,6 +106,11 @@ impl SessionView {
         if !self.is_provider_lane() {
             return None;
         }
+        // A prompt the provider reports beside the transcript (several
+        // questions, one card each) is answered as the whole prompt.
+        if let Some(pending) = self.question(block_id) {
+            return Some(pending);
+        }
         let session = self.session()?;
         for turn in session.turns.iter() {
             let Turn::Assistant { blocks, .. } = turn else { continue };
@@ -160,7 +165,7 @@ impl SessionView {
             return;
         }
         let chosen: Vec<String> = selected.iter().filter_map(|i| pending.labels.get(*i).cloned()).collect();
-        let answer = UserInputAnswer {
+        let answer = provider::QuestionAnswer {
             free_text: None,
             note: None,
             question_id: pending.question_id.clone(),
@@ -177,8 +182,19 @@ impl SessionView {
             cx.notify();
             return;
         }
-        let answers: Vec<UserInputAnswer> =
-            self.answers.remove(&pending.input_id).unwrap_or_default().into_values().collect();
+        let answers: Vec<UserInputAnswer> = self
+            .answers
+            .remove(&pending.input_id)
+            .unwrap_or_default()
+            .into_values()
+            .map(|answer| UserInputAnswer {
+                free_text: answer.free_text,
+                note: answer.note,
+                question_id: answer.question_id,
+                selected_label: answer.selected_label,
+                selected_labels: answer.selected_labels,
+            })
+            .collect();
         let Some(client) = self.wire_client(cx) else { return };
         let input_id = pending.input_id.clone();
         let params = UserInputAnswerParams {
@@ -216,16 +232,26 @@ impl SessionView {
             free_text: None,
             note: None,
         };
+        // A prompt of several questions (a wizard) settles once: answers
+        // wait here until its last question is answered.
         let input_id = pending.input_id.clone();
+        let gathered = self.answers.entry(input_id.clone()).or_default();
+        gathered.insert(pending.question_id.clone(), answer);
+        if gathered.len() < pending.questions {
+            cx.notify();
+            return;
+        }
+        let answers: Vec<provider::QuestionAnswer> =
+            self.answers.remove(&input_id).unwrap_or_default().into_values().collect();
         let command = ProviderCommand::AnswerQuestion {
             request_id: new_command_id(),
             session_id: self.session_id.clone(),
             question: input_id.clone(),
-            answers: vec![answer],
+            answers,
         };
         self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                this.report_provider_error(&error, cx);
+                this.settle_provider_failed(&input_id, &error, cx);
             }
         });
         cx.notify();
@@ -245,9 +271,11 @@ impl SessionView {
                 question: input_id,
                 reason: Some("The person declined to answer.".to_owned()),
             };
+            self.answers.remove(&pending.input_id);
+            let input_id = pending.input_id.clone();
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
-                    this.report_provider_error(&error, cx);
+                    this.settle_provider_failed(&input_id, &error, cx);
                 }
             });
             cx.notify();
@@ -304,9 +332,10 @@ impl SessionView {
                 question: pending.input_id.clone(),
                 text: content,
             };
+            let input_id = pending.input_id.clone();
             self.provider_send(command, cx, move |this, result, cx| {
                 if let Err(error) = result {
-                    this.report_provider_error(&error, cx);
+                    this.settle_provider_failed(&input_id, &error, cx);
                 }
             });
             cx.notify();
@@ -348,6 +377,21 @@ impl SessionView {
                 self.set_banner("Muse refused that answer; pick again.", None, cx);
             }
             _ => self.report(error, cx),
+        }
+    }
+
+    /// The ways a question's settlement can lose, by the provider's hint:
+    /// someone already settled it (the settlement is on its way), or the
+    /// answer was refused (pick again).
+    fn settle_provider_failed(&mut self, input_id: &str, error: &provider::ProviderError, cx: &mut Context<Self>) {
+        match error.hint() {
+            provider::RefusalHint::AlreadySettled => {}
+            provider::RefusalHint::InvalidChoice => {
+                self.answers.remove(input_id);
+                let agent = self.provider_kind().label();
+                self.set_banner(&format!("{agent} refused that answer; pick again."), None, cx);
+            }
+            _ => self.report_provider_error(error, cx),
         }
     }
 }

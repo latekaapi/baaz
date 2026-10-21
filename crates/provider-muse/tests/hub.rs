@@ -176,3 +176,19 @@ fn a_decision_without_a_stage_token_takes_the_pending_stage() {
     assert_eq!(decide["params"]["requirementId"], serde_json::json!({"approvalId": "a-1", "sourceIndex": 3}));
     let _ = std::fs::remove_file(&records);
 }
+
+#[test]
+fn a_page_lands_on_the_lane_and_then_says_so() {
+    let (_hub, lane) = hub(&[]);
+    resume(&lane, "s-1");
+    let ack = lane
+        .send(Command::PageTranscript { session_id: "s-1".into(), after: None, limit: 50, backward: false })
+        .expect("page");
+    assert!(matches!(ack, Ack::TranscriptPage { ref deltas, next_cursor: None } if deltas.is_empty()), "{ack:?}");
+    let heard = collect(&lane, |seen| seen.iter().any(|e| matches!(e, ProviderEvent::TranscriptPaged { .. })));
+    assert!(
+        heard.iter().any(|event| matches!(event,
+            ProviderEvent::TranscriptPaged { session_id, next_cursor: None } if session_id == "s-1")),
+        "the page's landing is in the stream: {heard:?}"
+    );
+}

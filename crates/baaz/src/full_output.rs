@@ -104,7 +104,7 @@ fn push_page(
 /// Split fetched bytes into lines, the way the fold splits visible output: no
 /// trailing empty line for output that ends in a newline, and nothing at all
 /// for empty output.
-fn split_output_lines(text: &str) -> Vec<String> {
+pub fn split_output_lines(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }

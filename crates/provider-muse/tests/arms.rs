@@ -200,11 +200,11 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 model_id: Some("m-1".into()),
                 permission_profile: None,
                 provider_id: Some("p-1".into()),
-                session_id: None,
+                session_id: Some("cmd-open".into()), // minted from the request id
                 workspace_root: Some("/tmp/w".into()),
                 workspace_roots: None,
             }),
-            check_ack: session_ack("s-1", Some("Fake Session")),
+            check_ack: session_ack("cmd-open", Some("Fake Session")),
         },
         Case {
             name: "resume-session",
@@ -240,7 +240,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
             expected_params: params_of!(SessionForkParams {
                 command_id: "cmd-fork".into(),
                 cut_point: Some(ForkCutPoint { last_turn_id: "t-9".into() }),
-                exclude_items: None,
+                exclude_items: Some(true), // a Muse fork always pages its history in
                 session_id: "s-1".into(),
             }),
             check_ack: session_ack("s-1", Some("Fake Session")),

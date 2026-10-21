@@ -9,6 +9,7 @@ repository.workspace = true
 description = "The muse implementation of the provider seam: neutral commands into MSP, view events out through the fold."
 
 [dependencies]
+base64 = { workspace = true }
 provider = { workspace = true }
 muse-client = { workspace = true }
 muse-adapter = { workspace = true }

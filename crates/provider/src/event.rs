@@ -160,6 +160,17 @@ pub enum ProviderEvent {
         /// The banner's words.
         text: String,
     },
+    /// A page asked for with [`crate::Command::PageTranscript`] has landed
+    /// in this stream: its deltas came before this event. `next_cursor` is
+    /// where the next page starts, `None` at the end. A backend whose pages
+    /// travel the event stream sends it so the caller can tell a page that
+    /// was answered from one that was drawn.
+    TranscriptPaged {
+        /// The paged session.
+        session_id: String,
+        /// Where the next page starts; `None` when this was the last.
+        next_cursor: Option<String>,
+    },
     /// The connection is back after a [`ProviderEvent::ConnectionLost`]:
     /// followed sessions were re-attached and resume from where they were.
     ConnectionRestored,

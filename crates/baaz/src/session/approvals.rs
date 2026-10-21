@@ -158,6 +158,42 @@ impl SessionView {
     /// arriving does nothing; a failed fetch reports its banner and leaves the
     /// truncated body alone.
     pub fn show_full_output(&mut self, block_id: String, cx: &mut Context<Self>) {
+        // A lane reads the whole stored output with one command: the
+        // provider pages, decodes and caps it.
+        if self.is_provider_lane() {
+            let Some(output) = self.store.side().stored_outputs.get(&block_id).cloned() else { return };
+            if matches!(self.full_outputs.get(&block_id), Some(full_output::Fetch::Fetching)) {
+                return;
+            }
+            self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
+            self.refresh_render_cache();
+            cx.notify();
+            let command = ProviderCommand::ReadStoredOutput {
+                session_id: self.session_id.clone(),
+                item: block_id.clone(),
+                output,
+                offset: 0,
+                length: None,
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                match result {
+                    Ok(provider::Ack::StoredOutput { content, complete }) => {
+                        let lines = full_output::split_output_lines(&content);
+                        this.full_outputs.insert(block_id, full_output::Fetch::Ready { lines, capped: !complete });
+                    }
+                    Ok(_) => {
+                        this.full_outputs.remove(&block_id);
+                    }
+                    Err(error) => {
+                        this.full_outputs.remove(&block_id);
+                        this.report_provider_error(&error, cx);
+                    }
+                }
+                this.refresh_render_cache();
+                cx.notify();
+            });
+            return;
+        }
         let Some(client) = self.wire_client(cx) else { return };
         let Some(output_ref) = self.store.side().stored_outputs.get(&block_id).cloned() else {
             return;
@@ -222,7 +258,13 @@ impl SessionView {
     /// unattended attempt before it deserves a person's attention.
     pub(super) fn report_retryable(&mut self, error: &MuseError, action: BannerAction, cx: &mut Context<Self>) {
         let auto = matches!(error.kind(), Some(ErrorKind::Overloaded | ErrorKind::Backpressured));
-        self.set_banner(&format!("{}. {error}", conn::title(error)), Some(action.clone()), cx);
+        self.offer_retry(&format!("{}. {error}", conn::title(error)), action, auto, cx);
+    }
+
+    /// Banner `message` with the retry `action`; with `auto`, press it once
+    /// on its own after the backoff unless the banner moved meanwhile.
+    pub(super) fn offer_retry(&mut self, message: &str, action: BannerAction, auto: bool, cx: &mut Context<Self>) {
+        self.set_banner(message, Some(action.clone()), cx);
         if !auto {
             return;
         }
@@ -248,6 +290,11 @@ impl SessionView {
             Some(BannerAction::OpenProviders) => cx.emit(SessionEvent::OpenProviders),
             None => cx.notify(),
         }
+    }
+
+    /// Put `message` on the session's banner, with no action.
+    pub(crate) fn show_banner(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.set_banner(message, None, cx);
     }
 
     /// One place that writes the banner, so its message and its action can never
@@ -309,7 +356,7 @@ impl SessionView {
         // quietly (see `crate::providers`). Park it anyway — dropping a
         // security decision is worse than a banner — and say so.
         if crate::providers::check_single_lane(
-            crate::providers::uses_legacy_pump(self.provider_kind()),
+            !self.is_provider_lane(),
             true,
             &self.session_id,
         )
@@ -424,6 +471,25 @@ impl SessionView {
                     if error.is_unknown_approval() {
                         this.drop_gone_approval(&approval, cx);
                         return;
+                    }
+                    // A lost race the provider already settled in the
+                    // transcript: someone else decided it, or the choices
+                    // moved to the next stage. Logged, never bannered.
+                    match error.hint() {
+                        provider::RefusalHint::AlreadySettled | provider::RefusalHint::StaleChoice => {
+                            crate::baaz_log!("provider approval {approval}: lost the race ({error}); the card follows the provider");
+                            return;
+                        }
+                        provider::RefusalHint::InvalidChoice => {
+                            this.set_banner("That choice is no longer offered for this command.", None, cx);
+                            return;
+                        }
+                        provider::RefusalHint::ItemGone => {
+                            let agent = this.provider_kind().label();
+                            this.set_banner(&format!("{agent} no longer knows about that approval."), None, cx);
+                            return;
+                        }
+                        _ => {}
                     }
                     this.report_provider_error(&error, cx);
                     crate::baaz_log!("provider approval {approval}: the decision never landed: {error}");

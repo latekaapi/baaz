@@ -1807,6 +1807,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     models: rows
                         .into_iter()
                         .map(|row| ModelSummary {
+                            default_effort: None,
+                            effort_notes: Vec::new(),
                             active: row.value == active,
                             label: row.display_name.clone(),
                             id: row.value.clone(),

@@ -309,13 +309,16 @@ pub fn dispatch(
             })
         }
         Command::CompactSession { request_id, session_id, through_turn } => {
-            client
+            let result = client
                 .session_compact(&SessionCompactParams {
                     command_id: request_id,
                     session_id,
                     turn_id: through_turn,
                 })
                 .map_err(transport_error)?;
+            if result.status == muse_client::schema::CompactStatus::Noop {
+                return Ok(Ack::Noop { reason: result.reason.unwrap_or_else(|| "nothing to summarize".to_owned()) });
+            }
             Ok(Ack::Accepted)
         }
         Command::SelectModel { request_id, session_id, model, model_provider } => {
@@ -642,6 +645,13 @@ pub fn model_summaries(models: &[muse_client::schema::ModelCatalogEntry]) -> Vec
             active: model.is_active,
             is_default: model.is_default,
             description: model.description.clone(),
+            default_effort: model.default_reasoning_effort.clone(),
+            effort_notes: model
+                .reasoning_effort_variants
+                .iter()
+                .flatten()
+                .filter_map(|tier| Some((tier.tier.clone(), tier.description.clone()?)))
+                .collect(),
             ..Default::default()
         })
         .collect()

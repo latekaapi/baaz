@@ -125,7 +125,7 @@ fn resume_session(provider: &Provider) -> Ack {
 fn granted_open_and_resume_carry_the_bridge() {
     let (provider, records) = connect(true, true);
     match open_session(&provider) {
-        Ack::Session { session_id, .. } => assert_eq!(session_id, "s-1"),
+        Ack::Session { session_id, .. } => assert_eq!(session_id, "cmd-open"),
         other => panic!("open must ack a session, got {other:?}"),
     }
     let params = last_params(&records, "session/start");
@@ -166,17 +166,15 @@ fn granted_open_and_resume_carry_the_bridge() {
 #[test]
 fn ungranted_sessions_send_what_they_always_sent() {
     // The relay is set, but the old server never granted the route: no
-    // minted id, no `config` key — byte-identical to the pre-route shape.
+    // `config` key — the start still names its minted id, as every Muse
+    // start does (`session/start` takes an exact identity).
     let (provider, records) = connect(false, true);
     match open_session(&provider) {
         Ack::Session { .. } => {}
         other => panic!("open must ack a session, got {other:?}"),
     }
     let params = last_params(&records, "session/start");
-    assert!(
-        params.get("sessionId").is_none_or(Value::is_null),
-        "ungranted open mints nothing: {params}"
-    );
+    assert_eq!(params.get("sessionId").and_then(Value::as_str), Some("cmd-open"), "{params}");
     assert!(
         params.get("config").is_none_or(Value::is_null),
         "ungranted open carries no bridge: {params}"
@@ -203,5 +201,5 @@ fn granted_without_a_relay_sends_what_it_always_sent() {
     }
     let params = last_params(&records, "session/start");
     assert!(params.get("config").is_none_or(Value::is_null));
-    assert!(params.get("sessionId").is_none_or(Value::is_null));
+    assert_eq!(params.get("sessionId").and_then(Value::as_str), Some("cmd-open"));
 }

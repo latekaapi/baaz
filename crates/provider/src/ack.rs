@@ -41,6 +41,12 @@ pub struct ModelSummary {
     /// mode picker can say so before a switch is refused. Empty when the
     /// provider names no limit — absent is never read as unsupported.
     pub unavailable_modes: Vec<PermissionMode>,
+    /// The level the model runs at when none is picked, when the provider
+    /// says.
+    pub default_effort: Option<String>,
+    /// The provider's own words for each level it describes: `(level,
+    /// description)`.
+    pub effort_notes: Vec<(String, String)>,
 }
 
 /// One pending approval, pointed at — not the full card, which arrives as a
@@ -77,6 +83,12 @@ pub enum Ack {
     /// Admitted; the outcome arrives as events. Ack is admission, never
     /// outcome — view events for a command can arrive before its ack.
     Accepted,
+    /// The provider took the command and had nothing to do, and says why
+    /// (compacting a context with nothing to summarize). Not a failure.
+    Noop {
+        /// The provider's words.
+        reason: String,
+    },
     /// A session was opened, resumed, forked, or read.
     Session {
         /// The session identity.
