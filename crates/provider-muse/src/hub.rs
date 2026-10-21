@@ -96,6 +96,9 @@ struct Core {
     /// One mode pick at a time per session: two picks interleaving could
     /// land the mode of one and the profile of the other.
     picks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// The last usage reading seen (a `usage/changed`, a `usage/read`):
+    /// what [`MuseLane::read_usage`] peeks at.
+    usage: Mutex<Option<provider::UsageReport>>,
 }
 
 impl FoldAccess for Core {
@@ -132,6 +135,7 @@ impl MuseHub {
                 refuses_resume_bridge: AtomicBool::new(false),
                 catalog: Mutex::new(HashMap::new()),
                 picks: Mutex::new(HashMap::new()),
+                usage: Mutex::new(None),
             }),
         }
     }
@@ -350,6 +354,19 @@ impl Core {
                 };
                 self.broadcast(ProviderEvent::ConnectionLost { reason });
                 false
+            }
+            MuseEvent::Notification { session_id: None, method, params, .. }
+                if crate::usage::connection_event(&method, &params).is_some() =>
+            {
+                // Account and usage belong to the connection: the app's
+                // sign-in and tier follow them; no session folds them.
+                if let Some(event) = crate::usage::connection_event(&method, &params) {
+                    if let ProviderEvent::UsageChanged { report } = &event {
+                        *self.usage.lock().expect("usage mutex") = Some(report.clone());
+                    }
+                    let _ = self.connection.0.send(event);
+                }
+                true
             }
             MuseEvent::Notification { session_id, method, params, cursor } => {
                 let mut routed = self.routed.lock().expect("routed mutex");
@@ -774,6 +791,13 @@ impl Core {
                 let (content, complete) = crate::output::read_whole(&*self.client()?, &session_id, &item, &output)?;
                 Ok(Ack::StoredOutput { content, complete })
             }
+            Command::ReadUsage => {
+                let ack = translate::dispatch(&*self.client()?, self, Command::ReadUsage, None)?;
+                if let Ack::Usage { report: Some(report) } = &ack {
+                    *self.usage.lock().expect("usage mutex") = Some(report.clone());
+                }
+                Ok(ack)
+            }
             other => {
                 let session = command_session(&other);
                 let client = self.client()?;
@@ -947,7 +971,7 @@ impl ProviderAdapter for MuseLane {
     }
 
     fn read_usage(&self) -> Option<provider::UsageReport> {
-        None
+        self.core.usage.lock().expect("usage mutex").clone()
     }
 }
 

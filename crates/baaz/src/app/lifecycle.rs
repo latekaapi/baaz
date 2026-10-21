@@ -8536,7 +8536,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.auth = Auth::SignedIn(crate::auth::Identity {
-                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    lane: provider::AccountLane::AccountLogin,
                     name: "Test".into(),
                     email: String::new(),
                 });
@@ -8567,7 +8567,7 @@ done
                 harness.provider_factory = scripted_factory();
                 harness.client = Some(dead_client());
                 harness.auth = Auth::SignedIn(crate::auth::Identity {
-                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    lane: provider::AccountLane::AccountLogin,
                     name: "Test".into(),
                     email: String::new(),
                 });
@@ -8614,7 +8614,7 @@ done
                 harness.provider_factory = scripted_factory();
                 harness.client = Some(dead_client());
                 harness.auth = Auth::SignedIn(crate::auth::Identity {
-                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    lane: provider::AccountLane::AccountLogin,
                     name: "Test".into(),
                     email: String::new(),
                 });

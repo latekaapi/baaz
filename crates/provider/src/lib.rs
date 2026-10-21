@@ -51,7 +51,7 @@ mod traits;
 pub mod usage;
 pub mod version;
 
-pub use ack::{Ack, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
+pub use ack::{AccountLane, Ack, LoginOutcome, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
 pub use aui_protocol::Delta;
 pub use capability::{Capability, CapabilitySet, CapabilityState};
 pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};

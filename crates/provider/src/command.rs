@@ -356,6 +356,9 @@ pub enum Command {
     /// Which credential lane is in effect. The only probe: logged-out means
     /// the login screen, anything else means signed in.
     ReadAccount,
+    /// The latest usage reading the provider holds: plan and windows, read
+    /// without spending a turn.
+    ReadUsage,
     /// Begin the login flow: with `api_key` store and validate a key,
     /// without it start the device-code flow the user completes in a
     /// browser. Key material travels here and must never reach a log.
@@ -400,6 +403,7 @@ impl Command {
             Self::UnfollowSession { .. } => "unfollow-session",
             Self::ReadStoredOutput { .. } => "read-stored-output",
             Self::ReadAccount => "read-account",
+            Self::ReadUsage => "read-usage",
             Self::BeginLogin { .. } => "begin-login",
             Self::CancelLogin { .. } => "cancel-login",
             Self::LogOut => "log-out",

@@ -78,9 +78,7 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Root;
-use muse_client::schema::{
-    AccountStateKind, SessionListParams,
-};
+use muse_client::schema::SessionListParams;
 use muse_client::{MuseClient, MuseError, MuseEvent};
 use provider::ProviderEvent;
 
@@ -1922,7 +1920,7 @@ impl Harness {
             // The shell is the point — the transcript is what is being looked
             // at — so the auth probe is skipped rather than faked into a login.
             this.auth = Auth::SignedIn(Identity {
-                lane: AccountStateKind::AccountLogin,
+                lane: provider::AccountLane::AccountLogin,
                 name: "Replay".into(),
                 email: String::new(),
             });
@@ -2263,9 +2261,25 @@ impl Harness {
     fn observe_provider(&mut self, mut events: UnboundedReceiver<ProviderEvent>, cx: &mut Context<Self>) {
         self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
-                if matches!(event, ProviderEvent::ConnectionLost { .. }) {
-                    crate::baaz_log!("provider reported the connection lost");
-                    let _ = this.update(cx, |_, cx| cx.notify());
+                let done = this.update(cx, |this, cx| match event {
+                    ProviderEvent::ConnectionLost { .. } => {
+                        crate::baaz_log!("provider reported the connection lost");
+                        cx.notify();
+                    }
+                    // Sign-in rides the account events; the session views
+                    // never see them.
+                    event @ (ProviderEvent::AccountChanged { .. } | ProviderEvent::LoginCompleted { .. }) => {
+                        this.on_account_event(event, cx);
+                        cx.notify();
+                    }
+                    // A new reading keeps the tier live past its boot-time
+                    // one: the footer meter and the banner follow through
+                    // `push_tier`.
+                    ProviderEvent::UsageChanged { report } => this.apply_usage_changed(&report, cx),
+                    _ => {}
+                });
+                if done.is_err() {
+                    return;
                 }
             }
         }));
@@ -2299,19 +2313,11 @@ impl Harness {
             self.wire = Wire::Reconnecting;
             self.reconnect(cx);
         }
-        // The account notifications own sign-in: they are folded before the
-        // session view sees anything, and the session view never sees them.
-        if let MuseEvent::Notification { method, params, .. } = &event {
+        // Account and usage notifications are the hub's connection events
+        // now (`observe_provider`); this stream only drops them.
+        if let MuseEvent::Notification { method, .. } = &event {
             if method.starts_with("account/") {
-                self.route_account(method, params, cx);
-                cx.notify();
                 return;
-            }
-            // `usage/changed` keeps the tier live past its boot-time reading:
-            // the footer meter and the banner follow through `push_tier`. A
-            // frame that does not decode keeps the known tier.
-            if method == "usage/changed" {
-                self.apply_usage_changed(params, cx);
             }
         }
         // A finished turn is when the index has something new to say about the

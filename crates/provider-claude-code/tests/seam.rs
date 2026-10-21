@@ -322,7 +322,7 @@ fn read_account_reports_the_live_meter_label() {
     let adapter = ClaudeCodeAdapter::new("claude");
     let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
     match ack {
-        Ack::Account { signed_in, label } => {
+        Ack::Account { signed_in, label, .. } => {
             // No meter reading observed yet: no login claimed. `claude
             // --version` succeeds logged-out, so a fresh adapter must read
             // false — fail closed. (The true branch — a meter reading seen

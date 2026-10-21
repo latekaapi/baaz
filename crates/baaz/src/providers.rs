@@ -357,6 +357,27 @@ impl MuseSlot {
         ready.notify_all();
     }
 
+    /// Whether the hub is up right now.
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(*self.state.0.lock().expect("muse slot"), MuseState::Ready(_))
+    }
+
+    /// A lane for connection-level commands (account, usage, the session
+    /// list) when the hub is up now, never waiting: a sign-in screen asks
+    /// and answers at once. Blocking only for the lane's own handshake
+    /// report, which sends nothing on a hub that is up.
+    pub(crate) fn control(&self) -> Result<Provider, ProviderError> {
+        use provider::ProviderAdapter as _;
+        let hub = match &*self.state.0.lock().expect("muse slot") {
+            MuseState::Ready(hub) => hub.clone(),
+            MuseState::Down(reason) => return Err(ProviderError::Unavailable { reason: reason.clone() }),
+            MuseState::Starting => return Err(ProviderError::Unavailable { reason: "Muse is starting".into() }),
+        };
+        let mut lane = hub.lane();
+        lane.connect(&crate::conn::connect_info())?;
+        Ok(Provider::new(lane))
+    }
+
     /// A connected lane on the hub, waiting up to [`MUSE_START_WAIT`] while
     /// it starts. Blocking: the open path runs it on the background
     /// executor.

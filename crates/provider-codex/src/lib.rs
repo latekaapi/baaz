@@ -1234,6 +1234,8 @@ impl ProviderAdapter for CodexAdapter {
                 "read-stored-output",
                 "the protocol exposes no stored-output reference; follow the live session instead",
             )),
+            // The reading the fold holds, the same peek `read_usage` makes.
+            Command::ReadUsage => Ok(Ack::Usage { report: self.read_usage() }),
             Command::ReadAccount => {
                 let label =
                     self.fold.lock().expect("fold mutex").account().label().clone();
@@ -1244,7 +1246,11 @@ impl ProviderAdapter for CodexAdapter {
                 // one while serving an authenticated account. So `signed_in`
                 // is true exactly when a push has been seen; `false` means
                 // "no login observed", never "definitely logged out".
-                Ok(Ack::Account { signed_in: label.is_some(), label })
+                Ok(Ack::Account {
+                    signed_in: label.is_some(),
+                    lane: if label.is_some() { provider::AccountLane::AccountLogin } else { provider::AccountLane::LoggedOut },
+                    label,
+                })
             }
             Command::BeginLogin { .. } => Err(ProviderError::unsupported(
                 "begin-login",
@@ -1302,7 +1308,7 @@ mod tests {
         let adapter = CodexAdapter::new("codex");
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         assert!(
-            matches!(ack, Ack::Account { signed_in: false, label: None }),
+            matches!(ack, Ack::Account { signed_in: false, label: None, .. }),
             "no push seen, no login claimed: {ack:?}"
         );
     }
@@ -1823,7 +1829,7 @@ for line in sys.stdin:
         adapter.fold.lock().expect("fold mutex").apply(&frame);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         match ack {
-            Ack::Account { signed_in: true, label: Some(label) } => {
+            Ack::Account { signed_in: true, label: Some(label), .. } => {
                 assert!(label.contains("19%"), "live meter label: {label}");
             }
             other => panic!("expected signed-in account with a label, got {other:?}"),

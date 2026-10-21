@@ -621,6 +621,11 @@ impl SessionView {
                     self.lane_page_landed(next_cursor, cx);
                 }
             }
+            // Account and usage belong to the connection; the app reads
+            // them from the hub's own stream, never from a session lane.
+            provider::ProviderEvent::AccountChanged { .. }
+            | provider::ProviderEvent::LoginCompleted { .. }
+            | provider::ProviderEvent::UsageChanged { .. } => {}
             // The shared child is back and this session re-attached: the
             // lost-connection banner stands down.
             provider::ProviderEvent::ConnectionRestored => {
