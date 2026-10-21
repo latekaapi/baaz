@@ -1198,7 +1198,7 @@ impl ClaudeCodeAdapter {
         for part in parts {
             match part {
                 provider::SubmissionPart::Text(chunk) => text.push_str(chunk),
-                provider::SubmissionPart::Image { base64_data, media_type } => {
+                provider::SubmissionPart::Image { base64_data, media_type, .. } => {
                     images.push(argv::ImageInput {
                         base64_data: base64_data.clone(),
                         media_type: media_type.clone(),
@@ -1265,7 +1265,7 @@ impl ClaudeCodeAdapter {
         // The ack carries the submission handle: the CLI names the turn
         // only when its first message streams, and the fold announces
         // that id as `TurnIdentified` against this one.
-        Ok(Ack::TurnAccepted { turn_id })
+        Ok(Ack::TurnAccepted { turn_id, queued: false })
     }
 
     fn find_stored(&self, session_id: &str) -> Option<PathBuf> {

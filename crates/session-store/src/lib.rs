@@ -200,6 +200,19 @@ impl SessionStore {
         }
     }
 
+    /// Take a header an adapter reported: model, working directory,
+    /// branch. `false` when nothing moved.
+    pub fn set_header(&mut self, header: &provider::facts::SessionHeader) -> bool {
+        let session = &mut self.session;
+        if session.model == header.model && session.cwd == header.cwd && session.branch == header.branch {
+            return false;
+        }
+        session.model.clone_from(&header.model);
+        session.cwd.clone_from(&header.cwd);
+        session.branch.clone_from(&header.branch);
+        true
+    }
+
     /// Set the approval mode; `false` when it already held it.
     pub fn set_mode(&mut self, mode: PermissionMode) -> bool {
         if self.session.mode == mode {

@@ -130,6 +130,52 @@ pub fn title(error: &MuseError) -> String {
     }
 }
 
+/// A wire error as the seam's typed refusal: Muse's kind becomes the hint,
+/// [`title`] the title, [`severity`] the weight and [`is_session_scoped`]
+/// the scope. Transport failures (the child gone, a timeout) stay
+/// [`provider::ProviderError::Unavailable`]; an answer that does not decode
+/// stays `Rejected`.
+pub fn refusal(error: &MuseError) -> provider::ProviderError {
+    use provider::{ProviderError, Refusal, RefusalHint};
+    match error {
+        MuseError::Closed | MuseError::Timeout(_) | MuseError::Io(_) => {
+            return crate::translate::transport_error_unclassified(error);
+        }
+        MuseError::Json(_) | MuseError::Protocol(_) => {
+            return crate::translate::transport_error_unclassified(error);
+        }
+        MuseError::Rpc(_) => {}
+    }
+    let hint = if error.is_stale_sidecar() {
+        RefusalHint::StaleHistory
+    } else {
+        match error.kind() {
+            Some(ErrorKind::Overloaded | ErrorKind::Backpressured) => RefusalHint::RetryLater,
+            Some(ErrorKind::SessionInUse) => RefusalHint::HeldElsewhere,
+            Some(ErrorKind::SessionNotFound | ErrorKind::NotFound) => RefusalHint::SessionGone,
+            Some(ErrorKind::ApprovalAlreadyResolved | ErrorKind::UserInputAlreadySettled) => {
+                RefusalHint::AlreadySettled
+            }
+            Some(ErrorKind::ApprovalRequirementStale) => RefusalHint::StaleChoice,
+            Some(ErrorKind::ApprovalChoiceInvalid | ErrorKind::UserInputAnswerInvalid) => RefusalHint::InvalidChoice,
+            Some(ErrorKind::ApprovalNotFound | ErrorKind::UserInputNotFound) => RefusalHint::ItemGone,
+            Some(ErrorKind::ForkBoundaryInvalid) => RefusalHint::BadBoundary,
+            Some(ErrorKind::CommandRejected) if error.reason() == Some("already_terminal") => RefusalHint::TurnOver,
+            _ => RefusalHint::None,
+        }
+    };
+    ProviderError::Refused(Refusal {
+        hint,
+        title: title(error),
+        reason: error.to_string(),
+        severity: match severity(error) {
+            Severity::Banner => provider::Severity::Banner,
+            Severity::Dialog => provider::Severity::Dialog,
+        },
+        session_scoped: is_session_scoped(error),
+    })
+}
+
 /// Whether a turn failure looks like a credential problem and should route to
 /// the login screen rather than an inline error (spec §3.2).
 ///
@@ -208,5 +254,50 @@ mod tests {
         assert!(!looks_like_signed_out(Some("modelError"), "the model timed out"));
         // The right words but the wrong kind is still not an auth failure.
         assert!(!looks_like_signed_out(Some("stepLimit"), "not authenticated"));
+    }
+
+    #[test]
+    fn each_wire_kind_maps_to_the_hint_the_app_acts_on() {
+        use provider::RefusalHint;
+        let cases = [
+            ("sessionInUse", RefusalHint::HeldElsewhere),
+            ("overloaded", RefusalHint::RetryLater),
+            ("backpressured", RefusalHint::RetryLater),
+            ("sessionNotFound", RefusalHint::SessionGone),
+            ("approvalAlreadyResolved", RefusalHint::AlreadySettled),
+            ("userInputAlreadySettled", RefusalHint::AlreadySettled),
+            ("approvalRequirementStale", RefusalHint::StaleChoice),
+            ("approvalChoiceInvalid", RefusalHint::InvalidChoice),
+            ("approvalNotFound", RefusalHint::ItemGone),
+            ("forkBoundaryInvalid", RefusalHint::BadBoundary),
+            ("internal", RefusalHint::None),
+        ];
+        for (kind, hint) in cases {
+            let error = rpc_error(kind, -32000, "refused");
+            assert_eq!(refusal(&error).hint(), hint, "{kind}");
+        }
+        let in_use = refusal(&rpc_error("sessionInUse", -32021, "in use"));
+        assert!(in_use.is_session_scoped());
+        assert_eq!(in_use.title(), "Session already in use");
+        assert_eq!(in_use.severity(), provider::Severity::Dialog);
+        assert!(matches!(refusal(&MuseError::Closed), provider::ProviderError::Unavailable { .. }));
+    }
+
+    #[test]
+    fn an_already_terminal_rejection_reads_as_turn_over() {
+        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+            "code": -32000,
+            "message": "turn/interrupt command c1 rejected: already_terminal",
+            "data": {"kind": "commandRejected", "reason": "already_terminal"},
+        }))
+        .expect("error object decodes");
+        let error = MuseError::Rpc(Box::new(object));
+        assert_eq!(refusal(&error).hint(), provider::RefusalHint::TurnOver);
+    }
+
+    #[test]
+    fn a_stale_sidecar_is_stale_history() {
+        let error = rpc_error("internal", -32603, "stale sidecar for session s1");
+        assert_eq!(refusal(&error).hint(), provider::RefusalHint::StaleHistory);
     }
 }

@@ -96,6 +96,10 @@ pub enum Ack {
     TurnAccepted {
         /// The turn that will carry (or absorbed) the input.
         turn_id: String,
+        /// The input waits behind the running turn instead of starting
+        /// one: it shows on the queue strip until it runs or is reclaimed
+        /// ([`crate::Command::ReclaimQueued`]).
+        queued: bool,
     },
     /// The model catalog snapshot.
     ModelCatalog {

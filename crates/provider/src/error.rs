@@ -27,12 +27,77 @@ pub enum ProviderError {
         /// Why the command was refused.
         reason: String,
     },
+    /// The provider refused, and said why in a way the app can act on: a
+    /// typed hint (retry later, the session is held elsewhere, the choice
+    /// went stale…), a title and how loudly to show it. Never parsed from
+    /// text by the caller — the adapter decides the hint.
+    Refused(Refusal),
     /// No provider on the other end: the child is gone, the socket is down,
     /// the request timed out. Retry may help; a different command will not.
     Unavailable {
         /// What went wrong.
         reason: String,
     },
+}
+
+/// What the app can do about a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalHint {
+    /// Nothing specific: show it.
+    None,
+    /// The provider said "not now" (overloaded, backpressured): one retry
+    /// after a pause is reasonable.
+    RetryLater,
+    /// Another client holds the session: this view stays read-only until
+    /// that one lets go.
+    HeldElsewhere,
+    /// The session is gone or was never there.
+    SessionGone,
+    /// The thing acted on (an approval, a question) is gone: the provider
+    /// no longer knows it, and will never settle it.
+    ItemGone,
+    /// The stored history was stale and is being regenerated: the same
+    /// request usually succeeds once more.
+    StaleHistory,
+    /// The credential is gone: offer sign-in.
+    SignedOut,
+    /// Someone else settled it first (an approval, a question); the
+    /// settlement arrives on its own.
+    AlreadySettled,
+    /// The choices moved under the press (a staged approval advanced); the
+    /// update is on its way, nothing to show.
+    StaleChoice,
+    /// That choice or answer is not acceptable.
+    InvalidChoice,
+    /// The turn is already over.
+    TurnOver,
+    /// The cut point is not one the session can branch at.
+    BadBoundary,
+}
+
+/// How loudly a refusal is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// A banner on the session.
+    Banner,
+    /// A dialog over the window.
+    Dialog,
+}
+
+/// A typed refusal ([`ProviderError::Refused`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// What the app can do about it.
+    pub hint: RefusalHint,
+    /// A one-line title, e.g. "Session already in use".
+    pub title: String,
+    /// The full human reason.
+    pub reason: String,
+    /// Banner or dialog.
+    pub severity: Severity,
+    /// It concerns this session only, never the connection: a resume
+    /// refused for it leaves the rest of the app working.
+    pub session_scoped: bool,
 }
 
 /// The prefix [`ProviderError::unknown_approval`] writes; the quoted id
@@ -67,6 +132,38 @@ impl ProviderError {
         Self::Rejected { reason: format!("{UNKNOWN_APPROVAL}{approval:?}: {detail}") }
     }
 
+    /// The typed hint, when the provider gave one.
+    pub fn hint(&self) -> RefusalHint {
+        match self {
+            Self::Refused(refusal) => refusal.hint,
+            _ => RefusalHint::None,
+        }
+    }
+
+    /// The refusal's title, or a generic one by shape.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Refused(refusal) => refusal.title.clone(),
+            Self::Unavailable { .. } => "The agent disconnected".into(),
+            Self::Rejected { .. } | Self::Unsupported { .. } => "Something went wrong".into(),
+        }
+    }
+
+    /// How loudly to show it: a lost connection is a dialog, anything else
+    /// a banner unless the refusal says otherwise.
+    pub fn severity(&self) -> Severity {
+        match self {
+            Self::Refused(refusal) => refusal.severity,
+            Self::Unavailable { .. } => Severity::Dialog,
+            Self::Rejected { .. } | Self::Unsupported { .. } => Severity::Banner,
+        }
+    }
+
+    /// Whether it concerns one session only (see [`Refusal::session_scoped`]).
+    pub fn is_session_scoped(&self) -> bool {
+        matches!(self, Self::Refused(refusal) if refusal.session_scoped)
+    }
+
     /// Whether this is [`Self::unknown_approval`]'s refusal: the approval
     /// is no longer pending on the provider's side, so nothing will ever
     /// settle it there.
@@ -82,6 +179,7 @@ impl fmt::Display for ProviderError {
                 write!(f, "unsupported capability `{capability}`: {reason}")
             }
             Self::Rejected { reason } => write!(f, "provider refused the command: {reason}"),
+            Self::Refused(refusal) => f.write_str(&refusal.reason),
             Self::Unavailable { reason } => write!(f, "provider unavailable: {reason}"),
         }
     }

@@ -269,7 +269,7 @@ impl SessionView {
     ) {
         crate::log::send_mark("ack");
         match result {
-            Ok(provider::Ack::TurnAccepted { turn_id }) => {
+            Ok(provider::Ack::TurnAccepted { turn_id, .. }) => {
                 // Events can beat acks: when the adapter already said
                 // which turn this ack names, use the streamed id; else
                 // `TurnIdentified` re-keys what this records when it lands.
@@ -332,6 +332,7 @@ impl SessionView {
         parts.extend(self.images.iter().map(|image| provider::SubmissionPart::Image {
             base64_data: image.base64_data.clone(),
             media_type: image.media_type.clone(),
+            size: Some((image.width, image.height)),
         }));
         if parts.is_empty() {
             parts.push(provider::SubmissionPart::Text(String::new()));

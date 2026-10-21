@@ -216,7 +216,7 @@ mod tests {
                     },
                     |probe, result, _| {
                         probe.seen = Some(match result {
-                            Ok(Ack::TurnAccepted { turn_id }) => Ok(turn_id),
+                            Ok(Ack::TurnAccepted { turn_id, .. }) => Ok(turn_id),
                             Ok(other) => Err(format!("wrong ack: {other:?}")),
                             Err(error) => Err(error.to_string()),
                         });

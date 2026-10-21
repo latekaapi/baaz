@@ -758,7 +758,7 @@ impl CodexAdapter {
         if let Some(display) = display_text {
             self.fold.lock().expect("fold mutex").record_display_text(Some(&turn_id), text, display);
         }
-        Ok(Ack::TurnAccepted { turn_id })
+        Ok(Ack::TurnAccepted { turn_id, queued: false })
     }
 
     /// Parse a [`Command::DecideApproval`] choice against the lane the

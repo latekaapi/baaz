@@ -133,3 +133,33 @@ pub struct SessionSide {
     /// takes.
     pub stored_outputs: BTreeMap<String, String>,
 }
+
+/// What a session is beside its turns, as a header: the model, where it
+/// runs, the branch. The approval mode has its own event
+/// ([`crate::ProviderEvent::ApprovalModeChanged`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionHeader {
+    /// The model label or id the provider reports.
+    pub model: String,
+    /// The working directory.
+    pub cwd: String,
+    /// The git branch checked out there, when known.
+    pub branch: Option<String>,
+}
+
+/// How a turn ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// It finished.
+    Completed,
+    /// The person (or a newer turn) stopped it.
+    Interrupted,
+    /// It failed. The transcript already shows the failure card; this is
+    /// what the app does about it.
+    Failed {
+        /// The provider's message, when it gave one.
+        message: Option<String>,
+        /// The failure means the credential is gone: offer sign-in.
+        signed_out: bool,
+    },
+}

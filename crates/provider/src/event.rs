@@ -8,6 +8,8 @@
 
 use aui_protocol::{Delta, PermissionMode};
 
+use crate::facts::{SessionHeader, SessionSide, TurnOutcome};
+
 /// Something the provider did on its own — not the answer to a command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
@@ -92,6 +94,62 @@ pub enum ProviderEvent {
     ModelCatalogChanged {
         /// The owning session.
         session_id: String,
+    },
+    /// The session's facts beside its transcript changed: the whole side as
+    /// it stands now. Sent by an adapter that tracks such facts (Muse:
+    /// context, queue, retry, pending prompts, cursor), only when they moved.
+    SessionFacts {
+        /// The owning session.
+        session_id: String,
+        /// The facts now.
+        side: SessionSide,
+    },
+    /// The session's header changed: model, working directory, branch.
+    HeaderChanged {
+        /// The owning session.
+        session_id: String,
+        /// The header now.
+        header: SessionHeader,
+    },
+    /// A turn began running, before it says anything: what the stop button
+    /// and the working row stand on. An adapter whose turns open with
+    /// their first delta need not send it.
+    TurnRunning {
+        /// The owning session.
+        session_id: String,
+        /// The running turn.
+        turn_id: String,
+    },
+    /// A turn ended, and how. The transcript's own `TurnFinished` carries
+    /// the footer; this carries what the app acts on (a failure's
+    /// sign-in hint, the row's outcome).
+    TurnSettled {
+        /// The owning session.
+        session_id: String,
+        /// The turn that ended.
+        turn_id: String,
+        /// How.
+        outcome: TurnOutcome,
+    },
+    /// A submission left the transcript and its words come back to the
+    /// composer: a retracted turn, or a queued one reclaimed.
+    PromptRestored {
+        /// The owning session.
+        session_id: String,
+        /// The queued turn that was reclaimed, when it was one.
+        turn_id: Option<String>,
+        /// The words it was sent with.
+        text: String,
+    },
+    /// A session's live status as a row shows it — running, and what needs
+    /// the person — for sessions no view follows.
+    StatusChanged {
+        /// The session.
+        session_id: String,
+        /// A turn is running.
+        running: bool,
+        /// What is waiting on the person, as the provider names it.
+        attention: Vec<String>,
     },
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.

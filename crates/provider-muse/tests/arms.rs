@@ -356,6 +356,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                     SubmissionPart::Image {
                         base64_data: "aGVsbG8=".into(),
                         media_type: "image/png".into(),
+                        size: None,
                     },
                 ],
                 display_text: Some("hello display".into()),
@@ -375,7 +376,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 workspace_roots: None,
             }),
             check_ack: Box::new(|ack| match ack {
-                Ack::TurnAccepted { turn_id } => assert_eq!(turn_id, "t-1"),
+                Ack::TurnAccepted { turn_id, .. } => assert_eq!(turn_id, "t-1"),
                 other => panic!("expected a turn ack, got {other:?}"),
             }),
         },
