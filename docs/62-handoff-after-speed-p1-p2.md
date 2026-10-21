@@ -3,12 +3,15 @@
 Read this first in the next session. It replaces docs/61 as the "where are we"; docs/60 §4 (how to verify) and §5
 (rules) still apply. Numbers and findings are in docs/51 §8–§9.
 
+**Stage status: COMPLETE (2026-10-21).** The owner's one screenshot note on the test build (Files pane) is fixed
+too — §2 item 7.
+
 ## 1. State of the code — committed on both mains, NOT pushed
 
 | Repo | Head | Pushed | Notes |
 |---|---|---|---|
-| agentic-ui (library) | `4bec972` (2 commits on `v0.6.1`) | no | markdown bench; `aui_motion::frames` counter |
-| harness (Baaz) | see `git log -1` (7 commits on `0226ea5`) | no | `Cargo.toml` still pins `v0.6.1` |
+| agentic-ui (library) | `c2ae1a1` (3 commits on `v0.6.1`) | no | markdown bench; `aui_motion::frames` counter; Files names 13 px |
+| harness (Baaz) | see `git log -1` (9 commits on `0226ea5`) | no | `Cargo.toml` still pins `v0.6.1` |
 
 **Harness main only builds with the local `[patch]`** (`.cargo/config.toml` → `../agentic-ui`): the frames commit
 uses `aui_motion::frames`, which v0.6.1 does not have. At "push": commit and tag agentic-ui **v0.6.2**, push it, then
@@ -34,6 +37,12 @@ P2 (docs/61 §4b):
    ignored tests). Results in docs/51 §9.
 6. `aui_motion::frames`: every frame request attributed to `file:line`; Baaz traces `baaz-perf frames=…`;
    `idle.frame_requests` budget 0.
+
+Owner note on the test build (screenshot, 21 Oct evening):
+7. **Files pane** — the first row was washed out under the pane row's fade (the fade now draws over the tree only once
+   it scrolls: `right.rs` `fade_under_row`), and the names were 14.3 px against the sidebar's 13 (now `TextRole::Body`,
+   agentic-ui `files.rs`). Seen in captures (`right-files`, new `right-files-scrolled`; `wheel:` takes `@x,y`). The two
+   Files probe entries differ from their baselines on purpose: **regenerate baselines on main at push**, own commit.
 
 ## 3. Open items (carry)
 
