@@ -723,15 +723,15 @@ impl Harness {
             .filter(|entry| self.show_archived || !entry.archived)
             .filter(|entry| {
                 // An archived row shown on request is explicitly asked for;
-                // the empty filter must not swallow it back. A provisional
-                // row's emptiness is unknown (the index knows no turn count),
-                // so the empty filter leaves it alone — hidden and archived
+                // the empty filter must not swallow it back. An index-only
+                // boot row's emptiness is unknown (the index knows no turn
+                // count), so the empty filter leaves it alone — hidden and archived
                 // still apply above, from the same overrides the real rows
                 // get. Only labelled index entries ever become provisional,
                 // which is what keeps the index's own zero-turn rows out.
                 (self.show_archived && entry.archived)
                     || self.show_empty
-                    || entry.provisional
+                    || entry.turns_unknown
                     || !entry.is_empty()
                     || sidebar::sent_to(&entry.id, &self.provider_sessions, &self.overrides)
                     || active_head.as_deref() == Some(entry.id.as_str())

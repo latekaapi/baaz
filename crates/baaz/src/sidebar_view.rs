@@ -490,7 +490,7 @@ impl SidebarKey {
             browse_menu: baaz.browse_menu.clone(),
             browse_naming: baaz.browse_naming.clone(),
             current_space: baaz.browser.tabs.current_space.clone(),
-            loading: !(baaz.sessions_loaded && baaz.index_loaded),
+            loading: baaz.sidebar_loading(),
             sidebar_open: baaz.sidebar_open,
             skills_on: baaz.skills.catalog.on_count(),
             plan: muse_plan_label(baaz.tier.as_ref()),
@@ -701,6 +701,18 @@ impl Harness {
             .collect()
     }
 
+    /// Whether the sidebar still draws its skeleton rows: until the index
+    /// has landed, and after that only while there is nothing to paint —
+    /// the wire has not answered and no boot row exists. The boot rows
+    /// (`install_provisional_rows`) exist to be painted before
+    /// `session/list` lands (baa4338: rows at ~162 ms instead of ~1.2 s);
+    /// the D3 screen's `loading` waited for the list again, which is a
+    /// skeleton for as long as Muse's first listing takes — 1.4 s typically,
+    /// 20 s once on 2026-10-21.
+    pub(crate) fn sidebar_loading(&self) -> bool {
+        !self.index_loaded || (!self.sessions_loaded && !self.sessions.iter().any(|e| e.provisional))
+    }
+
     /// The sidebar column as the library's v2 screen (D3): a
     /// [`SidebarModel`] built from Baaz state on every pane render, the
     /// screen's intents routed back to the handlers in this file. The host
@@ -722,8 +734,7 @@ impl Harness {
         static FIRST_ROWS_DONE: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         let visible = self.visible_sessions(cx);
-        if self.sessions_loaded
-            && self.index_loaded
+        if !self.sidebar_loading()
             && !visible.is_empty()
             && !FIRST_ROWS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
@@ -890,7 +901,7 @@ impl Harness {
             hovered_projects_header: self.hovered_projects_header,
             highlighted: None,
             editing,
-            loading: !(self.sessions_loaded && self.index_loaded),
+            loading: self.sidebar_loading(),
             view_menu_open,
             view_options: ViewOptions {
                 group_by,
@@ -2092,6 +2103,7 @@ mod tests {
                     last_ask: None,
                     local: false,
                     provisional: false,
+                    turns_unknown: false,
                     workspace: None,
                     project: Some(id.clone()),
                     project_name: None,
@@ -2235,6 +2247,7 @@ mod tests {
             last_ask: None,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace: None,
             project: Some(project.to_owned()),
             project_name: None,
@@ -3139,6 +3152,7 @@ mod tests {
                 last_ask: None,
                 local: false,
                 provisional: false,
+                turns_unknown: false,
                 workspace: None,
                 project: None,
                 project_name: None,
@@ -3359,6 +3373,7 @@ mod tests {
             last_ask: None,
             local: false,
             provisional: false,
+            turns_unknown: false,
             workspace: None,
             project: None,
             project_name: None,

@@ -1953,6 +1953,7 @@ mod tests {
                         last_ask: Some("the ask".into()),
                         local: false,
                         provisional: false,
+                        turns_unknown: false,
                         workspace: None,
                         project: None,
                         project_name: None,
