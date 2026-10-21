@@ -79,7 +79,7 @@ use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Root;
 use muse_client::schema::SessionListParams;
-use muse_client::{MuseClient, MuseError, MuseEvent};
+use muse_client::{MuseClient, MuseError};
 use provider::ProviderEvent;
 
 use crate::auth::Identity;
@@ -648,10 +648,6 @@ pub struct Harness {
     /// Seeded from the command line, changed only by the picker — never by
     /// a live session, which keeps the lane it was created on.
     pub(crate) new_provider: String,
-    /// The legacy transport session views still ride. Same child as the
-    /// provider below — never a second spawn. Gone with the last legacy
-    /// view.
-    pub(crate) client: Option<Arc<MuseClient>>,
     /// The `muse serve` child as a hub: one provider lane per Muse
     /// session. Set alongside `client` on connect and cleared with it on
     /// reconnect.
@@ -1536,7 +1532,6 @@ impl Harness {
         let mut this = Self {
             new_provider,
             args,
-            client: None,
             muse_hub: None,
             muse_slot: muse_slot.clone(),
             provider_factory: crate::providers::default_provider_factory(
@@ -2158,15 +2153,14 @@ impl Harness {
             |this, result, cx| match result {
             Ok(connected) => {
                 crate::log::boot_mark("connect-reply");
-                    crate::baaz_log!("connected to {} {}", connected.legacy.agent_name, connected.legacy.agent_version);
-                if let Some(warning) = &connected.legacy.warning {
+                crate::baaz_log!("connected to {} {}", connected.agent_name, connected.agent_version);
+                if let Some(warning) = &connected.warning {
                     // A fingerprint mismatch is additive evolution, never a
                     // failure: say so on stderr and carry on.
                     crate::baaz_log!("{warning}");
                 }
-                this.user_shell = connected.legacy.user_shell;
-                this.session_mcp = connected.legacy.session_mcp;
-                this.client = Some(connected.legacy.transport);
+                this.user_shell = connected.user_shell;
+                this.session_mcp = connected.session_mcp;
                 // Muse sessions are lanes on this hub; the terminal relay
                 // rides its `sessionMcp` grant.
                 connected.hub.set_terminal_relay(
@@ -2176,7 +2170,6 @@ impl Harness {
                 this.muse_slot.set_ready(connected.hub.clone());
                 this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
-                this.pump(connected.legacy.events, cx);
                 this.observe_provider(connected.events, cx);
                 this.probe_account(cx);
                 cx.notify();
@@ -2202,6 +2195,13 @@ impl Harness {
         });
     }
 
+    /// The Muse child, while it is up — transitional: Muse's session list
+    /// and its derived titles still read it until those rows come through
+    /// the seam.
+    pub(crate) fn muse_transport(&self) -> Option<Arc<MuseClient>> {
+        self.muse_hub.as_ref().filter(|_| self.muse_slot.is_ready()).and_then(|hub| hub.transport())
+    }
+
     /// Muse is not running (off, missing, or failed to start): the sidebar
     /// settles on what the local and provider records hold instead of
     /// waiting for a `session/list` that will never come, and the other
@@ -2213,7 +2213,7 @@ impl Harness {
     /// Claude Code or Codex lane that never sent anything (docs/50 P1).
     /// Tests that install a client keep reaching the real lane path.
     pub(crate) fn scripted_chrome(&self) -> bool {
-        (self.args.offline || self.args.replay.is_some()) && self.client.is_none()
+        (self.args.offline || self.args.replay.is_some()) && !self.muse_slot.is_ready()
     }
 
     /// Whether the whole-window login screen is up: only offline and replay
@@ -2250,159 +2250,90 @@ impl Harness {
     /// connection for the log. It ends when the provider is dropped.
     fn observe_provider(&mut self, mut events: UnboundedReceiver<ProviderEvent>, cx: &mut Context<Self>) {
         self.tasks.push(cx.spawn(async move |this, cx| {
+            // The hub keeps one connection stream across respawns, so this
+            // outlives a child's exit and hears the next child's events.
             while let Some(event) = events.next().await {
-                let done = this.update(cx, |this, cx| match event {
-                    ProviderEvent::ConnectionLost { .. } => {
-                        crate::baaz_log!("provider reported the connection lost");
-                        cx.notify();
-                    }
-                    // Sign-in rides the account events; the session views
-                    // never see them.
-                    event @ (ProviderEvent::AccountChanged { .. } | ProviderEvent::LoginCompleted { .. }) => {
-                        this.on_account_event(event, cx);
-                        cx.notify();
-                    }
-                    // A new reading keeps the tier live past its boot-time
-                    // one: the footer meter and the banner follow through
-                    // `push_tier`.
-                    ProviderEvent::UsageChanged { report } => this.apply_usage_changed(&report, cx),
-                    _ => {}
-                });
-                if done.is_err() {
+                if this.update(cx, |this, cx| this.on_hub_event(event, cx)).is_err() {
                     return;
                 }
             }
         }));
     }
 
-    /// Drain the bridge onto the UI thread, one event at a time, in wire order.
-    pub(crate) fn pump(&mut self, mut events: UnboundedReceiver<MuseEvent>, cx: &mut Context<Self>) {
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            // The hub keeps one raw stream across respawns, so the pump
-            // outlives a child's exit and drains the next child's events.
-            while let Some(event) = events.next().await {
-                if this.update(cx, |this, cx| this.route(event, cx)).is_err() {
-                    return;
+    /// One event off the hub's connection stream: the rows' live facts for
+    /// every Muse session (open or not), sign-in, usage, and the child's
+    /// exit. Session views hear their own lanes; this is the window's.
+    fn on_hub_event(&mut self, event: ProviderEvent, cx: &mut Context<Self>) {
+        match event {
+            ProviderEvent::ConnectionLost { .. } => {
+                // The exit reason: whatever the child said on stderr last.
+                let tail = self.muse_hub.as_ref().map(|hub| hub.stderr_tail()).unwrap_or_default();
+                if tail.is_empty() {
+                    crate::baaz_log!("muse serve exited; reconnecting");
+                } else {
+                    crate::baaz_log!("muse serve exited; reconnecting; stderr tail: {tail}");
                 }
+                self.wire = Wire::Reconnecting;
+                self.reconnect(cx);
             }
-        }));
+            // Sign-in rides the account events; the session views never
+            // see them.
+            event @ (ProviderEvent::AccountChanged { .. } | ProviderEvent::LoginCompleted { .. }) => {
+                self.on_account_event(event, cx);
+            }
+            // A new reading keeps the tier live past its boot-time one: the
+            // footer meter and the banner follow through `push_tier`.
+            ProviderEvent::UsageChanged { report } => self.apply_usage_changed(&report, cx),
+            ProviderEvent::TurnRunning { session_id, .. } => {
+                // The row reads running now, no `session/list` round trip.
+                self.sync_row_live(&session_id, true, cx);
+                self.muse_turn_started(session_id, cx);
+            }
+            ProviderEvent::TurnSettled { session_id, outcome, .. } => {
+                // The turn's terminal, recorded into the row and the store: a
+                // failed turn's message is what `Failed` stands on, and a
+                // later success (or a retry's start) stands it down.
+                let (failed, error) = match outcome {
+                    provider::facts::TurnOutcome::Failed { message, .. } => (true, message),
+                    _ => (false, None),
+                };
+                self.sync_row_live(&session_id, false, cx);
+                self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
+                // A finished turn is when the index has something new to say
+                // about the session, so the sidebar is refreshed then rather
+                // than on a timer.
+                self.load_index(cx);
+                self.load_sessions(cx);
+                self.record_last_summary(cx);
+                // The free excerpt just landed; a poor one may earn one
+                // debounced rewrite — idle sessions only, never a running
+                // turn.
+                self.maybe_rewrite_byline(cx);
+            }
+            // A loaded session's `(status, attention)` flipped: folded into
+            // the row for sessions whose view is not open; the open session
+            // then overlays its own truth, which is fresher than any
+            // listing.
+            ProviderEvent::StatusChanged { session_id, running, attention } => {
+                if !self.is_side_session(&session_id) {
+                    if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
+                        entry.apply_status_changed(running, &attention);
+                        self.invalidate_list();
+                    }
+                }
+                self.sync_row_live(&session_id, false, cx);
+            }
+            _ => return,
+        }
+        self.title_from_transcript(cx);
+        cx.notify();
     }
 
-    /// Hand an event to the session it belongs to, and notice a dead child.
-    fn route(&mut self, event: MuseEvent, cx: &mut Context<Self>) {
-        if let MuseEvent::Closed(code) = &event {
-            // The exit reason, while the old client still owns it: its
-            // status and whatever it said on stderr last. Read before
-            // `reconnect` drops the client.
-            let tail = self.client.as_ref().map(|client| client.stderr_tail()).unwrap_or_default();
-            if tail.is_empty() {
-                crate::baaz_log!("muse serve exited ({code:?}); reconnecting");
-            } else {
-                crate::baaz_log!("muse serve exited ({code:?}); reconnecting; stderr tail: {tail}");
-            }
-            self.wire = Wire::Reconnecting;
-            self.reconnect(cx);
-        }
-        // Account and usage notifications are the hub's connection events
-        // now (`observe_provider`); this stream only drops them.
-        if let MuseEvent::Notification { method, .. } = &event {
-            if method.starts_with("account/") {
-                return;
-            }
-        }
-        // A finished turn is when the index has something new to say about the
-        // session, so the sidebar is refreshed then rather than on a timer.
-        let completed = matches!(&event, MuseEvent::Notification { method, .. } if method == "turn/completed");
-        // A started turn titles the new session's local row: the wire still
-        // does not list it, but the prompt the view sent is known.
-        let started: Option<String> = match &event {
-            MuseEvent::Notification { method, params, session_id, .. } if method == "turn/started" => session_id
-                .clone()
-                .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)),
-            _ => None,
-        };
-        // A loaded session's projected `(status, attention)` flipped: the
-        // command-plane broadcast (muse 1.3.0) that keeps rows other than
-        // the open session fresh without a `session/list` round trip.
-        // Extracted before the view takes the event, applied after.
-        let status_changed: Option<(String, bool, Option<Vec<muse_client::schema::AttentionFlag>>)> = match &event {
-            MuseEvent::Notification { method, params, session_id, .. } if method == "session/statusChanged" => {
-                serde_json::from_value::<muse_client::schema::SessionStatusChangedParams>(params.clone())
-                    .ok()
-                    .map(|change| {
-                        let id = session_id.clone().unwrap_or(change.session_id.clone());
-                        let running = matches!(change.status, muse_client::schema::SessionStatus::Running);
-                        (id, running, change.attention)
-                    })
-            }
-            _ => None,
-        };
-        // A turn's terminal: which session, whether it failed, and the
-        // failure's message when it did. Recorded into the row (and the
-        // store) after `apply`, so `Failed` survives the session closing.
-        let turn_outcome: Option<(String, bool, Option<String>)> = match &event {
-            MuseEvent::Notification { method, params, session_id, .. } if method == "turn/completed" => {
-                let id = session_id
-                    .clone()
-                    .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned));
-                let failed = params.get("terminal").and_then(|v| v.as_str()).is_some_and(|t| t == "failed");
-                let error = params
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
-                id.map(|id| (id, failed, error))
-            }
-            _ => None,
-        };
-        // The row's live facts, straight from the event — extracted before
-        // the view takes the event below, applied after, so the fold
-        // already holds the event's world (see the call past `apply`).
-        let live: Option<(bool, String)> = match &event {
-            MuseEvent::Notification { method, params, session_id, .. } => {
-                let id = session_id
-                    .clone()
-                    .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned));
-                match (method.as_str(), id) {
-                    ("turn/started", Some(id)) => Some((true, id)),
-                    ("turn/completed", Some(id))
-                    | ("approval/requested", Some(id))
-                    | ("approval/updated", Some(id))
-                    | ("approval/resolved", Some(id))
-                    | ("userInput/requested", Some(id))
-                    | ("userInput/settled", Some(id)) => Some((false, id)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        // The row's live facts, straight from the event — no `session/list`
-        // round trip: a started turn reads running now, a completed one (or
-        // an approval/question event) re-reads the open view's pending
-        // words. Runs after `apply`, so the fold already holds the event's
-        // world.
-        if let Some((is_start, id)) = live {
-            self.sync_row_live(&id, is_start, cx);
-        }
-        // The broadcast's `(status, attention)`, folded into the row for
-        // sessions whose view is not open; the open session then overlays
-        // its own truth, which is fresher than any listing.
-        if let Some((id, running, attention)) = status_changed {
-            if !self.is_side_session(&id) {
-                if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == id) {
-                    entry.apply_status_changed(running, attention);
-                    self.invalidate_list();
-                }
-            }
-            self.sync_row_live(&id, false, cx);
-        }
-        // The turn's terminal, recorded into the row and the store: a
-        // failed turn's message is what `Failed` stands on, and a later
-        // success (or a retry's start) stands it down.
-        if let Some((id, failed, error)) = turn_outcome {
-            self.record_turn_outcome(&id, failed, error.as_deref(), cx);
-        }
-        if let Some(session_id) = started {
+    /// A Muse turn started: the session is made real — no draft any more —
+    /// and its row goes visible, titled from the open view's prompt; a
+    /// rowless first send gets its local row; the first send may earn a
+    /// generated title.
+    fn muse_turn_started(&mut self, session_id: String, cx: &mut Context<Self>) {
             let prompt = self
                 .active
                 .as_ref()
@@ -2485,18 +2416,10 @@ impl Harness {
                 let prompt = self.active.as_ref().and_then(|view| view.read(cx).first_prompt_text());
                 self.maybe_start_title(&session_id, prompt, cx);
             }
-        }
-        if completed {
-            self.load_index(cx);
-            self.load_sessions(cx);
-            self.record_last_summary(cx);
-            // The free excerpt just landed; a poor one may earn one
-            // debounced rewrite — idle sessions only, never a running turn.
-            self.maybe_rewrite_byline(cx);
-        }
-        self.title_from_transcript(cx);
-        cx.notify();
-    }
+            }
+
+
+
 
     /// The reconnect procedure: respawn, `initialize`, then `session/resume`
     /// from the last observed cursor, which serves `history.mode: "none"` and
@@ -2515,7 +2438,6 @@ impl Harness {
             self.connect(cx);
             return;
         };
-        self.client = None;
         self.muse_slot.set_starting();
         let work = move || hub.reconnect().map(|refused| (hub, refused));
         self.wire_call(cx, work, move |this, result, cx| match result {
@@ -2527,7 +2449,6 @@ impl Harness {
                 }
                 this.session_mcp = hub.session_mcp_granted();
                 this.user_shell = hub.user_shell_granted();
-                this.client = hub.transport();
                 this.muse_slot.set_ready(hub.clone());
                 this.wire = Wire::Ready;
                 // Every followed session the respawned child re-attached has
@@ -5921,7 +5842,7 @@ impl Harness {
     /// off (not installed then, or switched off) brings it up the first time
     /// the person reaches for it, instead of handing them a dead draft.
     pub(crate) fn ensure_muse_started(&mut self, cx: &mut Context<Self>) {
-        if self.client.is_some() || self.scripted_chrome() || self.args.offline || self.args.replay.is_some() {
+        if self.muse_slot.is_ready() || self.scripted_chrome() || self.args.offline || self.args.replay.is_some() {
             return;
         }
         if matches!(self.wire, Wire::Connecting | Wire::Reconnecting) {
@@ -9992,6 +9913,75 @@ mod tests {
         let current = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("still bound");
         assert_eq!(current.keystroke, "cmd-n", "Clear restores the default");
         restore_shortcut_state(state);
+    }
+
+    /// P4: a Muse row follows the hub's connection stream, open or not —
+    /// a running turn arms it, a status broadcast's attention marks it
+    /// needing approval, a failed settle records the failure, and the idle
+    /// broadcast stands it down.
+    #[gpui::test]
+    fn the_hubs_connection_events_drive_muse_rows(cx: &mut gpui::TestAppContext) {
+        use chrono::Local;
+        let state = hermetic_state("hub-rows");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let row = |baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).sessions.iter().find(|e| e.id == "s-bg").cloned().expect("the row"))
+        };
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let mut entry = crate::sidebar::local_started_row("s-bg", "Chart it".into(), None, None, Local::now());
+                entry.running = false;
+                entry.turns = 1;
+                h.sessions.push(entry);
+                h.on_hub_event(provider::ProviderEvent::TurnRunning { session_id: "s-bg".into(), turn_id: "t-1".into() }, cx);
+            })
+        });
+        assert!(row(&baaz, vc).running, "a running turn arms the row");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.on_hub_event(
+                    provider::ProviderEvent::StatusChanged {
+                        session_id: "s-bg".into(),
+                        running: true,
+                        attention: vec!["approvalPending".into()],
+                    },
+                    cx,
+                );
+            })
+        });
+        assert!(row(&baaz, vc).needs_approval(), "the broadcast's attention reaches the row");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.on_hub_event(
+                    provider::ProviderEvent::TurnSettled {
+                        session_id: "s-bg".into(),
+                        turn_id: "t-1".into(),
+                        outcome: provider::facts::TurnOutcome::Failed {
+                            message: Some("rate limited".into()),
+                            signed_out: false,
+                        },
+                    },
+                    cx,
+                );
+            })
+        });
+        assert_eq!(row(&baaz, vc).last_error.as_deref(), Some("rate limited"), "the settle records why it failed");
+        // The idle broadcast that follows stands the row down.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.on_hub_event(
+                    provider::ProviderEvent::StatusChanged { session_id: "s-bg".into(), running: false, attention: Vec::new() },
+                    cx,
+                );
+            })
+        });
+        let idle = row(&baaz, vc);
+        assert!(!idle.running && !idle.needs_approval(), "idle, nothing waiting");
+        restore_state(state);
     }
 
     /// B5: a `session/list` reply that still says idle never stands a live

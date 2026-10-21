@@ -1,11 +1,11 @@
 //! The `muse serve` connection and how its events reach the UI thread.
 //!
 //! [`connect`] spawns the child and shakes hands through
-//! [`provider_muse::establish`], then moves the adapter behind the enforced
-//! [`Provider`] gate and bridges both event streams onto `futures` channels
-//! a gpui foreground task can await: crossbeam receivers are competing
-//! consumers no foreground task can await, so one small forwarding thread
-//! per stream moves every event across.
+//! [`provider_muse::establish`], and bridges the hub's connection stream onto
+//! a `futures` channel a gpui foreground task can await: crossbeam receivers
+//! are competing consumers no foreground task can await, so one small
+//! forwarding thread per stream moves every event across. Sessions ride the
+//! hub as [`Provider`] lanes, each behind the enforced gate.
 //!
 //! Commands are the other direction and they *do* block (a request waits up to
 //! three minutes), so every one of them runs on gpui's background executor and
@@ -16,13 +16,6 @@
 //! accepts a turn and then emits no view events at all
 //! (`docs/01-transport.md` §4), so an app that wants a transcript may never
 //! set it. That flag lives in [`provider_muse::spawn`].
-//!
-//! The [`Legacy`] bundle is transitional: session views still ride the raw
-//! transport until they move onto [`Command`](provider::Command) one lane at
-//! a time. It carries the one spawned child, its raw event stream, and the
-//! handshake facts the app logs — never a second spawn. The follow-up that
-//! moves the last view removes it, and with it the last `muse_client`
-//! mentions in this file.
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use provider::{ConnectInfo, Provider, ProviderError, ProviderEvent};
@@ -40,29 +33,14 @@ pub const CLIENT_NAME: &str = "baaz";
 /// inside `provider-muse`.
 pub const REQUESTED_CAPABILITIES: &[&str] = &["userShell", "sessionMcp"];
 
-/// A live connection: the provider behind its gate, the provider events,
-/// and the transitional legacy bundle sharing the same child.
+/// A live connection: the hub and its connection stream.
 pub struct Connected {
     /// The one `muse serve` child as a hub: a [`Provider`] lane per
     /// session, every command through the lane's gate.
     pub hub: provider_muse::MuseHub,
-    /// The hub's connection stream (row facts, connection loss), bridged
-    /// onto a channel a gpui task can await.
+    /// The hub's connection stream (row facts, account and usage,
+    /// connection loss), bridged onto a channel a gpui task can await.
     pub events: UnboundedReceiver<ProviderEvent>,
-    /// The transitional legacy bundle: same child, raw stream, handshake
-    /// facts. Gone with the last legacy view.
-    pub legacy: Legacy,
-}
-
-/// Transitional: what the app's legacy session views still need from the
-/// one spawned child. Same child as [`Connected::provider`] — never a
-/// second spawn.
-pub struct Legacy {
-    /// The spawned child, shared with the adapter.
-    pub transport: provider_muse::SharedTransport,
-    /// The raw transport events, bridged onto a channel a gpui task can
-    /// await. Feeds the unchanged event pump and route.
-    pub events: UnboundedReceiver<muse_client::MuseEvent>,
     /// Who answered: the agent's own name for itself.
     pub agent_name: String,
     /// Who answered: the agent's version string.
@@ -81,9 +59,8 @@ pub struct Legacy {
 
 /// A one-line title for a connection failure, for the reconnect dialog.
 ///
-/// Coarse by design: the neutral error carries no wire kind, so the
-/// per-kind titles stay on the legacy path (see [`title`]) until the views
-/// move. Only the shape of the failure survives: gone versus refused.
+/// A refusal carries its own title; anything else keeps only the shape of
+/// the failure: gone versus refused.
 pub fn provider_title(error: &ProviderError) -> String {
     match error {
         ProviderError::Unavailable { .. } => "Muse disconnected".into(),
@@ -104,25 +81,20 @@ pub fn connect_info() -> ConnectInfo {
     }
 }
 
-/// Spawn `muse serve`, `initialize`, and start both event bridges.
+/// Spawn `muse serve`, `initialize`, and bridge the connection stream.
 ///
 /// Blocking: run it on the background executor.
 pub fn connect(program: &str) -> Result<Connected, ProviderError> {
     let established = provider_muse::establish(program, &connect_info())?;
-    let legacy_events = bridge_events(established.legacy);
     let events = bridge_events(established.hub.connection_events());
     Ok(Connected {
         hub: established.hub,
         events,
-        legacy: Legacy {
-            transport: established.transport,
-            events: legacy_events,
-            agent_name: established.handshake.agent_name,
-            agent_version: established.handshake.agent_version,
-            warning: established.warning,
-            user_shell: established.user_shell,
-            session_mcp: established.session_mcp,
-        },
+        agent_name: established.handshake.agent_name,
+        agent_version: established.handshake.agent_version,
+        warning: established.warning,
+        user_shell: established.user_shell,
+        session_mcp: established.session_mcp,
     })
 }
 
@@ -181,8 +153,7 @@ pub(crate) fn gate_quiet(provider: Provider) -> (Provider, UnboundedReceiver<Pro
 
 /// Move every event from a competing crossbeam receiver onto a futures
 /// channel a gpui task can await. The thread ends when the sender side is
-/// dropped, which happens when the adapter (and, for the legacy stream, the
-/// transport) is.
+/// dropped, which happens when the adapter (or the hub) is.
 fn forward<T: Send + 'static>(
     events: crossbeam_channel::Receiver<T>,
     tx: UnboundedSender<T>,

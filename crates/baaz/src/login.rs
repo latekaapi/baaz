@@ -130,7 +130,8 @@ fn login_state_name(state: &LoginState) -> &'static str {
 
 /// The login half of [`Harness`]: the fields stay on the struct in `app.rs`,
 /// the flow lives here, and the shell reaches it through one call per seam —
-/// `probe_account` from `connect`, `route_account` from `route`,
+/// `probe_account` from `connect`, `on_account_event` from the hub's
+/// connection stream,
 /// `apply_login_sample` and `submit_api_key` from `new`, `logout` from the
 /// account menu, `login_escape` from Escape and `render_login` from `render`.
 impl Harness {

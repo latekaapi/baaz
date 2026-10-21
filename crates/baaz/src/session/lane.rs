@@ -914,9 +914,8 @@ impl SessionView {
                     }
                     self.submitting = false;
                     // The lane's terminal: the application records the
-                    // byline, the ledger row and the record bump, the way
-                    // the muse route's `turn/completed` arm does for its
-                    // lane. Replayed history settles here too; every write
+                    // byline, the ledger row and the record bump. Replayed
+                    // history settles here too; every write
                     // below is idempotent, so a reopen never double-counts.
                     cx.emit(super::SessionEvent::ProviderTurnFinished {
                         session_id: self.session_id.clone(),

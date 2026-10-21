@@ -299,7 +299,7 @@ impl Harness {
         if was_active {
             if let Some(window) = window {
                 let next = self.visible_sessions(cx).first().map(|e| e.id.clone());
-                if self.client.is_some() {
+                if self.muse_slot.is_ready() {
                     if let Some(id) = next {
                         self.resume(id, window, cx);
                     }
@@ -407,8 +407,8 @@ impl Harness {
             return;
         };
         let mut changed = false;
-        // The open view just applied this event (the route applies before
-        // it syncs): when it declined a re-delivered start for a turn it
+        // The open view applies its lane's events before the row syncs:
+        // when it declined a re-delivered start for a turn it
         // already saw complete, the row declines it too instead of
         // manufacturing a fresh `Working · now` (item 3). A session with no
         // open view keeps the wire's word.
@@ -433,8 +433,8 @@ impl Harness {
                 changed = true;
             }
         }
-        // The live view just applied this event (the route applies before
-        // it syncs): a parked provider lane's fold is as current as the
+        // The live view applies its lane's events before the row syncs: a
+        // parked provider lane's fold is as current as the
         // open view's, so its row re-reads it the same way (B3b).
         if let Some(view) = Self::live_view_for(&self.active, &self.session_cache, session_id, cx) {
             let (approval, question) = view.read(cx).row_pending();
@@ -854,7 +854,7 @@ impl Harness {
     /// line, never a dialog, and the session stays untitled-marked so a later
     /// pass retries once the sidecar has regenerated under a lease.
     pub(super) fn derive_titles(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.muse_transport() else { return };
         let wanted: Vec<String> = self
             .sessions
             .iter()

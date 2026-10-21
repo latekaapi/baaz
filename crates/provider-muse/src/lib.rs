@@ -7,8 +7,8 @@
 //! translation is in `translate`. Spawning, `initialize` and the
 //! schema-fingerprint warning live here too — [`establish`] is what `baaz`'s
 //! connection path calls. [`MuseAdapter`] is the whole connection as one
-//! adapter, for tests; [`SharedTransport`] and [`MuseHub::legacy_events`]
-//! are transitional.
+//! adapter, for tests; [`SharedTransport`] and [`MuseHub::transport`] are
+//! transitional.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
 use muse_client::schema::{ApprovalRequestParams, UserInputRequestParams};
-use muse_client::{MuseClient, MuseConfig, MuseEvent};
+use muse_client::{MuseClient, MuseConfig};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
     ProviderEvent, ProviderId,
@@ -86,11 +86,6 @@ impl MuseAdapter {
     /// The schema-fingerprint warning from `initialize`.
     pub fn schema_warning(&self) -> Option<String> {
         self.hub().schema_warning()
-    }
-
-    /// The raw transport events, in wire order (transitional).
-    pub fn legacy_events(&self) -> Receiver<MuseEvent> {
-        self.hub().legacy_events()
     }
 }
 
@@ -191,10 +186,6 @@ pub fn spawn(program: &str) -> Result<MuseClient, ProviderError> {
 pub struct Established {
     /// The hub: one lane per session, plus the connection stream.
     pub hub: MuseHub,
-    /// The one spawned child (transitional).
-    pub transport: SharedTransport,
-    /// The raw transport events, in wire order (transitional). Single consumer.
-    pub legacy: Receiver<MuseEvent>,
     /// Who answered, neutrally.
     pub handshake: Handshake,
     /// The schema-fingerprint warning, pre-formatted for the log.
@@ -208,11 +199,8 @@ pub struct Established {
 /// Spawn `muse serve` ([`spawn`]) and shake hands over it. Blocking.
 pub fn establish(program: &str, client: &ConnectInfo) -> Result<Established, ProviderError> {
     let hub = MuseHub::connect(program, client)?;
-    let transport = hub.transport().ok_or_else(|| ProviderError::Unavailable { reason: "Muse is not running".into() })?;
     let handshake = hub.handshake().ok_or_else(|| ProviderError::Unavailable { reason: "Muse is not running".into() })?;
     Ok(Established {
-        legacy: hub.legacy_events(),
-        transport,
         handshake,
         warning: hub.schema_warning(),
         user_shell: hub.user_shell_granted(),

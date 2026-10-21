@@ -649,13 +649,12 @@ impl SessionEntry {
     /// after the transition, and the attention flags after it. The flags
     /// ride present-only-when-nonempty, so an absent list clears — the
     /// broadcast is the whole truth, not a delta.
-    pub fn apply_status_changed(
-        &mut self,
-        running: bool,
-        attention: Option<Vec<muse_client::schema::AttentionFlag>>,
-    ) {
+    pub fn apply_status_changed(&mut self, running: bool, attention: &[String]) {
         self.running = running;
-        self.attention = attention.unwrap_or_default();
+        self.attention = attention
+            .iter()
+            .filter_map(|flag| serde_json::from_value(serde_json::Value::String(flag.clone())).ok())
+            .collect();
     }
 
     /// Fold a `turn/completed` terminal into the row: a failed turn records
@@ -2420,15 +2419,14 @@ mod tests {
     /// delta: flags ride present-only-when-nonempty, so absence clears.
     #[test]
     fn status_changed_folds_running_and_attention() {
-        use muse_client::schema::AttentionFlag;
         let mut row = entry("s");
         row.turns = 2;
-        row.apply_status_changed(true, Some(vec![AttentionFlag::ApprovalPending]));
+        row.apply_status_changed(true, &["approvalPending".to_owned()]);
         assert!(row.running);
         assert!(row.needs_approval());
         assert_eq!(row.row_status(Local::now()).text().as_ref(), "Needs approval");
         // The stand-down clears both: no flags, no longer running.
-        row.apply_status_changed(false, None);
+        row.apply_status_changed(false, &[]);
         assert!(!row.running);
         assert!(!row.needs_approval());
         assert!(!row.asked());

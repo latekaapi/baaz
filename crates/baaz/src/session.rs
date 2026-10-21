@@ -352,8 +352,7 @@ pub enum SessionEvent {
     },
     /// A provider lane landed or settled an approval card: a
     /// `Block::Approval` arrived or left `Pending`. The application
-    /// re-reads the open view's pending words into the sidebar row — the
-    /// lane's equivalent of the muse route's approval/question sync — so
+    /// re-reads the open view's pending words into the sidebar row, so
     /// the row reads the needs-you state while the approval waits
     /// instead of `Working`.
     ProviderApprovalsChanged {
@@ -361,8 +360,9 @@ pub enum SessionEvent {
         session_id: String,
     },
     /// A provider lane settled a turn: a `TurnFinished` delta landed. The
-    /// application records the byline, the ledger row and the record bump —
-    /// the lane's equivalent of the muse route's `turn/completed` arm.
+    /// application records the byline, the ledger row and the record bump
+    /// (a Muse lane: the ledger row; its row follows the hub's
+    /// `TurnSettled`).
     /// Replayed history settles here too (a reopen replays finished
     /// turns), and every write below is idempotent, so replays land the
     /// byline without double-counting the ledger.
