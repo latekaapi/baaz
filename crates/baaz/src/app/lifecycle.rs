@@ -1282,7 +1282,13 @@ impl Harness {
         let pending = self.titles_pending.clone();
         let sides = self.side_sessions.clone();
         let mut rows = Vec::new();
-        let present: std::collections::HashSet<String> = self.sessions.iter().map(|e| e.id.clone()).collect();
+        // Only local rows survive the swap below (`retain(local)`), so only
+        // they keep their seat. Skipping every id already shown dropped the
+        // whole sidebar on a second install — the index reconcile landing
+        // before the list reply — because the first install's rows were
+        // skipped here and then removed by the retain.
+        let present: std::collections::HashSet<String> =
+            self.sessions.iter().filter(|e| e.local).map(|e| e.id.clone()).collect();
         // The saved `session/list` first ([`crate::list_cache`]): each row
         // joins exactly as the list reply will join it, so its label — and
         // the search row built from it — does not change when the reply
@@ -6852,6 +6858,38 @@ mod tests {
                 let joined = SessionEntry::join(&untitled, harness.index.get("s-chain"), None, &harness.projects);
                 assert_eq!(row.label, joined.label, "rejoin and join agree on a long label");
                 assert!(row.label.ends_with('\u{2026}'));
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// A second boot install (the index reconcile landing before the list
+    /// reply) keeps every row. It used to skip the rows the first install
+    /// placed and then drop them, leaving only local rows: 2,545 search rows
+    /// became 2,661 with every side session unhidden, and the sidebar held
+    /// almost nothing until the reply.
+    #[gpui::test]
+    fn a_second_boot_install_keeps_every_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("second-boot-install");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                for id in ["s-a", "s-b", "s-c"] {
+                    harness.index.insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                }
+                harness.install_provisional_rows();
+                let ids = |h: &Harness| {
+                    let mut ids: Vec<String> = h.sessions.iter().filter(|e| e.provisional).map(|e| e.id.clone()).collect();
+                    ids.sort();
+                    ids
+                };
+                assert_eq!(ids(harness), ["s-a", "s-b", "s-c"]);
+                // The reconcile brings one more row.
+                harness.index.insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() });
+                harness.install_provisional_rows();
+                assert_eq!(ids(harness), ["s-a", "s-b", "s-c", "s-d"], "nothing drops, the new row joins");
             });
         });
         lane_restore(state);
