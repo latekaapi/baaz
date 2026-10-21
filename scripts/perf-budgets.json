@@ -31,6 +31,18 @@
           "budget": 150,
           "measured": 23
         },
+        "store.list_cache_load_ms": {
+          "budget": 30,
+          "measured": 2.8
+        },
+        "store.list_newer_ms": {
+          "budget": 40,
+          "measured": 3.9
+        },
+        "store.list_newer_pages": {
+          "budget": 1,
+          "measured": 1
+        },
         "boot.first_frame_ms": {
           "budget": 300,
           "measured": 125
@@ -104,6 +116,18 @@
         "store.provider_bodies_ms": {
           "budget": 150,
           "measured": 21
+        },
+        "store.list_cache_load_ms": {
+          "budget": 30,
+          "measured": 2.8
+        },
+        "store.list_newer_ms": {
+          "budget": 40,
+          "measured": 3.9
+        },
+        "store.list_newer_pages": {
+          "budget": 1,
+          "measured": 1
         },
         "boot.first_frame_ms": {
           "budget": 300,

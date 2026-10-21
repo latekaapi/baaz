@@ -424,6 +424,29 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     entry
 }
 
+/// Muse's list rows, for the saved listing ([`crate::list_cache`]).
+impl crate::list_cache::Row for muse_client::schema::Session {
+    fn id(&self) -> &str {
+        &self.session_id
+    }
+    fn updated_at(&self) -> &str {
+        &self.updated_at
+    }
+    fn activity_at(&self) -> &str {
+        self.last_activity_at.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&self.created_at)
+    }
+    fn compact(&mut self) {
+        // The join reads these for an 80-character label and a prompt-prefix
+        // side marker; nothing in Baaz reads past the first 1,000.
+        for text in [&mut self.title, &mut self.first_user_prompt, &mut self.name, &mut self.generated_name]
+            .into_iter()
+            .flatten()
+        {
+            crate::list_cache::keep_prefix(text);
+        }
+    }
+}
+
 /// The id prefix of a local draft: a Muse draft with no session behind it
 /// (scripted chrome, or a live launch with Muse still starting).
 pub(crate) const LOCAL_DRAFT_PREFIX: &str = "local-draft-";
@@ -459,15 +482,27 @@ impl Harness {
                 if map != previous {
                     index::save_cache(&cache, &map);
                 }
+                // The saved `session/list` too, on the first read: the boot
+                // rows join it exactly as the list reply will, so nothing
+                // (labels, search rows) changes when the reply lands.
+                let listed = if first {
+                    crate::list_cache::load(&crate::list_cache::cache_path()).map(std::sync::Arc::new)
+                } else {
+                    None
+                };
                 crate::log::boot_mark(&format!(
-                    "index-read-done rows={} cached={} in={}ms",
+                    "index-read-done rows={} cached={} listed={} in={}ms",
                     map.len(),
                     previous.len(),
+                    listed.as_ref().map_or(0, |l| l.sessions.len()),
                     at.elapsed().as_millis()
                 ));
-                map
+                (map, listed)
             },
-            move |this, index, cx| {
+            move |this, (index, listed), cx| {
+                if this.saved_list.is_none() {
+                    this.saved_list = listed;
+                }
                 this.apply_index(index, cx);
                 if first {
                     this.reconcile_index(cx);
@@ -541,6 +576,9 @@ impl Harness {
     /// `session/list`, unfiltered and paged: one window over every
     /// workspace, so the filter that used to hide other workspaces' sessions
     /// is gone and the cursor is followed until the server says `None`.
+    /// Incremental against the saved copy ([`crate::list_cache`]): rows
+    /// newer than its newest, merged in, with a full listing when the copy
+    /// is missing or a day old. The reply below always sees the whole list.
     /// Everything lands on the one background task behind this
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
@@ -559,38 +597,55 @@ impl Harness {
         self.sessions_list_in_flight = true;
         crate::log::boot_mark("session/list-sent");
         let projects = self.projects.clone();
+        let cached = self.saved_list.clone();
         let work = move || {
             let at = std::time::Instant::now();
             crate::log::boot_mark("session/list-work-start");
-            let mut sessions = Vec::new();
-            let mut cursor: Option<String> = None;
-            let mut pages = 0usize;
-            loop {
-                let page_at = std::time::Instant::now();
-                let page = client.session_list(&SessionListParams {
-                    cursor,
-                    limit: Some(200),
-                    ..Default::default()
-                })?;
-                pages += 1;
-                crate::log::boot_mark(&format!(
-                    "session/list-page pages={} rows={} in={}ms",
-                    pages,
-                    page.sessions.len(),
-                    page_at.elapsed().as_millis()
-                ));
-                sessions.extend(page.sessions);
-                cursor = page.next_cursor;
-                if cursor.is_none() {
-                    break;
-                }
-            }
+            // Only rows newer than the saved copy's newest, merged into it
+            // (`list_cache`): one page instead of 27 at boot and after
+            // every finished turn. The first listing of a launch may run
+            // before the index read has loaded the copy; it reads it here.
+            let cache_path = crate::list_cache::cache_path();
+            let cached = cached.or_else(|| crate::list_cache::load(&cache_path).map(std::sync::Arc::new));
+            let source = crate::index::index_path().to_string_lossy().into_owned();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let listing = crate::list_cache::list(
+                cached.as_deref(),
+                &source,
+                now_ms,
+                &mut |ask| {
+                    client
+                        .session_list(&SessionListParams {
+                            cursor: ask.cursor,
+                            limit: Some(ask.limit),
+                            updated_after: ask.updated_after.map(str::to_owned),
+                            ..Default::default()
+                        })
+                        .map(|page| crate::list_cache::Page { rows: page.sessions, next: page.next_cursor })
+                },
+                &mut |page, rows, took| {
+                    crate::log::boot_mark(&format!(
+                        "session/list-page pages={page} rows={rows} in={}ms",
+                        took.as_millis()
+                    ));
+                },
+            )?;
             crate::log::boot_mark(&format!(
-                "session/list-work-done rows={} pages={} in={}ms",
-                sessions.len(),
-                pages,
+                "session/list-work-done rows={} pages={} mode={:?} fetched={} in={}ms",
+                listing.sessions.len(),
+                listing.pages,
+                listing.mode,
+                listing.fetched,
                 at.elapsed().as_millis()
             ));
+            let held = match listing.save {
+                Some(copy) => {
+                    crate::list_cache::save(&cache_path, &copy);
+                    Some(std::sync::Arc::new(copy))
+                }
+                None => cached,
+            };
+            let sessions = listing.sessions;
             // The branch behind every project group row, read while already
             // off the UI thread — and the root-exists answers beside them,
             // so the refresh rechecks every adoption without touching the
@@ -612,12 +667,12 @@ impl Harness {
             for project in &projects.projects {
                 canon.get(&project.root.to_string_lossy());
             }
-            Ok::<_, MuseError>((sessions, branches, availability, canon))
+            Ok::<_, MuseError>((sessions, branches, availability, canon, held))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
             let reply_at = std::time::Instant::now();
             let row_count = match &result {
-                Ok((sessions, _, _, _)) => sessions.len(),
+                Ok((sessions, _, _, _, _)) => sessions.len(),
                 Err(_) => 0,
             };
             crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
@@ -629,7 +684,10 @@ impl Harness {
             let already = this.sessions_loaded;
             this.sessions_loaded = true;
             crate::log::boot_mark("sessions-loaded");
-            if let Ok((sessions, branches, availability, mut canon)) = result {
+            if let Ok((sessions, branches, availability, mut canon, held)) = result {
+                if held.is_some() {
+                    this.saved_list = held;
+                }
                 this.projects.refresh_availability(&availability);
                 let projects = this.projects.clone();
                 let join_at = std::time::Instant::now();

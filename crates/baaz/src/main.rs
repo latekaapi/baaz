@@ -60,6 +60,7 @@ mod images;
 mod index;
 mod keymap;
 mod layout;
+mod list_cache;
 mod log;
 mod login;
 mod mascot;

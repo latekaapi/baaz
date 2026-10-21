@@ -162,3 +162,35 @@ seen earlier was the failed-resume path); a smaller first page buys nothing. Mus
 is server work. Muse `session/list` at boot is 27 serial pages of 200 (the server maximum), ~5 s, but the sidebar
 paints from the cache and nothing waits on it — an `updatedAfter` incremental listing is the follow-up. 60 Muse chain
 rows rewrite their search row once per launch because the boot label (index cache) and the list's label differ.
+
+## 8. Speed P1, the rest: Muse's list at launch (2026-10-21, on `main`)
+
+**Probe first (muse 1.4.11, `1.4.11-R6667.1`, read-only `muse serve` + `session/list`, no turns).**
+`session/list` takes `updatedAfter` and honours it:
+
+- it filters on **`updatedAt`, strictly later** (a cut equal to the newest stamp returns 0 rows, one microsecond earlier
+  returns that row); microsecond precision; a malformed stamp is `-32602 invalidParams`;
+- filtered results page like the full listing (`limit` ≤ 200, `nextCursor`);
+- the listing is ordered by **`lastActivityAt` descending**, not `updatedAt` as the schema comment says, and
+  `updatedAt` also moves on `session/resume`, so "newer" includes sessions that were merely opened — harmless here;
+- cost on the owner's 2,661 sessions: full listing 27 pages, 2.5 s warm from a probe (4.0–4.2 s inside Baaz at boot,
+  the first page cold at 1.5–2.5 s); a filtered listing is one page in 130–360 ms warm, ~1.4 s as the first call of a
+  cold `muse serve` (Muse warming its index — server work, nothing Baaz can skip).
+
+What a filtered listing cannot see is a session that left Muse. Hence: **`list_cache`** keeps the last listing in
+`session-list-cache.json` (state dir), asks for rows newer than its newest `updatedAt` less a 5 s overlap, merges by id
+and re-sorts like the server; a full listing runs when the copy is missing, unreadable, from another Muse data dir,
+older than 24 h, or when the filtered call fails. Rows are compacted as they arrive — title, first prompt and names cut
+to 1,000 characters like the index read — because Muse lists whole first prompts: the first saved copy was **233 MB**
+(128 MB of prompts + 128 MB of titles); compacted it is 6.6 MB. The same listing runs after every finished Muse turn
+and every fork, which used to re-read all 27 pages each time.
+
+| Measured (release bundle, BaazCheck, fresh state dir, real Muse index) | Before | After |
+|---|---|---|
+| Launch listing (`session/list-work-done`) | 3.97–4.21 s, 27 pages | **1.39–1.62 s, 1 page** (cold Muse's first call) |
+| Listing after a turn / fork (warm Muse, probe) | ~2.5 s, 27 pages | **130–360 ms, 1 page** |
+| Data over the pipe per listing | ~260 MB of prompts and titles | the newer rows only |
+
+Offline budgets (`--perf-store`, scripted 2,600-row server — the wire itself is Muse's): `store.list_cache_load_ms`
+(read the saved copy), `store.list_newer_ms` (the newer-rows listing and merge) and `store.list_newer_pages` (budget
+**1**: a listing that falls back to every page reads 13 there and fails).

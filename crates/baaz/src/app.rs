@@ -1134,6 +1134,11 @@ pub struct Harness {
     /// A refresh was asked for while [`Self::sessions_list_in_flight`]: the
     /// landing reply reloads once rather than dropping it.
     sessions_list_stale: bool,
+    /// The last `session/list` this window holds ([`crate::list_cache`]):
+    /// the next listing asks Muse only for rows newer than its newest. Loaded
+    /// from disk by the first index read (or by the first listing, whichever
+    /// runs first); `None` until then, and the listing reads the file itself.
+    pub(crate) saved_list: Option<std::sync::Arc<crate::list_cache::ListCache<muse_client::schema::Session>>>,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
     /// Which half of the window the person is in (B2a-H2): sessions or
@@ -1661,6 +1666,7 @@ impl Harness {
             index_loaded: false,
             sessions_list_in_flight: false,
             sessions_list_stale: false,
+            saved_list: None,
             layout: {
                 let layout = layout::read();
                 crate::sidebar::set_compact_rows(layout.compact_rows);

@@ -209,7 +209,106 @@ pub fn run(dir: &Path) -> serde_json::Value {
     put("provider_bodies_ms", ms(at));
     assert_eq!(bodies.len(), PROVIDER_SESSIONS, "every synthetic provider transcript yields text");
 
+    // The launch listing (speed P1, docs/51 §8): a saved copy of every row,
+    // then a boot that asks only for what moved since. The server is
+    // scripted in-process — the wire is Muse's to time — so what is timed is
+    // Baaz's own share: reading the copy and merging the newer rows in. The
+    // page count is the guard: a listing that falls back to every page reads
+    // 13 here and fails its budget of 1.
+    let list_path = dir.join("session-list-cache.json");
+    let mut server = ListServer { rows: (0..SESSIONS).map(list_row).collect(), pages: 0 };
+    let full = crate::list_cache::list(None, "perf", 0, &mut |ask| server.page(ask), &mut |_, _, _| {})
+        .expect("the scripted listing");
+    let saved = full.save.expect("a full listing is saved");
+    crate::list_cache::save(&list_path, &saved);
+    let at = Instant::now();
+    let loaded: crate::list_cache::ListCache<ListRow> =
+        crate::list_cache::load(&list_path).expect("the copy reads back");
+    put("list_cache_load_ms", ms(at));
+    assert_eq!(loaded.sessions.len(), SESSIONS);
+    server.rows[SESSIONS / 2].updated_at = "2026-10-22T00:00:00Z".into();
+    server.rows[SESSIONS / 2].activity_at = "2026-10-22T00:00:00Z".into();
+    server.pages = 0;
+    let at = Instant::now();
+    let newer = crate::list_cache::list(Some(&loaded), "perf", 1, &mut |ask| server.page(ask), &mut |_, _, _| {})
+        .expect("the scripted listing");
+    put("list_newer_ms", ms(at));
+    put("list_newer_pages", server.pages as f64);
+    assert_eq!(newer.sessions[0].id, session_id(SESSIONS / 2), "the moved row leads the merged list");
+
     let value = serde_json::Value::Object(out);
     println!("{value}");
     value
+}
+
+/// A list row the size of Muse's after [`crate::list_cache::Row::compact`]:
+/// a 1,000-character title and first prompt.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ListRow {
+    id: String,
+    updated_at: String,
+    activity_at: String,
+    title: String,
+    first_user_prompt: String,
+    workspace_root: String,
+}
+
+impl crate::list_cache::Row for ListRow {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn updated_at(&self) -> &str {
+        &self.updated_at
+    }
+    fn activity_at(&self) -> &str {
+        &self.activity_at
+    }
+    fn compact(&mut self) {
+        crate::list_cache::keep_prefix(&mut self.title);
+        crate::list_cache::keep_prefix(&mut self.first_user_prompt);
+    }
+}
+
+fn list_row(index: usize) -> ListRow {
+    // Newest first, a minute apart, like the server's order.
+    let at = chrono::DateTime::from_timestamp(1_790_000_000 - index as i64 * 60, 0)
+        .expect("a valid stamp")
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    ListRow {
+        id: session_id(index),
+        updated_at: at.clone(),
+        activity_at: at,
+        title: body_for(index).chars().take(1000).collect(),
+        first_user_prompt: body_for(index + 1).chars().take(1000).collect(),
+        workspace_root: format!("/work/project-{}", index % 12),
+    }
+}
+
+/// `session/list` as muse 1.4.11 serves it: 200 a page, `updatedAfter`
+/// strictly later.
+struct ListServer {
+    rows: Vec<ListRow>,
+    pages: usize,
+}
+
+impl ListServer {
+    fn page(&mut self, ask: crate::list_cache::Ask<'_>) -> Result<crate::list_cache::Page<ListRow>, String> {
+        self.pages += 1;
+        let after = ask.updated_after.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+        let rows: Vec<&ListRow> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                after.is_none_or(|after| {
+                    chrono::DateTime::parse_from_rfc3339(&row.updated_at).is_ok_and(|at| at > after)
+                })
+            })
+            .collect();
+        let start: usize = ask.cursor.as_deref().and_then(|c| c.parse().ok()).unwrap_or(0);
+        let end = (start + ask.limit as usize).min(rows.len());
+        Ok(crate::list_cache::Page {
+            rows: rows[start..end].iter().map(|row| (*row).clone()).collect(),
+            next: (end < rows.len()).then(|| end.to_string()),
+        })
+    }
 }
