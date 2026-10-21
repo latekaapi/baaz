@@ -19,8 +19,10 @@ owner's state:
            then a generated 1,000-turn transcript, where the per-chunk
            render work must not grow with the session (docs/51 #6).
   idle     the signed-in shell with the 300-turn replay open, left alone:
-           CPU used (cumulative `ps` time, not the decaying `%cpu`) and root
-           renders over a quiet window. At rest both must be ~zero.
+           CPU used (cumulative `ps` time, not the decaying `%cpu`), root
+           renders and frames asked for (aui-motion's per-call-site
+           counter) over a quiet window. At rest all must be ~zero; a miss
+           on frames names the call sites that asked.
 
 Budgets live in `scripts/perf-budgets.json`, per build profile, each with
 the number measured on the reference machine beside it. A budget missed is
@@ -38,6 +40,9 @@ BUDGETS = os.path.join(REPO, "scripts", "perf-budgets.json")
 STRESS = "fixtures/msp/synthetic-stress-300.jsonl"
 STRESS_ID = "synthetic-stress-300"
 SIDEBAR = "fixtures/sidebar/stress.json"
+# Why a metric reads what it reads, printed beside a miss (e.g. which call
+# sites asked for frames at rest).
+NOTES = {}
 GROUPS = ("store", "boot", "open", "switch", "stream", "idle")
 
 
@@ -212,8 +217,12 @@ def measure_idle(binary, settle_s, window_s, state):
         fh.seek(start_len)
         tail = fh.read()
     renders = sum(int(n) for n in re.findall(r"baaz-perf renders=(\d+)/2s", tail))
+    frame_lines = re.findall(r"baaz-perf frames=(\d+) by (.*)", tail)
+    if frame_lines:
+        NOTES["idle.frame_requests"] = "; ".join(by for _, by in frame_lines)
     return {"idle.cpu_pct": round(100.0 * cpu / window_s, 2),
-            "idle.renders": renders}
+            "idle.renders": renders,
+            "idle.frame_requests": sum(int(n) for n, _ in frame_lines)}
 
 
 def main():
@@ -275,7 +284,8 @@ def main():
         rows[name] = {"value": value, "budget": limit, "unit": spec.get("unit", "ms"),
                       "reference": spec.get("measured"), "ok": ok}
         if not ok:
-            misses.append(f"{name} = {value} > budget {limit:g}")
+            note = f" ({NOTES[name]})" if name in NOTES else ""
+            misses.append(f"{name} = {value} > budget {limit:g}{note}")
     # A budgeted metric in a group that ran but produced nothing is an error,
     # never a silent pass.
     for name in budgets:
@@ -293,6 +303,9 @@ def main():
             mark = "ok  " if row["ok"] else ("MISS" if row["ok"] is False else "    ")
             budget = "-" if row["budget"] is None else f"{row['budget']:g}"
             print(f"{mark} {name:<{width}}  {row['value']:>9g}  budget {budget}")
+        for line in misses:
+            if "(" in line:
+                print(f"MISS {line}")
         for line in errors:
             print(f"ERR  {line}")
         print(f"perf-budgets ({profile}): {len(misses)} missed, {len(errors)} unmeasured")

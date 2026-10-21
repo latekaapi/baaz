@@ -229,7 +229,7 @@ impl SessionView {
         // its threshold. A settled transcript requests nothing once it
         // lapses, which is what `bench-idle` asserts.
         if self.gesture_active() {
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
         }
         self.sync_render_cache();
         if let Some(sent_at) = self.send_trace_turns {
@@ -328,13 +328,13 @@ impl SessionView {
             self.list_state.scroll_to(target);
             self.quote_scroll = None;
             self.start_quote_flash();
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
             return;
         }
         let eased = 1.0 - (1.0 - t).powi(3);
         let y = f32::from(from.y) + (f32::from(to.y) - f32::from(from.y)) * eased;
         self.list_state.set_offset_from_scrollbar(gpui::point(from.x, px(y)));
-        window.request_animation_frame();
+        aui_motion::request_frame(window);
     }
 
     /// The one place a frame writes the render cache.
@@ -492,7 +492,7 @@ impl SessionView {
             span_flash: {
                 let flash = self.quote_flash_now();
                 if flash.is_some() {
-                    window.request_animation_frame();
+                    aui_motion::request_frame(window);
                 }
                 flash
             },

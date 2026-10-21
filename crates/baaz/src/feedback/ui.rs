@@ -1779,7 +1779,7 @@ impl crate::app::Harness {
             if self.feedback.press.is_none() {
                 match self.feedback.hover_tested_at {
                     Some(tested) if tested.elapsed() < FEEDBACK_HOVER_THROTTLE => {
-                        window.request_animation_frame();
+                        aui_motion::request_frame(window);
                     }
                     _ => {
                         self.hover_hit_test(point, window, cx);
@@ -2029,7 +2029,7 @@ impl crate::app::Harness {
             || self.feedback.capture_pending.is_some()
             || !self.feedback.step_queue.is_empty()
         {
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
         }
         let accent = feedback_accent(cx);
         let win = window.viewport_size();

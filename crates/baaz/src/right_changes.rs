@@ -707,7 +707,7 @@ pub(crate) fn changes_screen(
     let (session, other) = crate::right::partition_session_files(&tree.files, session_edits, root);
     let flash = ui.flash.as_ref().filter(|(at, _)| at.elapsed() < FLASH).map(|(at, files)| (1.0 - at.elapsed().as_secs_f32() / FLASH.as_secs_f32(), files.clone()));
     if flash.is_some() {
-        window.request_animation_frame();
+        aui_motion::request_frame(window);
     }
     let foot = foot_for(&tree, ui);
     let scroll = ui.scroll.clone();

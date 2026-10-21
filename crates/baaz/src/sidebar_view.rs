@@ -729,7 +729,7 @@ impl Harness {
             self.close_row_detail();
         }
         if self.sidebar_gesture_active() {
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
         }
         static FIRST_ROWS_DONE: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
@@ -790,7 +790,7 @@ impl Harness {
             Some(since) => {
                 let k = (cx.background_executor().now().duration_since(since).as_secs_f32() / MODE_FADE.as_secs_f32()).clamp(0.0, 1.0);
                 if k < 1.0 {
-                    window.request_animation_frame();
+                    aui_motion::request_frame(window);
                 }
                 aui_tokens::Easing::OUT.sample(k)
             }

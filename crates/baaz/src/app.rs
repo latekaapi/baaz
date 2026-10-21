@@ -6413,7 +6413,7 @@ impl Harness {
             match dy {
                 Some(dy) => {
                     self.push_sidebar_scroll_sweep(dy, cx);
-                    window.request_animation_frame();
+                    aui_motion::request_frame(window);
                 }
                 None => self.sidebar_scroll_sweep = None,
             }
@@ -6432,7 +6432,7 @@ impl Harness {
                             cx.notify();
                         });
                     }
-                    window.request_animation_frame();
+                    aui_motion::request_frame(window);
                 }
                 None => self.transcript_scroll_sweep = None,
             }
@@ -6445,7 +6445,7 @@ impl Harness {
         // `loading` key painted only after the load had ended): ask for the
         // next one so the re-armed pane draws now.
         if self.sync_sidebar_pane(cx) {
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
         }
         // A mode switch fades the sidebar's new rows in, but the pane is
         // cached: nothing would re-render it mid-fade, so keep re-arming it
@@ -6454,7 +6454,7 @@ impl Harness {
             if cx.background_executor().now().duration_since(since) >= crate::sidebar_view::MODE_FADE {
                 self.mode_fade_since = None;
             } else {
-                window.request_animation_frame();
+                aui_motion::request_frame(window);
                 self.sidebar_pane.update(cx, |_, cx| cx.notify());
             }
         }
@@ -7058,7 +7058,7 @@ impl Render for Harness {
         // paint transparent; the frames keep coming until the page settles.
         let hold_covers = self.browser_cover_settling(cx);
         if hold_covers {
-            window.request_animation_frame();
+            aui_motion::request_frame(window);
         }
         let held = |cover: Option<AnyElement>| {
             cover.map(|cover| {
