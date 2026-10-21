@@ -196,3 +196,8 @@ impl Attention {
         }
     }
 }
+
+/// The text a transcript gap marker carries when filling history back in
+/// stopped short; what follows it is the reason. (The other gap marker —
+/// history the provider no longer holds — carries its own words.)
+pub const BACKFILL_ABORTED_PREFIX: &str = "Backfill did not finish: ";

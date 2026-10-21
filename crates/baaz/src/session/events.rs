@@ -285,7 +285,7 @@ for line in sys.stdin:
     }
 
     impl StubServe {
-        fn start(name: &str, extra: &[&str]) -> (muse_client::MuseClient, StubServe) {
+        fn start(name: &str, extra: &[&str]) -> (provider_muse::MuseHub, StubServe) {
             let dir = std::env::temp_dir().join(format!(
                 "baaz-unqueue-{name}-{}-{}",
                 std::process::id(),
@@ -301,9 +301,8 @@ for line in sys.stdin:
             let log = dir.join("wire.log");
             let mut args: Vec<String> = extra.iter().map(|s| (*s).to_owned()).collect();
             args.push(log.to_string_lossy().into_owned());
-            let config = muse_client::MuseConfig { program: prog, trust_workspace: false, no_session_log: true, extra_args: args };
-            let client = muse_client::MuseClient::spawn(&config).expect("stub spawn");
-            (client, StubServe { dir, log })
+            let hub = provider_muse::MuseHub::spawn_stand_in(prog, args).expect("stub spawn");
+            (hub, StubServe { dir, log })
         }
 
         fn requests(&self) -> Vec<serde_json::Value> {
@@ -336,9 +335,8 @@ for line in sys.stdin:
     }
 
     /// A view on a Muse lane of a hub over the stub, attached to `s-1`.
-    fn open_live_view(vc: &mut gpui::VisualTestContext, client: muse_client::MuseClient, workspace: &str) -> Entity<SessionView> {
+    fn open_live_view(vc: &mut gpui::VisualTestContext, hub: provider_muse::MuseHub, workspace: &str) -> Entity<SessionView> {
         use provider::ProviderAdapter as _;
-        let hub = provider_muse::MuseHub::from_client(client);
         let mut lane = hub.lane();
         lane.connect(&crate::conn::connect_info()).expect("the stub shakes hands");
         let provider = provider::Provider::new(lane);

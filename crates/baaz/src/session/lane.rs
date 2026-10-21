@@ -125,13 +125,6 @@ impl ExternalQuestions {
 }
 
 impl SessionView {
-    /// Tests: whether this view is a Claude Code or Codex session — what
-    /// the older tests called "the provider lane", before Muse rode one too.
-    #[cfg(test)]
-    pub(crate) fn is_provider_lane(&self) -> bool {
-        self.provider_kind() != ProviderId::Muse
-    }
-
     /// The mode an opening provider view's open asked for, while no child
     /// has reported one (see [`OpeningLane`] and
     /// [`ProviderLane::unreported_mode`]).
@@ -1308,7 +1301,7 @@ mod tests {
             // shows, plus the one-shot `ListModels` the open pulls so the
             // menu lists what the child returns.
             assert_eq!(view.read(cx).tasks.len(), 3, "the drain loop plus the open's two pulls");
-            assert!(view.read(cx).is_provider_lane());
+            assert!(view.read(cx).provider_kind() != crate::providers::ProviderId::Muse);
         });
         submit_and_deliver(&view, &tx, vc, "hello");
         let texts = assistant_texts(&view, vc);
@@ -4105,16 +4098,12 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         let row = |id: &str, default: bool| ModelCatalogEntry {
             context_limit: None,
-            cost: None,
             description: None,
             display_label: format!("Codex {id}"),
             is_active: false,
             is_default: default,
             model_id: id.to_owned(),
-            output_limit: None,
-            profile_id: None,
             provider_id: "codex".to_owned(),
-            release_date: None,
             ..Default::default()
         };
         vc.update(|_, cx| {

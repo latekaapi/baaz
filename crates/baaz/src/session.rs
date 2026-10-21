@@ -61,7 +61,6 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, Position, TextareaState};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
-use muse_client::schema::{ApprovalMode, ModelCatalogEntry};
 
 use crate::overlays::{Command, Menu, MenuKind, Overlays, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
@@ -237,6 +236,58 @@ pub struct SessionHost {
     pub terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
 }
 
+/// Tests: one Muse notification frame for `session_id`, as the wire spells
+/// it, for [`SessionView::apply`].
+#[cfg(test)]
+pub(crate) fn wire_note(method: &str, session_id: &str, mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(map) = params.as_object_mut() {
+        map.entry("sessionId").or_insert_with(|| session_id.into());
+    }
+    serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+/// One row of the model menu: what a [`provider::ModelSummary`] carries,
+/// as the view reads it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModelCatalogEntry {
+    /// The model id a pick sends.
+    pub model_id: String,
+    /// The menu's label.
+    pub display_label: String,
+    /// The provider's one-line description.
+    pub description: Option<String>,
+    /// The session's effective model.
+    pub is_active: bool,
+    /// The provider's default row.
+    pub is_default: bool,
+    /// Which provider (or Muse model provider) serves the row.
+    pub provider_id: String,
+    /// The context window, when the provider reports one.
+    pub context_limit: Option<u64>,
+    /// The reasoning levels the provider lists for the row, in its order.
+    pub efforts: Vec<String>,
+    /// The level the model runs at when none is picked.
+    pub default_reasoning_effort: Option<String>,
+    /// The provider's words for each level it describes: `(level, words)`.
+    pub effort_notes: Vec<(String, String)>,
+}
+
+impl ModelCatalogEntry {
+    /// The row's selectable levels: the listed ones, else the described
+    /// ones; `None` when the provider names none.
+    pub fn effort_tiers(&self) -> Option<Vec<&str>> {
+        if !self.efforts.is_empty() {
+            return Some(self.efforts.iter().map(String::as_str).collect());
+        }
+        (!self.effort_notes.is_empty()).then(|| self.effort_notes.iter().map(|(tier, _)| tier.as_str()).collect())
+    }
+
+    /// The provider's words for `tier`, when it described it.
+    pub fn effort_description(&self, tier: &str) -> Option<&str> {
+        self.effort_notes.iter().find(|(name, _)| name == tier).map(|(_, words)| words.as_str())
+    }
+}
+
 /// Where the quote bar hangs: the selection's two ends as pressed and
 /// released (window coordinates) and the transcript's scroll offset then,
 /// so the bar rides with the text.
@@ -406,8 +457,8 @@ pub enum SessionEvent {
     /// The person picked an approval mode in this session: stored on the
     /// project defaults like the model.
     ModeSelected {
-        /// The picked mode, as the wire spells it.
-        mode: ApprovalMode,
+        /// The picked mode.
+        mode: aui_protocol::PermissionMode,
     },
     /// The person picked another provider from the composer chip in a
     /// session that has never sent: nothing has been written and no lane
@@ -1363,12 +1414,12 @@ impl SessionView {
         self.store.replace_client_block(id, block)
     }
 
-    /// Tests: fold one raw Muse wire event through the same translation a
-    /// hub lane runs, then into this view, as a live Muse session would see
-    /// it.
+    /// Tests: fold one Muse wire frame ([`wire_note`]) through the same
+    /// translation a hub lane runs, then into this view, as a live Muse
+    /// session would see it.
     #[cfg(test)]
-    pub(crate) fn apply(&mut self, event: muse_client::MuseEvent, cx: &mut Context<Self>) {
-        let events = self.test_wire.fold(event);
+    pub(crate) fn apply(&mut self, frame: serde_json::Value, cx: &mut Context<Self>) {
+        let events = self.test_wire.fold_line(&frame.to_string());
         self.fold_provider_events(events, cx);
     }
 
@@ -1564,7 +1615,7 @@ impl SessionView {
         if let Some(id) = self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()) {
             return id;
         }
-        if crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if self.provider_kind().catalog_flags_session_model() {
             // A reopened muse session's fold names no model, but its
             // `model/list` catalog still flags the effective row — and the
             // session's own past still outranks the catalog's default.
@@ -1610,7 +1661,7 @@ impl SessionView {
     /// settings, last reported model, then the out-of-box default),
     /// anything else the provider's human label.
     pub fn model(&self) -> SharedString {
-        if crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if self.provider_kind().catalog_flags_session_model() {
             return SharedString::from(self.muse_model_label());
         }
         let id = self.model_id();
@@ -1660,7 +1711,7 @@ impl SessionView {
     /// as nothing here, and a muse view with no catalog yet contributes
     /// nothing — an empty cache never drops a default.
     pub(crate) fn cached_muse_catalog_ids(&self) -> Vec<String> {
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if !self.provider_kind().catalog_flags_session_model() {
             return Vec::new();
         }
         self.models.iter().map(|m| m.model_id.clone()).collect()
@@ -1675,16 +1726,12 @@ impl SessionView {
             .iter()
             .map(|id| ModelCatalogEntry {
                 context_limit: None,
-                cost: None,
                 description: None,
                 display_label: (*id).to_owned(),
                 is_active: false,
                 is_default: false,
                 model_id: (*id).to_owned(),
-                output_limit: None,
-                profile_id: None,
                 provider_id: "muse".to_owned(),
-                release_date: None,
                 ..Default::default()
             })
             .collect();
@@ -1762,7 +1809,7 @@ impl SessionView {
     /// never receives `session/contextUsage`, so it reads the folded
     /// transcript's `TurnMeta` instead (see [`Self::provider_context`]).
     pub fn context(&self) -> ContextMeterState {
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if !self.provider_kind().meters_context_live() {
             return self.provider_context();
         }
         let side = self.store.side();
@@ -1934,7 +1981,7 @@ impl SessionView {
     /// something the provider never named, so it never reads "Finishing
     /// up… memory reminders" (seen on a Codex turn, 2026-10-17).
     pub fn on_reminder_tail(&self) -> bool {
-        crate::providers::uses_legacy_pump(self.provider_kind()) && self.reply_complete_for_running_turn()
+        self.provider_kind().has_reminder_tail() && self.reply_complete_for_running_turn()
     }
 
     /// Whether the composer is empty, which is what Escape branches on — and
@@ -2035,7 +2082,7 @@ impl SessionView {
     pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
         // The billing tier is Muse's account: no other provider's session
         // carries its banner or its guard, whichever lane it rides.
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if !self.provider_kind().has_billing_tier() {
             return;
         }
         if self.tier_banner != banner {
@@ -3173,16 +3220,12 @@ mod tests {
         });
         let row = |id: &str, label: &str| ModelCatalogEntry {
             context_limit: None,
-            cost: None,
             description: None,
             display_label: label.to_owned(),
             is_active: false,
             is_default: false,
             model_id: id.to_owned(),
-            output_limit: None,
-            profile_id: None,
             provider_id: "muse".to_owned(),
-            release_date: None,
             ..Default::default()
         };
         // A reopened session: the fold names no model, the session's own
@@ -3247,16 +3290,12 @@ mod tests {
         });
         let row = |id: &str, label: &str, active: bool| ModelCatalogEntry {
             context_limit: None,
-            cost: None,
             description: None,
             display_label: label.to_owned(),
             is_active: active,
             is_default: false,
             model_id: id.to_owned(),
-            output_limit: None,
-            profile_id: None,
             provider_id: "muse".to_owned(),
-            release_date: None,
             ..Default::default()
         };
         // The catalog's active row is stale: the chip names row 1.

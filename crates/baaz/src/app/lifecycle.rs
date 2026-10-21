@@ -2412,22 +2412,14 @@ impl Harness {
         let mode = self
             .args
             .approval_mode
-            .as_ref()
-            .cloned()
-            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
-            .as_ref()
-            .map(muse_adapter::permission_mode);
+            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode);
         Some(MuseOpen { model_provider, mode })
     }
 
     fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
         self.args
             .approval_mode
-            .as_ref()
-            .cloned()
             .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
-            .as_ref()
-            .map(muse_adapter::permission_mode)
             .unwrap_or_default()
     }
 
@@ -4530,7 +4522,7 @@ impl Harness {
             }
             SessionEvent::ModeSelected { mode } => {
                 self.note_pick(|defaults| {
-                    defaults.approval_mode = Some(mode.clone());
+                    defaults.approval_mode = Some(*mode);
                 });
             }
             // A fresh session's composer chip picked another provider:
@@ -6136,14 +6128,7 @@ mod tests {
     /// the dead child would have failed it into a dialog instead of a lane
     /// view.
     fn mark_muse_up(harness: &mut Harness) {
-        let child = muse_client::MuseClient::spawn(&muse_client::MuseConfig {
-            program: std::path::PathBuf::from("true"),
-            trust_workspace: false,
-            no_session_log: false,
-            extra_args: Vec::new(),
-        })
-        .expect("a throwaway child spawns");
-        let hub = provider_muse::MuseHub::from_client(child);
+        let hub = provider_muse::MuseHub::spawn_stand_in("true", Vec::new()).expect("a throwaway child spawns");
         harness.muse_slot.set_ready(hub.clone());
         harness.muse_hub = Some(hub);
     }
@@ -6485,7 +6470,7 @@ mod tests {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the provider session is open");
             assert!(
-                view.read(cx).is_provider_lane(),
+                view.read(cx).provider_kind() != ProviderId::Muse,
                 "the pick opens a provider lane, not a muse session"
             );
             assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
@@ -6848,7 +6833,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness.active.clone().expect("the retried lane is open");
-                assert!(view.read(cx).is_provider_lane(), "the retry reopens a lane, not a muse view");
+                assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the retry reopens a lane, not a muse view");
                 assert_eq!(view.read(cx).session_id, "s-codex-old", "the clicked session itself");
                 assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
                 assert!(
@@ -7870,9 +7855,7 @@ mod tests {
         answer: Option<&str>,
     ) {
         use provider::ProviderAdapter as _;
-        let client = std::sync::Arc::try_unwrap(starting_client_answering(dir, root, log, answer))
-            .unwrap_or_else(|_| panic!("the fake child is not shared yet"));
-        let hub = provider_muse::MuseHub::from_client(client);
+        let hub = starting_client_answering(dir, root, log, answer);
         hub.lane().connect(&crate::conn::connect_info()).expect("the fake child shakes hands");
         harness.muse_slot.set_ready(hub.clone());
         harness.muse_hub = Some(hub);
@@ -7885,7 +7868,7 @@ mod tests {
         root: &std::path::Path,
         log: &std::path::Path,
         answer: Option<&str>,
-    ) -> std::sync::Arc<muse_client::MuseClient> {
+    ) -> provider_muse::MuseHub {
         use std::os::unix::fs::PermissionsExt as _;
         let script = dir.join("fake-muse.sh");
         let answered = answer.map_or_else(|| "$sid".to_owned(), str::to_owned);
@@ -7910,15 +7893,7 @@ done
         );
         std::fs::write(&script, body).expect("fake muse script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        std::sync::Arc::new(
-            muse_client::MuseClient::spawn(&muse_client::MuseConfig {
-                program: script,
-                trust_workspace: false,
-                no_session_log: false,
-                extra_args: Vec::new(),
-            })
-            .expect("the fake child spawns"),
-        )
+        provider_muse::MuseHub::spawn_stand_in(script, Vec::new()).expect("the fake child spawns")
     }
 
     /// Adopt `dir` as the current project and pick muse for new sessions.
@@ -8069,7 +8044,7 @@ done
                 harness.new_session(window, cx);
                 let view = harness.active.clone().expect("the draft is up in the click's own update");
                 assert!(view.read(cx).is_starting(), "the child has not answered");
-                assert!(view.read(cx).is_provider_lane(), "it rides the provider lane");
+                assert!(view.read(cx).provider_kind() != ProviderId::Muse, "it rides the provider lane");
                 assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
                 let id = view.read(cx).session_id.clone();
                 assert!(harness.starts_in_flight.contains(&id), "scripted verbs wait for it");
@@ -8169,7 +8144,7 @@ done
         let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
         let provisional = vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.args.approval_mode = Some(muse_client::schema::ApprovalMode::DenyUnmatched);
+                harness.args.approval_mode = Some(aui_protocol::PermissionMode::DenyUnmatched);
                 harness.new_session(window, cx);
                 let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
                 harness.overrides.entry(id.clone()).or_default();
@@ -8672,7 +8647,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the fork is open");
-            assert!(view.read(cx).is_provider_lane(), "the fork opens a provider lane");
+            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the fork opens a provider lane");
             assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex, "on the same provider");
             assert_eq!(view.read(cx).session_id, "s-fork", "resuming the fork, not a fresh session");
             assert!(!harness.session_switch_pending, "the switch landed");
@@ -8702,7 +8677,7 @@ done
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("a session opened");
             assert!(
-                view.read(cx).is_provider_lane(),
+                view.read(cx).provider_kind() != ProviderId::Muse,
                 "`new` on a provider pick ends on a provider lane"
             );
             assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
@@ -8725,7 +8700,7 @@ done
         let old = vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the draft opened");
-            assert!(!view.read(cx).is_provider_lane(), "the draft starts on the muse lane");
+            assert!(view.read(cx).provider_kind() == ProviderId::Muse, "the draft starts on the muse lane");
             view.read(cx).session_id.clone()
         });
         // The `SwitchProvider` handler's own sequence: remember the pick,
@@ -8743,7 +8718,7 @@ done
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the replacement opened");
             assert_ne!(view.read(cx).session_id, old, "the draft did not survive the switch");
-            assert!(view.read(cx).is_provider_lane(), "the replacement rides the provider lane");
+            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the replacement rides the provider lane");
             assert!(
                 !harness.session_cache.iter().any(|(id, _)| id == &old),
                 "the discarded draft was closed, never parked"
@@ -8915,7 +8890,7 @@ done
         vc.update(|_, cx| {
             let view = baaz.read(cx).active.clone().expect("the first draft is drawn");
             baaz.update(cx, |harness, cx| {
-                harness.on_session_event(view.clone(), &SessionEvent::ModeSelected { mode: muse_client::schema::ApprovalMode::AllowAll }, cx);
+                harness.on_session_event(view.clone(), &SessionEvent::ModeSelected { mode: aui_protocol::PermissionMode::AllowAll }, cx);
                 harness.on_session_event(view, &SessionEvent::EffortSelected { effort: Some("medium".into()) }, cx);
             });
         });
@@ -8957,7 +8932,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 let adopted = harness.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
-                adopted.defaults.approval_mode = Some(muse_client::schema::ApprovalMode::OnRequest);
+                adopted.defaults.approval_mode = Some(aui_protocol::PermissionMode::OnRequest);
                 harness.provider_factory = factory;
                 mark_muse_up(harness);
                 harness.active = None;
@@ -9112,7 +9087,7 @@ done
             let harness = baaz.read(cx);
             assert_eq!(opens_of(&opens), 1, "one `new` pair spawns one child");
             let view = harness.active.clone().expect("the session opened");
-            assert!(view.read(cx).is_provider_lane(), "it rides the provider lane");
+            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "it rides the provider lane");
             assert!(!harness.session_switch_pending, "the switch landed");
         });
         lane_restore(state);
@@ -10126,7 +10101,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the resumed lane is open");
-            assert!(view.read(cx).is_provider_lane(), "the click reopens a lane, not a muse view");
+            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the click reopens a lane, not a muse view");
             assert_eq!(view.read(cx).session_id, open_id);
             assert!(!harness.session_switch_pending, "the switch landed");
             assert!(
@@ -10486,7 +10461,6 @@ done
     /// rolled back, never a silent Active.
     #[gpui::test]
     fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
-        use muse_client::MuseEvent;
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let state = lane_state("b3-pack-fail");
         let vc = cx.add_empty_window();
@@ -10557,12 +10531,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness.active.clone().expect("the destination is open");
-                let event = |method: &str, params: serde_json::Value| MuseEvent::Notification {
-                    method: method.to_owned(),
-                    params,
-                    cursor: None,
-                    session_id: Some("dest-m".to_owned()),
-                };
+                let event = |method: &str, params: serde_json::Value| crate::session::wire_note(method, "dest-m", params);
                 view.update(cx, |view, cx| {
                     view.apply(
                         event("session/started", serde_json::json!({"session": {"sessionId": "dest-m"}})),
@@ -10739,7 +10708,6 @@ done
     /// failed after activation stays that turn's business.
     #[gpui::test]
     fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::TestAppContext) {
-        use muse_client::MuseEvent;
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let state = lane_state("b3fix-pack-ok");
         let vc = cx.add_empty_window();
@@ -10803,12 +10771,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness.active.clone().expect("the destination is open");
-                let event = |method: &str, params: serde_json::Value| MuseEvent::Notification {
-                    method: method.to_owned(),
-                    params,
-                    cursor: None,
-                    session_id: Some("dest-m2".to_owned()),
-                };
+                let event = |method: &str, params: serde_json::Value| crate::session::wire_note(method, "dest-m2", params);
                 view.update(cx, |view, cx| {
                     view.apply(
                         event("session/started", serde_json::json!({"session": {"sessionId": "dest-m2"}})),
@@ -11806,7 +11769,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the fresh lane is open");
-            assert!(view.read(cx).is_provider_lane(), "a lane opens, not a muse view");
+            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "a lane opens, not a muse view");
             assert!(
                 harness.overlays.read(cx).dialog.is_none(),
                 "no failure dialog on a fresh open"

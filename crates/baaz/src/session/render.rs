@@ -1873,7 +1873,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
     pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse-account surface: never drawn on another provider's session.
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if !self.provider_kind().has_billing_tier() {
             return None;
         }
         let guard = self.tier_banner.clone()?;

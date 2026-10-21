@@ -2351,7 +2351,7 @@ impl Folded {
 /// transcript has a hole in it" and that is what both of these are — so the
 /// text carries which one it is, the way a `ForkedFrom` marker's text carries
 /// the session it came from. What follows the prefix is the reason.
-pub const GAP_ABORT_PREFIX: &str = "Backfill did not finish: ";
+pub const GAP_ABORT_PREFIX: &str = provider::facts::BACKFILL_ABORTED_PREFIX;
 
 /// Where a tool call's card was found by [`Folded::relocate_call`].
 enum Site {

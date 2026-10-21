@@ -2553,10 +2553,10 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
         // withdrawal of it when the backfill gave up (finding
         // `client-adapter-7`). The promise's text names a raw cursor, which is
         // not for a reader; the withdrawal's names the reason, which is.
-        MarkerKind::ViewGap if text.starts_with(muse_adapter::GAP_ABORT_PREFIX) => row
+        MarkerKind::ViewGap if text.starts_with(provider::facts::BACKFILL_ABORTED_PREFIX) => row
             .glyph(IconName::X, Some(p.warning))
             .text("Backfill did not finish, so events may be missing above")
-            .strong(text.trim_start_matches(muse_adapter::GAP_ABORT_PREFIX).to_owned()),
+            .strong(text.trim_start_matches(provider::facts::BACKFILL_ABORTED_PREFIX).to_owned()),
         MarkerKind::ViewGap => row
             .glyph(IconName::Shield, Some(p.warning))
             .text("Some events were missed while disconnected"),

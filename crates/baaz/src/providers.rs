@@ -210,12 +210,42 @@ pub fn mode_description(id: ProviderId, mode: aui_protocol::PermissionMode) -> &
     }
 }
 
-/// Whether this provider's sessions ride the legacy pump. `muse` does
-/// until the last view moves; every new provider rides the provider lane
-/// from its first session. Which lane serves a session is decided at
-/// session creation from the host's provider id and then not changed.
-pub fn uses_legacy_pump(id: ProviderId) -> bool {
-    matches!(id, ProviderId::Muse)
+/// What a provider's sessions offer beyond the seam's common ground — the
+/// registry's own words, so no view asks for a provider by name.
+impl ProviderId {
+    /// The login's plan decides what a turn costs, so its sessions carry
+    /// the billing banner and its send guard (Muse's tier).
+    pub fn has_billing_tier(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The provider reports the context window as it moves; the others'
+    /// meters read the settled turns' totals instead.
+    pub fn meters_context_live(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// A turn can stay open past its whole reply on the provider's own
+    /// bookkeeping (Muse's memory-reminder tail): "Finishing up…", not
+    /// "Working".
+    pub fn has_reminder_tail(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The provider's one catalog flags the session's effective model and
+    /// labels it, and is shared across its sessions (Muse's `model/list`):
+    /// the chip reads the catalog's label, and a new session's stored
+    /// default is checked against it.
+    pub fn catalog_flags_session_model(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// A model can rule a mode out (Claude Code and Codex models that
+    /// cannot run Auto): a mode left unsupported by a model change steps
+    /// down to Ask.
+    pub fn models_limit_modes(self) -> bool {
+        !matches!(self, ProviderId::Muse)
+    }
 }
 
 // ------------------------------------------------- finding the CLIs
@@ -1505,11 +1535,21 @@ mod tests {
         assert!(!refused.contains("Unverified"));
     }
 
+    /// The registry's properties are where a provider's own features are
+    /// named: Muse's billing tier, live context, reminder tail and shared
+    /// catalog; the CLI lanes' models that can rule a mode out.
     #[test]
-    fn muse_keeps_the_legacy_pump_and_new_providers_do_not() {
-        assert!(uses_legacy_pump(ProviderId::Muse));
-        assert!(!uses_legacy_pump(ProviderId::ClaudeCode));
-        assert!(!uses_legacy_pump(ProviderId::Codex));
+    fn the_registry_names_what_each_provider_offers() {
+        for id in ProviderId::all() {
+            let muse = id == ProviderId::Muse;
+            assert_eq!(id.lists_sessions(), muse);
+            assert_eq!(id.has_billing_tier(), muse);
+            assert_eq!(id.meters_context_live(), muse);
+            assert_eq!(id.has_reminder_tail(), muse);
+            assert_eq!(id.catalog_flags_session_model(), muse);
+            assert_eq!(id.models_limit_modes(), !muse);
+            assert_eq!(id.row_mark().is_none(), muse);
+        }
     }
 
     #[test]

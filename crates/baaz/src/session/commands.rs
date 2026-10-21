@@ -552,7 +552,7 @@ impl SessionView {
     /// which models lack Auto), and the provider reporting Auto (a launch
     /// or resume in Auto on a remembered model).
     pub(super) fn leave_auto_if_unsupported(&mut self, cx: &mut Context<Self>) {
-        if crate::providers::uses_legacy_pump(self.provider_kind())
+        if !self.provider_kind().models_limit_modes()
             || self.mode() != PermissionMode::OnRequest
             || self.mode_unavailable(PermissionMode::OnRequest).is_none()
         {
@@ -645,30 +645,16 @@ impl SessionView {
             .map(|row| ModelCatalogEntry {
                 // Muse's own tiers, default and notes ride the row: the
                 // effort menu reads them off it (`muse_effort_options`).
-                variants: (muse && !row.efforts.is_empty()).then(|| {
-                    muse_client::schema::ModelReasoningEffortVariants::Tiers(row.efforts.clone())
-                }),
+                efforts: if muse { row.efforts.clone() } else { Vec::new() },
                 default_reasoning_effort: row.default_effort.clone(),
-                reasoning_effort_variants: (!row.effort_notes.is_empty()).then(|| {
-                    row.effort_notes
-                        .iter()
-                        .map(|(tier, description)| muse_client::schema::ModelDescribedReasoningEffort {
-                            description: Some(description.clone()),
-                            tier: tier.clone(),
-                        })
-                        .collect()
-                }),
+                effort_notes: row.effort_notes.clone(),
                 context_limit: None,
-                cost: None,
                 description: row.description,
                 display_label: if muse { SessionView::muse_row_label(&row.id, &row.label) } else { row.label },
                 is_active: row.active,
                 is_default: row.is_default,
                 model_id: row.id,
-                output_limit: None,
-                profile_id: None,
                 provider_id: provider_id.to_owned(),
-                release_date: None,
             })
             .collect();
         // The session's model names no catalog row (Codex serves models its
@@ -682,16 +668,12 @@ impl SessionView {
             };
             self.models.push(ModelCatalogEntry {
                 context_limit: None,
-                cost: None,
                 description: None,
                 display_label: label,
                 is_active: true,
                 is_default: false,
                 model_id: current,
-                output_limit: None,
-                profile_id: None,
                 provider_id: provider_id.to_owned(),
-                release_date: None,
                 ..Default::default()
             });
         }
@@ -730,16 +712,12 @@ impl SessionView {
             };
             self.models.push(ModelCatalogEntry {
                 context_limit: None,
-                cost: None,
                 description: None,
                 display_label: label,
                 is_active: false,
                 is_default: false,
                 model_id: model_id.to_owned(),
-                output_limit: None,
-                profile_id: None,
                 provider_id: self.provider_id.clone(),
-                release_date: None,
                 ..Default::default()
             });
         }
@@ -1898,7 +1876,6 @@ mod tests {
     #[gpui::test]
     fn muse_effort_list_follows_the_rows_own_tiers(cx: &mut gpui::TestAppContext) {
         use crate::overlays::{EffortOptions, effort_row_id};
-        use muse_client::schema::{ModelDescribedReasoningEffort, ModelReasoningEffortVariants};
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "muse", "s-muse-tiers");
@@ -1911,13 +1888,8 @@ mod tests {
                         model_id: "tiered".into(),
                         provider_id: "meta".into(),
                         default_reasoning_effort: Some("medium".into()),
-                        variants: Some(ModelReasoningEffortVariants::Tiers(
-                            ["low", "medium", "hyper", "high"].map(str::to_owned).to_vec(),
-                        )),
-                        reasoning_effort_variants: Some(vec![ModelDescribedReasoningEffort {
-                            description: Some("Quick answers".into()),
-                            tier: "low".into(),
-                        }]),
+                        efforts: ["low", "medium", "hyper", "high"].map(str::to_owned).to_vec(),
+                        effort_notes: vec![("low".into(), "Quick answers".into())],
                         ..Default::default()
                     },
                     ModelCatalogEntry {

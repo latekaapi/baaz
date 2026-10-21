@@ -10012,15 +10012,7 @@ mod tests {
                 h.sessions.push(idle_row("s-1"));
                 let view = h.active.clone().expect("a session is open");
                 view.update(cx, |view, cx| {
-                    view.apply(
-                        muse_client::MuseEvent::Notification {
-                            method: "turn/started".to_owned(),
-                            params: serde_json::json!({"turnId": "t-1"}),
-                            cursor: None,
-                            session_id: Some("s-1".to_owned()),
-                        },
-                        cx,
-                    );
+                    view.apply(crate::session::wire_note("turn/started", "s-1", serde_json::json!({"turnId": "t-1"})), cx);
                 });
                 h.sync_row_live("s-1", true, cx);
             })

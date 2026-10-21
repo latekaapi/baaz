@@ -49,7 +49,28 @@ pub struct ProjectDefaults {
     pub efforts: std::collections::BTreeMap<String, String>,
     /// The approval mode new sessions start in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_mode: Option<muse_client::schema::ApprovalMode>,
+    pub approval_mode: Option<aui_protocol::PermissionMode>,
+}
+
+/// An approval mode from its stored name (`allowAll`, `onRequest`,
+/// `promptUnmatched`, `denyUnmatched`, any case). `None` for anything
+/// else: a word this build does not know never fails the file it is in.
+pub fn parse_mode(name: &str) -> Option<aui_protocol::PermissionMode> {
+    use aui_protocol::PermissionMode;
+    [PermissionMode::AllowAll, PermissionMode::OnRequest, PermissionMode::PromptUnmatched, PermissionMode::DenyUnmatched]
+        .into_iter()
+        .find(|mode| mode_name(*mode).eq_ignore_ascii_case(name.trim()))
+}
+
+/// The stored name of an approval mode: what [`parse_mode`] reads back.
+pub fn mode_name(mode: aui_protocol::PermissionMode) -> &'static str {
+    use aui_protocol::PermissionMode;
+    match mode {
+        PermissionMode::AllowAll => "allowAll",
+        PermissionMode::OnRequest => "onRequest",
+        PermissionMode::PromptUnmatched => "promptUnmatched",
+        PermissionMode::DenyUnmatched => "denyUnmatched",
+    }
 }
 
 /// The pre-keying shape of [`ProjectDefaults`]: what old `projects.json`
@@ -66,7 +87,7 @@ struct RawProjectDefaults {
     #[serde(default)]
     effort: Option<String>,
     #[serde(default)]
-    approval_mode: Option<muse_client::schema::ApprovalMode>,
+    approval_mode: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ProjectDefaults {
@@ -89,7 +110,7 @@ impl<'de> Deserialize<'de> for ProjectDefaults {
                 efforts.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
             }
         }
-        Ok(Self { models, efforts, approval_mode: raw.approval_mode })
+        Ok(Self { models, efforts, approval_mode: raw.approval_mode.as_deref().and_then(parse_mode) })
     }
 }
 
@@ -410,7 +431,7 @@ impl Projects {
                 picks.efforts.entry(lane.clone()).or_insert_with(|| effort.clone());
             }
             if picks.approval_mode.is_none() {
-                picks.approval_mode = project.defaults.approval_mode.clone();
+                picks.approval_mode = project.defaults.approval_mode;
             }
         }
         picks
@@ -734,6 +755,24 @@ mod tests {
     }
 
     use super::*;
+
+    /// The stored mode reads as the seam's mode; a word this build does not
+    /// know reads as no mode and never fails the rest of the defaults.
+    #[test]
+    fn a_stored_approval_mode_reads_and_an_unknown_one_is_dropped() {
+        let known: ProjectDefaults =
+            serde_json::from_value(serde_json::json!({"approvalMode": "promptUnmatched", "models": {"muse": "m"}}))
+                .expect("defaults read");
+        assert_eq!(known.approval_mode, Some(aui_protocol::PermissionMode::PromptUnmatched));
+        let unknown: ProjectDefaults =
+            serde_json::from_value(serde_json::json!({"approvalMode": "futureMode", "models": {"muse": "m"}}))
+                .expect("an unknown mode never fails the file");
+        assert_eq!(unknown.approval_mode, None);
+        assert_eq!(unknown.models.get("muse").map(String::as_str), Some("m"));
+        let written = serde_json::to_value(&known).expect("defaults write");
+        assert_eq!(written["approvalMode"], "promptUnmatched", "written the way older builds wrote it");
+        assert_eq!(parse_mode("DENYUNMATCHED"), Some(aui_protocol::PermissionMode::DenyUnmatched));
+    }
     use std::ffi::OsString;
 
     /// Point `BAAZ_STATE_DIR` at `dir` for the test's duration, restoring
