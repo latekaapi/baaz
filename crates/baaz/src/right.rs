@@ -1542,14 +1542,12 @@ fn is_markdown(name: &str) -> bool {
 }
 
 /// Whether a file opens rendered in the Page rather than in the preview
-/// (owner 2026-10-21): HTML and SVG as a browser draws them. Not PDFs: the
-/// owner chose the Page for them too, but the embedded Chromium draws a
-/// PDF as an empty grey page (seen live 2026-10-21, over file:// and http
-/// alike), so they keep the preview's card with Open in default app until
-/// its viewer works.
+/// (owner 2026-10-21): HTML and SVG as a browser draws them, PDFs in
+/// Chromium's viewer (which aui-cef must let load — it was cancelled as an
+/// app scheme and drew an empty grey page).
 pub(crate) fn opens_in_page(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    [".html", ".htm", ".xhtml", ".svg"].iter().any(|ext| lower.ends_with(ext))
+    [".html", ".htm", ".xhtml", ".svg", ".pdf"].iter().any(|ext| lower.ends_with(ext))
 }
 
 /// Whether a file's menu offers "View source": the kinds that otherwise
@@ -3111,12 +3109,12 @@ mod tests {
         assert!(!opens_on_chrome(RightKind::Browser, true, false), "a pushed view opens on content");
     }
 
-    /// A PDF stays out of the Page while its viewer draws nothing there.
+    /// HTML, SVG and PDF render in the Page; the rest previews.
     #[test]
-    fn pdfs_keep_the_preview_card() {
+    fn pages_open_html_svg_and_pdf() {
         assert!(super::opens_in_page("site/index.HTML"));
         assert!(super::opens_in_page("logo.svg"));
-        assert!(!super::opens_in_page("report.pdf"));
+        assert!(super::opens_in_page("report.pdf"));
         assert!(!super::opens_in_page("notes.md"));
     }
 }
