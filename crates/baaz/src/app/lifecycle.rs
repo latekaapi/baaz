@@ -5134,9 +5134,7 @@ impl Harness {
         let mut run = run;
         run.note_prepared(dest.clone());
         // Landing stands the summary wait down (the submitted pack is
-        // already the extractive one), so the side session's jobs leave
-        // with it: a late answer lands on nothing.
-        self.drop_handoff_summary_jobs(&pending.source_session, pending.epoch);
+        // already the extractive one): a late answer lands on nothing.
         // The destination names its model once the lane reports it; until
         // then the card keeps the provider default the open used.
         if !model.is_empty() {
@@ -5428,15 +5426,6 @@ impl Harness {
         }
     }
 
-    /// Drop a handoff run's summary side-session jobs: the wait is over
-    /// (landed, cancelled, or never opened), so a late side-session
-    /// answer must land on nothing. The paid-for turn itself is simply
-    /// abandoned — never retried, never harvested.
-    fn drop_handoff_summary_jobs(&mut self, source: &str, epoch: u64) {
-        self.title_jobs
-            .retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
-    }
-
     /// The handoff destination went away before it acknowledged the pack
     /// — its view closed, or its session errored — with no
     /// `HandoffPackFailed` to say so: fail the still-Prepared run with a
@@ -5463,10 +5452,9 @@ impl Harness {
         if run.card_id != card_id || !run.cancellable() {
             return;
         }
-        let epoch = run.epoch;
+        // The wait is over: a late summary answer finds no waiting run and
+        // lands on nothing.
         let opened = run.cancel();
-        // The wait is over: a late side-session answer lands on nothing.
-        self.drop_handoff_summary_jobs(source, epoch);
         if opened {
             if let Some(dest) = run.destination_session.clone() {
                 self.clear_handoff_links(source, &dest, cx);
@@ -5495,9 +5483,8 @@ impl Harness {
         if run.epoch != pending.epoch {
             return;
         }
-        // The wait is over with the open: a late side-session answer lands
-        // on nothing.
-        self.drop_handoff_summary_jobs(&pending.source_session, pending.epoch);
+        // The wait is over with the open: a late summary answer finds no
+        // waiting run and lands on nothing.
         run.fail(reason.clone());
         let card = run.card();
         let card_id = run.card_id.clone();
@@ -6665,6 +6652,53 @@ mod tests {
             assert_eq!(
                 harness.overrides.get("s-codex-old").and_then(|m| m.generated_title.clone()).as_deref(),
                 Some("Parser Panic Fix")
+            );
+        });
+        lane_restore(state);
+    }
+
+    /// P4: a Muse session's title takes the same one-shot path as the
+    /// others — the completer is asked for Muse, and the side session it
+    /// rides is recorded and hidden before anything is sent.
+    #[gpui::test]
+    fn a_muse_sessions_title_rides_a_recorded_hidden_side_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4-muse-title");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let log = state.2.join("requests.log");
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<crate::providers::ProviderId>::new()));
+        {
+            let asked = asked.clone();
+            crate::utility::set_test_completer(move |provider, _| {
+                asked.borrow_mut().push(provider);
+                Ok("Ferry Route Chart".into())
+            });
+        }
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                install_fake_muse(harness, &state.2, &state.2, &log, None);
+                harness.sessions.push(crate::sidebar::local_started_row(
+                    "s-muse-new",
+                    "chart the ferry routes".into(),
+                    None,
+                    None,
+                    chrono::Local::now(),
+                ));
+                harness.layout.auto_title = true;
+                harness.maybe_start_title("s-muse-new", Some("chart the ferry routes".into()), cx);
+                assert_eq!(harness.side_sessions.len(), 1, "the side session is recorded before the call");
+                let side = harness.side_sessions.iter().next().cloned().expect("a side id");
+                assert!(harness.overrides.get(&side).is_some_and(|meta| meta.hidden && meta.side_session));
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(*asked.borrow(), vec![crate::providers::ProviderId::Muse], "Muse wrote it, once");
+            assert_eq!(
+                harness.overrides.get("s-muse-new").and_then(|m| m.generated_title.clone()).as_deref(),
+                Some("Ferry Route Chart")
             );
         });
         lane_restore(state);
@@ -10473,10 +10507,7 @@ done
                     !harness.titles_pending.contains(&dest),
                     "a handoff destination earns no generated title"
                 );
-                assert!(
-                    !harness.title_jobs.values().any(|job| job.real_id == dest),
-                    "and starts no title side session"
-                );
+                assert!(harness.side_sessions.is_empty(), "and starts no title side session");
             });
         });
         vc.run_until_parked();
@@ -10637,7 +10668,7 @@ done
     /// late lands on nothing — the summary step never sticks on Current
     /// and the pack stays extractive. Driven through the app: the real
     /// watchdog handler while waiting, land itself, the real ack, then a
-    /// late side-session harvest and the watchdog again after activation.
+    /// late answer and the watchdog again after activation.
     #[gpui::test]
     fn a_late_summary_after_ack_leaves_the_extractive_pack(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -10710,22 +10741,9 @@ done
                 } else {
                     panic!("not a handoff card");
                 }
-                // A side-session answer landing after the ack: the harvest
-                // finds no waiting run and drops it.
-                harness.title_jobs.insert(
-                    "side-late".to_owned(),
-                    crate::app::titles::TitleJob {
-                        real_id: "b3-src".to_owned(),
-                        tries: 1,
-                        first_message: String::new(),
-                        handoff_epoch: Some(1),
-                    },
-                );
-                harness.harvest_title("side-late", cx);
-                assert!(
-                    !harness.title_jobs.contains_key("side-late"),
-                    "the late harvest drops its job"
-                );
+                // A summary answer landing after the ack finds no waiting
+                // run, so it is dropped.
+                assert!(!harness.handoff_summary_waiting("b3-src", 1), "a late answer lands on nothing");
                 let run = harness.handoffs.get("b3-src").expect("the run");
                 assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(crate::handoff::SummaryKind::Extractive));
                 // And the watchdog after activation is a no-op on the same

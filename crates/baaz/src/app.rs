@@ -1240,13 +1240,6 @@ pub struct Harness {
     /// `session/start` id that is not its own uuid shape, so side ids carry
     /// no namespace to match on).
     pub(crate) side_sessions: HashSet<String>,
-    /// Side session id → the generation it serves. Harvested off
-    /// `turn/completed`, reaped by the watchdog.
-    pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
-    /// D6: Muse side sessions drafting a commit message or PR description.
-    pub(crate) draft_jobs: HashMap<String, crate::right_changes::DraftJob>,
-    /// Side session id → the byline rewrite it serves.
-    pub(crate) byline_jobs: HashMap<String, titles::BylineJob>,
     /// Real session ids with a rewrite in flight: late answers for a
     /// stood-down rewrite are hidden and ignored, never landed.
     pub(crate) byline_live: HashSet<String>,
@@ -1688,9 +1681,6 @@ impl Harness {
             show_archived: false,
             titles_pending: HashSet::new(),
             side_sessions: HashSet::new(),
-            title_jobs: HashMap::new(),
-            draft_jobs: HashMap::new(),
-            byline_jobs: HashMap::new(),
             byline_live: HashSet::new(),
             byline_last_start: HashMap::new(),
             search_query: search_query.clone(),
@@ -2386,22 +2376,6 @@ impl Harness {
             }
             _ => None,
         };
-        // A side session's turn completed: harvest its answer for the title
-        // it serves. The open view ignores foreign ids on apply, so this is
-        // the only place a side session's events land.
-        if let MuseEvent::Notification { method, session_id, .. } = &event {
-            if method == "turn/completed" {
-                if let Some(side_id) = session_id.clone() {
-                    if self.title_jobs.contains_key(&side_id) {
-                        self.harvest_title(&side_id, cx);
-                    } else if self.byline_jobs.contains_key(&side_id) {
-                        self.harvest_byline(&side_id, cx);
-                    } else if self.draft_jobs.contains_key(&side_id) {
-                        self.harvest_draft(&side_id, cx);
-                    }
-                }
-            }
-        }
         // The row's live facts, straight from the event — no `session/list`
         // round trip: a started turn reads running now, a completed one (or
         // an approval/question event) re-reads the open view's pending

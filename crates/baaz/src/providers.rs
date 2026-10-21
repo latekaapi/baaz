@@ -357,6 +357,14 @@ impl MuseSlot {
         ready.notify_all();
     }
 
+    /// The hub, when it is up right now.
+    pub(crate) fn hub(&self) -> Option<provider_muse::MuseHub> {
+        match &*self.state.0.lock().expect("muse slot") {
+            MuseState::Ready(hub) => Some(hub.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether the hub is up right now.
     pub(crate) fn is_ready(&self) -> bool {
         matches!(*self.state.0.lock().expect("muse slot"), MuseState::Ready(_))

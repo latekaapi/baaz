@@ -2,14 +2,14 @@
 //! (parts 2 and 3).
 //!
 //! [`crate::titles`] owns the title policy and [`crate::byline`] the byline
-//! policy; this module owns the wire. On the first `turn/started` of an
+//! policy; this module drives them. On the first `turn/started` of an
 //! unnamed session, [`Harness::maybe_start_title`] marks the attempt
 //! (persisted, once-ever), shows the pending placeholder, and runs one
-//! background chain — `model/list`, `session/start` with `modelId` pinned
-//! and a namespaced client id, one `turn/start` — then waits for that side
-//! session's `turn/completed`, harvested with a free `session/read`. The
-//! result lands as `generated_title`; the side session is hidden the moment
-//! it starts. On a completed turn whose free byline excerpt is poor,
+//! background completion on the session's own provider
+//! ([`crate::utility::complete`]; on Muse a hidden side session the hub
+//! answers, [`provider_muse::MuseHub::complete`]). The result lands as
+//! `generated_title`; a Muse side session is hidden the moment it is
+//! minted. On a completed turn whose free byline excerpt is poor,
 //! [`Harness::maybe_rewrite_byline`] spends one debounced call the same way
 //! to rewrite the two lines.
 //!
@@ -17,34 +17,13 @@
 //! real turn is never blocked or delayed by a title. Failure (timeout, wire
 //! error, missing model, switch off) falls back to today's labels with one
 //! log line, never a dialog, and at most one retry per session — and a
-//! timeout stands the row down without giving the job up, so a reply that
-//! lands late still harvests read-only instead of being thrown away.
+//! timeout stands the row down without giving the call up, so a reply that
+//! lands late still lands instead of being thrown away.
 //!
 //! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
 
 use super::*;
 use crate::{byline, titles};
-
-/// One title generation in flight: which real session it names, and which
-/// attempt of this run's budget it is on.
-///
-/// The same map also carries handoff-summary jobs (Z8): when
-/// `handoff_epoch` is `Some`, the side session is a checkpoint's summary
-/// turn for `real_id` (the handoff source) under that owner-epoch — never
-/// a title. [`Harness::harvest_title`] diverts those to the summary
-/// harvest, and the title settle paths leave them alone.
-#[derive(Clone, Debug)]
-pub(crate) struct TitleJob {
-    /// The real session this names.
-    pub real_id: String,
-    /// 1 for the first try, 2 for the one retry.
-    pub tries: u8,
-    /// The first message the prompt was built from, so a harvest retry
-    /// re-asks about the same text rather than about nothing.
-    pub first_message: String,
-    /// `Some(epoch)` when this job is a handoff summary, `None` for a title.
-    pub handoff_epoch: Option<u64>,
-}
 
 impl Harness {
     /// Whether `session_id` names one of this app's throwaway title/summary
@@ -132,9 +111,11 @@ impl Harness {
         cx.notify();
     }
 
-    /// One background attempt: list models, start the side session, send the
-    /// one title prompt. The completion either records the harvest job (and
-    /// arms its timeout) or retries once / gives up.
+    /// One background attempt: one completion on the session's own
+    /// provider (docs/50 P2) — a Claude Code or Codex session never sends
+    /// its prompt to Muse — landed, retried once, or given up. A reply that
+    /// lands after the watchdog stood the row down still lands (the turn is
+    /// paid for), unless the session went away or was named meanwhile.
     fn run_title_attempt(
         &mut self,
         real_id: String,
@@ -142,83 +123,61 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
-        // The session's own provider writes its title (docs/50 P2): a
-        // Claude Code or Codex session never sends its prompt to Muse.
-        let provider = self.session_lane_provider(&real_id);
-        if provider != crate::providers::ProviderId::Muse {
-            self.run_title_on_provider(provider, real_id, first_message, tries, cx);
-            return;
-        }
-        let Some(client) = self.client.clone() else { return };
         if !self.titles_pending.contains(&real_id) {
             return;
         }
-        // The side workspace, never the real session's: the prompt already
-        // carries the user's message, so the side session needs no repo —
-        // and outside every adoption it can never match a project.
-        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
-        let side_id = titles::side_session_id();
-        // Recorded before the start runs, so a crash between the start and
-        // the hide still hides by record after a restart.
-        self.remember_side_session(&side_id, cx);
+        let provider = self.session_lane_provider(&real_id);
         let prompt = titles::title_prompt(&first_message);
-        let retry_message = first_message.clone();
-        let work = move || -> Result<String, String> {
-            // Free pre-flight: the pinned id when listed, else `None` — omit
-            // `modelId` and take the server default rather than failing.
-            let models = client
-                .model_list(&muse_client::schema::ModelListParams { session_id: None })
-                .map(|result| result.models)
-                .unwrap_or_default();
-            let model_id = titles::pick_title_model(&models);
-            let started = client
-                .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: provider::new_request_id(),
-                    model_id,
-                    session_id: Some(side_id.clone()),
-                    workspace_root: Some(workspace),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("session/start: {error}"))?;
-            let started_id = started.session.session_id.clone();
-            client
-                .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: provider::new_request_id(),
-                    session_id: started_id.clone(),
-                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
-                    display_text: Some("baaz auto-title".to_owned()),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("turn/start: {error}"))?;
-            Ok(started_id)
-        };
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(side_id) => {
-                // Already hidden by the pre-start record, before any list
-                // refresh could show it.
-                // A timeout that fired while the chain ran stood the row
-                // down, but the turn this started is paid for: record the
-                // job anyway, so its `turn/completed` still harvests
-                // read-only below rather than dropping unheard. Recording
-                // starts nothing — no second generation, never a retry.
-                this.title_jobs.insert(
-                    side_id.clone(),
-                    TitleJob { real_id: real_id.clone(), tries, first_message: retry_message, handoff_epoch: None },
-                );
-                cx.notify();
-            }
-            Err(reason) => {
-                if !this.titles_pending.contains(&real_id) {
+        let model = self.utility_model(&real_id, cx);
+        let muse = self.muse_side(provider, "baaz auto-title", cx);
+        let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
+        self.wire_call(cx, work, move |this, result, cx| {
+            let late = !this.titles_pending.contains(&real_id);
+            let reason = match result.map(|text| titles::clean_title(&text)) {
+                Ok(Some(title)) => {
+                    let known = this.sessions.iter().any(|entry| entry.id == real_id);
+                    if late && (!known || !titles::should_land_late(this.overrides.get(&real_id))) {
+                        crate::baaz_log!(
+                            "late auto-title for {real_id} dropped (renamed or gone); keeping the current label"
+                        );
+                        return;
+                    }
+                    this.land_title(&real_id, &title, cx);
                     return;
                 }
-                if titles::should_retry_title(tries, false) {
-                    crate::baaz_log!("auto-title for {real_id} failed ({reason}); retrying once");
-                    this.run_title_attempt(real_id, retry_message, tries + 1, cx);
-                } else {
-                    this.fail_title(&real_id, &reason, cx);
-                }
+                Ok(None) => "empty reply".to_owned(),
+                Err(reason) => reason,
+            };
+            if late {
+                return;
+            }
+            if titles::should_retry_title(tries, false) {
+                crate::baaz_log!("auto-title for {real_id} on {} failed ({reason}); retrying once", provider.label());
+                this.run_title_attempt(real_id, first_message, tries + 1, cx);
+            } else {
+                this.fail_title(&real_id, &reason, cx);
             }
         });
+    }
+
+    /// The Muse half of a completion on `provider`: a fresh side session,
+    /// recorded (hidden) before it starts so a crash between the start and
+    /// the hide still hides it after a restart. `None` for the CLI
+    /// providers, and while Muse is not up (the completion then fails and
+    /// the caller keeps its free fallback).
+    pub(crate) fn muse_side(
+        &mut self,
+        provider: crate::providers::ProviderId,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::utility::MuseSide> {
+        if provider != crate::providers::ProviderId::Muse {
+            return None;
+        }
+        let hub = self.muse_slot.hub()?;
+        let side_id = titles::side_session_id();
+        self.remember_side_session(&side_id, cx);
+        Some(crate::utility::MuseSide { hub, side_id, label })
     }
 
     /// The provider whose lane `session_id` rides: its provider record's,
@@ -234,7 +193,7 @@ impl Harness {
     /// through its connection, the others through their CLIs while enabled.
     pub(crate) fn utility_available(&self, provider: crate::providers::ProviderId) -> bool {
         match provider {
-            crate::providers::ProviderId::Muse => self.client.is_some(),
+            crate::providers::ProviderId::Muse => self.muse_slot.is_ready(),
             other => {
                 !self.scripted_chrome()
                     && crate::utility::supports(other)
@@ -252,129 +211,13 @@ impl Harness {
             .filter(|model| !model.is_empty())
     }
 
-    /// [`Self::run_title_attempt`] on a Claude Code or Codex session: one
-    /// completion on that provider's cheapest model, landed, retried once,
-    /// or given up exactly as the Muse route's harvest does.
-    fn run_title_on_provider(
-        &mut self,
-        provider: crate::providers::ProviderId,
-        real_id: String,
-        first_message: String,
-        tries: u8,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.titles_pending.contains(&real_id) {
-            return;
-        }
-        let prompt = titles::title_prompt(&first_message);
-        let model = self.utility_model(&real_id, cx);
-        self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, result, cx| {
-            let late = !this.titles_pending.contains(&real_id);
-            let reason = match result.map(|text| titles::clean_title(&text)) {
-                Ok(Some(title)) => {
-                    let known = this.sessions.iter().any(|entry| entry.id == real_id);
-                    if late && (!known || !titles::should_land_late(this.overrides.get(&real_id))) {
-                        return;
-                    }
-                    this.land_title(&real_id, "", &title, cx);
-                    return;
-                }
-                Ok(None) => "empty reply".to_owned(),
-                Err(reason) => reason,
-            };
-            if late {
-                return;
-            }
-            if titles::should_retry_title(tries, false) {
-                crate::baaz_log!("auto-title for {real_id} on {} failed ({reason}); retrying once", provider.label());
-                this.run_title_on_provider(provider, real_id, first_message, tries + 1, cx);
-            } else {
-                this.fail_title(&real_id, &reason, cx);
-            }
-        });
-    }
-
-    /// A `turn/completed` on a side session: harvest its answer with a free
-    /// `session/read`, then land the title or retry / give up per budget. A
-    /// reply that lands after the watchdog stood the job down harvests the
-    /// same way — the turn is already paid for — except it never retries
-    /// into a second generation and lands only while the session still
-    /// wants a name (gone, or named since, and it is dropped).
-    pub(super) fn harvest_title(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        // Stood down already (timeout): the row fell back to the first
-        // prompt, but the job stays so this late `turn/completed` still
-        // harvests below instead of being dropped unheard. (The closure
-        // re-reads the pending set: a stand-down can land between here and
-        // the read coming back.)
-        if !self.title_jobs.contains_key(side_id) {
-            return;
-        }
-        // A handoff-summary side session rides the same map under its
-        // `handoff_epoch` marker: harvest the summary, never a title.
-        if self.title_jobs.get(side_id).is_some_and(|job| job.handoff_epoch.is_some()) {
-            self.harvest_handoff_summary(side_id, cx);
-            return;
-        }
-        let Some(client) = self.client.clone() else { return };
-        let side_id = side_id.to_owned();
-        let read_id = side_id.clone();
-        let work = move || {
-            client.session_read(&muse_client::schema::SessionReadParams {
-                session_id: read_id.clone(),
-                exclude_items: Some(false),
-            })
-        };
-        self.wire_call(cx, work, move |this, result, cx| {
-            let Some(job) = this.title_jobs.get(&side_id).cloned() else { return };
-            let late = !this.titles_pending.contains(&job.real_id);
-            match result {
-                Ok(read) => match titles::harvest_title_text(&read) {
-                    Some(title) => {
-                        // A late answer lands exactly like an in-time one —
-                        // unless the session went away or someone named it
-                        // while the turn ran, in which case it is dropped.
-                        let known = this.sessions.iter().any(|entry| entry.id == job.real_id);
-                        if late
-                            && (!known
-                                || !titles::should_land_late(this.overrides.get(&job.real_id)))
-                        {
-                            crate::baaz_log!(
-                                "late auto-title for {} dropped (renamed or gone); keeping the current label",
-                                job.real_id
-                            );
-                            this.title_jobs.remove(&side_id);
-                            return;
-                        }
-                        this.land_title(&job.real_id, &side_id, &title, cx);
-                    }
-                    None if titles::should_retry_title(job.tries, late) => {
-                        crate::baaz_log!("auto-title for {} came back empty; retrying once", job.real_id);
-                        this.title_jobs.remove(&side_id);
-                        this.run_title_attempt(job.real_id, job.first_message, job.tries + 1, cx);
-                    }
-                    None => this.fail_title(&job.real_id, "empty reply", cx),
-                },
-                Err(error) => {
-                    if titles::should_retry_title(job.tries, late) {
-                        crate::baaz_log!("auto-title read for {} failed ({error}); retrying once", job.real_id);
-                        this.title_jobs.remove(&side_id);
-                        this.run_title_attempt(job.real_id, job.first_message, job.tries + 1, cx);
-                    } else {
-                        this.fail_title(&job.real_id, &error.to_string(), cx);
-                    }
-                }
-            }
-        });
-    }
-
     /// The title landed: store it under the user-given name in the label
     /// order, clear the pending state, and let the row and the crumb update
     /// in place — `set_override` rejoins the one row, so no flicker and no
     /// scroll jump.
-    fn land_title(&mut self, real_id: &str, side_id: &str, title: &str, cx: &mut Context<Self>) {
+    fn land_title(&mut self, real_id: &str, title: &str, cx: &mut Context<Self>) {
         let title = title.to_owned();
         self.set_override(real_id, |meta| meta.generated_title = Some(title), cx);
-        self.title_jobs.remove(side_id);
         self.titles_pending.remove(real_id);
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
             entry.title_pending = false;
@@ -390,7 +233,6 @@ impl Harness {
     fn fail_title(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-title for {real_id} failed ({reason}); keeping the first prompt");
         self.titles_pending.remove(real_id);
-        self.title_jobs.retain(|_, job| job.real_id != real_id || job.handoff_epoch.is_some());
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
             entry.title_pending = false;
         }
@@ -530,141 +372,23 @@ impl Harness {
         // The source session's own provider writes the summary (docs/50
         // P2): its transcript never leaves for another provider's model.
         let provider = self.session_lane_provider(&source);
-        if provider != crate::providers::ProviderId::Muse {
-            self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
-            let model = self.utility_model(&source, cx);
-            self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, reply, cx| {
-                let summary = reply.ok().and_then(|text| titles::clean_summary(&text));
-                if this.handoff_summary_waiting(&source, epoch) {
-                    this.resolve_handoff_summary(source, epoch, summary, cx);
-                }
-            });
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            // Signed out between the checkpoint's check and now: keep the
-            // extractive text and open the destination.
-            self.resolve_handoff_summary(source, epoch, None, cx);
-            return;
-        };
-        // The side workspace, never the real session's: the prompt already
-        // carries the goal and the excerpt, so the side session needs no
-        // repo — and outside every adoption it can never match a project.
-        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
-        let side_id = titles::side_session_id();
-        // Recorded before the start runs, so a crash between the start and
-        // the hide still hides by record after a restart.
-        self.remember_side_session(&side_id, cx);
-        // The watchdog is armed NOW, not once the start returns: a Muse that
-        // is connected but hangs in `session/start` or `turn/start` would
-        // otherwise hold the handoff until the client's own 180 s request
-        // timeout (review finding). A start that lands after the watchdog
-        // settled finds no waiting run and is dropped by the harvest guard.
+        // The watchdog is armed now, not once the completion starts: a
+        // provider that hangs would otherwise hold the handoff. An answer
+        // that lands after the watchdog settled finds no waiting run.
         self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
-        let work = move || -> Result<String, String> {
-            // Free pre-flight: the pinned id when listed, else `None` — omit
-            // `modelId` and take the server default rather than failing.
-            let models = client
-                .model_list(&muse_client::schema::ModelListParams { session_id: None })
-                .map(|result| result.models)
-                .unwrap_or_default();
-            let model_id = titles::pick_title_model(&models);
-            let started = client
-                .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: provider::new_request_id(),
-                    model_id,
-                    session_id: Some(side_id.clone()),
-                    workspace_root: Some(workspace),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("session/start: {error}"))?;
-            let started_id = started.session.session_id.clone();
-            client
-                .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: provider::new_request_id(),
-                    session_id: started_id.clone(),
-                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
-                    display_text: Some("baaz handoff summary".to_owned()),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("turn/start: {error}"))?;
-            Ok(started_id)
-        };
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(side_id) => {
-                // Already hidden by the pre-start record, before any list
-                // refresh could show it. Marked as a summary job, so the
-                // shared `turn/completed` route harvests a summary, and so
-                // a title settle for the same session never touches it.
-                this.title_jobs.insert(
-                    side_id,
-                    TitleJob {
-                        real_id: source.clone(),
-                        tries: 1,
-                        first_message: String::new(),
-                        handoff_epoch: Some(epoch),
-                    },
-                );
-                cx.notify();
-            }
-            Err(reason) => {
-                crate::baaz_log!(
-                    "handoff summary for {source} failed ({reason}); keeping the extractive summary"
-                );
-                this.resolve_handoff_summary(source, epoch, None, cx);
-            }
-        });
-    }
-
-    /// A `turn/completed` on a summary side session: harvest its answer
-    /// with a free `session/read`, then resolve the wait — model text in,
-    /// or the extractive text on an empty reply or a wire error. The
-    /// destination already opened beside the wait, so nothing opens here.
-    /// A reply that lands after Cancel (or a supersede) finds no waiting
-    /// run and is dropped: the side session stays hidden.
-    fn harvest_handoff_summary(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        let Some(job) = self.title_jobs.get(side_id).cloned() else { return };
-        let Some(epoch) = job.handoff_epoch else { return };
-        if !self.handoff_summary_waiting(&job.real_id, epoch) {
-            self.title_jobs.remove(side_id);
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            self.resolve_handoff_summary(job.real_id, epoch, None, cx);
-            return;
-        };
-        let side_id = side_id.to_owned();
-        let read_id = side_id.clone();
-        let work = move || {
-            client.session_read(&muse_client::schema::SessionReadParams {
-                session_id: read_id.clone(),
-                exclude_items: Some(false),
-            })
-        };
-        self.wire_call(cx, work, move |this, result, cx| {
-            // Abandoned while the read ran (cancelled, superseded): drop.
-            if !this.handoff_summary_waiting(&job.real_id, epoch) {
-                this.title_jobs.remove(&side_id);
-                return;
-            }
-            match result {
-                Ok(read) => {
-                    let harvested = titles::harvest_summary_text(&read);
-                    if harvested.is_none() {
-                        crate::baaz_log!(
-                            "handoff summary for {} came back empty; keeping the extractive summary",
-                            job.real_id
-                        );
-                    }
-                    this.resolve_handoff_summary(job.real_id, epoch, harvested, cx);
+        let model = self.utility_model(&source, cx);
+        let muse = self.muse_side(provider, "baaz handoff summary", cx);
+        let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
+        self.wire_call(cx, work, move |this, reply, cx| {
+            let summary = match reply {
+                Ok(text) => titles::clean_summary(&text),
+                Err(reason) => {
+                    crate::baaz_log!("handoff summary for {source} failed ({reason}); keeping the extractive summary");
+                    None
                 }
-                Err(error) => {
-                    crate::baaz_log!(
-                        "handoff summary read for {} failed ({error}); keeping the extractive summary",
-                        job.real_id
-                    );
-                    this.resolve_handoff_summary(job.real_id, epoch, None, cx);
-                }
+            };
+            if this.handoff_summary_waiting(&source, epoch) {
+                this.resolve_handoff_summary(source, epoch, summary, cx);
             }
         });
     }
@@ -673,7 +397,7 @@ impl Harness {
     /// under this epoch and is still waiting. Landing stands the wait
     /// down, so in practice this only ever holds while Checkpointed —
     /// but the flag, not the state, is the guard.
-    fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
+    pub(crate) fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
         self.handoffs.get(source).is_some_and(|run| {
             run.epoch == epoch
                 && run.summarising
@@ -702,12 +426,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
-        if run.epoch != epoch {
-            self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
-            return;
-        }
-        if !run.summarising {
-            self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
+        if run.epoch != epoch || !run.summarising {
             return;
         }
         match harvested.filter(|text| !text.trim().is_empty()) {
@@ -715,7 +434,6 @@ impl Harness {
             None => run.note_summary_fallback(),
         }
         self.handoffs.insert(source.clone(), run);
-        self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
         self.refresh_handoff_card(&source, cx);
         cx.notify();
     }
@@ -788,21 +506,6 @@ impl Harness {
     }
 }
 
-/// One byline rewrite in flight: which real session it summarises, which
-/// attempt of the budget, and the poor excerpt it re-asks about (retries
-/// reuse it rather than re-reading a transcript that may have moved on).
-#[derive(Clone, Debug)]
-pub(crate) struct BylineJob {
-    /// The real session this summarises.
-    pub real_id: String,
-    /// 1 for the first try, 2 for the one retry.
-    pub tries: u8,
-    /// The poor ask half, as excerpted when the rewrite started.
-    pub ask: String,
-    /// The poor result half, as excerpted when the rewrite started.
-    pub result: String,
-}
-
 impl Harness {
     /// A turn completed: the free excerpt already landed via
     /// [`Self::record_last_summary`], and now the rewrite question — only
@@ -873,8 +576,9 @@ impl Harness {
         cx.notify();
     }
 
-    /// One background rewrite attempt: the same side-session shape as a
-    /// title — model list, start, one prompt — with the rewrite prompt.
+    /// One background rewrite attempt: one completion on the session's own
+    /// provider (docs/50 P2) with the rewrite prompt, landed, retried once,
+    /// or given up. A late answer after the watchdog is ignored.
     fn run_byline_attempt(
         &mut self,
         real_id: String,
@@ -884,151 +588,17 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let provider = self.session_lane_provider(&real_id);
-        if provider != crate::providers::ProviderId::Muse {
-            self.run_byline_on_provider(provider, real_id, ask, result, tries, cx);
-            return;
-        }
-        let Some(client) = self.client.clone() else { return };
-        if self.byline_jobs.values().any(|job| job.real_id == real_id) {
-            return;
-        }
-        // Same side workspace as a title side session: the rewrite prompt
-        // already quotes both lines, so no repo is needed either.
-        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
-        let side_id = titles::side_session_id();
-        // Recorded before the start runs, like a title side session.
-        self.remember_side_session(&side_id, cx);
-        let prompt = byline::rewrite_prompt(&ask, &result);
-        let retry = (ask.clone(), result.clone());
-        let work = move || -> Result<String, String> {
-            let models = client
-                .model_list(&muse_client::schema::ModelListParams { session_id: None })
-                .map(|r| r.models)
-                .unwrap_or_default();
-            let model_id = titles::pick_title_model(&models);
-            let started = client
-                .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: provider::new_request_id(),
-                    model_id,
-                    session_id: Some(side_id.clone()),
-                    workspace_root: Some(workspace),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("session/start: {error}"))?;
-            let started_id = started.session.session_id.clone();
-            client
-                .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: provider::new_request_id(),
-                    session_id: started_id.clone(),
-                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
-                    display_text: Some("baaz auto-summary".to_owned()),
-                    ..Default::default()
-                })
-                .map_err(|error| format!("turn/start: {error}"))?;
-            Ok(started_id)
-        };
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(side_id) => {
-                // Already hidden by the pre-start record, whatever follows.
-                // Stood down while the chain ran: hide and ignore, never
-                // land a late answer over the free excerpt.
-                if !this.byline_live.contains(&real_id) {
-                    return;
-                }
-                this.byline_jobs.insert(
-                    side_id,
-                    BylineJob { real_id, tries, ask: retry.0, result: retry.1 },
-                );
-                cx.notify();
-            }
-            Err(reason) => {
-                if !this.byline_live.contains(&real_id) {
-                    return;
-                }
-                if tries < titles::TITLE_MAX_ATTEMPTS {
-                    crate::baaz_log!("auto-summary failed ({reason}); retrying once");
-                    let (ask, result) = retry;
-                    this.run_byline_attempt(real_id, ask, result, tries + 1, cx);
-                } else {
-                    this.fail_byline(&real_id, &reason, cx);
-                }
-            }
-        });
-    }
-
-    /// A rewrite side session's turn completed: read its two lines free and
-    /// land them, or retry / give up per budget.
-    pub(super) fn harvest_byline(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        if !self.byline_jobs.contains_key(side_id) {
-            return;
-        }
-        let Some(client) = self.client.clone() else { return };
-        let side_id = side_id.to_owned();
-        let read_id = side_id.clone();
-        let work = move || {
-            client.session_read(&muse_client::schema::SessionReadParams {
-                session_id: read_id.clone(),
-                exclude_items: Some(false),
-            })
-        };
-        self.wire_call(cx, work, move |this, result, cx| {
-            let Some(job) = this.byline_jobs.get(&side_id).cloned() else { return };
-            match result {
-                Ok(read) => {
-                    let texts: Vec<String> = {
-                        let inline = read.history.items.iter().flatten();
-                        let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
-                        inline
-                            .chain(snapshot)
-                            .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
-                            .filter_map(|item| item.text.clone())
-                            .collect()
-                    };
-                    match byline::parse_rewrite(&texts.join("\n")) {
-                        Some((ask, result)) => this.land_byline(&job.real_id, &side_id, &ask, &result, cx),
-                        None if job.tries < titles::TITLE_MAX_ATTEMPTS => {
-                            crate::baaz_log!("auto-summary came back unusable; retrying once");
-                            this.byline_jobs.remove(&side_id);
-                            this.run_byline_attempt(job.real_id, job.ask, job.result, job.tries + 1, cx);
-                        }
-                        None => this.fail_byline(&job.real_id, "unusable reply", cx),
-                    }
-                }
-                Err(error) => {
-                    if job.tries < titles::TITLE_MAX_ATTEMPTS {
-                        crate::baaz_log!("auto-summary read failed ({error}); retrying once");
-                        this.byline_jobs.remove(&side_id);
-                        this.run_byline_attempt(job.real_id, job.ask, job.result, job.tries + 1, cx);
-                    } else {
-                        this.fail_byline(&job.real_id, &error.to_string(), cx);
-                    }
-                }
-            }
-        });
-    }
-
-    /// The rewrite landed: both halves overwrite the free excerpt, and the
-    /// row updates in place through the one-row rejoin.
-    /// [`Self::run_byline_attempt`] on a Claude Code or Codex session: one
-    /// completion on its own provider, parsed like the Muse harvest.
-    fn run_byline_on_provider(
-        &mut self,
-        provider: crate::providers::ProviderId,
-        real_id: String,
-        ask: String,
-        result: String,
-        tries: u8,
-        cx: &mut Context<Self>,
-    ) {
         let prompt = byline::rewrite_prompt(&ask, &result);
         let model = self.utility_model(&real_id, cx);
-        self.wire_call(cx, move || crate::utility::complete(provider, model.as_deref(), &prompt), move |this, reply, cx| {
+        let muse = self.muse_side(provider, "baaz auto-summary", cx);
+        let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
+        self.wire_call(cx, work, move |this, reply, cx| {
             if !this.byline_live.contains(&real_id) {
                 return;
             }
             let reason = match reply.map(|text| byline::parse_rewrite(&text)) {
                 Ok(Some((new_ask, new_result))) => {
-                    this.land_byline(&real_id, "", &new_ask, &new_result, cx);
+                    this.land_byline(&real_id, &new_ask, &new_result, cx);
                     return;
                 }
                 Ok(None) => "unparseable reply".to_owned(),
@@ -1036,20 +606,19 @@ impl Harness {
             };
             if tries < titles::TITLE_MAX_ATTEMPTS {
                 crate::baaz_log!("auto-summary on {} failed ({reason}); retrying once", provider.label());
-                this.run_byline_on_provider(provider, real_id, ask, result, tries + 1, cx);
+                this.run_byline_attempt(real_id, ask, result, tries + 1, cx);
             } else {
                 this.fail_byline(&real_id, &reason, cx);
             }
         });
     }
 
-    fn land_byline(&mut self, real_id: &str, side_id: &str, ask: &str, result: &str, cx: &mut Context<Self>) {
+    fn land_byline(&mut self, real_id: &str, ask: &str, result: &str, cx: &mut Context<Self>) {
         let (ask, result) = (ask.to_owned(), result.to_owned());
         self.set_override(real_id, |meta| {
             meta.last_ask = Some(ask);
             meta.last_summary = Some(result);
         }, cx);
-        self.byline_jobs.remove(side_id);
         self.byline_live.remove(real_id);
         self.invalidate_list();
         cx.notify();
@@ -1059,7 +628,6 @@ impl Harness {
     /// dialog, never another attempt past budget.
     fn fail_byline(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-summary for {real_id} failed ({reason}); keeping the free excerpt");
-        self.byline_jobs.retain(|_, job| job.real_id != real_id);
         self.byline_live.remove(real_id);
         cx.notify();
     }
@@ -1088,72 +656,29 @@ impl Harness {
 /// and PR form; docs/43 §2.6), here beside the titles that use the same
 /// route, so the wire stays behind this seam.
 impl Harness {
-    /// Draft on Muse: a hidden side session in the side workspace, one turn
-    /// with the prompt; [`Self::harvest_draft`] reads the answer.
+    /// Draft on Muse: one completion in a hidden side session; the answer
+    /// lands where the person has not typed.
     pub(crate) fn draft_on_muse(&mut self, root: &std::path::Path, kind: crate::right_changes::DraftKind, prompt: String, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        let muse_id = crate::providers::ProviderId::Muse;
+        let Some(muse) = self.muse_side(muse_id, "baaz draft", cx) else {
             self.draft_failed(root, kind, cx);
             return;
         };
-        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
-        let side_id = titles::side_session_id();
-        self.remember_side_session(&side_id, cx);
         let root = root.to_path_buf();
-        let work = move || -> Result<String, String> {
-            let models = client.model_list(&muse_client::schema::ModelListParams { session_id: None }).map(|r| r.models).unwrap_or_default();
-            let started = client
-                .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: provider::new_request_id(),
-                    model_id: titles::pick_title_model(&models),
-                    session_id: Some(side_id.clone()),
-                    workspace_root: Some(workspace),
-                    ..Default::default()
-                })
-                .map_err(|e| format!("session/start: {e}"))?;
-            let id = started.session.session_id.clone();
-            client
-                .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: provider::new_request_id(),
-                    session_id: id.clone(),
-                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
-                    display_text: Some("baaz draft".to_owned()),
-                    ..Default::default()
-                })
-                .map_err(|e| format!("turn/start: {e}"))?;
-            Ok(id)
-        };
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(id) => {
-                this.draft_jobs.insert(id, crate::right_changes::DraftJob { root, kind });
+        let work = move || crate::utility::complete(muse_id, None, &prompt, Some(muse));
+        self.wire_call(cx, work, move |this, reply, cx| {
+            this.draft_failed(&root, kind, cx);
+            let text = match reply {
+                Ok(text) => crate::right_changes::clean_draft(&text),
+                Err(reason) => {
+                    crate::baaz_log!("draft on Muse failed: {reason}");
+                    return;
+                }
+            };
+            if text.is_empty() {
+                return;
             }
-            Err(reason) => {
-                crate::baaz_log!("draft on Muse failed: {reason}");
-                this.draft_failed(&root, kind, cx);
-            }
-        });
-    }
-
-    /// A drafting side session finished: read its answer, land it where
-    /// the person has not typed.
-    pub(crate) fn harvest_draft(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        let Some(job) = self.draft_jobs.remove(side_id) else { return };
-        let Some(client) = self.client.clone() else { return };
-        let read_id = side_id.to_owned();
-        let work = move || client.session_read(&muse_client::schema::SessionReadParams { session_id: read_id.clone(), exclude_items: Some(false) });
-        self.wire_call(cx, work, move |this, result, cx| {
-            let text = result.ok().and_then(|read| {
-                let inline = read.history.items.iter().flatten();
-                let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
-                inline
-                    .chain(snapshot)
-                    .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
-                    .filter_map(|item| item.text.clone())
-                    .rfind(|t| !t.trim().is_empty())
-            });
-            let root = job.root.clone();
-            this.draft_failed(&root, job.kind, cx);
-            let Some(text) = text.map(|t: String| crate::right_changes::clean_draft(&t)).filter(|t| !t.is_empty()) else { return };
-            match job.kind {
+            match kind {
                 crate::right_changes::DraftKind::Commit => {
                     let ui = this.changes_ui(&root);
                     if !ui.message_edited && ui.message.trim().is_empty() {

@@ -112,6 +112,13 @@ def canned(method, params, granted=()):
         if (params or {}).get("sessionId"):
             session = fake_session(params["sessionId"])
         return {"session": session, "viewCursor": "v:0"}
+    if method == "session/read" and (params or {}).get("sessionId") in REPLIES:
+        return {
+            "history": {"items": [REPLIES[params["sessionId"]]], "mode": "inline"},
+            "pendingRequests": [],
+            "session": fake_session(params["sessionId"]),
+            "viewCursor": "v:0",
+        }
     if method in ("session/resume", "session/fork", "session/read"):
         if EMIT_TURN and method == "session/resume" and (params or {}).get("sessionId"):
             session = fake_session(params["sessionId"])
@@ -221,6 +228,8 @@ def canned(method, params, granted=()):
 
 
 EMIT_TURN = False
+# The echoed reply per session, for `session/read` after an emitted turn.
+REPLIES = {}
 CURSOR = [0]
 
 
@@ -237,8 +246,10 @@ def emit_turn(params):
     note = lambda method, body: send({"jsonrpc": "2.0", "method": method,
         "params": dict(body, sessionId=session_id, viewCursor=cursor())})
     note("turn/started", {"turnId": turn_id})
-    note("item/completed", {"item": {"itemId": "i-" + turn_id, "kind": "agentMessage", "turnId": turn_id,
-        "revision": 1, "status": "completed", "text": "echo: " + text}})
+    item = {"itemId": "i-" + turn_id, "kind": "agentMessage", "turnId": turn_id,
+        "revision": 1, "status": "completed", "text": "echo: " + text}
+    REPLIES[session_id] = item
+    note("item/completed", {"item": item})
     note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 1})
 
 

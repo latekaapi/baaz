@@ -3,8 +3,12 @@
 //!
 //! Owner decision (2026-10-16): the session's own provider writes them, on
 //! its cheapest model — never Muse implicitly, so a Claude Code session's
-//! first prompt never leaves for Muse's model. Muse sessions keep Muse's
-//! side-session route (`app/titles.rs`), which is Muse's own way to do this.
+//! first prompt never leaves for Muse's model.
+//!
+//! - Muse: a hidden side session on the hub's cheapest model
+//!   ([`provider_muse::MuseHub::complete`]) — Muse has no one-shot verb. The
+//!   app mints and records the side id first ([`MuseSide`]), so the row
+//!   stays hidden even after a crash.
 //!
 //! - Claude Code: `claude -p` on `haiku`, no tools, no MCP, no settings, no
 //!   saved session, in Baaz's private Claude home.
@@ -34,8 +38,20 @@ pub(crate) const COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The model Claude Code completions run on.
 pub(crate) const CLAUDE_UTILITY_MODEL: &str = "haiku";
 
-/// Whether `provider` can write a completion here: Claude Code and Codex
-/// (through their CLIs). Muse uses its side sessions instead.
+/// How long a Muse completion may run. Longer than the titler's watchdog
+/// on purpose: the turn is paid for, so a late answer still lands.
+pub(crate) const MUSE_COMPLETE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// What a Muse completion rides: the hub, the side session the app minted
+/// and recorded for it, and the turn's display text.
+pub(crate) struct MuseSide {
+    pub hub: provider_muse::MuseHub,
+    pub side_id: String,
+    pub label: &'static str,
+}
+
+/// Whether `provider` can write a completion through its CLI: Claude Code
+/// and Codex. Muse writes them through the hub ([`MuseSide`]).
 pub(crate) fn supports(provider: ProviderId) -> bool {
     matches!(provider, ProviderId::ClaudeCode | ProviderId::Codex)
 }
@@ -48,10 +64,17 @@ pub(crate) fn supports(provider: ProviderId) -> bool {
 ///
 /// `model` is the session's own model, used by Codex (see the module docs);
 /// Claude Code always runs [`CLAUDE_UTILITY_MODEL`].
-pub(crate) fn complete(provider: ProviderId, model: Option<&str>, prompt: &str) -> Result<String, String> {
+/// `muse` is the side session a Muse completion rides; `None` for the CLIs
+/// (and a Muse completion without one fails: Muse is not up).
+pub(crate) fn complete(
+    provider: ProviderId,
+    model: Option<&str>,
+    prompt: &str,
+    muse: Option<MuseSide>,
+) -> Result<String, String> {
     #[cfg(test)]
     {
-        let _ = model;
+        let _ = (model, muse);
         return TEST_COMPLETER.with(|slot| match slot.borrow().as_ref() {
             Some(fake) => fake(provider, prompt),
             None => Err("no completions in tests".into()),
@@ -60,6 +83,14 @@ pub(crate) fn complete(provider: ProviderId, model: Option<&str>, prompt: &str) 
     #[allow(unreachable_code)]
     if crate::clock::deterministic() {
         return Err("no completions in a deterministic capture".into());
+    }
+    if provider == ProviderId::Muse {
+        let muse = muse.ok_or("Muse is not running")?;
+        let workspace = crate::titles::side_workspace_dir().to_string_lossy().into_owned();
+        return muse
+            .hub
+            .complete(&muse.side_id, &workspace, prompt, muse.label, MUSE_COMPLETE_TIMEOUT)
+            .map_err(|error| error.to_string());
     }
     complete_real(provider, model, prompt)
 }
@@ -133,7 +164,7 @@ fn complete_real(provider: ProviderId, model: Option<&str>, prompt: &str) -> Res
             command.args(codex_args(model, &last));
             out_file = Some(last);
         }
-        ProviderId::Muse => return Err("Muse writes these through its own side sessions".into()),
+        ProviderId::Muse => return Err("Muse completes through the hub".into()),
     }
     command.env("PATH", provider::env_path::login_path());
     provider::child_env::scrub_command(&mut command);

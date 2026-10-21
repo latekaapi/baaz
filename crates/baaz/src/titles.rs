@@ -13,8 +13,8 @@
 //! * the app starts a side session (`session/start` in the side workspace
 //!   under Baaz's own state dir — never a project — `modelId` pinned, a
 //!   bare-UUIDv7 client id recorded before the start), sends ONE short
-//!   prompt ([`title_prompt`]) for a 3–6 word title, and harvests
-//!   `turn/completed` with a free `session/read` ([`harvest_title_text`]).
+//!   prompt ([`title_prompt`]) for a 3–6 word title, and lands the reply
+//!   (the hub reads it back: `provider_muse::MuseHub::complete`).
 //! * the result lands in `sessions.json` as `generated_title`, ranked under
 //!   a user-given name in the label order; the server record is never
 //!   renamed. The side session is marked `hidden` the moment it starts, so
@@ -35,15 +35,6 @@
 //! billed evidence for that claim is one fresh-session send plus this call.
 
 use crate::sessions::SessionMeta;
-
-/// The model a title generation is pinned to at `session/start` when the
-/// catalog carries it: the non-contributor row. The wire reports `cost:
-/// null` for every model, so this is a smallest-appropriate pick by proxy
-/// (newest generation) with a privacy basis (the `-contributor` description
-/// flags transcript text "may be used for product improvement"), not a
-/// priced one. Absent from `model/list`, the start omits `modelId` and takes
-/// the server default — the send path never hard-fails on a model id.
-pub const TITLE_MODEL_ID: &str = "muse-spark-1.3";
 
 /// How long a title turn may run before the app stops waiting for it: 90 s.
 ///
@@ -200,16 +191,6 @@ pub fn should_title(
     }
 }
 
-/// The `modelId` for the side session's `session/start`: the pinned id when
-/// the catalog carries it, else `None` — omit the field and take the server
-/// default rather than failing the send path on a model id.
-pub fn pick_title_model(models: &[muse_client::schema::ModelCatalogEntry]) -> Option<String> {
-    models
-        .iter()
-        .any(|m| m.model_id == TITLE_MODEL_ID)
-        .then(|| TITLE_MODEL_ID.to_owned())
-}
-
 /// The one short prompt the side session sends: the user's first message,
 /// quoted and bounded, asking for a 3–6 word title and nothing else.
 pub fn title_prompt(first_message: &str) -> String {
@@ -247,37 +228,6 @@ pub fn clean_summary(reply: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.chars().take(SUMMARY_REPLY_CHARS).collect())
-}
-
-/// A handoff summary side session's answer, off a free `session/read`:
-/// the newest `agentMessage` text, inline items then the snapshot — the
-/// same two shapes [`harvest_title_text`] reads, but cleaned with
-/// [`clean_summary`] (multi-line) rather than [`clean_title`].
-pub fn harvest_summary_text(read: &muse_client::schema::SessionReadResult) -> Option<String> {
-    let inline = read.history.items.iter().flatten();
-    let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
-    inline
-        .chain(snapshot)
-        .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
-        .filter_map(|item| item.text.as_deref())
-        .rfind(|text| !text.trim().is_empty())
-        .and_then(clean_summary)
-}
-
-/// The side session's answer, off a free `session/read`: the newest
-/// `agentMessage` text, inline items then the snapshot, the same two shapes
-/// `first_shell_command` already reads. `None` is "no text yet" — retry the
-/// read once a later `turn/completed` arrives, or give up per the attempt
-/// budget; never a dialog.
-pub fn harvest_title_text(read: &muse_client::schema::SessionReadResult) -> Option<String> {
-    let inline = read.history.items.iter().flatten();
-    let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
-    inline
-        .chain(snapshot)
-        .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
-        .filter_map(|item| item.text.as_deref())
-        .rfind(|text| !text.trim().is_empty())
-        .and_then(clean_title)
 }
 
 #[cfg(test)]
@@ -417,18 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn the_pinned_model_wins_when_listed_and_yields_otherwise() {
-        let listed = vec![
-            model_row("muse-spark-1.2"),
-            model_row(TITLE_MODEL_ID),
-            model_row("muse-spark-1.3-contributor"),
-        ];
-        assert_eq!(pick_title_model(&listed), Some(TITLE_MODEL_ID.to_owned()));
-        assert_eq!(pick_title_model(&[model_row("muse-spark-1.2")]), None);
-        assert_eq!(pick_title_model(&[]), None);
-    }
-
-    #[test]
     fn side_prompts_are_recognisable_from_the_wire_alone() {
         assert!(is_side_prompt(&title_prompt("Explain the layout")));
         assert!(is_side_prompt(&crate::byline::rewrite_prompt("fix it", "patched it")));
@@ -447,16 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_harvest_keeps_multi_line_replies_verbatim() {
-        let reply = "Did X.\nDecided Y.\nNow at Z.\nLeft: W.";
-        let read = read_with(["queued reply", reply]);
-        assert_eq!(harvest_summary_text(&read), Some(reply.to_owned()));
-    }
-
-    #[test]
-    fn the_summary_harvest_skips_blanks_and_bounds_ramblers() {
-        assert_eq!(harvest_summary_text(&read_with(["   "])), None);
-        assert_eq!(harvest_summary_text(&read_with([])), None);
+    fn a_summary_reply_skips_blanks_and_bounds_ramblers() {
         let long = clean_summary(&"word ".repeat(10_000)).expect("a long reply still summarises");
         assert!(long.chars().count() <= SUMMARY_REPLY_CHARS);
         assert_eq!(clean_summary("  \n  "), None);
@@ -510,56 +439,4 @@ mod tests {
         assert_eq!(title, crate::sidebar::one_line(&"word ".repeat(100)));
     }
 
-    #[test]
-    fn the_harvest_reads_the_newest_assistant_text() {
-        let read = read_with(["queued reply", "Tighten validation"]);
-        assert_eq!(harvest_title_text(&read), Some("Tighten validation".into()));
-    }
-
-    #[test]
-    fn the_harvest_skips_user_text_and_blank_replies() {
-        let read = read_with(["   "]);
-        assert_eq!(harvest_title_text(&read), None);
-        let empty = read_with([]);
-        assert_eq!(harvest_title_text(&empty), None);
-    }
-
-    fn model_row(id: &str) -> muse_client::schema::ModelCatalogEntry {
-        serde_json::from_value(serde_json::json!({
-            "modelId": id,
-            "displayLabel": id,
-            "isActive": false,
-            "isDefault": false,
-            "providerId": "meta",
-        }))
-        .expect("a model row deserialises")
-    }
-
-    fn agent_item(text: &str) -> serde_json::Value {
-        serde_json::json!({
-            "itemId": "i",
-            "kind": "agentMessage",
-            "revision": 1,
-            "status": "completed",
-            "text": text,
-        })
-    }
-
-    fn read_with(texts: impl IntoIterator<Item = &'static str>) -> muse_client::schema::SessionReadResult {
-        let items: Vec<serde_json::Value> = texts.into_iter().map(agent_item).collect();
-        serde_json::from_value(serde_json::json!({
-            "history": { "items": items, "mode": "inline" },
-            "pendingRequests": [],
-            "session": {
-                "sessionId": "side",
-                "path": "",
-                "createdAt": "2026-09-16T00:00:00Z",
-                "updatedAt": "2026-09-16T00:00:00Z",
-                "turnCount": 1,
-                "status": "idle",
-            },
-            "viewCursor": "c",
-        }))
-        .expect("a read result deserialises")
-    }
 }
