@@ -83,7 +83,6 @@ struct Core {
     pending: Mutex<Option<Arc<MuseClient>>>,
     routed: Mutex<Routed>,
     connection: (Sender<ProviderEvent>, Receiver<ProviderEvent>),
-    legacy: (Sender<MuseEvent>, Receiver<MuseEvent>),
     terminal: Mutex<Option<TerminalRelay>>,
     /// Bumped per child: a reader of an older child stops quietly.
     generation: AtomicU64,
@@ -129,7 +128,6 @@ impl MuseHub {
                     orphans: VecDeque::new(),
                 }),
                 connection: unbounded(),
-                legacy: unbounded(),
                 terminal: Mutex::new(None),
                 generation: AtomicU64::new(0),
                 refuses_resume_bridge: AtomicBool::new(false),
@@ -230,14 +228,9 @@ impl MuseHub {
         self.core.connection.1.clone()
     }
 
-    /// The raw transport events, in wire order — transitional, for the
-    /// application's account, usage and title paths until they speak
-    /// neutral events. Competing consumers: keep one.
-    pub fn legacy_events(&self) -> Receiver<MuseEvent> {
-        self.core.legacy.1.clone()
-    }
-
-    /// The current child, shared — transitional, as [`Self::legacy_events`].
+    /// The current child, shared — transitional: the application's
+    /// session list still reads Muse's rows over it until they come
+    /// through the seam.
     pub fn transport(&self) -> Option<Arc<MuseClient>> {
         self.core.link.lock().expect("link mutex").as_ref().map(|link| Arc::clone(&link.client))
     }
@@ -372,7 +365,6 @@ impl Core {
     /// Fold one transport event and route what it produced. `false` once
     /// the child is gone.
     fn forward(&self, event: MuseEvent) -> bool {
-        let _ = self.legacy.0.send(event.clone());
         match event {
             MuseEvent::Closed(code) => {
                 let reason = match code {

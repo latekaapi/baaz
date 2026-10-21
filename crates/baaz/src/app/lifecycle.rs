@@ -595,7 +595,7 @@ impl Harness {
     /// Everything lands on the one background task behind this
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.muse_transport() else { return };
         if self.sessions_list_in_flight {
             // A fetch is already running — at boot the probe answer's fetch
             // is still out when the boot session's `session/start` lands and
@@ -815,7 +815,7 @@ impl Harness {
             active: self.active.is_some(),
             switch_pending: self.session_switch_pending,
             attempted: self.boot_session_attempted,
-            connected: self.client.is_some(),
+            connected: self.muse_slot.is_ready(),
             session_arg: self.args.session.as_deref(),
             send: self.args.send.is_some(),
             steps_pending: !self.args.steps.is_empty(),
@@ -885,7 +885,7 @@ impl Harness {
             !self.args.steps.is_empty(),
             self.args.replay.is_some(),
             self.args.offline,
-            self.client.is_some(),
+            self.muse_slot.is_ready(),
             self.active.is_some(),
             // A mixed script headed by a window verb can start: `new`
             // opens the session the later verbs need, so holding the whole
@@ -1807,7 +1807,7 @@ impl Harness {
         let Some(view) = in_centre.or(parked) else { return false };
         // A local Muse draft stood in while Muse was not running; once it
         // runs, the draft cannot send, so a new session starts a real one.
-        if is_local_draft(draft_id) && self.client.is_some() {
+        if is_local_draft(draft_id) && self.muse_slot.is_ready() {
             return false;
         }
         view.read(cx).provider_kind() == wanted
@@ -1892,7 +1892,7 @@ impl Harness {
         // Live, Muse is starting under this draft: the chip and the model
         // menu say so (the promotion replaces the view once it is up).
         let starting = !self.scripted_chrome()
-            && self.client.is_none()
+            && !self.muse_slot.is_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
         view.update(cx, |view, vc| view.set_muse_starting(starting, vc));
         // The Ask's session is this draft: key the draft to it before the
@@ -2332,7 +2332,7 @@ impl Harness {
         // answered, failed, went dark, or is older than about five
         // minutes. The wire only — never the pty scrape on every open.
         let muse_async = due.contains(&ProviderId::Muse)
-            && self.client.is_some()
+            && self.muse_slot.is_ready()
             && crate::tier::muse_menu_refresh_due(self.tier.as_ref());
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
         let mut views: Vec<Entity<SessionView>> =
@@ -4302,7 +4302,8 @@ impl Harness {
                     archive_target: None,
                 });
             }
-            // The child's exit already reached `route`, which owns the reconnect.
+            // The child's exit already reached the hub's connection stream,
+            // whose handler owns the reconnect.
             // A destination that errors out before it acknowledged the pack
             // never sends `HandoffPackFailed`: fail its still-Prepared run
             // here, so the links roll back instead of lingering with it.
@@ -4348,8 +4349,9 @@ impl Harness {
             // the session may earn a generated title, and the record moves
             // to now — the lane's `turn/started`.
             SessionEvent::ProviderTurnAccepted { session_id, prompt, turn_id, .. } => {
-                // A Muse lane's rows, titles and drafts follow Muse's own
-                // `turn/started` on the connection (see `route`).
+                // A Muse lane's rows, titles and drafts follow the hub's
+                // `TurnRunning` on the connection stream, which every Muse
+                // session's turn raises (see `on_hub_event`).
                 if view.read(cx).provider_kind() == ProviderId::Muse {
                     return;
                 }
@@ -4407,9 +4409,6 @@ impl Harness {
             // row re-reads the open view's pending words, so it stands
             // on the needs-you state while the approval waits.
             SessionEvent::ProviderApprovalsChanged { session_id } => {
-                if view.read(cx).provider_kind() == ProviderId::Muse {
-                    return;
-                }
                 self.sync_row_live(session_id, false, cx);
                 cx.notify();
             }
@@ -4421,8 +4420,8 @@ impl Harness {
                 let provider_kind = view.read(cx).provider_kind();
                 // A Muse lane's turn: the usage ledger's row, as Muse rows
                 // always were (untagged), stamped with the session's cursor;
-                // its row and byline follow Muse's own `turn/completed` on
-                // the connection (see `route`).
+                // its row and byline follow the hub's `TurnSettled` on the
+                // connection stream (see `on_hub_event`).
                 if provider_kind == ProviderId::Muse {
                     let cursor = view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
                     let row = crate::usage::row_from_finished(
@@ -6165,20 +6164,22 @@ mod tests {
         })
     }
 
-    /// A real child handle with no session behind it: `true` exits at once,
-    /// so nothing can answer on it — which is exactly what proves the lane
-    /// path issues no muse `session/start`: had it tried, the dead child
-    /// would have failed it into a dialog instead of a lane view.
-    fn dead_client() -> std::sync::Arc<MuseClient> {
-        std::sync::Arc::new(
-            MuseClient::spawn(&muse_client::MuseConfig {
-                program: std::path::PathBuf::from("true"),
-                trust_workspace: false,
-                no_session_log: false,
-                extra_args: Vec::new(),
-            })
-            .expect("a throwaway child spawns"),
-        )
+    /// Mark Muse up over a real child with no session behind it: `true`
+    /// exits at once, so nothing can answer on it — which is exactly what
+    /// proves the lane path issues no muse `session/start`: had it tried,
+    /// the dead child would have failed it into a dialog instead of a lane
+    /// view.
+    fn mark_muse_up(harness: &mut Harness) {
+        let child = MuseClient::spawn(&muse_client::MuseConfig {
+            program: std::path::PathBuf::from("true"),
+            trust_workspace: false,
+            no_session_log: false,
+            extra_args: Vec::new(),
+        })
+        .expect("a throwaway child spawns");
+        let hub = provider_muse::MuseHub::from_client(child);
+        harness.muse_slot.set_ready(hub.clone());
+        harness.muse_hub = Some(hub);
     }
 
     fn lane_harness(
@@ -6504,7 +6505,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -6552,7 +6553,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = failing_factory("no child here");
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -6633,7 +6634,7 @@ mod tests {
         }
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 z4_seed_stored_codex(harness, cx);
                 if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
                     record.turns = 0;
@@ -6758,7 +6759,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 // A tier that banners every session view it touches — the
                 // failure state must show none of it.
                 harness.tier = Some(crate::tier::Tier::Unavailable("no plan word".into()));
@@ -6845,7 +6846,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let first = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -6943,7 +6944,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7068,7 +7069,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7250,7 +7251,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7363,7 +7364,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7529,7 +7530,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         // Two landed lanes: the second parks the first into the cache.
@@ -7638,7 +7639,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7753,7 +7754,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7830,7 +7831,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -7907,7 +7908,6 @@ mod tests {
             .unwrap_or_else(|_| panic!("the fake child is not shared yet"));
         let hub = provider_muse::MuseHub::from_client(client);
         hub.lane().connect(&crate::conn::connect_info()).expect("the fake child shakes hands");
-        harness.client = hub.transport();
         harness.muse_slot.set_ready(hub.clone());
         harness.muse_hub = Some(hub);
     }
@@ -8025,7 +8025,7 @@ done
         let baaz = lane_harness(vc, &state.2);
         let project = vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 adopt_for_muse(harness, &state.2)
             })
         });
@@ -8067,7 +8067,7 @@ done
         let project = vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 let project = adopt_for_muse(harness, dir);
                 harness.new_provider = ProviderId::Codex.as_str().to_owned();
                 project
@@ -8599,7 +8599,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.auth = Auth::SignedIn(crate::auth::Identity {
                     lane: provider::AccountLane::AccountLogin,
                     name: "Test".into(),
@@ -8646,7 +8646,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.auth = Auth::SignedIn(crate::auth::Identity {
                     lane: provider::AccountLane::AccountLogin,
                     name: "Test".into(),
@@ -8687,7 +8687,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = resumable_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -8898,7 +8898,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.active = None;
             });
         });
@@ -8938,7 +8938,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.active = None;
                 harness.current_project = Some(first.clone());
             });
@@ -8993,7 +8993,7 @@ done
                 let adopted = harness.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
                 adopted.defaults.approval_mode = Some(muse_client::schema::ApprovalMode::OnRequest);
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.active = None;
             });
         });
@@ -9128,7 +9128,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.new_provider = ProviderId::Codex.as_str().to_owned();
             });
         });
@@ -9164,7 +9164,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.new_provider = ProviderId::Codex.as_str().to_owned();
             });
         });
@@ -9231,7 +9231,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.new_provider = ProviderId::Codex.as_str().to_owned();
             });
         });
@@ -9307,7 +9307,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
                 harness.new_provider = ProviderId::Codex.as_str().to_owned();
             });
         });
@@ -9574,7 +9574,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let first = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9648,7 +9648,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9694,7 +9694,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9739,7 +9739,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9795,7 +9795,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9840,7 +9840,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
@@ -9875,7 +9875,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         // Two asks back to back on different lanes; whichever background
@@ -10093,7 +10093,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -11801,7 +11801,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = factory;
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -11884,7 +11884,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -11926,7 +11926,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -11981,7 +11981,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -12131,7 +12131,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = parking_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -12235,7 +12235,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = parking_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {
@@ -12564,7 +12564,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 harness.provider_factory = scripted_factory();
-                harness.client = Some(dead_client());
+                mark_muse_up(harness);
             });
         });
         vc.update(|window, cx| {

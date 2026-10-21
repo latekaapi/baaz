@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Measured after the connection path moved behind the seam. It may only
 /// ever be reduced.
-const CEILING: usize = 11;
+const CEILING: usize = 10;
 
 fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -73,19 +73,17 @@ fn muse_client_coupling_only_ever_goes_down() {
 }
 
 #[test]
-fn the_two_rewired_files_are_accounted_for() {
+fn the_rewired_files_stay_off_the_wire() {
     let hits = files_mentioning_muse_client();
     // `wire.rs` issues neutral `Command`s and must never mention the wire crate again.
     assert!(
         !hits.iter().any(|f| f == "wire.rs"),
         "wire.rs mentions `muse_client` again; it issues neutral commands and must not",
     );
-    // `conn.rs` still does, for the named transitional bundle the module doc
-    // describes. Pinned so its removal is a deliberate act that updates this test,
-    // rather than something nobody notices either way.
+    // `conn.rs` neither: the transitional bundle went with P4 step 6c, and
+    // the connection is the hub alone.
     assert!(
-        hits.iter().any(|f| f == "conn.rs"),
-        "conn.rs no longer mentions `muse_client` — the transitional bundle is gone. \
-         Good: remove this assertion and lower CEILING.",
+        !hits.iter().any(|f| f == "conn.rs"),
+        "conn.rs mentions `muse_client` again; the connection is the hub alone",
     );
 }
