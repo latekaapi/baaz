@@ -12,3 +12,4 @@ description = "The neutral provider vocabulary: what the app asks any agent to d
 aui-protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 libc = { workspace = true }
+uuid = { workspace = true }

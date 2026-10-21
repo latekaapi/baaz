@@ -959,20 +959,6 @@ pub fn write_last_provider(id: ProviderId) {
     }
 }
 
-/// The loud detector for the two-writers bug: when both lanes claim the
-/// same session, return the violation as text (logged and bannered)
-/// instead of letting two state machines drive one screen silently.
-/// `None` is the only healthy answer.
-pub fn check_single_lane(legacy_active: bool, provider_active: bool, session_id: &str) -> Option<String> {
-    if legacy_active && provider_active {
-        Some(format!(
-            "Session {session_id} is served by two lanes at once; the legacy pump and the provider lane must never both drive one screen"
-        ))
-    } else {
-        None
-    }
-}
-
 // ------------------------------------------------- external approvals
 
 /// Where an approval waiting on the person came from. Claude Code sends
@@ -1138,15 +1124,6 @@ impl ExternalApprovalStore {
     pub fn pending(&self) -> Vec<&ExternalApproval> {
         let mut out: Vec<&ExternalApproval> =
             self.approvals.values().filter(|a| a.is_pending()).collect();
-        out.sort_by(|a, b| a.id.cmp(&b.id));
-        out
-    }
-
-    /// Everything the server has not resolved yet: pending presses plus
-    /// sent decisions still waiting. Both render; only the former offers
-    /// buttons — a sent card shows "waiting for the server" instead.
-    pub fn outstanding(&self) -> Vec<&ExternalApproval> {
-        let mut out: Vec<&ExternalApproval> = self.approvals.values().collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
@@ -1485,15 +1462,6 @@ mod tests {
         assert!(uses_legacy_pump(ProviderId::Muse));
         assert!(!uses_legacy_pump(ProviderId::ClaudeCode));
         assert!(!uses_legacy_pump(ProviderId::Codex));
-    }
-
-    #[test]
-    fn both_lanes_at_once_is_loud_not_silent() {
-        assert!(check_single_lane(false, false, "s").is_none());
-        assert!(check_single_lane(true, false, "s").is_none());
-        assert!(check_single_lane(false, true, "s").is_none());
-        let violation = check_single_lane(true, true, "s").expect("loud");
-        assert!(violation.contains('s'));
     }
 
     #[test]

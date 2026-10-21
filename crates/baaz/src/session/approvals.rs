@@ -22,84 +22,7 @@ impl SessionView {
         // card's choice id verbatim (each adapter answers its own
         // choices). The card stays pending — only the server's
         // resolution moves it, never this send.
-        if self.is_provider_lane() {
-            self.decide_provider_approval(approval_id, choice_id, feedback, cx);
-            return;
-        }
-        let Some(requirement_id) =
-            self.store.side().pending_approvals.get(&approval_id).and_then(|token| muse_adapter::parse_stage_token(token))
-        else {
-            // Nothing pending under that id: the resolution already landed.
-            // Ordinary, but not silent — a press that reaches here and says
-            // nothing is indistinguishable from a press that never arrived,
-            // which is precisely what made the "buttons do nothing" report
-            // undiagnosable (D1).
-            crate::baaz_log!("approval {approval_id}: nothing pending under that id; the resolution already landed");
-            return;
-        };
-        let Some(client) = self.wire_client(cx) else {
-            // `wire_client` raises the read-only banner on a replay; on a live
-            // session with no client there is nothing on screen at all, so say
-            // it here.
-            crate::baaz_log!("approval {approval_id}: no wire to decide on");
-            return;
-        };
-        // Every decision is logged as it goes out, so the wire log and the app
-        // log agree about whether a press was ever turned into a call.
-        crate::baaz_log!("approval {approval_id}: deciding {choice_id}");
-        self.feedback_open = None;
-        let params = ApprovalDecideParams {
-            approval_id: approval_id.clone(),
-            choice_id,
-            command_id: new_command_id(),
-            feedback,
-            requirement_id,
-            session_id: self.session_id.clone(),
-        };
-        self.wire_call(cx, move || client.approval_decide(&params), move |this, result, cx| {
-            // The ack's `terminal` flag is admission only: what the card
-            // shows next comes from `approval/updated` or
-            // `approval/resolved`, never from here.
-            if let Err(error) = result {
-                this.decide_failed(&approval_id, &error, cx);
-            }
-        });
-        cx.notify();
-    }
-
-    /// The four ways `approval/decide` can lose (research §1.14).
-    pub(super) fn decide_failed(&mut self, approval_id: &str, error: &MuseError, cx: &mut Context<Self>) {
-        match error.kind() {
-            // Somebody else — a policy, the judge, another window — got there
-            // first, and the error carries the winning resolution.
-            Some(ErrorKind::ApprovalAlreadyResolved) => {
-                let session_id = self.session_id.clone();
-                let deltas = self.muse_fold.resolve_approval(&session_id, approval_id, resolution_of(error));
-                self.muse_mirror_sync(deltas);
-                self.follow = true;
-                cx.notify();
-            }
-            // The choices moved under the press, which only happens between
-            // stages; the update that moved them is already on its way, so
-            // the person needs no banner. It still goes to the log: a press
-            // that loses this race looks exactly like a press that did
-            // nothing, and without a line here there is no way to tell the
-            // two apart after the fact (D1).
-            Some(ErrorKind::ApprovalRequirementStale) => {
-                crate::baaz_log!("approval {approval_id}: the choices moved under the press; waiting for the update that moved them");
-            }
-            Some(ErrorKind::ApprovalChoiceInvalid) => {
-                self.set_banner("That choice is no longer offered for this command.", None, cx);
-            }
-            Some(ErrorKind::ApprovalNotFound) => {
-                let session_id = self.session_id.clone();
-                let deltas = self.muse_fold.resolve_approval(&session_id, approval_id, None);
-                self.muse_mirror_sync(deltas);
-                self.follow = true;
-                self.set_banner("Muse no longer knows about that approval.", None, cx);
-            }
-            _ => self.report(error, cx),
-        }
+        self.decide_provider_approval(approval_id, choice_id, feedback, cx);
     }
 
     /// Open (or close) the feedback field a choice asks for.
@@ -160,66 +83,36 @@ impl SessionView {
     pub fn show_full_output(&mut self, block_id: String, cx: &mut Context<Self>) {
         // A lane reads the whole stored output with one command: the
         // provider pages, decodes and caps it.
-        if self.is_provider_lane() {
-            let Some(output) = self.store.side().stored_outputs.get(&block_id).cloned() else { return };
-            if matches!(self.full_outputs.get(&block_id), Some(full_output::Fetch::Fetching)) {
-                return;
-            }
-            self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
-            self.refresh_render_cache();
-            cx.notify();
-            let command = ProviderCommand::ReadStoredOutput {
-                session_id: self.session_id.clone(),
-                item: block_id.clone(),
-                output,
-                offset: 0,
-                length: None,
-            };
-            self.provider_send(command, cx, move |this, result, cx| {
-                match result {
-                    Ok(provider::Ack::StoredOutput { content, complete }) => {
-                        let lines = full_output::split_output_lines(&content);
-                        this.full_outputs.insert(block_id, full_output::Fetch::Ready { lines, capped: !complete });
-                    }
-                    Ok(_) => {
-                        this.full_outputs.remove(&block_id);
-                    }
-                    Err(error) => {
-                        this.full_outputs.remove(&block_id);
-                        this.report_provider_error(&error, cx);
-                    }
-                }
-                this.refresh_render_cache();
-                cx.notify();
-            });
-            return;
-        }
-        let Some(client) = self.wire_client(cx) else { return };
-        let Some(output_ref) = self.store.side().stored_outputs.get(&block_id).cloned() else {
-            return;
-        };
+        let Some(output) = self.store.side().stored_outputs.get(&block_id).cloned() else { return };
         if matches!(self.full_outputs.get(&block_id), Some(full_output::Fetch::Fetching)) {
             return;
         }
         self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
         self.refresh_render_cache();
         cx.notify();
-        let session_id = self.session_id.clone();
-        let fetch_id = block_id.clone();
-        // Every MSP request can block, so the pages run here and the card is
-        // replaced below, on the server's result.
-        let work = move || full_output::fetch_full_output(&client, &session_id, &fetch_id, &output_ref);
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok(fetched) => {
-                this.full_outputs
-                    .insert(block_id, full_output::Fetch::Ready { lines: fetched.lines, capped: fetched.capped });
-                this.refresh_render_cache();
-                cx.notify();
+        let command = ProviderCommand::ReadStoredOutput {
+            session_id: self.session_id.clone(),
+            item: block_id.clone(),
+            output,
+            offset: 0,
+            length: None,
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
+            match result {
+                Ok(provider::Ack::StoredOutput { content, complete }) => {
+                    let lines = full_output::split_output_lines(&content);
+                    this.full_outputs.insert(block_id, full_output::Fetch::Ready { lines, capped: !complete });
+                }
+                Ok(_) => {
+                    this.full_outputs.remove(&block_id);
+                }
+                Err(error) => {
+                    this.full_outputs.remove(&block_id);
+                    this.report_provider_error(&error, cx);
+                }
             }
-            Err(error) => {
-                this.full_outputs.remove(&block_id);
-                this.report(&error, cx);
-            }
+            this.refresh_render_cache();
+            cx.notify();
         });
     }
 
@@ -251,18 +144,9 @@ impl SessionView {
         self.store.command_ids().map(str::to_owned).collect()
     }
 
-    /// A failure the person can try again, with the button that would do it.
-    ///
-    /// `overloaded` and `backpressured` also retry themselves once, after the
-    /// backoff: they are the wire saying "not now", and "not now" deserves one
-    /// unattended attempt before it deserves a person's attention.
-    pub(super) fn report_retryable(&mut self, error: &MuseError, action: BannerAction, cx: &mut Context<Self>) {
-        let auto = matches!(error.kind(), Some(ErrorKind::Overloaded | ErrorKind::Backpressured));
-        self.offer_retry(&format!("{}. {error}", conn::title(error)), action, auto, cx);
-    }
-
     /// Banner `message` with the retry `action`; with `auto`, press it once
-    /// on its own after the backoff unless the banner moved meanwhile.
+    /// on its own after the backoff unless the banner moved meanwhile — "not
+    /// now" deserves one unattended attempt before a person's attention.
     pub(super) fn offer_retry(&mut self, message: &str, action: BannerAction, auto: bool, cx: &mut Context<Self>) {
         self.set_banner(message, Some(action.clone()), cx);
         if !auto {
@@ -348,26 +232,8 @@ impl SessionView {
     /// Park a new provider's approval request on this surface.
     ///
     /// The provider lane task calls this the moment an `ApprovalRequested`
-    /// lands, the way the legacy pump calls the fold today.
+    /// lands.
     pub fn inject_external_approval(&mut self, approval: ExternalApproval, cx: &mut Context<Self>) {
-        let id = approval.id.clone();
-        // Loud, not silent: an external approval on a legacy-pump session
-        // means both lanes claim this session, which must never happen
-        // quietly (see `crate::providers`). Park it anyway — dropping a
-        // security decision is worse than a banner — and say so.
-        if crate::providers::check_single_lane(
-            !self.is_provider_lane(),
-            true,
-            &self.session_id,
-        )
-        .is_some()
-        {
-            crate::baaz_log!("external approval {id} arrived on a legacy-pump session; parking it on the approvals surface");
-            self.banner = Some(format!(
-                "An approval arrived on the wrong lane for this session ({id}); it is parked below and still decides nothing by itself."
-            ));
-            self.banner_action = None;
-        }
         self.external_approvals.inject(approval);
         self.follow = true;
         cx.notify();

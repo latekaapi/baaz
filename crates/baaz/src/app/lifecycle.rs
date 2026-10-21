@@ -40,19 +40,6 @@ pub(crate) fn draft_decision(
     }
 }
 
-/// Whether a `session/start` answer is the session its view was opened
-/// under. `sessionId` is an exact identity the server takes as given (MSP
-/// `SessionStartParams.sessionId`: "Exact identity for this new root
-/// session"), so a different id is a server that broke that promise — said
-/// out loud, never adopted silently into a view keyed on the minted one.
-fn minted_start_answer(minted: &str, answered: &str) -> Result<(), String> {
-    if minted == answered {
-        Ok(())
-    } else {
-        Err(format!("the server started session {answered}, not the requested {minted}"))
-    }
-}
-
 /// Which parked ids survive the MRU cap, in order: drafts are never evicted,
 /// everything else keeps most-recent-first up to `limit`.
 pub(crate) fn evict_parked(
@@ -1551,62 +1538,6 @@ impl Harness {
         self.new_session_in(current, window, cx);
     }
 
-    /// `session/start` in `project`, which becomes current first so the new
-    /// view, its workspace and the next ⌘N all agree about where it started.
-    /// A `None` or unknown project is [`Self::new_session`] with no adoption:
-    /// nothing starts.
-    ///
-    /// An unsent session has no sidebar row: while the target project's draft
-    /// is still unsent this reopens that view instead of starting another
-    /// session, so repeated clicks never create more than one session per
-    /// project.
-    /// The terminal relay's route for a new muse session (T2 route 1): mint
-    /// the session id and register it with the service BEFORE the start
-    /// runs. `None` when `initialize` did not grant `sessionMcp` — no
-    /// route, and the session opens exactly as it always did (logged once
-    /// per process, not once per session). The caller carries the id onto
-    /// the start with `provider_muse::terminal::attach_start` (the
-    /// schema spelling lives in the provider crate; the relay only names
-    /// the neutral bridge spec).
-    fn muse_terminal_session(&mut self, root: &std::path::Path) -> Option<String> {
-        if !self.session_mcp {
-            crate::terminal::relay::note_muse_route_ungranted();
-            return None;
-        }
-        let session_id = muse_client::new_command_id();
-        self.register_terminal_session(&session_id, root.to_path_buf(), "muse");
-        Some(session_id)
-    }
-
-    /// The terminal relay's route for resuming a muse session: re-register
-    /// the stored id (harmless when already registered; refreshes the root)
-    /// and attach the bridge to `params`. Without the `sessionMcp` grant
-    /// the resume runs exactly as it always did.
-    pub(crate) fn muse_terminal_resume(
-        &mut self,
-        params: &mut muse_client::schema::SessionResumeParams,
-    ) {
-        // This muse already refused the bridge on a resume (see
-        // `conn::resume_muse`): resume bare, as without the grant.
-        if crate::conn::MUSE_REFUSES_RESUME_BRIDGE.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        if !self.session_mcp {
-            crate::terminal::relay::note_muse_route_ungranted();
-            return;
-        }
-        let session_id = params.session_id.clone();
-        let root = std::path::PathBuf::from(self.session_workspace(&session_id));
-        self.register_terminal_session(&session_id, root, "muse");
-        let socket = self.terminal_service.socket_path().to_path_buf();
-        let spec = crate::terminal::relay::bridge_spec(
-            &crate::terminal::relay::bridge_path(),
-            &socket,
-            &session_id,
-        );
-        provider_muse::terminal::attach_resume(params, &session_id, &spec.command, &spec.args);
-    }
-
     /// The cached muse `model/list` ids across the open and parked views:
     /// what a muse start checks its stored default against. Empty means
     /// nothing is known yet — never a reason to drop.
@@ -1619,26 +1550,6 @@ impl Harness {
             catalog.extend(cached.read(cx).cached_muse_catalog_ids());
         }
         catalog
-    }
-
-    /// The `session/start` params for a new session in `project`: the
-    /// project's root and defaults through the one guarded helper, so a
-    /// new session and a handoff destination to muse filter alike, and a
-    /// Codex or Claude Code default never meets the muse catalog. `None`
-    /// when there is no such project — the caller's cue to start nothing.
-    fn new_session_params(
-        &self,
-        project: Option<&str>,
-        cx: &gpui::App,
-    ) -> Option<muse_client::schema::SessionStartParams> {
-        let catalog = self.muse_catalog_ids(cx);
-        projects::checked_start_params(
-            &self.projects,
-            project,
-            &self.new_provider,
-            &catalog,
-            self.args.approval_mode.clone(),
-        )
     }
 
     pub(crate) fn new_session_in(
@@ -1780,325 +1691,13 @@ impl Harness {
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
-        let Some(client) = self.client.clone() else {
-            // Scripted chrome (`--no-connect` / `--replay`): no child to
-            // start a session on, so the draft opens as a local view. Its id
-            // is deterministic per project so captures read the same.
-            // Live, with Muse not running yet: bring it up for the next
-            // send (docs/50 P1); offline chrome is a no-op here.
-            self.ensure_muse_started(cx);
-            self.open_local_draft(window, cx);
-            return;
-        };
-        // `session/start` is the only surface that declares a session's
-        // policy up front; `session/setApprovalMode` afterwards is a
-        // different thing, and on this server it does not reach
-        // `promptUnmatched`. The params carry the project's root and its
-        // defaults, with the command line's approval mode winning.
-        let Some(mut params) = self.new_session_params(current.as_deref(), cx) else {
-            if current.is_none() {
-                // No project to start in, which is an ordinary state and not
-                // a failure: the session goes to the default workspace, so a
-                // first launch can ask something before adopting anything.
-                // That folder is not a project, so the session files itself
-                // as unfiled.
-                let root = projects::default_workspace();
-                crate::baaz_log!("new: no project; starting in the default workspace");
-                self.new_session_in_root_open(&root, window, cx, switch);
-                return;
-            }
-            // `current.is_some()` here would mean the id `current_project()`
-            // just resolved through `find_available` no longer names a
-            // project at all — a race this single-threaded flow does not
-            // have today. Logged, because a scripted `new` that lands here
-            // used to read as a script that ran — exit 0, screenshot
-            // written — while having started nothing.
-            crate::baaz_log!("new: current project is unavailable; starting nothing");
-            self.drop_pending_ask();
-            return;
-        };
-        // `new_session_params` already ran the guarded muse catalog
-        // check above: the stored muse default rides only when the cached
-        // muse `model/list` still names it, so a foreign pick kept through
-        // migration starts on the server default instead of failing the
-        // turn. A handoff destination to muse lands here too — it opens
-        // through `new_session` — so it filters alike.
-        let effort = self
-            .projects
-            .picks(current.as_deref().and_then(|id| self.projects.find(id)))
-            .effort_for(&self.new_provider)
-            .as_deref()
-            .and_then(projects::parse_effort);
-        let started_project = current.clone();
-        self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
-        // The terminal relay's route (T2 route 1): the minted session id is
-        // registered with the service BEFORE the start runs, and the start
-        // carries the bridge — but only on the `sessionMcp` grant.
-        if let Some(root) = params.workspace_root.clone() {
-            if let Some(session_id) = self.muse_terminal_session(std::path::Path::new(&root)) {
-                let socket = self.terminal_service.socket_path().to_path_buf();
-                let spec = crate::terminal::relay::bridge_spec(
-                    &crate::terminal::relay::bridge_path(),
-                    &socket,
-                    &session_id,
-                );
-                provider_muse::terminal::attach_start(
-                    &mut params,
-                    &session_id,
-                    &spec.command,
-                    &spec.args,
-                );
-            }
-        }
-        // The id is ours, not the server's (`session/start` takes an exact
-        // identity), so a plain new session opens its view on the click:
-        // the empty state and the composer paint in this frame instead of
-        // after a round trip that took 1–5 s under a busy server. A switch
-        // keeps the old view up until its start lands (Y2b), so it waits.
-        let minted = params.session_id.get_or_insert_with(muse_client::new_command_id).clone();
-        // A provider switch of an unsent draft opens on the click as well:
-        // `activate` closes the replaced draft in the same update, its text
-        // moving across, so the old provider's chrome never lingers.
-        let early = switch.is_none_or(|epoch| self.replacing_epoch == Some(epoch));
-        if early {
-            crate::log::boot_mark("new-draft-open");
-            self.key_pending_ask(&minted);
-            self.open(minted.clone(), false, false, window, cx);
-            if let Some(view) = self.find_view(&minted, cx) {
-                view.update(cx, |view, _| view.begin_start());
-            }
-            self.dress_new_session(&minted, current.clone(), effort, window, cx);
-            if let (Some((mode, effort)), Some(view)) =
-                (switch.and(self.switch_carry.take()), self.find_view(&minted, cx))
-            {
-                view.update(cx, |view, cx| view.carry_draft_settings(mode, effort, cx));
-            }
-            match started_project.clone() {
-                Some(id) => {
-                    self.drafts.insert(id, minted.clone());
-                }
-                None => {
-                    self.unsent.insert(minted.clone());
-                }
-            }
-            crate::log::boot_mark("new-draft-shown");
-            // Scripted session verbs wait for the start (see `run_steps`);
-            // nothing else does, so this is no switch.
-            self.starts_in_flight.insert(minted.clone());
-        } else {
-            // The switch lands on the round-trip below, after the following
-            // steps would run: session verbs wait for it (see `run_steps`)
-            // instead of acting on the session that is still open.
-            self.session_switch_pending = true;
-        }
-        let work = move || client.session_start(&params);
-        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
-            Ok(started) if early => {
-                crate::log::boot_mark("session/start-reply early");
-                let session_id = started.session.session_id.clone();
-                this.starts_in_flight.remove(&minted);
-                if let Err(reason) = minted_start_answer(&minted, &session_id) {
-                    this.drafts.retain(|_, id| *id != minted);
-                    this.refuse_minted_start(&minted, reason, cx);
-                    this.fail_pending_handoff("the session started under another id".to_owned(), cx);
-                    return;
-                }
-                this.insert_started_row(&started.session);
-                if let Some(view) = this.find_view(&session_id, cx) {
-                    if let Ok(envelope) = serde_json::to_value(&started.session) {
-                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                    }
-                    view.update(cx, |view, cx| view.start_landed(window, cx));
-                }
-                this.land_handoff_destination(session_id.clone(), cx);
-                if let Some(view) =
-                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
-                {
-                    this.attach_handoff_prefix(&view, cx);
-                }
-                if let Some(id) = started_project.as_deref() {
-                    crate::baaz_log!("session/start project={id} reason=no-draft");
-                }
-            }
-            Err(error) if early => {
-                crate::baaz_log!("session/start failed: {error}");
-                this.starts_in_flight.remove(&minted);
-                // The view stays, draft and all, saying why; the next
-                // "New session" starts fresh rather than reusing it.
-                this.drafts.retain(|_, id| *id != minted);
-                if let Some(view) = this.find_view(&minted, cx) {
-                    view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
-                }
-                this.fail_pending_handoff(error.to_string(), cx);
-                this.drop_pending_ask();
-                this.report(&error, cx);
-            }
-            Ok(started) => {
-                // A cancelled or superseded switch never lands: its session
-                // was created on the wire, but no view opens for it, nothing
-                // is parked or persisted, and the person's view is untouched.
-                if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
-                    crate::baaz_log!("session/start landed for a stale switch; discarding it");
-                    this.drop_pending_ask();
-                    return;
-                }
-                let session_id = started.session.session_id.clone();
-                // The Ask's session just earned its id: key the draft to
-                // it before the view lands, so `activate` takes it here —
-                // and only here.
-                this.key_pending_ask(&session_id);
-                this.open(session_id.clone(), false, false, window, cx);
-                // The result carries the session object `session/started`
-                // would have carried, and it is the only place a mode set
-                // at start-up is reported: `session/start` with an
-                // `approvalMode` raises no `session/approvalModeChanged`,
-                // so a session started under one mode drew the chip of
-                // another until this was folded.
-                if let Some(view) = this.active.clone() {
-                    if let Ok(envelope) = serde_json::to_value(&started.session) {
-                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                    }
-                }
-                // No row until the first send. Under muse 1.2.1 this held
-                // because the wire itself listed a session only after its
-                // log flushed on `turn/completed`; muse 1.3.0 lists a
-                // zero-turn session like any other, so as of v0.1 prep
-                // task 3 `SessionEntry::is_empty` enforces the rule itself
-                // instead of assuming the wire will — the `turn/started`
-                // handler still inserts the local row that makes the first
-                // row appear. The session groups under the project it
-                // started in, even when its folder later proves to be a
-                // worktree of that root.
-                let retarget = this.dress_new_session(&session_id, current.clone(), effort, window, cx);
-                // A handoff to muse lands here: the pack submits onto the
-                // fresh view, which the lane check above just built.
-                this.land_handoff_destination(session_id.clone(), cx);
-                // A reopened handoff destination renders its snapshot
-                // prefix above the backfilled history; anything else is a
-                // no-op.
-                if let Some(view) =
-                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
-                {
-                    this.attach_handoff_prefix(&view, cx);
-                }
-                // The started row goes in locally: the reply carried the
-                // whole session, so no `session/list` round trip (27 pages,
-                // 5–10 s, and a full rejoin on landing) is spent on it.
-                this.insert_started_row(&started.session);
-                if started_project.is_none() {
-                    this.unsent.insert(session_id.clone());
-                }
-                if let Some(id) = started_project.clone() {
-                    this.drafts.insert(id.clone(), session_id);
-                    crate::baaz_log!(
-                        "session/start project={} reason={}",
-                        id,
-                        if retarget { "retarget" } else { "no-draft" }
-                    );
-                }
-            }
-            Err(error) => {
-                // A stale switch's failure belongs to nobody: the person
-                // moved on, so it must not clear the current switch, unlock
-                // its view, or dialog.
-                if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
-                    crate::baaz_log!("session/start failed for a stale switch: {error}");
-                    this.drop_pending_ask();
-                    return;
-                }
-                // No switch is coming: release the session verbs waiting on
-                // it rather than holding them for the whole bound. Logged as
-                // well as dialogued: a headless run's stderr is the only
-                // place this failure would otherwise appear.
-                crate::baaz_log!("session/start failed: {error}");
-                this.session_switch_pending = false;
-                this.abort_replacing(cx);
-                this.fail_pending_handoff(error.to_string(), cx);
-                this.drop_pending_ask();
-                this.report(&error, cx);
-            }
-        });
-    }
-
-    /// A start answered for an id other than the one its view was opened
-    /// under: the view can never land (its events key on the minted id), so
-    /// it fails visibly instead of reading Starting forever, and the queued
-    /// sends go back in its composer.
-    fn refuse_minted_start(&mut self, minted: &str, reason: String, cx: &mut Context<Self>) {
-        crate::baaz_log!("session/start: {reason}");
-        self.unsent.remove(minted);
-        if let Some(view) = self.find_view(minted, cx) {
-            view.update(cx, |view, cx| view.start_failed(reason, cx));
-        }
-        self.drop_pending_ask();
-    }
-
-    /// What a new muse session's view carries before its first turn,
-    /// whether it opened on the click or after its start landed: the
-    /// project it files under, that project's name and effort, and a
-    /// retargeted draft in flight. Returns whether a draft was retargeted.
-    fn dress_new_session(
-        &mut self,
-        session_id: &str,
-        project: Option<String>,
-        effort: Option<aui_protocol::ReasoningEffort>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        // No row until the first send. Under muse 1.2.1 this held
-        // because the wire itself listed a session only after its
-        // log flushed on `turn/completed`; muse 1.3.0 lists a
-        // zero-turn session like any other, so as of v0.1 prep
-        // task 3 `SessionEntry::is_empty` enforces the rule itself
-        // instead of assuming the wire will — the `turn/started`
-        // handler still inserts the local row that makes the first
-        // row appear. The session groups under the project it
-        // started in, even when its folder later proves to be a
-        // worktree of that root.
-        self.set_override(session_id, |meta| meta.project = project, cx);
-        // The row does not exist when the view activates, so its
-        // project name arrives now.
-        let name = self.project_name_for(session_id);
-        let view = self.active.clone().filter(|view| view.read(cx).session_id == session_id);
-        if let Some(view) = &view {
-            view.update(cx, |view, cx| {
-                view.set_project_name(name);
-                // The cached centre reuses a clean view: push the
-                // repaint with the name.
-                cx.notify();
-            });
-            // The project's effort rides along before the first turn.
-            if let Some(effort) = effort {
-                view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
-            }
-        }
-        // A retargeted draft lands in the session it was moved to.
-        let moving = self.pending_draft.take();
-        let retarget = moving.is_some();
-        if let Some(view) = &view {
-            Self::land_moving_draft(view, moving, window, cx);
-        } else if moving.is_some() {
-            self.pending_draft = moving;
-        }
-        retarget
-    }
-
-    /// Put a just-started muse session's row in the list from the
-    /// `session/start` reply itself — the same join a `session/list` row
-    /// gets — so the start costs no list round trip. The row stays out of
-    /// view until its first turn (`SessionEntry::is_empty`); the periodic
-    /// and post-turn refreshes still replace it with the wire's own.
-    pub(crate) fn insert_started_row(&mut self, session: &muse_client::schema::Session) {
-        let mut entry = SessionEntry::join(
-            session,
-            self.index.get(&session.session_id),
-            self.overrides.get(&session.session_id),
-            &self.projects,
-        );
-        Harness::apply_title_flags(&self.titles_pending, &self.side_sessions, &mut entry);
-        self.sessions.retain(|row| row.id != entry.id);
-        self.sessions.push(entry);
-        self.invalidate_list();
+        // Scripted chrome (`--no-connect` / `--replay`): no child to
+        // start a session on, so the draft opens as a local view. Its id
+        // is deterministic per project so captures read the same.
+        // Live, with Muse not running yet: bring it up for the next
+        // send (docs/50 P1); offline chrome is a no-op here.
+        self.ensure_muse_started(cx);
+        self.open_local_draft(window, cx);
     }
 
     /// `session/start` in `root`, which is never adopted: no project
@@ -2146,140 +1745,12 @@ impl Harness {
             self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
         }
-        let Some(client) = self.client.clone() else {
-            // Scripted chrome (`--no-connect` / `--replay`): no child to
-            // start a session on, so the draft opens as a local view.
-            // Live, with Muse not running yet: bring it up for the next
-            // send (docs/50 P1); offline chrome is a no-op here.
-            self.ensure_muse_started(cx);
-            self.open_local_draft(window, cx);
-            return;
-        };
-        let mut params = projects::start_params_for_root(&root, &self.new_provider, self.args.approval_mode.clone());
-        // Walked eagerly, like `new_session_in` does for a project's root:
-        // the `@` picker for the session about to open should not wait on
-        // the sessions list to learn where it lives.
-        self.load_menu_sources(root.clone(), cx);
-        // The terminal relay's route, as in `new_session_in`: registered
-        // before the start, carried on it, grant-gated.
-        if let Some(session_id) = self.muse_terminal_session(&root) {
-            let socket = self.terminal_service.socket_path().to_path_buf();
-            let spec = crate::terminal::relay::bridge_spec(
-                &crate::terminal::relay::bridge_path(),
-                &socket,
-                &session_id,
-            );
-            provider_muse::terminal::attach_start(
-                &mut params,
-                &session_id,
-                &spec.command,
-                &spec.args,
-            );
-        }
-        // Opened on the click, like [`Self::new_session_open`]: the id is
-        // ours, so the view need not wait for the server's answer.
-        let minted = params.session_id.get_or_insert_with(muse_client::new_command_id).clone();
-        let early = switch.is_none();
-        if early {
-            crate::log::boot_mark("new-draft-open");
-            self.key_pending_ask(&minted);
-            // Before `open`, which asks `session_workspace` where this
-            // session lives and has nothing else to go on.
-            self.starting_root = Some((minted.clone(), projects::canonical_str(&root.to_string_lossy())));
-            self.open(minted.clone(), false, false, window, cx);
-            if let Some(view) = self.find_view(&minted, cx) {
-                view.update(cx, |view, _| view.begin_start());
-            }
-            // No project override: a `meta.project` of `None` is exactly
-            // what files this session under Unfiled. No `drafts` entry
-            // either, so `unsent` keeps its row out until the first send.
-            self.unsent.insert(minted.clone());
-            let moving = self.pending_draft.take();
-            if let Some(view) = self.active.clone().filter(|view| view.read(cx).session_id == minted) {
-                Self::land_moving_draft(&view, moving, window, cx);
-            } else if moving.is_some() {
-                self.pending_draft = moving;
-            }
-            crate::log::boot_mark("new-draft-shown");
-            self.starts_in_flight.insert(minted.clone());
-        } else {
-            self.session_switch_pending = true;
-        }
-        let work = move || client.session_start(&params);
-        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
-            Ok(started) if early => {
-                crate::log::boot_mark("session/start-reply early");
-                this.starts_in_flight.remove(&minted);
-                if let Err(reason) = minted_start_answer(&minted, &started.session.session_id) {
-                    this.refuse_minted_start(&minted, reason, cx);
-                    return;
-                }
-                this.insert_started_row(&started.session);
-                if let Some(view) = this.find_view(&minted, cx) {
-                    if let Ok(envelope) = serde_json::to_value(&started.session) {
-                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                    }
-                    view.update(cx, |view, cx| view.start_landed(window, cx));
-                }
-                crate::baaz_log!("session/start root (no project)");
-            }
-            Err(error) if early => {
-                crate::baaz_log!("new-in: session/start failed: {error}");
-                this.starts_in_flight.remove(&minted);
-                if let Some(view) = this.find_view(&minted, cx) {
-                    view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
-                }
-                this.drop_pending_ask();
-                this.report(&error, cx);
-            }
-            Ok(started) => {
-                // Stale switch, like [`Self::new_session_open`]: created on
-                // the wire, never opened, parked, or persisted.
-                if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
-                    crate::baaz_log!("session/start landed for a stale switch; discarding it");
-                    this.drop_pending_ask();
-                    return;
-                }
-                let session_id = started.session.session_id.clone();
-                this.key_pending_ask(&session_id);
-                // Before `open`, which asks `session_workspace` where this
-                // session lives and has nothing else to go on.
-                this.starting_root =
-                    Some((session_id.clone(), projects::canonical_str(&root.to_string_lossy())));
-                this.open(session_id.clone(), false, false, window, cx);
-                if let Some(view) = this.active.clone() {
-                    if let Ok(envelope) = serde_json::to_value(&started.session) {
-                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                    }
-                }
-                // No project override: a `meta.project` of `None` is exactly
-                // what files this session under Unfiled.
-                let moving = this.pending_draft.take();
-                if let Some(view) =
-                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
-                {
-                    Self::land_moving_draft(&view, moving, window, cx);
-                } else if moving.is_some() {
-                    this.pending_draft = moving;
-                }
-                crate::baaz_log!("session/start root (no project)");
-                this.unsent.insert(session_id.clone());
-                this.insert_started_row(&started.session);
-            }
-            Err(error) => {
-                // Stale switch: nobody waits, nobody is dialogued.
-                if switch.is_some_and(|epoch| epoch != this.switch_epoch) {
-                    crate::baaz_log!("new-in: session/start failed for a stale switch: {error}");
-                    this.drop_pending_ask();
-                    return;
-                }
-                crate::baaz_log!("new-in: session/start failed: {error}");
-                this.session_switch_pending = false;
-                this.abort_replacing(cx);
-                this.drop_pending_ask();
-                this.report(&error, cx);
-            }
-        });
+        // Scripted chrome (`--no-connect` / `--replay`): no child to
+        // start a session on, so the draft opens as a local view.
+        // Live, with Muse not running yet: bring it up for the next
+        // send (docs/50 P1); offline chrome is a no-op here.
+        self.ensure_muse_started(cx);
+        self.open_local_draft(window, cx);
     }
 
     /// `new-in:<path>`: [`Self::new_session_in_root`] against a named root,
@@ -2340,38 +1811,6 @@ impl Harness {
             return false;
         }
         view.read(cx).provider_kind() == wanted
-            && view.read(cx).is_provider_lane() == (wanted != ProviderId::Muse)
-    }
-
-    /// Muse came up under a live local Muse draft (opened while it was
-    /// starting, docs/50 P1): that view has no child and can never send or
-    /// list models, so its words move into a real Muse draft for the same
-    /// project — the same move a project retarget makes. Anything else in
-    /// the centre is left alone, and so is a local draft with a send in
-    /// flight or one the person has switched off Muse.
-    pub(crate) fn promote_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let id = view.read(cx).session_id.clone();
-        if !is_local_draft(&id)
-            || view.read(cx).is_provider_lane()
-            || view.read(cx).is_sending()
-            || self.client.is_none()
-            || ProviderId::parse(&self.new_provider) != ProviderId::Muse
-        {
-            return;
-        }
-        crate::baaz_log!("new: Muse is up; the local draft becomes a Muse draft");
-        let moving = view.update(cx, |view, vc| view.take_draft(window, vc));
-        self.drafts.retain(|_, named| named != &id);
-        if self.sessions.iter().any(|e| e.id == id) {
-            self.set_override(&id, |meta| meta.hidden = true, cx);
-        }
-        self.pending_draft = Some(moving);
-        let project = self.current_project_id();
-        self.new_session_in(project, window, cx);
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.refresh_open_model_menu(cx));
-        }
     }
 
     /// Reopen a live draft's view: the active one when it is already open,
@@ -2426,14 +1865,7 @@ impl Harness {
             self.drop_pending_ask();
             return;
         };
-        if projects::start_params(
-            &self.projects,
-            Some(id.as_str()),
-            &self.new_provider,
-            self.args.approval_mode.clone(),
-        )
-        .is_none()
-        {
+        if self.projects.find(&id).is_none() {
             crate::baaz_log!("new: no current project; starting nothing");
             self.drop_pending_ask();
             return;
@@ -2450,7 +1882,7 @@ impl Harness {
             capture: self.capture.clone(),
             terminal_host: Some(self.terminal_host.clone()),
         };
-        let view = cx.new(|cx| SessionView::new(draft_id.clone(), None, host, window, cx));
+        let view = cx.new(|cx| SessionView::new(draft_id.clone(), host, window, cx));
         let fold_on = self.layout.fold_finished_turns;
         view.update(cx, |view, cx| {
             view.fold_finished_turns = fold_on;
@@ -2634,130 +2066,37 @@ impl Harness {
             self.reopen_muse(session_id, quiet, window, cx);
             return;
         }
-        let Some(client) = self.client.clone() else {
-            // Scripted chrome (`--no-connect` / `--replay`) has no child to
-            // resume from: the row opens as a local view, so a capture can
-            // drive drafts and switching for nothing. Live reconnects never
-            // land here — they keep their client-shaped early return below
-            // because `args.offline` is false for them.
-            if self.args.offline {
-                // The row is already open on this view (a `--replay` window
-                // whose capture is folded): keep it, so a click on the open
-                // row selects without wiping the folded transcript for a
-                // blank local view. The highlight above already moved.
-                if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
-                    return;
-                }
-                // Traced like the live switch below, so the offline perf
-                // budget (`scripts/perf-budgets.py`) times a cached switch.
-                crate::log::trace_reset();
-                crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
-                crate::log::trace_arm_first_frame();
-                if let Some(view) = self.cache_take(&session_id) {
-                    crate::log::trace_mark("cache-hit");
-                    self.activate(view, quiet, window, cx);
-                } else {
-                    self.open(session_id.clone(), false, quiet, window, cx);
-                    // An existing session opens loading, never the hero —
-                    // even with no client behind it.
-                    if let Some(view) = self.active.clone() {
-                        view.update(cx, |view, cx| view.mark_history_loading(cx));
-                        self.attach_handoff_prefix(&view, cx);
-                    }
-                }
+        // Scripted chrome (`--no-connect` / `--replay`) has no child to
+        // resume from: the row opens as a local view, so a capture can
+        // drive drafts and switching for nothing. Live reconnects never
+        // land here — they keep their client-shaped early return below
+        // because `args.offline` is false for them.
+        if self.args.offline {
+            // The row is already open on this view (a `--replay` window
+            // whose capture is folded): keep it, so a click on the open
+            // row selects without wiping the folded transcript for a
+            // blank local view. The highlight above already moved.
+            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                return;
             }
-            return;
-        };
-        crate::log::trace_reset();
-        crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
-        if let Some(view) = self.cache_take(&session_id) {
-            crate::log::trace_mark("cache-hit");
-            self.activate(view, quiet, window, cx);
-            crate::log::trace_mark("swap");
+            // Traced like the live switch below, so the offline perf
+            // budget (`scripts/perf-budgets.py`) times a cached switch.
+            crate::log::trace_reset();
+            crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
             crate::log::trace_arm_first_frame();
-            self.top_up(cx);
-            return;
-        }
-        crate::log::trace_mark("cache-miss");
-        // No backfill yet: the first `view/page` must wait for the resume
-        // round-trip below. The resume is the leased touch that regenerates a
-        // stale `.msp-view-v1` sidecar (muse 1.2.1, #29473); a page fired
-        // before it reads the stale generation and fails `-32603`.
-        self.open(session_id.clone(), false, quiet, window, cx);
-        // The fresh view is for an existing session: it renders the quiet
-        // loading state on its very first frame — never the new-session
-        // hero — until the resume ack below starts its backfill (owner
-        // round 6). Same frame as the swap, so no paint lands between.
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.mark_history_loading(cx));
-            self.attach_handoff_prefix(&view, cx);
-        }
-        crate::log::trace_mark("swap");
-        crate::log::trace_arm_first_frame();
-        let resumed = session_id.clone();
-        let mut resume_params = SessionResumeParams {
-            command_id: new_command_id(),
-            session_id,
-            // History comes through `view/page`, which is the contiguous,
-            // ordered, bounded path; resume just attaches.
-            exclude_items: Some(true),
-            cursor: None,
-            history: None,
-            config: None,
-            permission_profile: None,
-        };
-        // The terminal relay's route: re-register the stored id and carry
-        // the bridge — grant-gated, like the start.
-        let bare = resume_params.clone();
-        self.muse_terminal_resume(&mut resume_params);
-        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
-        self.wire_call(cx, work, move |this, result, cx| {
-            match &result {
-                Ok(_) => crate::log::trace_mark("resume-ack"),
-                // A stale sidecar is not a failure to show: the resume was
-                // still the regenerating first touch, so the backfill below
-                // pages a fresh sidecar. One log line, never a dialog.
-                Err(error) if error.is_stale_sidecar() => {
-                    crate::log::trace_mark("resume-ack-stale");
-                    crate::baaz_log!("resume of {resumed} hit a stale sidecar ({error}); paging anyway");
-                }
-                // A rejection about this session — another host holding its
-                // lease — is not a failure of the wire: the view stays open
-                // under the same lease notice the reconnect path raises,
-                // read-only, with no dialog, and the sidebar row stays
-                // selectable.
-                Err(error) if conn::is_session_scoped(error) => {
-                    crate::log::trace_mark("resume-ack-held");
-                    let banner = conn::lease_banner(error);
-                    crate::baaz_log!("resume of {resumed} rejected ({error}); banner on the view, wire stays up");
-                    let held =
-                        this.active.clone().filter(|view| view.read(cx).session_id == resumed);
-                    if let Some(view) = held {
-                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
-                    }
-                }
-                Err(error) => {
-                    crate::log::trace_mark(&format!("resume-ack-err {error}"));
-                    this.report(error, cx);
+            if let Some(view) = self.cache_take(&session_id) {
+                crate::log::trace_mark("cache-hit");
+                self.activate(view, quiet, window, cx);
+            } else {
+                self.open(session_id.clone(), None, quiet, window, cx);
+                // An existing session opens loading, never the hero —
+                // even with no client behind it.
+                if let Some(view) = self.active.clone() {
+                    view.update(cx, |view, cx| view.mark_history_loading(cx));
+                    self.attach_handoff_prefix(&view, cx);
                 }
             }
-            // Only while the just-opened view is still the open one: a
-            // further switch owns its own backfill, and a parked view must
-            // not start one behind the new view's back.
-            let still_open = this.active.clone().filter(|view| view.read(cx).session_id == resumed);
-            if let Some(view) = still_open {
-                view.update(cx, |view, cx| {
-                    // The sandbox follows the mode the session reports,
-                    // whatever it was left under (a session older than
-                    // Baaz's profile picks runs the host default).
-                    if let Ok(resumed) = &result {
-                        view.reconcile_profile(&resumed.session, cx);
-                    }
-                    view.backfill(cx)
-                });
-            }
-            cx.notify();
-        });
+        }
     }
 
     /// Reopen a Muse session on a lane of the shared child. The view opens
@@ -2771,9 +2110,8 @@ impl Harness {
         crate::log::trace_mark("cache-miss");
         let workspace = self.session_workspace(&session_id);
         let mode = self.provider_open_mode(Some(&workspace), None);
-        self.open(session_id.clone(), false, quiet, window, cx);
+        self.open(session_id.clone(), Some(mode), quiet, window, cx);
         if let Some(view) = self.find_view(&session_id, cx) {
-            view.update(cx, |view, cx| view.begin_lane_reopen(mode, cx));
             self.attach_handoff_prefix(&view, cx);
         }
         crate::log::trace_mark("swap");
@@ -2795,7 +2133,7 @@ impl Harness {
             let (provider, events) = conn::gate(provider);
             let resume = provider
                 .send(provider::Command::ResumeSession {
-                    request_id: new_command_id(),
+                    request_id: provider::new_request_id(),
                     session_id: resumed,
                     cursor: None,
                     metadata_only: true,
@@ -2924,24 +2262,25 @@ impl Harness {
     pub(super) fn open(
         &mut self,
         session_id: String,
-        backfill: bool,
+        reopen: Option<aui_protocol::PermissionMode>,
         quiet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The client rides along when there is one; scripted chrome
-        // (`--no-connect` / `--replay`) opens the row as a local view with
-        // none, which is what lets a capture drive drafts and switching.
-        let client = self.client.clone();
-        // Every row `open` builds rides the Muse lane (`session/start`, a
-        // fork, a sidebar reopen of a Muse session) — never the new-session
-        // default, which read "Codex" or "Claude Code" on a reopened Muse
-        // session and fed that provider's model metadata into its turns.
+        // A Muse row: `reopen` draws it opening (its lane attaches when the
+        // resume answers, sends wait, history loading); without it the row
+        // opens read-only — scripted chrome (`--no-connect` / `--replay`),
+        // which is what lets a capture drive drafts and switching. Always
+        // Muse — never the new-session default, which read "Codex" or
+        // "Claude Code" on a reopened Muse session.
         let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
-        let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
+        let view = cx.new(|cx| match reopen {
+            Some(mode) => SessionView::new_lane_reopen(session_id.clone(), mode, host, window, cx),
+            None => SessionView::new(session_id.clone(), host, window, cx),
+        });
         let fold_on = self.layout.fold_finished_turns;
         view.update(cx, |view, cx| {
             view.fold_finished_turns = fold_on;
@@ -2950,11 +2289,6 @@ impl Harness {
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
         self.adopt_session_project(&session_id, cx);
-        if backfill && client.is_some() {
-            if let Some(view) = self.active.clone() {
-                view.update(cx, |view, cx| view.backfill(cx));
-            }
-        }
         cx.notify();
     }
 
@@ -3085,6 +2419,20 @@ impl Harness {
     /// a mode, and always sent: the adapter starts the child in it and
     /// reports it back, so the chip shows what was asked for until the
     /// child says otherwise — never a default nobody sent.
+    /// The model a new session on `provider_id` in `project` asks for: the
+    /// last one picked for that provider there. A stored Muse default rides
+    /// only while the cached Muse catalog still names it — a foreign pick
+    /// kept through migration would fail the turn, so the server's default
+    /// stands instead; no other provider's default ever meets Muse's catalog.
+    pub(crate) fn start_model(&self, provider_id: ProviderId, project: Option<&str>, cx: &gpui::App) -> Option<String> {
+        let picks = self.projects.picks(project.and_then(|id| self.projects.find(id)));
+        let remembered = picks.model_for(provider_id.as_str());
+        if provider_id == ProviderId::Muse {
+            return projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
+        }
+        remembered
+    }
+
     /// A Muse open's extras ([`MuseOpen`]); `None` for any other provider.
     fn muse_open(&self, provider_id: ProviderId, workspace: Option<&str>, project: Option<&str>) -> Option<MuseOpen> {
         if provider_id != ProviderId::Muse {
@@ -3158,7 +2506,7 @@ impl Harness {
         // bridge will answer for (Claude Code takes it as `--session-id`;
         // Codex's bridge answers for it until the minted thread id lands) —
         // so it is registered with the service BEFORE the open runs.
-        let request_id = new_command_id();
+        let request_id = provider::new_request_id();
         self.register_terminal_session(
             &request_id,
             std::path::PathBuf::from(workspace.clone()),
@@ -3224,7 +2572,7 @@ impl Harness {
                 let provider = provider::Provider::new(adapter);
                 let ack = provider
                     .send(provider::Command::OpenSession {
-                        request_id: new_command_id(),
+                        request_id: provider::new_request_id(),
                         workspace: Some(workspace.clone()),
                         model: None,
                         model_provider: None,
@@ -3478,7 +2826,7 @@ impl Harness {
         // thread id, and the landing renames everything keyed by this one
         // (see `rekey_session`). Registered with the terminal relay before
         // the open runs, like `open_on_provider` does.
-        let request_id = new_command_id();
+        let request_id = provider::new_request_id();
         self.register_terminal_session(
             &request_id,
             std::path::PathBuf::from(workspace.clone()),
@@ -3508,13 +2856,7 @@ impl Harness {
         } else if let Some(effort) = picks.effort_for(provider_id.as_str()).as_deref().and_then(projects::parse_effort) {
             view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
         }
-        let mut remembered = picks.model_for(provider_id.as_str());
-        // A stored Muse default rides only while the cached Muse catalog
-        // still names it: a foreign pick kept through migration would fail
-        // the turn, so the server's default stands instead.
-        if provider_id == ProviderId::Muse {
-            remembered = projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
-        }
+        let remembered = self.start_model(provider_id, project.as_deref(), cx);
         if let Some(model) = remembered {
             view.update(cx, |view, cx| view.set_model(&model, cx));
         }
@@ -4088,7 +3430,7 @@ impl Harness {
                 .and_then(|_| {
                     let provider = provider::Provider::new(resumed);
                     let session_id =
-                        crate::provider_sessions::send_resume(&provider, &record, &new_command_id(), Some(mode))
+                        crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode))
                             .map_err(|error| error.to_string())?;
                     #[cfg(test)]
                     let (provider, events) = conn::gate_sync(provider);
@@ -4197,7 +3539,7 @@ impl Harness {
                 #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
                 let session_id =
-                    crate::provider_sessions::send_resume(&provider, &record, &new_command_id(), Some(mode))?;
+                    crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode))?;
                 crate::log::trace_mark("reopen resume acked");
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
@@ -4322,7 +3664,7 @@ impl Harness {
                     let provider = provider::Provider::new(resumed);
                     let ack = provider
                         .send(provider::Command::ResumeSession {
-                            request_id: new_command_id(),
+                            request_id: provider::new_request_id(),
                             session_id: session_id.clone(),
                             cursor: None,
                             metadata_only: false,
@@ -4398,7 +3740,7 @@ impl Harness {
             #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::ResumeSession {
-                request_id: new_command_id(),
+                request_id: provider::new_request_id(),
                 session_id: session_id.clone(),
                 cursor: None,
                 metadata_only: false,
@@ -4786,16 +4128,6 @@ impl Harness {
         if !replaced {
             self.park_active(cx);
         }
-        // A parked view's client predates a reconnect; the current child is
-        // the one that can page. Provider-lane views own their own child,
-        // so the muse reconnect refuses on them — skip it outright.
-        if let Some(client) = self.client.clone() {
-            view.update(cx, |view, cx| {
-                if !view.is_provider_lane() {
-                    view.reconnected(client, cx);
-                }
-            });
-        }
         // One subscription per live view: the view being activated plus
         // every parked view the MRU still holds. A parked provider lane
         // keeps its child and drain task, so its turn and approval events
@@ -4930,96 +4262,6 @@ impl Harness {
     pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
         self.active.as_ref().is_some_and(|view| view.read(cx).is_sending())
             || self.session_cache.iter().any(|(_, view)| view.read(cx).is_sending())
-    }
-
-    /// Top a reopened cached view up from its last cursor: re-attach with the
-    /// reconnect procedure (`docs/01-transport.md` §3), which serves
-    /// `history.mode: "none"` and streams only the suffix. The view is
-    /// already on screen, so the suffix folds in behind it through the live
-    /// stream; no `view/page` is needed, and none would serve: a forward page
-    /// anchored at the cached head answers `notFound/missingAnchor`.
-    fn top_up(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let Some(view) = self.active.clone() else { return };
-        let session_id = view.read(cx).session_id.clone();
-        let cursor = view.read(cx).last_cursor();
-        let topped = session_id.clone();
-        let mut resume_params = SessionResumeParams {
-            command_id: new_command_id(),
-            session_id,
-            cursor,
-            exclude_items: Some(true),
-            history: None,
-            config: None,
-            permission_profile: None,
-        };
-        // The terminal relay's route, as in `open`: re-registered and
-        // carried, grant-gated.
-        let bare = resume_params.clone();
-        self.muse_terminal_resume(&mut resume_params);
-        let work = move || crate::conn::resume_muse(&client, &resume_params, &bare);
-        self.wire_call_in(cx, work, move |this, result, window, cx| {
-            match result {
-                Ok(resumed) => {
-                    crate::log::trace_mark(&format!("resume-ack mode={:?}", resumed.history.mode));
-                    // Only when the topped-up view is still the open one; a
-                    // further switch parked it, and its own top-up owns it.
-                    // The streamed suffix is already folding through the live
-                    // stream; all that is left is the tail pin.
-                    let still_open = this
-                        .active
-                        .clone()
-                        .filter(|view| view.read(cx).session_id == topped);
-                    if let Some(view) = still_open {
-                        view.update(cx, |view, cx| {
-                            crate::log::trace_mark("HistoryReady");
-                            // A later resume succeeding is what stands the
-                            // lease notice down.
-                            view.note_resumed(cx);
-                            view.reconcile_profile(&resumed.session, cx);
-                            view.follow_tail(cx);
-                        });
-                    }
-                }
-                // The server no longer knows the cached cursor (`-32011
-                // notFound`, "unknown cursor anchor"): the parked view is
-                // stale, not the person's problem. Drop it and open the
-                // session afresh — the loading row, then the pages — instead
-                // of a dialog.
-                Err(error) if error.kind() == Some(&muse_client::schema::ErrorKind::NotFound) => {
-                    crate::log::trace_mark("resume-ack-stale");
-                    crate::baaz_log!("cached view of {topped} is stale ({error}); reopening");
-                    let still_open = this.active.as_ref().is_some_and(|view| view.read(cx).session_id == topped);
-                    if still_open {
-                        // Through `resume`, not `open`: the fresh view pages
-                        // only after its own resume settles, so a stale
-                        // sidecar regenerates before the first page reads it.
-                        this.resume(topped.clone(), window, cx);
-                        // `resume` parked the stale view; it must not come back.
-                        this.session_cache.retain(|(id, _)| *id != topped);
-                    }
-                }
-                // Any other rejection about this session banners the still-open
-                // topped-up view like the reconnect path, never a dialog.
-                Err(error) if conn::is_session_scoped(&error) => {
-                    crate::log::trace_mark("resume-ack-held");
-                    let banner = conn::lease_banner(&error);
-                    crate::baaz_log!("cached resume of {topped} rejected ({error}); banner on the view, wire stays up");
-                    let still_open = this
-                        .active
-                        .clone()
-                        .filter(|view| view.read(cx).session_id == topped);
-                    if let Some(view) = still_open {
-                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
-                    }
-                }
-                Err(error) => {
-                    crate::log::trace_mark("resume-ack-err");
-                    this.report(&error, cx);
-                }
-            }
-            cx.notify();
-        });
     }
 
     /// Store a pick as the one every new session starts with, in any
@@ -5264,24 +4506,6 @@ impl Harness {
                 // The lane settled: repaint on this path even if the
                 // view's own notify raced the event delivery (W8c).
                 cx.notify();
-            }
-            // The fork result is a resume envelope for the **new** session, so
-            // it is already attached: opening it and paging it in is all that
-            // is left, and the sidebar re-reads itself because there is now one
-            // more session in this workspace.
-            SessionEvent::Forked { session_id, session } => {
-                let (session_id, envelope) = (session_id.clone(), session.clone());
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        // `open` swaps synchronously, so the fork view is the
-                        // active one by the time its envelope is seeded.
-                        this.open(session_id, true, false, window, cx);
-                        if let Some(view) = this.active.clone() {
-                            view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                        }
-                        this.load_sessions(cx);
-                    });
-                }));
             }
             SessionEvent::Logout => self.logout(cx),
             // "Enable" on a disabled-provider banner: Settings on the
@@ -5595,25 +4819,6 @@ impl Harness {
         }
     }
 
-    /// A failed command that the application, rather than a session, issued.
-    pub(super) fn report(&mut self, error: &MuseError, cx: &mut Context<Self>) {
-        let title = conn::title(error);
-        let dialog = Dialog {
-            title,
-            detail: error.to_string(),
-            kind: DialogKind::Error,
-            primary: match conn::severity(error) {
-                Severity::Dialog => "Reconnect",
-                Severity::Banner => "Dismiss",
-            },
-            action: match conn::severity(error) {
-                Severity::Dialog => DialogAction::Reconnect,
-                Severity::Banner => DialogAction::Dismiss,
-            },
-            archive_target: None,
-        };
-        self.set_dialog(cx, dialog);
-    }
 }
 
 /// Handoff between providers (H2): the application half. The machine
@@ -6568,13 +5773,6 @@ mod tests {
             draft_decision(&drafts, "p", |_| false),
             DraftDecision::Start { stale: Some("s-draft".into()) }
         );
-    }
-
-    #[test]
-    fn a_start_answered_under_another_id_is_refused() {
-        assert_eq!(minted_start_answer("s-1", "s-1"), Ok(()));
-        let refused = minted_start_answer("s-1", "s-2").expect_err("a foreign id never lands");
-        assert!(refused.contains("s-2") && refused.contains("s-1"), "{refused}");
     }
 
     #[test]
@@ -9095,7 +8293,7 @@ done
                         capture: crate::shot::CaptureToken::default(),
                         terminal_host: None,
                     };
-                    let other = cx.new(|cx| SessionView::new(format!("s-park-{n}"), None, host, window, cx));
+                    let other = cx.new(|cx| SessionView::new(format!("s-park-{n}"), host, window, cx));
                     harness.park_active(cx);
                     harness.active = Some(other);
                 }
@@ -9590,7 +8788,7 @@ done
             vc.update(|window, cx| {
                 baaz.update(cx, |harness, cx| {
                     harness.new_provider = default.as_str().to_owned();
-                    harness.open("muse-row".into(), false, true, window, cx);
+                    harness.open("muse-row".into(), None, true, window, cx);
                 });
             });
             vc.run_until_parked();
@@ -9632,10 +8830,7 @@ done
         });
         vc.update(|window, cx| {
             let view = cx.new(|cx| {
-                SessionView::new(
-                    "s-b2fix-catalog".to_owned(),
-                    None,
-                    SessionHost {
+                SessionView::new("s-b2fix-catalog".to_owned(), SessionHost {
                         provider_id: ProviderId::Muse.as_str().to_owned(),
                         workspace: workspace.clone(),
                         overlays: cx.new(|_| crate::overlays::Overlays::default()),
@@ -9802,9 +8997,9 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let params =
-                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                    harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
                 assert_eq!(
-                    params.model_id.as_deref(),
+                    params.as_deref(),
                     Some("gpt-6-astra"),
                     "a codex default never meets the muse catalog"
                 );
@@ -9825,9 +9020,9 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let params =
-                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                    harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
                 assert_eq!(
-                    params.model_id.as_deref(),
+                    params.as_deref(),
                     Some("claude-opus-4"),
                     "a claude-code default never meets the muse catalog"
                 );
@@ -9856,9 +9051,9 @@ done
                     prefix: Vec::new(),
                 });
                 let params =
-                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                    harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
                 assert_eq!(
-                    params.model_id, None,
+                    params, None,
                     "a foreign default never rides a muse handoff destination"
                 );
             });
@@ -9878,9 +9073,9 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let params =
-                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                    harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
                 assert_eq!(
-                    params.model_id.as_deref(),
+                    params.as_deref(),
                     Some("muse-spark-1.3"),
                     "a listed muse default rides the start"
                 );
@@ -11305,7 +10500,7 @@ done
         // the row exists, the chain links are in place.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-m".to_owned(), false, false, window, cx);
+                harness.open("dest-m".to_owned(), None, false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(
@@ -11570,7 +10765,7 @@ done
         // the row exists, the chain links are in place.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-m2".to_owned(), false, false, window, cx);
+                harness.open("dest-m2".to_owned(), None, false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(
@@ -11815,7 +11010,7 @@ done
         // A muse destination with the pack submitted but never acked.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-me".to_owned(), false, false, window, cx);
+                harness.open("dest-me".to_owned(), None, false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(

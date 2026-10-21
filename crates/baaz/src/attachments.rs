@@ -42,10 +42,6 @@ impl AttachedFile {
         format!("{} · {}", kind_label(&self.name), size_label(self.size_bytes))
     }
 
-    /// The wire part: one text part carrying the file's name and content.
-    pub fn part(&self) -> muse_client::schema::TurnInputPart {
-        muse_client::schema::TurnInputPart::text(format!("--- file: {} ---\n{}", self.name, self.text))
-    }
 }
 
 /// Text-like extensions, read as UTF-8. The format is sniffed from the bytes
@@ -270,8 +266,6 @@ mod tests {
         assert_eq!(file.text, "# hello\nworld\n");
         assert!(!file.truncated);
         assert_eq!(file.detail(), "MD · 14 B");
-        let part = file.part();
-        assert!(part.text.is_some_and(|t| t.starts_with("--- file: notes.md ---\n")));
     }
 
     #[test]

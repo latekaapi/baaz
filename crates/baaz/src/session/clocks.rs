@@ -69,41 +69,6 @@ impl SessionView {
         out
     }
 
-    /// Re-read what is pending, after a resume or a reconnect.
-    ///
-    /// The server does not re-issue an `approval/request` it already sent, so a
-    /// client that was away has to pull. `approval/listPending` is that pull;
-    /// the fold dedupes on ids it has already seen, so folding both lists is
-    /// safe even when nothing was missed.
-    pub(super) fn refresh_pending_now(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let params = ApprovalListPendingParams { session_id: self.session_id.clone() };
-        let session_id = self.session_id.clone();
-        self.wire_call(cx, move || client.approval_list_pending(&params), move |this, result, cx| {
-            let Ok(pending) = result else { return };
-            let fold = |this: &mut Self, method: &str, value: &serde_json::Value| {
-                this.muse_apply(MuseEvent::Notification {
-                    method: method.to_owned(),
-                    params: value.clone(),
-                    cursor: value.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned),
-                    session_id: Some(session_id.clone()),
-                });
-            };
-            for approval in &pending.approvals {
-                if let Ok(value) = serde_json::to_value(approval) {
-                    fold(this, "approval/requested", &value);
-                }
-            }
-            for request in &pending.user_inputs {
-                if let Ok(value) = serde_json::to_value(request) {
-                    fold(this, "userInput/requested", &value);
-                }
-            }
-            this.observe_clocks(cx);
-            cx.notify();
-        });
-    }
-
     /// Whether anything is waiting on the person, for the needs-you banner.
     /// New-provider approvals live beside the fold's, not inside it, so
     /// both counts join here — a Codex approval waiting below must light

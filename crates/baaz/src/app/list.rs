@@ -383,7 +383,6 @@ impl Harness {
         cache
             .iter()
             .find(|(id, _)| id == session_id)
-            .filter(|(_, view)| view.read(cx).is_provider_lane())
             .map(|(_, view)| view.clone())
     }
 

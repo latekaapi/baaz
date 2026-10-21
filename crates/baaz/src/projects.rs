@@ -684,51 +684,6 @@ pub fn parse_effort(text: &str) -> Option<aui_protocol::ReasoningEffort> {
     serde_json::from_value::<aui_protocol::ReasoningEffort>(serde_json::Value::String(text.to_owned())).ok()
 }
 
-/// The shared shape behind [`start_params`] and [`start_params_for_root`]:
-/// a fresh command id, `root` canonicalized (so `/tmp/x` and `/private/tmp/x`
-/// are the one workspace `session/list` will later filter on), and whatever
-/// model default and approval mode the caller already resolved.
-fn build_start_params(
-    root: &Path,
-    provider: &str,
-    model_id: Option<String>,
-    approval_mode: Option<muse_client::schema::ApprovalMode>,
-) -> muse_client::schema::SessionStartParams {
-    muse_client::schema::SessionStartParams {
-        command_id: muse_client::new_command_id(),
-        workspace_root: Some(canonical_path(root).to_string_lossy().into_owned()),
-        provider_id: Some(provider.to_owned()),
-        model_id,
-        // The approval mode alone does not set the posture: the profile
-        // carries the sandbox and who reviews (see
-        // `muse_adapter::permission_profile`). No mode, no pick — the host
-        // default stands, which is what the chip's default reads.
-        permission_profile: approval_mode
-            .as_ref()
-            .map(|mode| muse_adapter::permission_profile(muse_adapter::permission_mode(mode)).to_owned()),
-        approval_mode,
-        ..Default::default()
-    }
-}
-
-/// The `session/start` params for a new session in `project_id`: the
-/// project's root and defaults, with the command line's approval mode
-/// winning over the stored one. `None` when there is no such project, which
-/// is the caller's cue to start nothing (the hero owns that state). The
-/// model is this provider's default only: a pick stored under another lane
-/// never rides along (see [`checked_start_params`] for the muse catalog
-/// check the start path applies on top).
-pub fn start_params(
-    projects: &Projects,
-    project_id: Option<&str>,
-    provider: &str,
-    cli_approval: Option<muse_client::schema::ApprovalMode>,
-) -> Option<muse_client::schema::SessionStartParams> {
-    let project = project_id.and_then(|id| projects.find(id))?;
-    let picks = projects.picks(Some(project));
-    Some(build_start_params(&project.root, provider, picks.model_for(provider), cli_approval.or(picks.approval_mode)))
-}
-
 /// The dropped-model ids already logged: the drop repeats every start
 /// until the person picks a listed model, and each distinct id logs once.
 static DROPPED_MUSE_MODELS_LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -759,39 +714,6 @@ pub fn muse_start_model(model: Option<String>, catalog_ids: &[String]) -> Option
         );
     }
     None
-}
-
-/// [`start_params`], plus the muse catalog check — applied only when
-/// `provider` parses to muse, through the same [`ProviderId`](crate::providers::ProviderId)
-/// parsing the defaults use. A Codex or Claude Code default is never
-/// dropped against the muse catalog; only a muse start consults it.
-/// Every muse `session/start` that carries a project default — a new
-/// session and a handoff destination alike — builds its params here, so
-/// the two cannot drift.
-pub fn checked_start_params(
-    projects: &Projects,
-    project_id: Option<&str>,
-    provider: &str,
-    catalog_ids: &[String],
-    cli_approval: Option<muse_client::schema::ApprovalMode>,
-) -> Option<muse_client::schema::SessionStartParams> {
-    let mut params = start_params(projects, project_id, provider, cli_approval)?;
-    if crate::providers::ProviderId::parse(provider) == crate::providers::ProviderId::Muse {
-        params.model_id = muse_start_model(params.model_id, catalog_ids);
-    }
-    Some(params)
-}
-
-/// The `session/start` params for a session in `root` that is not being
-/// adopted as a project (the "start here without remembering it" path):
-/// no project to draw a model or approval-mode default from, so `model_id`
-/// is `None` and the command line's approval mode is the only one in play.
-pub fn start_params_for_root(
-    root: &Path,
-    provider: &str,
-    cli_approval: Option<muse_client::schema::ApprovalMode>,
-) -> muse_client::schema::SessionStartParams {
-    build_start_params(root, provider, None, cli_approval)
 }
 
 #[cfg(test)]
@@ -1124,69 +1046,6 @@ mod tests {
     }
 
     #[test]
-    fn start_params_carry_the_project_and_its_defaults() {
-        use muse_client::schema::ApprovalMode;
-        let mut projects = Projects::default();
-        let dir = state_dir("start-params");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let id = projects.add(&dir).id.clone();
-        let project = projects.projects.iter_mut().find(|p| p.id == id).expect("added");
-        project.defaults.note_model("muse", "muse-spark-1.3");
-        project.defaults.note_effort("muse", Some("high".into()));
-        project.defaults.approval_mode = Some(ApprovalMode::OnRequest);
-        // No project, no params: the caller starts nothing.
-        assert!(start_params(&projects, None, "meta", None).is_none());
-        assert!(start_params(&projects, Some("gone"), "meta", None).is_none());
-        let params = start_params(&projects, Some(&id), "meta", None).expect("params");
-        assert_eq!(params.workspace_root.as_deref(), Some(canonical_str(&dir.to_string_lossy()).as_str()));
-        assert_eq!(params.model_id.as_deref(), Some("muse-spark-1.3"));
-        assert_eq!(params.approval_mode, Some(ApprovalMode::OnRequest));
-        assert_eq!(params.provider_id.as_deref(), Some("meta"));
-        // The command line wins over the stored mode.
-        let params = start_params(&projects, Some(&id), "meta", Some(ApprovalMode::AllowAll)).expect("params");
-        assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn start_params_for_root_carries_no_project_defaults() {
-        use muse_client::schema::ApprovalMode;
-        let dir = state_dir("start-params-root");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let params = start_params_for_root(&dir, "meta", None);
-        assert_eq!(params.workspace_root.as_deref(), Some(canonical_str(&dir.to_string_lossy()).as_str()));
-        assert_eq!(params.model_id, None);
-        assert_eq!(params.approval_mode, None);
-        assert_eq!(params.provider_id.as_deref(), Some("meta"));
-        // The command line still wins when it names a mode, exactly as it
-        // does for a project's own defaults.
-        let params = start_params_for_root(&dir, "meta", Some(ApprovalMode::AllowAll));
-        assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A start that names a mode names its permission profile too, so the
-    /// sandbox and the reviewer match the chip from the first turn; a start
-    /// with no mode leaves the host default for both.
-    #[test]
-    fn start_params_carry_the_modes_permission_profile() {
-        use muse_client::schema::ApprovalMode;
-        let dir = state_dir("start-params-profile");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        assert_eq!(start_params_for_root(&dir, "meta", None).permission_profile, None);
-        for (mode, profile) in [
-            (ApprovalMode::AllowAll, ":unrestricted"),
-            (ApprovalMode::OnRequest, ":auto-review"),
-            (ApprovalMode::PromptUnmatched, ":ask-me"),
-            (ApprovalMode::DenyUnmatched, ":read-only"),
-        ] {
-            let params = start_params_for_root(&dir, "meta", Some(mode.clone()));
-            assert_eq!(params.permission_profile.as_deref(), Some(profile), "{mode:?}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn a_codex_model_pick_never_becomes_the_muse_start_model() {
         let mut projects = Projects::default();
         let dir = state_dir("per-provider-defaults");
@@ -1197,13 +1056,10 @@ mod tests {
         // `note_project_default` records it from the picking view.
         project.defaults.note_model("codex", "gpt-6-astra");
         project.defaults.note_effort("codex", Some("xhigh".into()));
-        // The muse start carries no model: Codex's pick never leaks lanes.
-        let params = start_params(&projects, Some(&id), "muse", None).expect("params");
-        assert_eq!(params.model_id, None, "a Codex pick must not start a muse session");
-        assert_eq!(params.provider_id.as_deref(), Some("muse"));
-        // The Codex start still reads its own default.
-        let params = start_params(&projects, Some(&id), "codex", None).expect("params");
-        assert_eq!(params.model_id.as_deref(), Some("gpt-6-astra"));
+        // Each provider reads its own default: Codex's pick never leaks lanes.
+        let picks = |projects: &Projects| projects.picks(projects.find(&id));
+        assert_eq!(picks(&projects).model_for("muse"), None, "a Codex pick must not start a muse session");
+        assert_eq!(picks(&projects).model_for("codex").as_deref(), Some("gpt-6-astra"));
         // And a muse pick later does not disturb the Codex entry.
         projects
             .projects
@@ -1212,15 +1068,13 @@ mod tests {
             .expect("added")
             .defaults
             .note_model("muse", "muse-spark-1.3");
-        let params = start_params(&projects, Some(&id), "codex", None).expect("params");
-        assert_eq!(params.model_id.as_deref(), Some("gpt-6-astra"));
-        let params = start_params(&projects, Some(&id), "muse", None).expect("params");
-        assert_eq!(params.model_id.as_deref(), Some("muse-spark-1.3"));
+        assert_eq!(picks(&projects).model_for("codex").as_deref(), Some("gpt-6-astra"));
+        assert_eq!(picks(&projects).model_for("muse").as_deref(), Some("muse-spark-1.3"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn start_params_drops_a_model_the_muse_catalog_does_not_list() {
+    fn a_stored_model_the_muse_catalog_does_not_list_is_dropped() {
         let listed = vec!["muse-spark-1.3".to_owned(), "muse-everyday".to_owned()];
         // A stored default the catalog names rides along.
         assert_eq!(

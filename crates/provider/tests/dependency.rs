@@ -25,8 +25,9 @@ use std::process::Command as ProcCommand;
 /// The whole neutral vocabulary: the render model, identity, and the
 /// channel primitive the transports already use. Nothing else.
 // `libc` is the OS, not a wire: `env_path` needs `setsid` and a group
-// kill for the login-shell PATH probe (std exposes neither).
-const ALLOWED: &[&str] = &["aui-protocol", "crossbeam-channel", "libc"];
+// kill for the login-shell PATH probe (std exposes neither). `uuid` mints
+// the client's request ids (`new_request_id`), a neutral handle.
+const ALLOWED: &[&str] = &["aui-protocol", "crossbeam-channel", "libc", "uuid"];
 
 /// Every wire spelling that must never appear in this crate's graph.
 const FORBIDDEN: &[&str] = &["muse-client", "muse-adapter", "msp"];
