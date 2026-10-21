@@ -187,6 +187,30 @@ fn activity_time(session: &muse_client::schema::Session) -> DateTime<Local> {
         .unwrap_or_else(|| parse_time(&session.created_at))
 }
 
+/// A Muse row's label, best first — the one ladder the list join, the boot
+/// rows and [`crate::app::Harness::rejoin`] all read, so a row never reads
+/// one thing before the list lands and another after it (and its search
+/// row is not rewritten each time it flips — 63 rows a launch on the
+/// owner's store, docs/51 §8). `wire` is the `session/list` row when one is
+/// known; see [`SessionEntry::join`] for the order and why.
+pub(crate) fn label_ladder<'a>(
+    meta: Option<&'a SessionMeta>,
+    wire: Option<&'a muse_client::schema::Session>,
+    index: Option<&'a IndexEntry>,
+) -> Option<&'a str> {
+    fn pick(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|s| !s.is_empty())
+    }
+    pick(meta.and_then(|m| m.name.as_deref()))
+        .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
+        .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
+        .or_else(|| pick(wire.and_then(|w| w.name.as_deref())))
+        .or_else(|| pick(wire.and_then(|w| w.title.as_deref())))
+        .or_else(|| pick(wire.and_then(|w| w.first_user_prompt.as_deref())))
+        .or_else(|| index.and_then(IndexEntry::label))
+        .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())))
+}
+
 impl SessionEntry {
     /// Join one `session/list` row with what the index and the store know.
     ///
@@ -231,18 +255,8 @@ impl SessionEntry {
         projects: &crate::projects::Projects,
         cache: &mut crate::projects::CanonicalCache,
     ) -> Self {
-        fn pick(value: Option<&str>) -> Option<&str> {
-            value.map(str::trim).filter(|s| !s.is_empty())
-        }
-        let name = pick(meta.and_then(|m| m.name.as_deref()));
-        let label = name
-            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
-            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
-            .or_else(|| pick(session.name.as_deref()))
-            .or_else(|| pick(session.title.as_deref()))
-            .or_else(|| pick(session.first_user_prompt.as_deref()))
-            .or_else(|| index.and_then(IndexEntry::label))
-            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
+        let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+        let label = label_ladder(meta, Some(session), index);
         // A user-given name always earns the first prompt below it; any other
         // label earns it only when it does not already say it (see
         // `describe`): Muse writes whole first prompts into the index title,
@@ -351,16 +365,8 @@ impl SessionEntry {
         projects: &crate::projects::Projects,
         cache: &mut crate::projects::CanonicalCache,
     ) -> Option<Self> {
-        fn pick(value: Option<&str>) -> Option<&str> {
-            value.map(str::trim).filter(|s| !s.is_empty())
-        }
-        let name = pick(meta.and_then(|m| m.name.as_deref()));
-        let label = name
-            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
-            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
-            .or_else(|| index.label())
-            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
-        let text = label?;
+        let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+        let text = label_ladder(meta, None, Some(index))?;
         let user_named = name.is_some()
             || index
                 .session_name
