@@ -39,6 +39,11 @@ pub use caps::{
 };
 pub use hub::{side_of, MuseHub, MuseLane};
 pub use terminal::TerminalRelay;
+
+/// Where the `muse` program is: `MUSE_PROGRAM`, `PATH`, then the install
+/// fallbacks (the Dock launches with a minimal `PATH`). `None` when none
+/// exists.
+pub use muse_client::resolve_muse_program as resolve_program;
 pub use translate::{approval_headline, question_headline};
 
 /// The raw transport, shared between the hub and the application's

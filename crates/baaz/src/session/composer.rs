@@ -642,7 +642,7 @@ impl SessionView {
         // The person answered the Auto-fallback banner: it comes down.
         self.dismiss_mode_fallback(cx);
         self.set_mode(mode, cx);
-        cx.emit(SessionEvent::ModeSelected { mode: provider_muse::modes::wire_mode(mode) });
+        cx.emit(SessionEvent::ModeSelected { mode });
         self.close_menu(cx);
     }
 

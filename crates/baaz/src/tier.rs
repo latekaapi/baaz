@@ -14,7 +14,7 @@
 //! # Two oracles: the wire first, the screen scrape as fallback
 //!
 //! Since muse 1.3.0 the numbers the card shows are on the wire, typed:
-//! `usage/read` answers `UsageReadResult { usage: Option<SubscriptionUsage> }`
+//! `usage/read` answers `{usage?}` (absent on a cold host)
 //! and the server emits `usage/changed` as observations land. Those are the
 //! primary oracle now — they reach Baaz through the Muse lane as neutral
 //! [`provider::UsageReport`]s (`Command::ReadUsage`, `UsageChanged`) —
@@ -30,7 +30,7 @@
 //! 1. `usage/read` answers `{}` on a cold host — it only populates after a
 //!    turn has observed a provider response, so a fresh boot has nothing.
 //! 2. Nothing on the wire says a login is pay-as-you-go. `usage/read`
-//!    returns a `SubscriptionUsage` when a subscription observation exists
+//!    returns a reading when a subscription observation exists
 //!    and nothing otherwise; absence is "not known yet", not pay-as-you-go.
 //!
 //! The `muse` TUI's `/upgrade` card is still the only oracle that
@@ -69,8 +69,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use muse_client::schema::{SubscriptionUsage, UsageReadResult};
 use provider::{UsageReport, UsageWindow};
 
 /// The ceiling on one probe, start to finish.
@@ -111,7 +109,7 @@ const MAX_OUTPUT: usize = 512 * 1024;
 
 /// A plan string fit to show: it names the plan in words.
 ///
-/// The wire (`SubscriptionUsage.tier`, muse 1.4.0) carries an opaque numeric
+/// The wire (the reading's `tier`, muse 1.4.0) carries an opaque numeric
 /// id there instead of a name. Anything without a letter is such an id —
 /// all digits or otherwise id-shaped — never a name, and must never reach a
 /// surface.
@@ -1014,10 +1012,12 @@ fn percent(window: &UsageWindow) -> u32 {
     (window.used_fraction * 100.0).round().max(0.0) as u32
 }
 
-/// [`tier_from_report`] over the wire shape, for the tests that build one.
+/// [`tier_from_report`] over a wire reading (`usage/changed` params), for
+/// the tests that build one.
 #[cfg(test)]
-pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
-    tier_from_report(&provider_muse::usage::report_from(usage)).expect("a wire reading has both windows")
+pub fn tier_from_usage(usage: &serde_json::Value) -> Tier {
+    tier_from_report(&provider_muse::usage::report_from_changed(usage).expect("a wire reading decodes"))
+        .expect("a wire reading has both windows")
 }
 
 /// One wire reset clause: the card's words rendered from the stamp, carrying
@@ -1060,15 +1060,7 @@ fn restore_known_plan(tier: &mut Tier, raw_tier: &str, auth_mtime_secs: Option<u
 /// for unknown.
 #[cfg(test)]
 pub fn tier_from_read_value(value: &serde_json::Value) -> Option<Tier> {
-    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
-    tier_from_read_result(&result)
-}
-
-/// [`tier_from_read_value`] without the JSON: `Some` builds the subscription,
-/// `None` (the `{}` case) falls through to the fallback.
-#[cfg(test)]
-pub fn tier_from_read_result(result: &UsageReadResult) -> Option<Tier> {
-    result.usage.as_ref().map(tier_from_usage)
+    provider_muse::usage::report_from_read(value).and_then(|report| tier_from_report(&report))
 }
 
 /// One `usage/changed` notification's params → the tier it names, or `None`
@@ -1076,7 +1068,7 @@ pub fn tier_from_read_result(result: &UsageReadResult) -> Option<Tier> {
 /// tier: the caller keeps what it had.
 #[cfg(test)]
 pub fn tier_from_changed(params: &serde_json::Value) -> Option<Tier> {
-    serde_json::from_value::<SubscriptionUsage>(params.clone()).ok().map(|usage| tier_from_usage(&usage))
+    provider_muse::usage::report_from_changed(params).and_then(|report| tier_from_report(&report))
 }
 
 /// One usage reading → the tier it names, when the observation belongs to
@@ -1622,7 +1614,7 @@ fn resolve_probe_muse(muse: &str) -> PathBuf {
     if !muse.is_empty() && candidate.is_file() {
         return candidate.to_path_buf();
     }
-    if let Some(program) = muse_client::resolve_muse_program() {
+    if let Some(program) = provider_muse::resolve_program() {
         return program;
     }
     if let Some(program) = provider::env_path::find_program("muse") {
@@ -2364,10 +2356,8 @@ mod tests {
     fn usage_read_empty_falls_through_to_the_fallback() {
         let cold: serde_json::Value = serde_json::json!({});
         assert_eq!(tier_from_read_value(&cold), None, "the {{}} case falls through, it is not Unavailable");
-        // The typed shape says the same: absent usage is the cold host.
-        let decoded: UsageReadResult = serde_json::from_value(cold).expect("{} decodes");
-        assert_eq!(decoded.usage, None);
-        assert_eq!(tier_from_read_result(&decoded), None);
+        // The reading the hub hands over says the same: nothing observed.
+        assert_eq!(provider_muse::usage::report_from_read(&cold), None);
     }
 
     /// A `usage/changed` notification replaces an already-known tier in place
@@ -2549,7 +2539,7 @@ mod tests {
     }
 
     /// A plan string fit to show names the plan in words. The wire (muse
-    /// 1.4.0) sends an opaque numeric id in `SubscriptionUsage.tier`
+    /// 1.4.0) sends an opaque numeric id in the reading's `tier`
     /// instead — observed live as `27681631238169137` — and anything without
     /// a letter is such an id, never a name.
     #[test]
@@ -2568,20 +2558,13 @@ mod tests {
 
     /// One wire observation with fixed stamps, for driving the builders
     /// without a live connection.
-    fn wire_usage(tier: &str) -> SubscriptionUsage {
-        SubscriptionUsage {
-            observed_at_ms: 1_786_000_000_000,
-            tier: tier.to_owned(),
-            weekly: muse_client::schema::SubscriptionUsageWeekly {
-                resets_at_ms: 1_786_012_200_000,
-                used_percent: 9,
-            },
-            window: muse_client::schema::SubscriptionUsageWindow {
-                resets_at_ms: 1_786_003_020_000,
-                used_percent: 4,
-                window_duration_mins: 300,
-            },
-        }
+    fn wire_usage(tier: &str) -> serde_json::Value {
+        serde_json::json!({
+            "observedAtMs": 1_786_000_000_000u64,
+            "tier": tier,
+            "weekly": {"resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9},
+            "window": {"resetsAtMs": 1_786_003_020_000u64, "usedPercent": 4, "windowDurationMins": 300},
+        })
     }
 
     /// A numeric wire plan with no previous reading reads as the generic
@@ -3039,8 +3022,8 @@ mod usage_fraction_tests {
     /// never decides the kind; a reading naming its plan still does.
     #[test]
     fn a_numeric_wire_reading_never_decides_the_plan_kind() {
-        let numeric = serde_json::to_value(wire_usage("27681631238169137")).expect("encodes");
-        let named = serde_json::to_value(wire_usage("Muse Code High Usage")).expect("encodes");
+        let numeric = wire_usage("27681631238169137");
+        let named = wire_usage("Muse Code High Usage");
         assert!(!wire_settles_kind(&numeric, Some(&Tier::PayAsYouGo)), "never over a pay-as-you-go");
         assert!(!wire_settles_kind(&numeric, None), "never over an unknown plan");
         assert!(!wire_settles_kind(&numeric, Some(&Tier::Unavailable("x".into()))));

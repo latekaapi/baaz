@@ -138,6 +138,21 @@ impl MuseHub {
         }
     }
 
+    /// A hub over a stand-in server: `program` run with `args` (after the
+    /// `serve` arguments every child gets), not yet shaken hands — the
+    /// first lane's connect is the handshake. For harnesses that drive a
+    /// scripted server (tests); production connects with [`Self::connect`].
+    pub fn spawn_stand_in(program: impl Into<std::path::PathBuf>, args: Vec<String>) -> Result<Self, ProviderError> {
+        let client = MuseClient::spawn(&muse_client::MuseConfig {
+            program: program.into(),
+            trust_workspace: false,
+            no_session_log: false,
+            extra_args: args,
+        })
+        .map_err(|error| ProviderError::Unavailable { reason: error.to_string() })?;
+        Ok(Self::from_client(client))
+    }
+
     /// Spawn `muse serve` ([`crate::spawn`]) and shake hands. Blocking.
     pub fn connect(program: &str, info: &ConnectInfo) -> Result<Self, ProviderError> {
         let hub = Self::with(Some(program.to_owned()), None);

@@ -226,7 +226,7 @@ pub struct Args {
     /// non-interactive run's policy, and it is what a scripted capture of an
     /// approval needs — a shell command under `promptUnmatched` raises a real,
     /// server-minted approval and makes no model call.
-    pub approval_mode: Option<muse_client::schema::ApprovalMode>,
+    pub approval_mode: Option<aui_protocol::PermissionMode>,
     /// `--login <state>`: which login-screen state `--no-connect` boots
     /// into for a capture — `choose` (the default), `device`, `apikey`,
     /// `apikey-error`, `validating`, `error`, `signed-in` (the shell with
@@ -392,18 +392,10 @@ fn parse_args() -> Args {
             }
             "--print-tier" => out.print_tier = true,
             "--approval-mode" => {
-                use muse_client::schema::ApprovalMode;
                 let value = args.next().unwrap_or_default();
                 out.approval_mode = Some(
-                    [
-                        ApprovalMode::AllowAll,
-                        ApprovalMode::OnRequest,
-                        ApprovalMode::PromptUnmatched,
-                        ApprovalMode::DenyUnmatched,
-                    ]
-                    .into_iter()
-                    .find(|mode| mode.as_wire().eq_ignore_ascii_case(&value))
-                    .unwrap_or_else(|| usage(&format!("unknown approval mode `{value}`"))),
+                    projects::parse_mode(&value)
+                        .unwrap_or_else(|| usage(&format!("unknown approval mode `{value}`"))),
                 );
             }
             "--login" => {
