@@ -228,10 +228,8 @@ impl MuseHub {
         self.core.connection.1.clone()
     }
 
-    /// The current child, shared — transitional: the application's
-    /// session list still reads Muse's rows over it until they come
-    /// through the seam.
-    pub fn transport(&self) -> Option<Arc<MuseClient>> {
+    /// The current child, shared.
+    fn transport(&self) -> Option<Arc<MuseClient>> {
         self.core.link.lock().expect("link mutex").as_ref().map(|link| Arc::clone(&link.client))
     }
 

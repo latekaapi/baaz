@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Measured after the connection path moved behind the seam. It may only
 /// ever be reduced.
-const CEILING: usize = 10;
+const CEILING: usize = 8;
 
 fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

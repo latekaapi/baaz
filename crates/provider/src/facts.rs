@@ -163,3 +163,36 @@ pub enum TurnOutcome {
         signed_out: bool,
     },
 }
+
+/// What is waiting on the person in a session that is not open: a row's
+/// needs-you state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attention {
+    /// An approval waits.
+    ApprovalPending,
+    /// A question waits.
+    InputPending,
+    /// Something this build has no name for, as the provider spells it.
+    /// Never counted as either of the above.
+    Other(String),
+}
+
+impl Attention {
+    /// From its name (`approvalPending`, `inputPending`, anything else).
+    pub fn parse(name: &str) -> Self {
+        match name {
+            "approvalPending" => Self::ApprovalPending,
+            "inputPending" => Self::InputPending,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// Its name: what [`Self::parse`] reads back.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::ApprovalPending => "approvalPending",
+            Self::InputPending => "inputPending",
+            Self::Other(name) => name,
+        }
+    }
+}

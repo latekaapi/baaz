@@ -252,11 +252,12 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 cursor: Some("c-1".into()),
                 limit: Some(25),
                 workspace: Some("/tmp/w".into()),
+                updated_after: Some("2026-10-21T00:00:00Z".into()),
             }),
             expected_params: params_of!(SessionListParams {
                 cursor: Some("c-1".into()),
                 limit: Some(25),
-                updated_after: None,
+                updated_after: Some("2026-10-21T00:00:00Z".into()),
                 workspace_root: Some("/tmp/w".into()),
             }),
             check_ack: Box::new(|ack| match ack {
@@ -280,7 +281,14 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 exclude_items: None,
                 session_id: "s-1".into(),
             }),
-            check_ack: session_ack("s-1", Some("Fake Session")),
+            check_ack: Box::new(|ack| match ack {
+                Ack::SessionRead { session_id, title, first_shell_command } => {
+                    assert_eq!(session_id, "s-1");
+                    assert_eq!(title.as_deref(), Some("Fake Session"));
+                    assert_eq!(first_shell_command, None, "the puppet's history holds none");
+                }
+                other => panic!("expected a session read, got {other:?}"),
+            }),
         },
         Case {
             name: "compact-session",

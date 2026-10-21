@@ -1037,7 +1037,7 @@ impl ProviderAdapter for CodexAdapter {
             Command::ReadSession { session_id, .. } => {
                 match self.session_id.lock().expect("session mutex").as_deref() {
                     Some(held) if held == session_id => {
-                        Ok(Ack::Session { session_id, title: None })
+                        Ok(Ack::SessionRead { session_id, title: None, first_shell_command: None })
                     }
                     _ => Err(ProviderError::Rejected {
                         reason: format!(

@@ -374,36 +374,15 @@ fn fixture_settled() -> String {
 fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Projects) -> SessionEntry {
     let root = std::path::PathBuf::from(&row.workspace_root);
     let root = if root.is_absolute() { root } else { launch.join(root) };
-    let session = muse_client::schema::Session {
-        active_turn_id: None,
-        approval_mode: None,
-        attention: None,
-        branch: None,
-        created_at: row.updated_at.clone(),
-        created_by_client: None,
-        first_user_prompt: None,
-        forked_from: None,
-        generated_name: None,
-        kind: None,
-        last_activity_at: row.last_activity_at.clone(),
-        model_id: None,
-        name: None,
-        name_origin: None,
-        parent_session_id: None,
-        path: String::new(),
-        permission_state: None,
-        provider_id: None,
+    let session = crate::list_cache::ListedRow {
         session_id: row.session_id.clone(),
-        side_from: None,
-        status: if row.status == "running" {
-            muse_client::schema::SessionStatus::Running
-        } else {
-            muse_client::schema::SessionStatus::Idle
-        },
-        title: None,
-        turn_count: row.turn_count,
+        created_at: row.updated_at.clone(),
+        last_activity_at: row.last_activity_at.clone(),
         updated_at: row.updated_at.clone(),
+        status: Some(if row.status == "running" { "running" } else { "idle" }.to_owned()),
+        turn_count: row.turn_count,
         workspace_root: Some(root.to_string_lossy().into_owned()),
+        ..Default::default()
     };
     let mut entry = SessionEntry::join(&session, None, None, projects);
     // The fixture's own label, kept like a replayed row's: no index or
@@ -419,10 +398,9 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
         entry.last_ask = Some(ask.to_owned());
     }
     for flag in &row.attention {
-        match flag.as_str() {
-            "approvalPending" => entry.attention.push(muse_client::schema::AttentionFlag::ApprovalPending),
-            "inputPending" => entry.attention.push(muse_client::schema::AttentionFlag::InputPending),
-            _ => {}
+        match provider::facts::Attention::parse(flag) {
+            provider::facts::Attention::Other(_) => {}
+            known => entry.attention.push(known),
         }
     }
     if let Some(approval) = row.approval.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -437,28 +415,6 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     entry
 }
 
-/// Muse's list rows, for the saved listing ([`crate::list_cache`]).
-impl crate::list_cache::Row for muse_client::schema::Session {
-    fn id(&self) -> &str {
-        &self.session_id
-    }
-    fn updated_at(&self) -> &str {
-        &self.updated_at
-    }
-    fn activity_at(&self) -> &str {
-        self.last_activity_at.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&self.created_at)
-    }
-    fn compact(&mut self) {
-        // The join reads these for an 80-character label and a prompt-prefix
-        // side marker; nothing in Baaz reads past the first 1,000.
-        for text in [&mut self.title, &mut self.first_user_prompt, &mut self.name, &mut self.generated_name]
-            .into_iter()
-            .flatten()
-        {
-            crate::list_cache::keep_prefix(text);
-        }
-    }
-}
 
 /// The id prefix of a local draft: a Muse draft with no session behind it
 /// (scripted chrome, or a live launch with Muse still starting).
@@ -595,7 +551,10 @@ impl Harness {
     /// Everything lands on the one background task behind this
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.muse_transport() else { return };
+        if !self.muse_slot.is_ready() {
+            return;
+        }
+        let slot = self.muse_slot.clone();
         if self.sessions_list_in_flight {
             // A fetch is already running — at boot the probe answer's fetch
             // is still out when the boot session's `session/start` lands and
@@ -622,19 +581,26 @@ impl Harness {
             let cached = cached.or_else(|| crate::list_cache::load(&cache_path).map(std::sync::Arc::new));
             let source = crate::index::index_path().to_string_lossy().into_owned();
             let now_ms = chrono::Utc::now().timestamp_millis();
+            let lane = slot.control()?;
             let listing = crate::list_cache::list(
                 cached.as_deref(),
                 &source,
                 now_ms,
                 &mut |ask| {
-                    client
-                        .session_list(&SessionListParams {
-                            cursor: ask.cursor,
-                            limit: Some(ask.limit),
-                            updated_after: ask.updated_after.map(str::to_owned),
-                            ..Default::default()
-                        })
-                        .map(|page| crate::list_cache::Page { rows: page.sessions, next: page.next_cursor })
+                    match lane.send(provider::Command::ListSessions {
+                        cursor: ask.cursor,
+                        limit: Some(ask.limit),
+                        workspace: None,
+                        updated_after: ask.updated_after.map(str::to_owned),
+                    })? {
+                        provider::Ack::SessionIndex { sessions, next_cursor } => Ok(crate::list_cache::Page {
+                            rows: sessions.into_iter().map(crate::list_cache::ListedRow::from).collect(),
+                            next: next_cursor,
+                        }),
+                        other => Err(provider::ProviderError::Rejected {
+                            reason: format!("a session listing answered {other:?}"),
+                        }),
+                    }
                 },
                 &mut |page, rows, took| {
                     crate::log::boot_mark(&format!(
@@ -680,7 +646,7 @@ impl Harness {
             for project in &projects.projects {
                 canon.get(&project.root.to_string_lossy());
             }
-            Ok::<_, MuseError>((sessions, branches, availability, canon, held))
+            Ok::<_, provider::ProviderError>((sessions, branches, availability, canon, held))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
             let reply_at = std::time::Instant::now();
@@ -1408,7 +1374,7 @@ impl Harness {
         // Provider-lane rows rejoin from their record, not from the wire
         // or the index: the generic ladder below knows neither.
         let provider_ids: Vec<String> =
-            self.sessions.iter().filter(|entry| entry.provider.is_some()).map(|entry| entry.id.clone()).collect();
+            self.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).map(|entry| entry.id.clone()).collect();
         for id in provider_ids {
             self.rejoin_provider_row(&id);
         }
@@ -1420,12 +1386,12 @@ impl Harness {
         // ([`sidebar::label_ladder`]): without them a rejoin fell back to the
         // index label, uncut, and the next list reply flipped it back.
         let listed = self.saved_list.clone();
-        let wire: HashMap<&str, &muse_client::schema::Session> = listed
+        let wire: HashMap<&str, &crate::list_cache::ListedRow> = listed
             .as_deref()
             .map(|l| l.sessions.iter().map(|s| (s.session_id.as_str(), s)).collect())
             .unwrap_or_default();
         for entry in &mut self.sessions {
-            if entry.provider.is_some() {
+            if !entry.provider.lists_sessions() {
                 continue;
             }
             // The adoption may have changed under the row: re-resolve every
@@ -3128,11 +3094,11 @@ impl Harness {
         // A deleted record that anchored a chain still needs the collapse:
         // its row leaves, the chain re-sums without it.
         let removed_linked = self.sessions.iter().any(|entry| {
-            entry.provider.is_some()
+            !entry.provider.lists_sessions()
                 && !self.provider_sessions.contains_key(&entry.id)
                 && sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides)
         });
-        self.sessions.retain(|entry| entry.provider.is_none() || self.provider_sessions.contains_key(&entry.id));
+        self.sessions.retain(|entry| entry.provider.lists_sessions() || self.provider_sessions.contains_key(&entry.id));
         if self.provider_sessions.is_empty() {
             return false;
         }
@@ -3207,7 +3173,7 @@ impl Harness {
                         archived: meta.is_some_and(|m| m.archived),
                         description: String::new(),
                         replayed: false,
-                        provider: None,
+                        provider: ProviderId::Muse,
                         named,
                         needs_title: false,
                         side_marker: false,
@@ -6170,7 +6136,7 @@ mod tests {
     /// the dead child would have failed it into a dialog instead of a lane
     /// view.
     fn mark_muse_up(harness: &mut Harness) {
-        let child = MuseClient::spawn(&muse_client::MuseConfig {
+        let child = muse_client::MuseClient::spawn(&muse_client::MuseConfig {
             program: std::path::PathBuf::from("true"),
             trust_workspace: false,
             no_session_log: false,
@@ -6232,7 +6198,7 @@ mod tests {
         let state = lane_state("saved-list-boot-rows");
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
-        let wire: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+        let wire: crate::list_cache::ListedRow = serde_json::from_value(serde_json::json!({
             "sessionId": "s-chain",
             "createdAt": "2026-10-01T00:00:00Z",
             "updatedAt": "2026-10-20T00:00:00Z",
@@ -6355,7 +6321,7 @@ mod tests {
                 // A zero-turn session from the saved list is filtered as empty
                 // now, as the reply's row will be; an index-only row, whose turn
                 // count nobody knows yet, still shows.
-                let zero: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+                let zero: crate::list_cache::ListedRow = serde_json::from_value(serde_json::json!({
                     "sessionId": "s-zero", "createdAt": "2026-10-01T00:00:00Z",
                     "updatedAt": "2026-10-20T00:00:00Z", "path": "/tmp/z.jsonl", "status": "idle",
                     "turnCount": 0, "title": "Zero", "activeTurnId": null, "forkedFrom": null,
@@ -6537,7 +6503,7 @@ mod tests {
                 harness
                     .sessions
                     .iter()
-                    .any(|entry| entry.id == open_id && entry.provider.as_deref() == Some("codex")),
+                    .any(|entry| entry.id == open_id && entry.provider == crate::providers::ProviderId::Codex),
                 "a provider sidebar row names the lane session"
             );
         });
@@ -6592,7 +6558,7 @@ mod tests {
                 harness.sessions_loaded = false;
                 harness.sessions.clear();
                 z4_seed_stored_codex(harness, cx);
-                harness.sessions.retain(|entry| entry.provider.is_some());
+                harness.sessions.retain(|entry| !entry.provider.lists_sessions());
                 harness.sessions_loaded = false;
                 harness.muse_unavailable("Muse is off or not installed".into(), cx);
                 assert!(harness.sessions_loaded, "the sidebar settles without a Muse list");
@@ -6601,7 +6567,7 @@ mod tests {
                 // A Muse row beside it, then a Muse sign-out.
                 let mut muse_row = harness.sessions[0].clone();
                 muse_row.id = "s-muse".into();
-                muse_row.provider = None;
+                muse_row.provider = crate::providers::ProviderId::Muse;
                 harness.sessions.push(muse_row);
                 harness.forget_muse_rows(cx);
                 assert!(harness.sessions.iter().all(|e| e.id != "s-muse"), "Muse's row goes");
@@ -7919,7 +7885,7 @@ mod tests {
         root: &std::path::Path,
         log: &std::path::Path,
         answer: Option<&str>,
-    ) -> std::sync::Arc<MuseClient> {
+    ) -> std::sync::Arc<muse_client::MuseClient> {
         use std::os::unix::fs::PermissionsExt as _;
         let script = dir.join("fake-muse.sh");
         let answered = answer.map_or_else(|| "$sid".to_owned(), str::to_owned);
@@ -7945,7 +7911,7 @@ done
         std::fs::write(&script, body).expect("fake muse script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         std::sync::Arc::new(
-            MuseClient::spawn(&muse_client::MuseConfig {
+            muse_client::MuseClient::spawn(&muse_client::MuseConfig {
                 program: script,
                 trust_workspace: false,
                 no_session_log: false,
@@ -9203,7 +9169,7 @@ done
             // what proves the replacement.)
             let _ = draft;
             let rows: Vec<_> =
-                harness.sessions.iter().filter(|entry| entry.provider.is_some()).collect();
+                harness.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
             assert_eq!(rows.len(), 1, "exactly one provider row names the lane");
             assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the replacement");
             assert!(!harness.session_switch_pending, "the switch landed");
@@ -9900,7 +9866,7 @@ done
                 "the last ask wins, however the finishes order"
             );
             let rows: Vec<_> =
-                harness.sessions.iter().filter(|entry| entry.provider.is_some()).collect();
+                harness.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
             assert_eq!(rows.len(), 1, "the stale finish leaves no row");
             assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the winner");
             assert!(!harness.session_switch_pending, "the switch landed");
@@ -10148,7 +10114,7 @@ done
                 harness
                     .sessions
                     .iter()
-                    .any(|entry| entry.id == open_id && entry.provider.as_deref() == Some("codex")),
+                    .any(|entry| entry.id == open_id && entry.provider == crate::providers::ProviderId::Codex),
                 "the sidebar reinstalls the provider row from the record"
             );
         });
@@ -10223,7 +10189,7 @@ done
             archived: false,
             description: String::new(),
             replayed: false,
-            provider: None,
+            provider: crate::providers::ProviderId::Muse,
             named: false,
             needs_title: false,
             side_marker: false,
@@ -11284,7 +11250,7 @@ done
                         harness.sessions.iter_mut().find(|entry| entry.id == "chain-a").expect("member row");
                     member.running = true;
                     member.turn_started = Some(now);
-                    member.attention = vec![muse_client::schema::AttentionFlag::ApprovalPending];
+                    member.attention = vec![provider::facts::Attention::ApprovalPending];
                 }
                 // The rebuild re-reads the records around the live rows.
                 harness.merge_provider_rows();
@@ -11298,7 +11264,7 @@ done
                 assert_eq!(member.turn_started, Some(now));
                 assert_eq!(
                     member.attention,
-                    vec![muse_client::schema::AttentionFlag::ApprovalPending],
+                    vec![provider::facts::Attention::ApprovalPending],
                     "a member's attention survives the rebuild"
                 );
                 // One view row, carrying the member's live state.
@@ -11308,7 +11274,7 @@ done
                 assert_eq!(row.id, "chain-c", "the head is what is listed");
                 assert!(row.running, "the head row shows the member's live turn");
                 assert!(
-                    row.attention.contains(&muse_client::schema::AttentionFlag::ApprovalPending),
+                    row.attention.contains(&provider::facts::Attention::ApprovalPending),
                     "the head row ORs the member's attention, drew {:?}",
                     row.attention
                 );
@@ -11737,32 +11703,13 @@ done
                 // Built before the provider rebuild so the restart synth
                 // below does not double it (Y2a: storage keeps one row per
                 // session).
-                let wire = muse_client::schema::Session {
-                    active_turn_id: None,
-                    approval_mode: None,
-                    attention: None,
-                    branch: None,
-                    created_at: "2026-09-13T10:00:00Z".into(),
-                    created_by_client: None,
-                    first_user_prompt: None,
-                    forked_from: None,
-                    generated_name: None,
-                    kind: None,
-                    last_activity_at: None,
-                    model_id: None,
-                    name: None,
-                    name_origin: None,
-                    parent_session_id: None,
-                    path: String::new(),
-                    permission_state: None,
-                    provider_id: None,
+                let wire = crate::list_cache::ListedRow {
                     session_id: "count-c".into(),
-                    side_from: None,
-                    status: muse_client::schema::SessionStatus::Idle,
-                    title: None,
-                    turn_count: 2,
+                    created_at: "2026-09-13T10:00:00Z".into(),
                     updated_at: "2026-09-13T10:00:00Z".into(),
-                    workspace_root: None,
+                    status: Some("idle".into()),
+                    turn_count: 2,
+                    ..Default::default()
                 };
                 let head = crate::sidebar::SessionEntry::join(
                     &wire,

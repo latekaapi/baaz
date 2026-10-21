@@ -8,14 +8,38 @@
 
 use aui_protocol::{Delta, PermissionMode};
 
-/// One row of a session listing: identity plus the display title, when the
-/// provider could derive one. Never fabricated — absent stays absent.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One row of a session listing: what a sidebar row is built from. Never
+/// fabricated — absent stays absent, and a provider that knows only the id
+/// leaves the rest at its default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionSummary {
     /// The session identity.
     pub session_id: String,
     /// Display title, when derivable.
     pub title: Option<String>,
+    /// The name someone gave the session in the provider, when it keeps one.
+    pub name: Option<String>,
+    /// The first thing the person sent, when the provider reports it (a
+    /// preview: the head is kept, the tail may be cut).
+    pub first_prompt: Option<String>,
+    /// The workspace root the session ran in.
+    pub workspace: Option<String>,
+    /// The workspace's branch, when the provider derives one.
+    pub branch: Option<String>,
+    /// When it was created, RFC 3339.
+    pub created_at: String,
+    /// When its content last moved, RFC 3339; absent before any content.
+    pub last_activity_at: Option<String>,
+    /// When the provider last touched its record, RFC 3339 — what an
+    /// incremental listing ([`crate::Command::ListSessions`]'s
+    /// `updated_after`) filters on.
+    pub updated_at: String,
+    /// A turn is running.
+    pub running: bool,
+    /// Exchanges so far.
+    pub turns: u64,
+    /// What is waiting on the person.
+    pub attention: Vec<crate::facts::Attention>,
 }
 
 /// One row of the model catalog.
@@ -140,6 +164,17 @@ pub enum Ack {
         session_id: String,
         /// Display title, when the provider could derive one.
         title: Option<String>,
+    },
+    /// A stored session, read: who it is, and the first shell command in
+    /// its history — a label for a session with nothing else to go by.
+    SessionRead {
+        /// The session identity.
+        session_id: String,
+        /// Display title, when the provider could derive one.
+        title: Option<String>,
+        /// The first shell command the person ran, when the history served
+        /// holds one.
+        first_shell_command: Option<String>,
     },
     /// A page of the stored-session index.
     SessionIndex {
