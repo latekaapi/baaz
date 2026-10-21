@@ -113,84 +113,24 @@ impl SessionView {
             self.restore_prompt(text, cx);
             return;
         }
-        // The provider lane never touches the muse wire: text plus the
-        // composer's attachments travel as one `SubmitInput`, queued
-        // behind a running turn by the provider itself — the same
-        // queue-behind behaviour the muse lane gets from `turn/start`.
-        if self.is_provider_lane() {
-            if let Some(notice) = self.lease_notice.clone() {
-                self.banner = Some(notice);
-                self.banner_action = None;
-                self.restore_prompt(text, cx);
-                return;
-            }
-            // The billing guard holds the send while the pay-as-you-go
-            // banner stands (only a Muse session ever carries it).
-            if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
-                self.restore_prompt(text, cx);
-                return;
-            }
-            self.submit_on_provider(text, cx);
-            return;
-        }
-        // Nothing leaves a replayed capture, and nothing about the person's
-        // draft or their history is touched on the way to finding that out.
-        if self.wire_client(cx).is_none() {
-            self.restore_prompt(text, cx);
-            return;
-        }
-        // The lease is gone: another window holds this session, so the turn
-        // would never stream back. The draft goes back in the composer and
-        // the notice is re-shown — it is already above the composer unless
-        // it was dismissed.
+        // Another window holds the session: the turn would never stream
+        // back. The draft goes back and the notice is re-shown.
         if let Some(notice) = self.lease_notice.clone() {
             self.banner = Some(notice);
             self.banner_action = None;
             self.restore_prompt(text, cx);
             return;
         }
-        // The billing guard. A pay-as-you-go login bills every turn as API
-        // usage, so the turn does not leave until the person has said once,
-        // out loud, that they meant it. The draft goes back in the composer:
-        // the banner explaining why is already above it. Muse lanes only:
-        // a provider session has no muse account behind it.
+        // The billing guard holds the send while the pay-as-you-go banner
+        // stands (only a Muse session ever carries it): the person says once,
+        // out loud, that they meant it.
         if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
             self.restore_prompt(text, cx);
             return;
         }
-        self.banner = None;
-        self.submitting = true;
-        crate::log::send_reset();
-        if crate::log::trace_enabled() {
-            self.send_trace_turns = Some(self.cached_turns.len());
-        }
-        self.append_history(text.clone(), cx);
-        let command_id = new_command_id();
-        // The wire never gives the prompt back, so the fold has to remember it
-        // before the command leaves: a retraction identifies the submission by
-        // `commandId` and by nothing else.
-        self.remember_command(&command_id, &text);
-        // Plan mode is the one thing that makes the model-visible text differ
-        // from the person's: `/plan ` fires the bundled skill (see plan.rs).
-        let quoted = quoted_prompt(&self.quotes, &text);
-        let model_text = if self.plan { plan::prefix(&quoted) } else { quoted };
-        let params = TurnStartParams {
-            command_id,
-            session_id: self.session_id.clone(),
-            input: self.parts(model_text),
-            display_text: Some(text.clone()),
-            reasoning_effort: self.effort.map(effort_wire),
-            ..Default::default()
-        };
-        self.record_sent(&text);
-        self.images.clear();
-        self.files.clear();
-        let Some(client) = self.wire_client(cx) else { return };
-        let planning = self.plan;
-        self.wire_call(cx, move || client.turn_start(&params), move |this, result, cx| {
-            this.sent(result, text, planning, cx);
-        });
-        cx.notify();
+        // Text plus the composer's attachments travel as one `SubmitInput`,
+        // queued behind a running turn by the provider itself.
+        self.submit_on_provider(text, cx);
     }
 
     /// Submit on the provider lane: the typed text plus the composer's
@@ -210,7 +150,7 @@ impl SessionView {
             self.send_trace_turns = Some(self.cached_turns.len());
         }
         self.append_history(text.clone(), cx);
-        let request_id = new_command_id();
+        let request_id = provider::new_request_id();
         // The wire never gives the prompt back, so the fold remembers it
         // before the command leaves: `retry_turn` resubmits it from here.
         self.remember_command(&request_id, &text);
@@ -350,56 +290,6 @@ impl SessionView {
         parts
     }
 
-    /// The turn's content parts: one text part per attached file, then the
-    /// prompt text, then every attached image.
-    pub(super) fn parts(&self, text: String) -> Vec<TurnInputPart> {
-        let mut parts = Vec::new();
-        parts.extend(self.files.iter().map(attachments::AttachedFile::part));
-        if !text.trim().is_empty() {
-            parts.push(TurnInputPart::text(text));
-        }
-        parts.extend(self.images.iter().map(images::Image::part));
-        if parts.is_empty() {
-            parts.push(TurnInputPart::text(String::new()));
-        }
-        parts
-    }
-
-    /// The `turn/start` ack. Admission only — the authority for what the turn
-    /// is doing is always the view event.
-    pub(super) fn sent(
-        &mut self,
-        result: Result<TurnStartResult, MuseError>,
-        text: String,
-        planning: bool,
-        cx: &mut Context<Self>,
-    ) {
-        crate::log::send_mark("ack");
-        match result {
-            Ok(ack) => {
-                if ack.disposition == TurnStartDisposition::Queued {
-                    let session_id = self.session_id.clone();
-                    self.muse_fold.record_queued(&session_id, &ack.turn_id, &ack.command_id, &text);
-                    self.store.record_command(&ack.command_id, &text);
-                    self.muse_mirror_sync(Vec::new());
-                    self.submitting = false;
-                } else if planning {
-                    // The plan card is appended when this turn's reply lands.
-                    self.plan_turn = Some(ack.turn_id.clone());
-                }
-            }
-            Err(error) => {
-                self.submitting = false;
-                // The turn never left, so the person keeps their words — and,
-                // when the wire only said "not now", the banner offers to send
-                // them again rather than making the person press Enter twice.
-                self.report_retryable(&error, BannerAction::RetryTurn(text.clone()), cx);
-                self.restore_prompt(text, cx);
-            }
-        }
-        cx.notify();
-    }
-
     /// ⌘↩: interject into the running turn instead of queueing behind it.
     pub fn steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
@@ -444,54 +334,25 @@ impl SessionView {
             self.restore_prompt(text, cx);
             return;
         };
-        let command_id = new_command_id();
+        let command_id = provider::new_request_id();
         self.remember_command(&command_id, &text);
         self.append_history(text.clone(), cx);
         // The provider lane steers with `expected_turn`, the race guard
         // that keeps input for turn A out of turn B.
-        if self.is_provider_lane() {
-            let command = ProviderCommand::SteerInput {
-                request_id: command_id,
-                session_id: self.session_id.clone(),
-                expected_turn: turn_id,
-                parts: self.provider_parts(text.clone()),
-                effort: crate::projects::effort_string(self.effort),
-            };
-            self.images.clear();
-            self.files.clear();
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    // The steer never landed: the banner says why, and the
-                    // words go back in the composer instead of evaporating.
-                    this.report_provider_error(&error, cx);
-                    this.restore_prompt(text, cx);
-                }
-            });
-            cx.notify();
-            return;
-        }
-        let params = TurnSteerParams {
-            command_id,
+        let command = ProviderCommand::SteerInput {
+            request_id: command_id,
             session_id: self.session_id.clone(),
-            expected_turn_id: turn_id,
-            input: self.parts(text.clone()),
-            reasoning_effort: self.effort.map(effort_wire),
+            expected_turn: turn_id,
+            parts: self.provider_parts(text.clone()),
+            effort: crate::projects::effort_string(self.effort),
         };
         self.images.clear();
         self.files.clear();
-        let Some(client) = self.wire_client(cx) else {
-            // No wire to steer on (a replayed capture — and `wire_client`
-            // already said so above the composer): keep the words, not just
-            // the notice.
-            self.restore_prompt(text, cx);
-            return;
-        };
-        self.wire_call(cx, move || client.turn_steer(&params), move |this, result, cx| {
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                // The steer never landed (the turn ended mid-flight, or the
-                // server refused it): the banner says why, and the words go
-                // back in the composer instead of evaporating.
-                this.report(&error, cx);
+                // The steer never landed: the banner says why, and the
+                // words go back in the composer instead of evaporating.
+                this.report_provider_error(&error, cx);
                 this.restore_prompt(text, cx);
             }
         });
@@ -529,68 +390,36 @@ impl SessionView {
         // The provider lane stops with `retract`, paired as on the muse
         // lane: a turn interrupted before anything committed is durably
         // retracted and its prompt comes back.
-        if self.is_provider_lane() {
-            // X1b: a stop before the provider's first event — reachable
-            // from the moment of send, while `submitting` holds and no
-            // running turn exists yet — carries no turn id, and a turn
-            // that never started emits no delta to settle it. The ack
-            // itself settles the view (see `settle_early_stop`), whether
-            // the provider acks, errors, or later emits nothing.
-            let early = self.running.is_none();
-            let command = ProviderCommand::InterruptTurn {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                turn: self.running.as_ref().map(|r| r.turn_id.clone()),
-                retract: true,
-            };
-            self.provider_send(command, cx, move |this, result, cx| {
-                if early {
-                    this.settle_early_stop(cx);
-                }
-                if let Err(error) = result {
-                    // The provider saying there is nothing to stop is a
-                    // better answer about the turn than the local state,
-                    // which still believes it runs — so take it, and let
-                    // the window settle instead of banner-counting.
-                    if interrupt_provider_found_turn_over(&error) {
-                        crate::baaz_log!("interrupt: the provider turn was already over; settling the view");
-                        this.clear_running();
-                        this.submitting = false;
-                        cx.notify();
-                        return;
-                    }
-                    this.report_provider_error(&error, cx);
-                }
-            });
-            return;
-        }
-        let params = TurnInterruptParams {
-            command_id: new_command_id(),
+        // X1b: a stop before the provider's first event — reachable
+        // from the moment of send, while `submitting` holds and no
+        // running turn exists yet — carries no turn id, and a turn
+        // that never started emits no delta to settle it. The ack
+        // itself settles the view (see `settle_early_stop`), whether
+        // the provider acks, errors, or later emits nothing.
+        let early = self.running.is_none();
+        let command = ProviderCommand::InterruptTurn {
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
-            retract: Some(true),
-            turn_id: self.running.as_ref().map(|r| r.turn_id.clone()),
+            turn: self.running.as_ref().map(|r| r.turn_id.clone()),
+            retract: true,
         };
-        let Some(client) = self.wire_client(cx) else { return };
-        self.wire_call(cx, move || client.turn_interrupt(&params), |this, result, cx| {
+        self.provider_send(command, cx, move |this, result, cx| {
+            if early {
+                this.settle_early_stop(cx);
+            }
             if let Err(error) = result {
-                // `commandRejected` / `already_terminal` is not a failure to
-                // report: the server is saying the turn this asked to stop
-                // had already finished. That is a better answer about the
-                // turn than the local state, which still believes it is
-                // running — so take it, and let the window settle.
-                //
-                // Without this the only thing a person can do about a turn
-                // the server has forgotten is press Stop, and Stop answers
-                // with a red banner and leaves the composer counting. The
-                // turn seen behind this was "running" for twelve hours.
-                if interrupt_found_turn_over(&error) {
-                    crate::baaz_log!("interrupt: the turn was already over; settling the view");
+                // The provider saying there is nothing to stop is a
+                // better answer about the turn than the local state,
+                // which still believes it runs — so take it, and let
+                // the window settle instead of banner-counting.
+                if interrupt_provider_found_turn_over(&error) {
+                    crate::baaz_log!("interrupt: the provider turn was already over; settling the view");
                     this.clear_running();
                     this.submitting = false;
                     cx.notify();
                     return;
                 }
-                this.report(&error, cx);
+                this.report_provider_error(&error, cx);
             }
         });
     }
@@ -633,42 +462,19 @@ impl SessionView {
         // The provider lane reclaims with `ReclaimQueued` — refused when
         // the row already launched, which is a banner rather than a
         // missing row. Only the provider's answer removes the row.
-        if self.is_provider_lane() {
-            self.unqueueing.insert(turn_id.to_owned(), PendingUnqueue { kind: why, text });
-            let command = ProviderCommand::ReclaimQueued {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                turn: turn_id.to_owned(),
-            };
-            let turn_id = turn_id.to_owned();
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    // The reclaim lost the race; the row stays, because
-                    // only the provider removes it.
-                    this.unqueueing.remove(&turn_id);
-                    this.report_provider_error(&error, cx);
-                }
-            });
-            cx.notify();
-            return;
-        }
-        if self.wire_client(cx).is_none() {
-            return;
-        }
         self.unqueueing.insert(turn_id.to_owned(), PendingUnqueue { kind: why, text });
-        let params = TurnUnqueueParams {
-            command_id: new_command_id(),
+        let command = ProviderCommand::ReclaimQueued {
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
-            turn_id: turn_id.to_owned(),
+            turn: turn_id.to_owned(),
         };
-        let Some(client) = self.wire_client(cx) else { return };
         let turn_id = turn_id.to_owned();
-        self.wire_call(cx, move || client.turn_unqueue(&params), move |this, result, cx| {
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                // The reclaim lost the race; the row stays, because only
-                // the wire removes it.
+                // The reclaim lost the race; the row stays, because
+                // only the provider removes it.
                 this.unqueueing.remove(&turn_id);
-                this.report(&error, cx);
+                this.report_provider_error(&error, cx);
             }
         });
         cx.notify();
@@ -695,59 +501,43 @@ impl SessionView {
             self.leave_auto_if_unsupported(cx);
             return;
         }
-        if self.is_provider_lane() || !crate::providers::uses_legacy_pump(self.provider_kind()) {
-            let command = ProviderCommand::SelectModel {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                model: model_id.to_owned(),
-                model_provider: None,
-            };
-            let previous = self.pending_model.clone();
-            let had_row = self.models.iter().any(|row| row.model_id == model_id);
-            self.apply_model_selected(model_id, cx);
-            if self.is_provider_lane() {
-                let picked = model_id.to_owned();
-                self.provider_send(command, cx, move |this, result, cx| {
-                    if let Err(error) = result {
-                        // The pick never landed: drop the recording so the
-                        // chip stops claiming a model the child never took,
-                        // and banner the reason — never silence. A row the
-                        // failed pick itself added leaves with it.
-                        if this.pending_model.as_deref() == Some(picked.as_str()) {
-                            this.pending_model = previous;
-                            if !had_row {
-                                this.models.retain(|row| row.model_id != picked);
-                            }
-                            for row in &mut this.models {
-                                row.is_active = this
-                                    .pending_model
-                                    .as_deref()
-                                    .is_some_and(|pending| pending == row.model_id);
-                            }
-                        }
-                        this.report_provider_error(&error, cx);
-                    }
-                });
-            } else {
-                self.external_outbox.push(command);
-            }
+        let command = ProviderCommand::SelectModel {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            model: model_id.to_owned(),
+            model_provider: None,
+        };
+        let previous = self.pending_model.clone();
+        let had_row = self.models.iter().any(|row| row.model_id == model_id);
+        self.apply_model_selected(model_id, cx);
+        // Nothing live to ask: the pick stands on the chip and waits in the
+        // outbox for whoever attaches.
+        if self.read_only {
+            self.external_outbox.push(command);
             self.leave_auto_if_unsupported(cx);
             return;
         }
-        let model = self.model_selection_for(model_id);
-        let params = SessionSetModelParams {
-            command_id: new_command_id(),
-            session_id: self.session_id.clone(),
-            model,
-        };
-        let Some(client) = self.wire_client(cx) else { return };
-        self.wire_call(cx, move || client.session_set_model(&params), |this, result, cx| {
+        let picked = model_id.to_owned();
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                // On the echo provider this is `commandRejected:
-                // unsupported_route`, and the banner saying so is correct.
-                this.report(&error, cx);
+                // The pick never landed: drop the recording so the chip
+                // stops claiming a model the child never took, and banner
+                // the reason — never silence. A row the failed pick itself
+                // added leaves with it.
+                if this.pending_model.as_deref() == Some(picked.as_str()) {
+                    this.pending_model = previous;
+                    if !had_row {
+                        this.models.retain(|row| row.model_id != picked);
+                    }
+                    for row in &mut this.models {
+                        row.is_active =
+                            this.pending_model.as_deref().is_some_and(|pending| pending == row.model_id);
+                    }
+                }
+                this.report_provider_error(&error, cx);
             }
         });
+        self.leave_auto_if_unsupported(cx);
     }
 
     /// A model pick onto a model the catalog says cannot run Auto, made
@@ -782,13 +572,10 @@ impl SessionView {
             cx.notify();
             return;
         }
-        if !self.is_provider_lane() {
-            return;
-        }
         let previous = self.stand_on_mode(ask);
         self.sync_mode_menu_check(cx);
         let command = ProviderCommand::SelectApprovalMode {
-            request_id: new_command_id(),
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
             mode: ask,
         };
@@ -799,19 +586,6 @@ impl SessionView {
             }
         });
         cx.notify();
-    }
-
-    /// The `session/setModel` selection for `model_id`, from the catalog
-    /// row when one names it. A bare id still selects (aliases travel);
-    /// only the presentation comes from the row.
-    fn model_selection_for(&self, model_id: &str) -> ModelSelection {
-        let row = self.models.iter().find(|m| m.model_id == model_id);
-        ModelSelection {
-            display_label: row.map(|r| r.display_label.clone()),
-            model_id: model_id.to_owned(),
-            profile_id: row.and_then(|r| r.profile_id.clone()),
-            provider_id: row.map(|r| r.provider_id.clone()),
-        }
     }
 
     /// Fold a neutral model catalog into the picker: human labels shown,
@@ -993,141 +767,38 @@ impl SessionView {
             cx.notify();
             return;
         }
-        if self.is_provider_lane() {
-            // A request still standing unreported (the open's, or the
-            // fallback out of Auto) is superseded by this one: the chip
-            // reads the newest request until the provider reports.
-            let previous = self.opening_mode().and_then(|_| self.stand_on_mode(mode));
-            let command = ProviderCommand::SelectApprovalMode {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                mode,
-            };
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    if previous.is_some() {
-                        this.restore_unreported_mode(mode, previous);
-                    }
-                    this.report_provider_error(&error, cx);
-                }
-            });
-            return;
-        }
-        self.pick_muse_mode(mode, None, cx);
-    }
-
-    /// Bring a resumed muse session's sandbox in line with its approval
-    /// mode. The host retains the profile per session across a restart
-    /// (probed live 2026-10-16), but a session started before Baaz picked
-    /// profiles, or one whose pick half-applied, can run under a profile
-    /// that grants more than its chip reads. `session` is the resume
-    /// answer's; a pick on the wire already re-selects the profile, so
-    /// this stands down for it.
-    pub(crate) fn reconcile_profile(&mut self, session: &muse_client::schema::Session, cx: &mut Context<Self>) {
-        if self.is_provider_lane() || self.mode_pick_in_flight || session.session_id != self.session_id {
-            return;
-        }
-        let Some(mode) = profile_mismatch(session) else { return };
-        let Some(client) = self.wire_client(cx) else { return };
-        let session_id = self.session_id.clone();
-        let held = session.permission_state.as_ref().and_then(|state| state.profile_id.clone());
-        self.mode_pick_in_flight = true;
-        let work = move || {
-            let pick = |mode: PermissionMode| {
-                let params = profile_resume_params(&session_id, mode);
-                client.request("session/resume", serde_json::to_value(&params).ok()).map(|_| ())
-            };
-            match pick(mode) {
-                Ok(()) => Ok(()),
-                // Fail toward less access: the chip must not read less than
-                // the session has, so a refused match falls back to the
-                // read-only sandbox.
-                Err(error) => Err((error, mode != PermissionMode::DenyUnmatched && pick(PermissionMode::DenyUnmatched).is_ok())),
-            }
-        };
-        self.wire_call(cx, work, move |this, result, cx| {
-            this.mode_pick_in_flight = false;
-            if let Err((error, read_only)) = result {
-                let held = held.unwrap_or_else(|| "the host's default".to_owned());
-                let message = if read_only {
-                    format!(
-                        "This session's sandbox ({held}) could not be matched to {} ({error}), so it now runs read-only. Pick a mode to try again.",
-                        mode.label()
-                    )
-                } else {
-                    format!(
-                        "This session's sandbox ({held}) could not be matched to {} ({error}). Pick a mode to try again.",
-                        mode.label()
-                    )
-                };
-                this.set_banner(&message, None, cx);
-            }
-            if let Some(next) = this.mode_pick_queued.take() {
-                this.pick_muse_mode(next, None, cx);
-            }
-        });
-    }
-
-    /// The muse half of [`Self::set_mode`]. `from` is where the previous
-    /// pick left the mode when this one waited behind it (its
-    /// `approvalModeChanged` may not have folded yet); `None` reads the
-    /// server's.
-    fn pick_muse_mode(&mut self, mode: PermissionMode, from: Option<PermissionMode>, cx: &mut Context<Self>) {
-        // One pick on the wire at a time: two picks on separate background
-        // calls could land mode-of-one, profile-of-the-other. The latest
-        // pick made meanwhile waits and goes out when this one settles.
+        // A request still standing unreported (the open's, or the
+        // fallback out of Auto) is superseded by this one: the chip
+        // reads the newest request until the provider reports.
+        let previous = self.opening_mode().and_then(|_| self.stand_on_mode(mode));
+        // One pick on the wire at a time: a pick can be two wire steps
+        // (Muse moves the sandbox profile with the mode), and two picks
+        // interleaving could land the mode of one and the profile of the
+        // other. The latest pick made meanwhile waits and goes when this one
+        // settles; one superseded while waiting never goes out.
         if self.mode_pick_in_flight {
             self.mode_pick_queued = Some(mode);
             cx.notify();
             return;
         }
-        let Some(client) = self.wire_client(cx) else { return };
-        let from = from.unwrap_or_else(|| self.mode());
-        let session_id = self.session_id.clone();
-        self.mode_pick_in_flight = true;
-        // The posture follows the mode: the profile is re-selected on the
-        // loaded session by `session/resume` (the one wire that admits it
-        // after start, and it does while a turn runs — probed live
-        // 2026-10-16, committed mid-turn), or Full access stays sandboxed
-        // and Ask stays with the LLM judge.
-        let work = move || apply_muse_mode_pick(&client, &session_id, from, mode);
-        self.wire_call(cx, work, move |this, outcome, cx| {
+        // Only a send that will answer holds the slot (a view with no lane
+        // banners at once and never calls back).
+        self.mode_pick_in_flight = self.lane_attached();
+        let command = ProviderCommand::SelectApprovalMode {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            mode,
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
             this.mode_pick_in_flight = false;
-            // Where the approval mode now stands, for a pick waiting behind.
-            let landed = match &outcome {
-                MusePickOutcome::Applied | MusePickOutcome::ProfileRefused { restored: false, .. } => mode,
-                _ => from,
-            };
-            match outcome {
-                MusePickOutcome::Applied => {}
-                MusePickOutcome::Refused(error) => this.report(&error, cx),
-                MusePickOutcome::ProfileRefused { error, restored } => {
-                    let message = if restored {
-                        format!(
-                            "{} could not be applied: the sandbox profile was refused ({error}). The session stays in {}.",
-                            mode.label(),
-                            from.label()
-                        )
-                    } else {
-                        format!(
-                            "{} could not be applied: the sandbox profile was refused ({error}), and the mode could not be put back. The session still runs under the {} sandbox — pick a mode again.",
-                            mode.label(),
-                            from.label()
-                        )
-                    };
-                    this.set_banner(&message, None, cx);
+            if let Err(error) = result {
+                if previous.is_some() {
+                    this.restore_unreported_mode(mode, previous);
                 }
-                MusePickOutcome::ModeRefused(error) => {
-                    let message = format!(
-                        "The {} sandbox is on, but the approval mode could not change ({error}), so the chip still reads {}.",
-                        mode.label(),
-                        from.label()
-                    );
-                    this.set_banner(&message, None, cx);
-                }
+                this.report_provider_error(&error, cx);
             }
             if let Some(next) = this.mode_pick_queued.take() {
-                this.pick_muse_mode(next, Some(landed), cx);
+                this.set_mode(next, cx);
             }
         });
     }
@@ -1138,49 +809,28 @@ impl SessionView {
     /// — and a refusal banners its reason rather than going quiet (Claude
     /// Code has no compact-now over `--print`; Codex never executed one).
     pub(crate) fn compact(&mut self, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::CompactSession)
-                .allows_attempt()
-            {
-                let reason = crate::providers::gate(
-                    self.provider_kind(),
-                    provider::Capability::CompactSession,
-                )
-                .unwrap_or_else(|| "Compacting is not available on this provider.".into());
-                self.banner = Some(reason);
-                self.banner_action = None;
-                cx.notify();
-                return;
-            }
-            let command = ProviderCommand::CompactSession {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                through_turn: None,
-            };
-            self.provider_send(command, cx, move |this, result, cx| match result {
-                Ok(provider::Ack::Noop { reason }) => this.toast("Nothing to compact", reason, cx),
-                Ok(_) => {}
-                Err(error) => this.report_provider_error(&error, cx),
-            });
+        if !crate::providers::capability_state(self.provider_kind(), provider::Capability::CompactSession)
+            .allows_attempt()
+        {
+            let reason = crate::providers::gate(
+                self.provider_kind(),
+                provider::Capability::CompactSession,
+            )
+            .unwrap_or_else(|| "Compacting is not available on this provider.".into());
+            self.banner = Some(reason);
+            self.banner_action = None;
+            cx.notify();
             return;
         }
-        if self.start_queue().is_some() {
-            self.set_banner("Nothing to compact yet — the session is still starting.", None, cx);
-            return;
-        }
-        let params = SessionCompactParams {
-            command_id: new_command_id(),
+        let command = ProviderCommand::CompactSession {
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
-            turn_id: None,
+            through_turn: None,
         };
-        let Some(client) = self.wire_client(cx) else { return };
-        self.wire_call(cx, move || client.session_compact(&params), |this, result, cx| match result {
-            Ok(ack) if ack.status == muse_client::schema::CompactStatus::Noop => {
-                let reason = ack.reason.unwrap_or_else(|| "nothing to summarize".to_owned());
-                this.toast("Nothing to compact", reason, cx);
-            }
+        self.provider_send(command, cx, move |this, result, cx| match result {
+            Ok(provider::Ack::Noop { reason }) => this.toast("Nothing to compact", reason, cx),
             Ok(_) => {}
-            Err(error) => this.report(&error, cx),
+            Err(error) => this.report_provider_error(&error, cx),
         });
     }
 
@@ -1202,7 +852,7 @@ impl SessionView {
             ProviderId::ClaudeCode => {
                 // An opening lane lists Baaz's supplied aliases (below)
                 // until its child lands; the attach asks the child itself.
-                if self.lane_attached() {
+                if self.lane_live() {
                     self.request_provider_models(cx);
                     return;
                 }
@@ -1212,7 +862,7 @@ impl SessionView {
                 self.apply_model_catalog(rows, &provider, cx);
             }
             ProviderId::Codex => {
-                if self.lane_attached() {
+                if self.lane_live() {
                     self.request_provider_models(cx);
                     return;
                 }
@@ -1239,59 +889,9 @@ impl SessionView {
                     cx.notify();
                     return;
                 }
-                if self.lane_attached() {
-                    self.request_provider_models(cx);
-                    return;
-                }
-                let Some(client) = self.wire_client(cx) else {
-                    // Muse starts on demand (docs/50 P1): an open picker
-                    // says so rather than opening empty.
-                    if self.muse_starting {
-                        self.models_error = Some(super::MUSE_STARTING_MENU.to_owned());
-                        cx.notify();
-                    }
-                    return;
-                };
-                let params = ModelListParams { session_id: Some(self.session_id.clone()) };
-                self.wire_call(
-                    cx,
-                    move || client.model_list(&params),
-                    |this, result, cx| match result {
-                        Ok(list) => {
-                            this.models = list
-                                .models
-                                .into_iter()
-                                .map(|mut row| {
-                                    row.display_label = SessionView::muse_row_label(&row.model_id, &row.display_label);
-                                    row
-                                })
-                                .collect();
-                            this.models_error = None;
-                            // The menu opened before the rows landed: its
-                            // check was picked against no rows, so it fell on
-                            // index 0 (the default row) while the chip named
-                            // another. Re-pick it against the chip.
-                            this.sync_model_menu_check(cx);
-                            cx.notify();
-                        }
-                        Err(error) => {
-                            this.models_error = Some(error.to_string());
-                            this.report(&error, cx);
-                        }
-                    },
-                );
+                self.request_provider_models(cx);
             }
         }
-    }
-
-    /// Route a failed command to its banner or its dialog (spec §3.8).
-    pub(super) fn report(&mut self, error: &MuseError, cx: &mut Context<Self>) {
-        let title = conn::title(error);
-        match conn::severity(error) {
-            Severity::Banner => self.banner = Some(format!("{title}. {error}")),
-            Severity::Dialog => cx.emit(SessionEvent::Dialog { title, detail: error.to_string() }),
-        }
-        cx.notify();
     }
 
     /// The lease is gone: banner the view and refuse sends
@@ -1360,42 +960,31 @@ impl SessionView {
         // for `DenyUnmatched` through the mode switch, and the flag stands
         // back down on refusal, so the pill never claims enforcement the
         // child never took.
-        if self.is_provider_lane() {
-            self.plan = on;
-            let restore = if on {
-                self.plan_previous_mode = Some(self.mode());
-                PermissionMode::DenyUnmatched
-            } else {
-                self.plan_previous_mode.take().unwrap_or_default()
-            };
-            // An opening lane has no child to ask yet: the mode waits in
-            // the start queue like a chip pick.
-            if let Some(queue) = self.start_queue() {
-                queue.mode = Some(restore);
-                cx.notify();
-                return;
-            }
-            let command = ProviderCommand::SelectApprovalMode {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                mode: restore,
-            };
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    this.plan = !on;
-                    this.report_provider_error(&error, cx);
-                }
-            });
+        self.plan = on;
+        let restore = if on {
+            self.plan_previous_mode = Some(self.mode());
+            PermissionMode::DenyUnmatched
+        } else {
+            self.plan_previous_mode.take().unwrap_or_default()
+        };
+        // An opening lane has no child to ask yet: the mode waits in
+        // the start queue like a chip pick.
+        if let Some(queue) = self.start_queue() {
+            queue.mode = Some(restore);
             cx.notify();
             return;
         }
-        self.plan = on;
-        if on {
-            self.plan_previous_mode = Some(self.mode());
-            self.set_mode(PermissionMode::DenyUnmatched, cx);
-        } else if let Some(previous) = self.plan_previous_mode.take() {
-            self.set_mode(previous, cx);
-        }
+        let command = ProviderCommand::SelectApprovalMode {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            mode: restore,
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
+            if let Err(error) = result {
+                this.plan = !on;
+                this.report_provider_error(&error, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -1522,22 +1111,10 @@ impl SessionView {
     }
 }
 
-/// Whether a failed `turn/interrupt` means the turn had already finished.
-///
-/// `commandRejected` with reason `already_terminal` is the server declining
-/// to stop something that is already stopped — an answer about the turn, not
-/// an error about the request. Branching on the kind and the reason rather
-/// than the message is the wire contract (research §1.14); the message for
-/// this case reads `turn/interrupt command <id> rejected: already_terminal`
-/// and is explicitly not a branch point.
-pub(crate) fn interrupt_found_turn_over(error: &MuseError) -> bool {
-    matches!(error.kind(), Some(ErrorKind::CommandRejected)) && error.reason() == Some("already_terminal")
-}
-
-/// The provider lane's version: the seam has no `already_terminal` code,
-/// so a refusal that says there is nothing to stop — Codex's "no running
-/// turn was ever observed; nothing to stop" — settles the view the same
-/// way. Anything else (a blind interrupt Claude Code refuses, a lost
+/// Whether a refused interrupt means the turn had already finished: the
+/// provider's typed hint ([`provider::RefusalHint::TurnOver`]), or, for a
+/// provider with no such code, a refusal that says there is nothing to
+/// stop — Codex's "no running turn was ever observed; nothing to stop". Anything else (a blind interrupt Claude Code refuses, a lost
 /// child) is a banner, never a settle.
 fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
     match error {
@@ -1548,88 +1125,6 @@ fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
         _ => false,
     }
 }
-
-/// The chip mode whose profile a resumed session should be under, when the
-/// profile it reports is another one — or none at all. `None` when they
-/// agree, or when the session reports no approval mode to match.
-pub(crate) fn profile_mismatch(session: &muse_client::schema::Session) -> Option<PermissionMode> {
-    let mode = muse_adapter::permission_mode(&session.approval_mode.as_ref()?.mode);
-    let held = session.permission_state.as_ref().and_then(|state| state.profile_id.as_deref());
-    (held != Some(muse_adapter::permission_profile(mode))).then_some(mode)
-}
-
-/// How a muse mode pick landed. Each failure says which step held, so the
-/// banner can say what the session is actually running under.
-pub(crate) enum MusePickOutcome {
-    /// Mode and profile both moved.
-    Applied,
-    /// The first step was refused; nothing changed.
-    Refused(MuseError),
-    /// Raising access: the mode moved, the profile was refused, and the
-    /// mode was put back (`restored`) — or could not be, in which case the
-    /// chip reads more access than the sandbox grants, never less.
-    ProfileRefused { error: MuseError, restored: bool },
-    /// Lowering access: the tighter profile is on, but the mode could not
-    /// follow — the chip reads more access than the session has, never less.
-    ModeRefused(MuseError),
-}
-
-/// How much a chip mode lets through, for ordering a pick's two steps.
-fn access_rank(mode: PermissionMode) -> u8 {
-    match mode {
-        PermissionMode::DenyUnmatched => 0,
-        PermissionMode::PromptUnmatched => 1,
-        PermissionMode::OnRequest => 2,
-        PermissionMode::AllowAll => 3,
-    }
-}
-
-/// A muse mode pick's two wire steps, ordered so a half-applied pick never
-/// leaves the chip reading less access than the session has: the chip
-/// reads the approval mode, so a pick that raises access moves the mode
-/// first and the profile second (and puts the mode back if the profile is
-/// refused); any other pick tightens the profile first and moves the mode
-/// second. Blocking: runs on the background executor.
-pub(super) fn apply_muse_mode_pick(
-    client: &MuseClient,
-    session_id: &str,
-    from: PermissionMode,
-    to: PermissionMode,
-) -> MusePickOutcome {
-    let set_mode = |mode: PermissionMode| {
-        client
-            .session_set_approval_mode(&SessionSetApprovalModeParams {
-                command_id: new_command_id(),
-                session_id: session_id.to_owned(),
-                mode: wire_mode(mode),
-            })
-            .map(|_| ())
-    };
-    // The raw call: the answer is not read, so a resume envelope that
-    // fails to decode is not mistaken for a refused profile.
-    let set_profile = || {
-        let params = profile_resume_params(session_id, to);
-        client.request("session/resume", serde_json::to_value(&params).ok()).map(|_| ())
-    };
-    if access_rank(to) > access_rank(from) {
-        if let Err(error) = set_mode(to) {
-            return MusePickOutcome::Refused(error);
-        }
-        if let Err(error) = set_profile() {
-            let restored = set_mode(from).is_ok();
-            return MusePickOutcome::ProfileRefused { error, restored };
-        }
-    } else {
-        if let Err(error) = set_profile() {
-            return MusePickOutcome::Refused(error);
-        }
-        if let Err(error) = set_mode(to) {
-            return MusePickOutcome::ModeRefused(error);
-        }
-    }
-    MusePickOutcome::Applied
-}
-
 
 /// The model-visible prompt: the composer's quotes ahead of the person's
 /// words (docs/43 §0) — prose as a Markdown blockquote, a code quote as a
@@ -1702,7 +1197,7 @@ mod tests {
             
                 terminal_host: None,
 };
-            cx.new(|cx| SessionView::new(session_id, None, host, window, cx))
+            cx.new(|cx| SessionView::new(session_id, host, window, cx))
         })
     }
 
@@ -1943,44 +1438,6 @@ mod tests {
         });
     }
 
-    /// P3, muse: the `session/setModel` selection still carries the
-    /// catalog row's presentation, and a bare id still selects.
-    #[gpui::test]
-    fn muse_selection_carries_the_catalog_row(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let view = lane_view(vc, "muse", "s-muse");
-        vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models = vec![ModelCatalogEntry {
-                    context_limit: None,
-                    cost: None,
-                    description: Some("The everyday model".into()),
-                    display_label: "Muse Everyday".into(),
-                    is_active: true,
-                    is_default: true,
-                    model_id: "muse-everyday".into(),
-                    output_limit: None,
-                    profile_id: Some("p-1".into()),
-                    provider_id: "meta".into(),
-                    release_date: None,
-                    ..Default::default()
-                }];
-                let selection = view.model_selection_for("muse-everyday");
-                assert_eq!(selection.model_id, "muse-everyday");
-                assert_eq!(selection.display_label.as_deref(), Some("Muse Everyday"));
-                assert_eq!(selection.profile_id.as_deref(), Some("p-1"));
-                assert_eq!(selection.provider_id.as_deref(), Some("meta"));
-                // A bare id still selects; only the presentation is absent.
-                let bare = view.model_selection_for("unlisted-alias");
-                assert_eq!(bare.model_id, "unlisted-alias");
-                assert_eq!(bare.display_label, None);
-            });
-        });
-    }
-
-    /// P3, existing session: a session with turns in it changes model —
-    /// the pick applies, the chip updates, and the lane never moves.
     #[gpui::test]
     fn a_session_with_turns_changes_model_and_the_chip_updates(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -2518,13 +1975,6 @@ mod tests {
         });
     }
 
-    fn rpc(code: i64, message: &str, data: serde_json::Value) -> MuseError {
-        let object: muse_client::schema::ErrorObject =
-            serde_json::from_value(serde_json::json!({"code": code, "message": message, "data": data}))
-                .expect("error object decodes");
-        MuseError::Rpc(Box::new(object))
-    }
-
     /// P6: `setprovider:<id>` is the provider picker's menu row as a
     /// A disabled provider leaves the composer menu: the filtered rows
     /// name only the enabled providers (plus the session's own lane,
@@ -2648,41 +2098,27 @@ mod tests {
     }
 
     /// The case that stranded a session for twelve hours: Stop is the only
-    /// way out of a turn the window thinks is running, and the server
-    /// answers that there is nothing to stop.
+    /// way out of a turn the window thinks is running, and the provider
+    /// answers that there is nothing to stop — by its typed hint, or (Codex)
+    /// in words.
     #[test]
-    fn an_already_terminal_rejection_means_the_turn_is_over() {
-        let error = rpc(
-            -32030,
-            "turn/interrupt command 01a0be2a-99f3-7640-a50c-6f5e8b0fa152 rejected: already_terminal",
-            serde_json::json!({"kind": "commandRejected", "reason": "already_terminal"}),
-        );
-        assert!(interrupt_found_turn_over(&error));
-    }
-
-    /// Every other rejection still reports: `not_paired_interrupt` means the
-    /// request was malformed, which is worth a banner.
-    #[test]
-    fn other_rejections_are_still_errors() {
-        let other = rpc(
-            -32030,
-            "rejected: not_paired_interrupt",
-            serde_json::json!({"kind": "commandRejected", "reason": "not_paired_interrupt"}),
-        );
-        assert!(!interrupt_found_turn_over(&other));
-
-        let no_reason = rpc(-32030, "rejected", serde_json::json!({"kind": "commandRejected"}));
-        assert!(!interrupt_found_turn_over(&no_reason));
-
-        // The reason alone is not enough: it has to be a rejection.
-        let wrong_kind = rpc(
-            -32603,
-            "internal",
-            serde_json::json!({"kind": "internal", "reason": "already_terminal"}),
-        );
-        assert!(!interrupt_found_turn_over(&wrong_kind));
-
-        // And a transport failure carries no kind at all.
-        assert!(!interrupt_found_turn_over(&MuseError::Closed));
+    fn a_turn_over_refusal_settles_and_others_report() {
+        let refused = |hint| {
+            provider::ProviderError::Refused(provider::Refusal {
+                hint,
+                title: "Muse refused the command".into(),
+                reason: "rejected".into(),
+                severity: provider::Severity::Banner,
+                session_scoped: true,
+            })
+        };
+        assert!(interrupt_provider_found_turn_over(&refused(provider::RefusalHint::TurnOver)));
+        assert!(!interrupt_provider_found_turn_over(&refused(provider::RefusalHint::None)));
+        assert!(interrupt_provider_found_turn_over(&provider::ProviderError::Rejected {
+            reason: "no running turn was ever observed; nothing to stop".into(),
+        }));
+        assert!(!interrupt_provider_found_turn_over(&provider::ProviderError::Unavailable {
+            reason: "the agent process exited".into(),
+        }));
     }
 }

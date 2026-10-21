@@ -173,7 +173,7 @@ impl Harness {
             let model_id = titles::pick_title_model(&models);
             let started = client
                 .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     model_id,
                     session_id: Some(side_id.clone()),
                     workspace_root: Some(workspace),
@@ -183,7 +183,7 @@ impl Harness {
             let started_id = started.session.session_id.clone();
             client
                 .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     session_id: started_id.clone(),
                     input: vec![muse_client::schema::TurnInputPart::text(prompt)],
                     display_text: Some("baaz auto-title".to_owned()),
@@ -571,7 +571,7 @@ impl Harness {
             let model_id = titles::pick_title_model(&models);
             let started = client
                 .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     model_id,
                     session_id: Some(side_id.clone()),
                     workspace_root: Some(workspace),
@@ -581,7 +581,7 @@ impl Harness {
             let started_id = started.session.session_id.clone();
             client
                 .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     session_id: started_id.clone(),
                     input: vec![muse_client::schema::TurnInputPart::text(prompt)],
                     display_text: Some("baaz handoff summary".to_owned()),
@@ -908,7 +908,7 @@ impl Harness {
             let model_id = titles::pick_title_model(&models);
             let started = client
                 .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     model_id,
                     session_id: Some(side_id.clone()),
                     workspace_root: Some(workspace),
@@ -918,7 +918,7 @@ impl Harness {
             let started_id = started.session.session_id.clone();
             client
                 .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     session_id: started_id.clone(),
                     input: vec![muse_client::schema::TurnInputPart::text(prompt)],
                     display_text: Some("baaz auto-summary".to_owned()),
@@ -1103,7 +1103,7 @@ impl Harness {
             let models = client.model_list(&muse_client::schema::ModelListParams { session_id: None }).map(|r| r.models).unwrap_or_default();
             let started = client
                 .session_start(&muse_client::schema::SessionStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     model_id: titles::pick_title_model(&models),
                     session_id: Some(side_id.clone()),
                     workspace_root: Some(workspace),
@@ -1113,7 +1113,7 @@ impl Harness {
             let id = started.session.session_id.clone();
             client
                 .turn_start(&muse_client::schema::TurnStartParams {
-                    command_id: muse_client::new_command_id(),
+                    command_id: provider::new_request_id(),
                     session_id: id.clone(),
                     input: vec![muse_client::schema::TurnInputPart::text(prompt)],
                     display_text: Some("baaz draft".to_owned()),

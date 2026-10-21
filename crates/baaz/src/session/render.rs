@@ -414,8 +414,7 @@ impl SessionView {
             // A provider session's approval cards ask in the provider's
             // name ("Allow Claude Code to write this file?"); the muse
             // lane keeps its own title.
-            approval_host: self
-                .is_provider_lane()
+            approval_host: (self.provider_kind() != ProviderId::Muse)
                 .then(|| self.provider_kind().label().to_owned()),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
@@ -1873,9 +1872,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// Pay-as-you-go is `Waiting`-tinted and carries both the way out and the
     /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
     pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Muse-account surface: never drawn on a provider session, even if
-        // one ever landed there.
-        if self.is_provider_lane() {
+        // Muse-account surface: never drawn on another provider's session.
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
             return None;
         }
         let guard = self.tier_banner.clone()?;
@@ -2756,10 +2754,7 @@ impl SessionView {
     /// decision-routing record (and the row's fallback), never as a
     /// surface.
     pub(super) fn external_strip(&self) -> Vec<ExternalApproval> {
-        if self.is_provider_lane() {
-            return Vec::new();
-        }
-        self.external_approvals.outstanding().into_iter().cloned().collect()
+        Vec::new()
     }
 
     /// The external approval cards: one per new-provider approval the
@@ -2941,13 +2936,14 @@ mod tests {
     fn bench_render_cache(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         use super::super::events::bench_support::{capture_events, last_turn_lines, renamed_turn};
-        let events = capture_events("synthetic-stress-300.jsonl");
+        let (folder, events) = capture_events("synthetic-stress-300.jsonl");
+        let folder = std::cell::RefCell::new(folder);
         let last_turn = last_turn_lines("synthetic-stress-300.jsonl", "t-stress-300");
         let vc = cx.add_empty_window();
         vc.update(|window, cx| {
             let new_view = |window: &mut Window, cx: &mut gpui::App| {
                 let host = crate::session::SessionHost {
-                    provider_id: "echo".to_owned(),
+                    provider_id: "meta".to_owned(),
                     workspace: "/tmp/bench-render-cache".to_owned(),
                     overlays: cx.new(|_| crate::overlays::Overlays::default()),
                     capture: crate::shot::CaptureToken::default(),
@@ -2955,7 +2951,7 @@ mod tests {
                 };
                 // The capture's own session id: any other folds nothing.
                 let session_id = "synthetic-stress-300".to_owned();
-                cx.new(|cx| crate::session::SessionView::new(session_id, None, host, window, cx))
+                cx.new(|cx| crate::session::SessionView::new(session_id, host, window, cx))
             };
             let mut c = crate::perf_budget::bench_criterion();
             // A view holding the capture plus `extra` more turns (the
@@ -2967,14 +2963,11 @@ mod tests {
             let grown_view = |extra: usize, next: &mut usize, window: &mut Window, cx: &mut gpui::App| {
                 let view = new_view(window, cx);
                 view.update(cx, |view, cx| {
-                    for event in &events {
-                        view.apply(event.clone(), cx);
-                    }
+                    view.fold_provider_events(events.clone(), cx);
                     for _ in 0..extra {
                         *next += 1;
-                        for event in renamed_turn(&last_turn, *next) {
-                            view.apply(event, cx);
-                        }
+                        let turn = renamed_turn(&mut folder.borrow_mut(), &last_turn, *next);
+                        view.fold_provider_events(turn, cx);
                     }
                     view.refresh_render_cache();
                 });
@@ -2995,11 +2988,11 @@ mod tests {
                             }
                             next += 1;
                             appended += 1;
-                            let turn = renamed_turn(&last_turn, next);
                             let at = std::time::Instant::now();
+                            let turn = renamed_turn(&mut folder.borrow_mut(), &last_turn, next);
                             view.update(cx, |view, cx| {
                                 for event in turn {
-                                    view.apply(event, cx);
+                                    view.fold_provider_events(vec![event], cx);
                                     view.refresh_render_cache();
                                 }
                             });
@@ -3012,9 +3005,7 @@ mod tests {
             }
             let view = new_view(window, cx);
             view.update(cx, |view, cx| {
-                for event in &events {
-                    view.apply(event.clone(), cx);
-                }
+                view.fold_provider_events(events.clone(), cx);
                 view.refresh_render_cache();
                 assert!(view.cached_turns.len() >= 300, "the capture folded: {} turns", view.cached_turns.len());
             });
@@ -3243,7 +3234,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
         });
         let lines: Vec<String> = vec!["$ cargo test".into(), "\u{1b}[32mok\u{1b}[0m 12 passed".into(), "``` not a fence".into()];
         let text = aui::transcript::output_text(&lines, true);
@@ -3285,7 +3276,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
         });
         let span = MessageSelection::new(
             SelectionEndpoint { cell: SelectionKey::new("p0"), offset: 2 },
@@ -3337,7 +3328,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
         });
         // The subscription outlives the clicks below; emitted events flush
         // when the update that raised them ends.
@@ -3395,7 +3386,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
         });
         let _sub = vc.update(|_, cx| {
             cx.subscribe(&view, move |_, event: &crate::session::SessionEvent, _| {
@@ -3454,7 +3445,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
+            let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx));
             let toasts = |cx: &gpui::App| overlays.read(cx).toasts.len();
             view.update(cx, |view, cx| view.reveal_workspace_path("sub/gone.txt", cx));
             view.update(cx, |view, cx| view.reveal_workspace_path("/tmp/definitely-not-here-xyz", cx));
@@ -3537,7 +3528,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| crate::session::SessionView::new(session_id.to_owned(), None, host, window, cx))
+            cx.new(|cx| crate::session::SessionView::new(session_id.to_owned(), host, window, cx))
         })
     }
 

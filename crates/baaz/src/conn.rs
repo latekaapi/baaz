@@ -29,13 +29,6 @@ use provider::{ConnectInfo, Provider, ProviderError, ProviderEvent};
 #[cfg(test)]
 use provider::ProviderAdapter;
 
-// Transitional re-export: the MSP failure classifiers live in
-// `provider-muse` (every branch is a wire spelling) while session views
-// still speak the wire error.
-pub use provider_muse::errors::{
-    is_session_scoped, lease_banner, looks_like_signed_out, severity, title, Severity,
-};
-
 /// What `clientInfo.name` reports. Must match `[a-z0-9_]+`.
 pub const CLIENT_NAME: &str = "baaz";
 
@@ -179,6 +172,13 @@ pub(crate) fn gate_sync(provider: Provider) -> (Provider, UnboundedReceiver<Prov
     (provider, rx)
 }
 
+/// A provider that never speaks on its own (a read-only lane): its stream
+/// ends at once, so the view's drain task does too — no forwarding thread.
+pub(crate) fn gate_quiet(provider: Provider) -> (Provider, UnboundedReceiver<ProviderEvent>) {
+    let (_ended, events) = unbounded();
+    (provider, events)
+}
+
 /// Move every event from a competing crossbeam receiver onto a futures
 /// channel a gpui task can await. The thread ends when the sender side is
 /// dropped, which happens when the adapter (and, for the legacy stream, the
@@ -203,35 +203,6 @@ pub(crate) fn bridge_events<T: Send + 'static>(events: crossbeam_channel::Receiv
     let (tx, rx) = unbounded();
     let _ = forward(events, tx);
     rx
-}
-
-/// Set once muse has refused the bridge on a resume: this muse refuses it on
-/// every resume, so later ones go bare at once instead of paying the
-/// refused round trip first. Lives until restart (a muse update restarts
-/// the child, and the app with it more often than not).
-pub static MUSE_REFUSES_RESUME_BRIDGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// `session/resume` carrying the terminal bridge (`bridged`), retried once
-/// as `bare` — the same resume without it — when muse refuses the bridge
-/// ([`muse_client::MuseError::is_session_mcp_refused`], muse 1.4.10). The
-/// session then opens with no agent terminal route instead of an error
-/// dialog on every reopen. Blocking: call it from the wire's work closure.
-pub fn resume_muse(
-    client: &muse_client::MuseClient,
-    bridged: &muse_client::schema::SessionResumeParams,
-    bare: &muse_client::schema::SessionResumeParams,
-) -> Result<muse_client::schema::SessionResumeResult, muse_client::MuseError> {
-    match client.session_resume(bridged) {
-        Err(error) if bridged != bare && error.is_session_mcp_refused() => {
-            MUSE_REFUSES_RESUME_BRIDGE.store(true, std::sync::atomic::Ordering::Relaxed);
-            crate::baaz_log!(
-                "muse refused the terminal bridge on resuming {} ({error}); resuming without it",
-                bare.session_id
-            );
-            client.session_resume(bare)
-        }
-        result => result,
-    }
 }
 
 #[cfg(test)]

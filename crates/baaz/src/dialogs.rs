@@ -2217,7 +2217,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| SessionView::new("s-plus".to_owned(), None, host, window, cx))
+            cx.new(|cx| SessionView::new("s-plus".to_owned(), host, window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |harness, _| harness.active = Some(view.clone())));
         (baaz, view)

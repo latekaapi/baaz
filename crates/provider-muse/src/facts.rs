@@ -60,14 +60,18 @@ impl FactTracker {
                     });
                 }
             }
-            "turn/retracted" | "turn/unqueued" => {
+            // A retraction hands its words back when the fold remembers them.
+            // An unqueue always reports its turn — with the words when the
+            // echo carried the command id, empty when it did not — so the
+            // reclaim's intent (edit, steer, remove) still routes.
+            "turn/retracted" => {
                 if let Some(text) = fold.take_restored_prompt(session_id) {
-                    out.push(ProviderEvent::PromptRestored {
-                        session_id: session_id.to_owned(),
-                        turn_id: if method == "turn/unqueued" { turn_id() } else { None },
-                        text,
-                    });
+                    out.push(ProviderEvent::PromptRestored { session_id: session_id.to_owned(), turn_id: None, text });
                 }
+            }
+            "turn/unqueued" => {
+                let text = fold.take_restored_prompt(session_id).unwrap_or_default();
+                out.push(ProviderEvent::PromptRestored { session_id: session_id.to_owned(), turn_id: turn_id(), text });
             }
             "session/statusChanged" => {
                 let running = params.get("status").and_then(Value::as_str) == Some("running");
@@ -109,7 +113,14 @@ impl FactTracker {
             }
             _ => sent.side.as_ref().map(|side| side.stored_outputs.clone()).unwrap_or_default(),
         };
-        if sent.side.as_ref() != Some(&side) {
+        // The cursor moves with every event; on its own it is no news (the
+        // hub keeps it for a reconnect), so it rides along with the next
+        // change rather than sending the side on every streamed chunk.
+        let moved = match &sent.side {
+            Some(previous) => SessionSide { cursor: previous.cursor.clone(), ..side.clone() } != *previous,
+            None => true,
+        };
+        if moved {
             sent.side = Some(side.clone());
             out.push(ProviderEvent::SessionFacts { session_id: session_id.to_owned(), side });
         }

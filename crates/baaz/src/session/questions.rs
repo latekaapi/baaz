@@ -103,9 +103,6 @@ impl SessionView {
     /// options and labels are what the card drew. Matches the block's own
     /// id, or a `turn:block` key suffixing it.
     pub(super) fn provider_question(&self, block_id: &str) -> Option<Pending> {
-        if !self.is_provider_lane() {
-            return None;
-        }
         // A prompt the provider reports beside the transcript (several
         // questions, one card each) is answered as the whole prompt.
         if let Some(pending) = self.question(block_id) {
@@ -155,60 +152,7 @@ impl SessionView {
     /// **labels**, so a request with several questions gathers its answers here
     /// and sends one `userInput/answer` when the last one is answered.
     pub fn answer_question(&mut self, block_id: String, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            self.answer_provider_question(block_id, cx);
-            return;
-        }
-        let Some(pending) = self.question(&block_id) else { return };
-        let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
-        if selected.is_empty() {
-            return;
-        }
-        let chosen: Vec<String> = selected.iter().filter_map(|i| pending.labels.get(*i).cloned()).collect();
-        let answer = provider::QuestionAnswer {
-            free_text: None,
-            note: None,
-            question_id: pending.question_id.clone(),
-            // Exactly one of `selectedLabel` and `selectedLabels`, chosen by the
-            // question's own mode: sending both is `userInputAnswerInvalid`.
-            selected_label: (!pending.multi).then(|| chosen.first().cloned()).flatten(),
-            selected_labels: pending.multi.then(|| chosen.clone()),
-        };
-        let gathered = self.answers.entry(pending.input_id.clone()).or_default();
-        gathered.insert(pending.question_id.clone(), answer);
-        if gathered.len() < pending.questions {
-            // Not the last question of the prompt: the answers wait here until
-            // its siblings are answered, and the prompt settles once.
-            cx.notify();
-            return;
-        }
-        let answers: Vec<UserInputAnswer> = self
-            .answers
-            .remove(&pending.input_id)
-            .unwrap_or_default()
-            .into_values()
-            .map(|answer| UserInputAnswer {
-                free_text: answer.free_text,
-                note: answer.note,
-                question_id: answer.question_id,
-                selected_label: answer.selected_label,
-                selected_labels: answer.selected_labels,
-            })
-            .collect();
-        let Some(client) = self.wire_client(cx) else { return };
-        let input_id = pending.input_id.clone();
-        let params = UserInputAnswerParams {
-            answers,
-            command_id: new_command_id(),
-            session_id: self.session_id.clone(),
-            user_input_id: input_id.clone(),
-        };
-        self.wire_call(cx, move || client.user_input_answer(&params), move |this, result, cx| {
-            if let Err(error) = result {
-                this.settle_failed(&input_id, &error, cx);
-            }
-        });
-        cx.notify();
+        self.answer_provider_question(block_id, cx);
     }
 
     /// "Continue" on a provider-lane question: one `AnswerQuestion` per
@@ -244,7 +188,7 @@ impl SessionView {
         let answers: Vec<provider::QuestionAnswer> =
             self.answers.remove(&input_id).unwrap_or_default().into_values().collect();
         let command = ProviderCommand::AnswerQuestion {
-            request_id: new_command_id(),
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
             question: input_id.clone(),
             answers,
@@ -259,41 +203,22 @@ impl SessionView {
 
     /// "Skip": `userInput/cancel`.
     pub fn skip_question(&mut self, block_id: String, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            if !self.check_questions_gate(cx) {
-                return;
-            }
-            let Some(pending) = self.provider_question(&block_id) else { return };
-            let input_id = pending.input_id.clone();
-            let command = ProviderCommand::DismissQuestion {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                question: input_id,
-                reason: Some("The person declined to answer.".to_owned()),
-            };
-            self.answers.remove(&pending.input_id);
-            let input_id = pending.input_id.clone();
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    this.settle_provider_failed(&input_id, &error, cx);
-                }
-            });
-            cx.notify();
+        if !self.check_questions_gate(cx) {
             return;
         }
-        let Some(pending) = self.question(&block_id) else { return };
-        let Some(client) = self.wire_client(cx) else { return };
+        let Some(pending) = self.provider_question(&block_id) else { return };
+        let input_id = pending.input_id.clone();
+        let command = ProviderCommand::DismissQuestion {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            question: input_id,
+            reason: Some("The person declined to answer.".to_owned()),
+        };
         self.answers.remove(&pending.input_id);
         let input_id = pending.input_id.clone();
-        let params = UserInputCancelParams {
-            command_id: new_command_id(),
-            reason: Some("The person declined to answer.".to_owned()),
-            session_id: self.session_id.clone(),
-            user_input_id: input_id.clone(),
-        };
-        self.wire_call(cx, move || client.user_input_cancel(&params), move |this, result, cx| {
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                this.settle_failed(&input_id, &error, cx);
+                this.settle_provider_failed(&input_id, &error, cx);
             }
         });
         cx.notify();
@@ -315,69 +240,29 @@ impl SessionView {
         // The provider lane clarifies with free text instead of the offered
         // options — the "let me explain" path — gated like every question
         // command.
-        if self.is_provider_lane() {
-            if !self.check_questions_gate(cx) {
-                return;
-            }
-            let Some(pending) = self.provider_question(block_id) else { return };
-            let content = self.clarify.read(cx).value().to_string();
-            if content.trim().is_empty() {
-                return;
-            }
-            self.clarify_open = None;
-            self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
-            let command = ProviderCommand::ClarifyQuestion {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                question: pending.input_id.clone(),
-                text: content,
-            };
-            let input_id = pending.input_id.clone();
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    this.settle_provider_failed(&input_id, &error, cx);
-                }
-            });
-            cx.notify();
+        if !self.check_questions_gate(cx) {
             return;
         }
-        let Some(pending) = self.question(block_id) else { return };
+        let Some(pending) = self.provider_question(block_id) else { return };
         let content = self.clarify.read(cx).value().to_string();
         if content.trim().is_empty() {
             return;
         }
-        let Some(client) = self.wire_client(cx) else { return };
         self.clarify_open = None;
         self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
-        let input_id = pending.input_id.clone();
-        let params = UserInputClarifyParams {
-            // `format` is `"text"` in v1 and the field is open, so it is named
-            // rather than left to a default that might change.
-            clarification: UserInputClarification { content, format: "text".to_owned() },
-            command_id: new_command_id(),
+        let command = ProviderCommand::ClarifyQuestion {
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
-            user_input_id: input_id.clone(),
+            question: pending.input_id.clone(),
+            text: content,
         };
-        self.wire_call(cx, move || client.user_input_clarify(&params), move |this, result, cx| {
+        let input_id = pending.input_id.clone();
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                this.settle_failed(&input_id, &error, cx);
+                this.settle_provider_failed(&input_id, &error, cx);
             }
         });
         cx.notify();
-    }
-
-    /// The two ways a `userInput/*` settlement can lose.
-    pub(super) fn settle_failed(&mut self, input_id: &str, error: &MuseError, cx: &mut Context<Self>) {
-        match error.kind() {
-            // Something already settled it — a timeout, most likely — and
-            // `userInput/settled` is on its way with the real outcome.
-            Some(ErrorKind::UserInputAlreadySettled) => {}
-            Some(ErrorKind::UserInputAnswerInvalid) => {
-                self.answers.remove(input_id);
-                self.set_banner("Muse refused that answer; pick again.", None, cx);
-            }
-            _ => self.report(error, cx),
-        }
     }
 
     /// The ways a question's settlement can lose, by the provider's hint:

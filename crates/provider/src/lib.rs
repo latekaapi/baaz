@@ -61,3 +61,10 @@ pub use event::ProviderEvent;
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter};
 pub use usage::{window_label, UsageReport, UsageWindow};
 pub use version::{compare_versions, parse_version, version_at_least};
+
+/// A fresh client-minted request id: the idempotency handle a command
+/// carries (`request_id`), time-ordered (UUID v7), so the greatest id is the
+/// latest request.
+pub fn new_request_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}

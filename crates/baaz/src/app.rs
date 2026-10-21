@@ -79,13 +79,13 @@ use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Root;
 use muse_client::schema::{
-    AccountStateKind, SessionListParams, SessionResumeParams,
+    AccountStateKind, SessionListParams,
 };
-use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
+use muse_client::{MuseClient, MuseError, MuseEvent};
 use provider::ProviderEvent;
 
 use crate::auth::Identity;
-use crate::conn::{self, Severity};
+use crate::conn;
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
@@ -776,10 +776,6 @@ pub struct Harness {
     /// project's draft session to exist so it can be moved in. Set by the
     /// project menu's retarget, consumed by `new_session_in`.
     pub(crate) pending_draft: Option<Draft>,
-    /// Muse just connected: on the next frame (where a window is at hand),
-    /// a live local Muse draft opened while it was starting becomes a real
-    /// Muse draft ([`Self::promote_local_draft`]).
-    pub(crate) promote_local_draft: bool,
     /// `(session id, root)` for a session started outside any project, held
     /// from `session/start` until the sessions list carries its row.
     ///
@@ -1586,7 +1582,6 @@ impl Harness {
             drafts: HashMap::new(),
             unsent: HashSet::new(),
             pending_draft: None,
-            promote_local_draft: false,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
@@ -2193,7 +2188,6 @@ impl Harness {
                 this.muse_slot.set_ready(connected.hub.clone());
                 this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
-                this.promote_local_draft = true;
                 this.pump(connected.legacy.events, cx);
                 this.observe_provider(connected.events, cx);
                 this.probe_account(cx);
@@ -2402,11 +2396,6 @@ impl Harness {
                 }
             }
         }
-        // A Muse view on a lane hears its session from the hub; only a view
-        // still on the legacy lane (a capture, a local draft) folds here.
-        if let Some(active) = self.active.as_ref().filter(|view| !view.read(cx).is_provider_lane()) {
-            active.update(cx, |view, cx| view.apply(event, cx));
-        }
         // The row's live facts, straight from the event — no `session/list`
         // round trip: a started turn reads running now, a completed one (or
         // an approval/question event) re-reads the open view's pending
@@ -2559,11 +2548,21 @@ impl Harness {
                 this.session_mcp = hub.session_mcp_granted();
                 this.user_shell = hub.user_shell_granted();
                 this.client = hub.transport();
-                this.muse_slot.set_ready(hub);
+                this.muse_slot.set_ready(hub.clone());
                 this.wire = Wire::Ready;
-                // A session the respawned child would not re-attach keeps its
-                // view and history: another window holding it reads as the
-                // lease notice; anything else says what went wrong.
+                // Every followed session the respawned child re-attached has
+                // its lease back; one it would not re-attach keeps its view
+                // and history: another window holding it reads as the lease
+                // notice, anything else says what went wrong.
+                let refused_ids: Vec<String> = refused.iter().map(|(id, _)| id.clone()).collect();
+                for session_id in hub.followed() {
+                    if refused_ids.contains(&session_id) {
+                        continue;
+                    }
+                    if let Some(view) = this.find_view(&session_id, cx) {
+                        view.update(cx, |view, cx| view.note_resumed(cx));
+                    }
+                }
                 for (session_id, error) in refused {
                     let view = this.find_view(&session_id, cx);
                     match error.hint() {
@@ -4880,7 +4879,7 @@ impl Harness {
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse's connection is Muse's business: a Claude Code or Codex
         // session (or no session) never wears its banner (docs/50 P1).
-        let muse_session = self.active.as_ref().is_some_and(|view| !view.read(cx).is_provider_lane());
+        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind() == ProviderId::Muse);
         if !muse_session {
             return None;
         }
@@ -4925,15 +4924,15 @@ impl Harness {
         // replaces the moment the first line is folded.
         let view = cx.new(|cx| {
             let host = SessionHost { provider_id: provider, workspace, overlays, capture, terminal_host: None };
-            let mut view = SessionView::new("replay".to_owned(), None, host, window, cx);
+            let mut view = SessionView::new("replay".to_owned(), host, window, cx);
             view.set_at_rest(at_rest);
-            if bench {
-                if let Ok((events, sent)) = session::parse_replay_file(&path) {
-                    let id = session::capture_session_id(&events).unwrap_or_else(|| "bench".to_owned());
-                    view.begin_bench_replay(id, sent, cx);
+            match provider_muse::replay::Capture::load(&path) {
+                Ok(capture) if bench => {
+                    let id = capture.session_id().unwrap_or_else(|| "bench".to_owned());
+                    view.begin_bench_replay(id, capture.sent, cx);
                 }
-            } else {
-                view.load_replay(&path, cx);
+                Ok(capture) => view.load_capture(capture, cx),
+                Err(error) => view.show_banner(&format!("{}: {error}", path.display()), cx),
             }
             view.load_history(cx);
             view
@@ -6238,10 +6237,6 @@ impl Harness {
         self.apply_find_resync(window, cx);
         // Deferred, not done here: `on_frame` runs inside render, and the
         // promotion opens a session.
-        if self.promote_local_draft && self.client.is_some() {
-            self.promote_local_draft = false;
-            cx.defer_in(window, |this, window, cx| this.promote_local_draft(window, cx));
-        }
         // The overlay window (Browse menus over the native page) follows
         // what is open and where.
         self.sync_overlay(window, cx);
@@ -7760,7 +7755,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
-                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                    crate::session::SessionView::new("s-1".to_owned(), host, window, cx)
                 });
                 h.active = Some(view);
             })
@@ -8055,7 +8050,7 @@ mod tests {
                     capture: crate::shot::CaptureToken::default(),
                     terminal_host: None,
                 };
-                let view = cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx));
+                let view = cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), host, window, cx));
                 h.activate(view, false, window, cx);
             })
         });
@@ -8363,7 +8358,7 @@ mod tests {
                     capture: crate::shot::CaptureToken::default(),
                     terminal_host: None,
                 };
-                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx))
+                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), host, window, cx))
             })
         });
         vc.update(|_, cx| {
@@ -9559,7 +9554,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
-                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                    crate::session::SessionView::new("s-1".to_owned(), host, window, cx)
                 });
                 harness.active = Some(view.clone());
                 view
@@ -9627,7 +9622,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
-                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                    crate::session::SessionView::new("s-1".to_owned(), host, window, cx)
                 });
                 harness.active = Some(view.clone());
                 view
@@ -9690,7 +9685,7 @@ mod tests {
                     capture: crate::shot::CaptureToken::default(),
                     terminal_host: None,
                 };
-                let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
+                let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx));
                 harness.active = Some(view.clone());
                 view
             })
@@ -10114,158 +10109,4 @@ mod tests {
         restore_state(state);
     }
 
-    /// B5fix2: a parked muse view's frozen busy bit never re-arms its row.
-    /// Switching away drops the view's event subscription, so a later idle
-    /// list reply stands the row down and leaves no stale approval behind —
-    /// the row defers to the wire, not to the parked fold.
-    #[gpui::test]
-    fn parked_muse_view_never_rearms_its_row_after_an_idle_list_reply(cx: &mut gpui::TestAppContext) {
-        use chrono::Local;
-        let state = hermetic_state("list-parked-row");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        open_test_session(&mut *vc, &baaz, &state.2);
-        fn idle_row(id: &str) -> crate::sidebar::SessionEntry {
-            crate::sidebar::SessionEntry {
-                id: id.to_owned(),
-                label: "x".into(),
-                updated: Local::now(),
-                created: Local::now(),
-                running: false,
-                turns: 1,
-                hidden: false,
-                pinned: false,
-                archived: false,
-                description: String::new(),
-                replayed: false,
-                provider: None,
-                named: false,
-                needs_title: false,
-                side_marker: false,
-                title_pending: false,
-                last_ask: None,
-                branch: None,
-                terminals_running: 0,
-                local: false,
-                provisional: false,
-                turns_unknown: false,
-                workspace: None,
-                project: None,
-                project_name: None,
-                attention: Vec::new(),
-                approval_command: None,
-                pending_question: None,
-                turn_started: None,
-                last_error: None,
-            }
-        }
-        // s-1 turns live and holds a pending approval, the way a session
-        // looks mid-turn when it is parked.
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sessions.push(idle_row("s-1"));
-                let view = h.active.clone().expect("a session is open");
-                view.update(cx, |view, cx| {
-                    view.apply(
-                        muse_client::MuseEvent::Notification {
-                            method: "turn/started".to_owned(),
-                            params: serde_json::json!({"turnId": "t-1"}),
-                            cursor: None,
-                            session_id: Some("s-1".to_owned()),
-                        },
-                        cx,
-                    );
-                    view.apply(
-                        muse_client::MuseEvent::Notification {
-                            method: "approval/requested".to_owned(),
-                            params: serde_json::json!({
-                                "approvalId": "ap-1",
-                                "availableChoices": [],
-                                "currentRequirementId": {"approvalId": "ap-1", "sourceIndex": 0},
-                                "itemId": "i-1",
-                                "judgeEscalated": false,
-                                "protectedWrite": false,
-                                "rawArgs": "{}",
-                                "sessionId": "s-1",
-                                "sourceRange": {"first": {"id": "e1", "sequence": 1}, "last": {"id": "e1", "sequence": 1}, "stream": {"id": "run", "kind": "run"}},
-                                "subject": {"kind": "shell", "command": "ls /tmp"},
-                                "taskId": "task-1",
-                                "toolCallId": "shell_c-1",
-                                "toolName": "shell",
-                                "turnId": "t-1",
-                                "viewCursor": "c2",
-                            }),
-                            cursor: None,
-                            session_id: Some("s-1".to_owned()),
-                        },
-                        cx,
-                    );
-                });
-                h.sync_row_live("s-1", true, cx);
-            })
-        });
-        assert!(
-            vc.update(|_, cx| baaz.read(cx).sessions.iter().any(|e| e.id == "s-1"
-                && e.running
-                && e.approval_command.is_some())),
-            "the live turn arms the row with its pending approval"
-        );
-        // Switch away: s-1 parks in the MRU, s-2 opens. The parked muse view
-        // keeps its busy fold but loses its event subscription.
-        let workspace = state.2.to_string_lossy().into_owned();
-        let view2 = vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let host = crate::session::SessionHost {
-                    provider_id: "echo".to_owned(),
-                    workspace,
-                    overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
-                    terminal_host: None,
-                };
-                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx))
-            })
-        });
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                let parked = h.active.clone().expect("s-1 open");
-                h.session_cache.push(("s-1".to_owned(), parked));
-                h.active = Some(view2.clone());
-                h.sessions.push(idle_row("s-2"));
-            })
-        });
-        // The list reply says idle with no approvals: the wholesale replace
-        // stands both rows down, then the merge tail must not let the parked
-        // muse fold re-arm s-1.
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                let wire = vec![idle_row("s-1"), idle_row("s-2")];
-                h.sessions = crate::sidebar::merge_session_list(wire, &h.sessions);
-                h.merge_provider_rows();
-                h.sync_all_live_rows(cx);
-            })
-        });
-        let entry = vc.update(|_, cx| {
-            baaz
-                .read(cx)
-                .sessions
-                .iter()
-                .find(|e| e.id == "s-1")
-                .expect("the row survives the merge")
-                .clone()
-        });
-        assert!(!entry.running, "a parked view never re-arms Working over idle wire");
-        assert!(
-            entry.approval_command.is_none(),
-            "no stale approval from the parked fold: {:?}",
-            entry.approval_command
-        );
-        assert!(
-            entry.pending_question.is_none(),
-            "no stale question from the parked fold"
-        );
-        restore_state(state);
-    }
 }

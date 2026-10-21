@@ -38,15 +38,20 @@ const CONNECTION_LOST: &str = "Provider connection lost: ";
 /// Which event stream owns a session view. Set at construction, never
 /// reassigned: there is no setter and no public field.
 pub(super) enum Lane {
-    /// The legacy pump: `MuseEvent`s folded through `MuseFold::apply`.
-    Muse,
-    /// A provider task draining `ProviderEvent`s into `MuseFold::apply_deltas`.
+    /// A provider task draining `ProviderEvent`s into the session store.
     Provider(ProviderLane),
     /// A new provider session drawn on the click while its child is still
     /// answering `OpenSession`: a provider lane with no provider yet. It
     /// becomes [`Lane::Provider`] once, in [`SessionView::attach_provider`],
     /// and never goes back — so there is still only ever one writer.
     Opening(OpeningLane),
+}
+
+impl Lane {
+    /// A view's lane before it takes one: opening, in the default mode.
+    pub(super) fn unattached() -> Self {
+        Lane::Opening(OpeningLane { mode: aui_protocol::PermissionMode::default() })
+    }
 }
 
 /// What an opening provider view knows before its child answers: the mode
@@ -120,10 +125,11 @@ impl ExternalQuestions {
 }
 
 impl SessionView {
-    /// Whether this view rides the provider lane. The muse entry points
-    /// (`apply`, `seed_session`, `load_replay`, `reconnected`) refuse on it.
+    /// Tests: whether this view is a Claude Code or Codex session — what
+    /// the older tests called "the provider lane", before Muse rode one too.
+    #[cfg(test)]
     pub(crate) fn is_provider_lane(&self) -> bool {
-        matches!(self.lane, Lane::Provider(_) | Lane::Opening(_))
+        self.provider_kind() != ProviderId::Muse
     }
 
     /// The mode an opening provider view's open asked for, while no child
@@ -133,7 +139,6 @@ impl SessionView {
         match &self.lane {
             Lane::Opening(opening) => Some(opening.mode),
             Lane::Provider(lane) => lane.unreported_mode,
-            Lane::Muse => None,
         }
     }
 
@@ -148,7 +153,6 @@ impl SessionView {
         match &mut self.lane {
             Lane::Opening(opening) => Some(std::mem::replace(&mut opening.mode, mode)),
             Lane::Provider(lane) => lane.unreported_mode.replace(mode),
-            Lane::Muse => None,
         }
     }
 
@@ -230,14 +234,19 @@ impl SessionView {
     /// An existing session's view drawn on the click while its lane
     /// re-attaches: no provider yet, sends and picks waiting in the start
     /// queue, history loading. [`Self::attach_provider`] takes the lane
-    /// once the resume answers. A no-op on a view that already has a lane.
-    pub(crate) fn begin_lane_reopen(&mut self, mode: aui_protocol::PermissionMode, cx: &mut Context<Self>) {
-        if !matches!(self.lane, Lane::Muse) {
-            return;
-        }
-        self.lane = Lane::Opening(OpeningLane { mode });
-        self.begin_start();
-        self.mark_history_loading(cx);
+    /// once the resume answers.
+    pub fn new_lane_reopen(
+        session_id: String,
+        mode: aui_protocol::PermissionMode,
+        host: SessionHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new_unowned(session_id, host, window, cx);
+        this.lane = Lane::Opening(OpeningLane { mode });
+        this.begin_start();
+        this.loading_history = true;
+        this
     }
 
     /// The opening view's child answered: take the session's real id (the
@@ -279,7 +288,7 @@ impl SessionView {
     /// Record the session in the fold, take the provider as the lane, and
     /// spawn the one task draining its events — shared by both provider
     /// constructors.
-    fn install_lane(
+    pub(super) fn install_lane(
         &mut self,
         provider: provider::Provider,
         mut events: UnboundedReceiver<provider::ProviderEvent>,
@@ -296,8 +305,12 @@ impl SessionView {
         // `reconnected` re-reads `approval/listPending` before trusting the
         // next frame. And the model menu lists what the child returns, so
         // the catalog is asked for on the same open.
-        self.request_provider_pending(cx);
-        self.request_provider_models(cx);
+        // A read-only lane has nothing to pull: the provider's offline
+        // fallbacks stand in (see `lane_live`).
+        if !self.read_only {
+            self.request_provider_pending(cx);
+            self.request_provider_models(cx);
+        }
         // A Claude Code lane outlives a lost child: its adapter resumes the
         // session (`--resume`) on the next send, and the resumed child's
         // events arrive on this same stream — so only that lane keeps
@@ -338,7 +351,7 @@ impl SessionView {
     /// question taps onto their surfaces, a lost connection onto the banner.
     /// Only the lane task calls this, so `apply_deltas` has exactly one
     /// writer.
-    fn on_provider_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
+    pub(super) fn on_provider_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
         match event {
             provider::ProviderEvent::Deltas { session_id, deltas } => {
                 if session_id.as_deref() != Some(self.session_id.as_str()) {
@@ -578,12 +591,18 @@ impl SessionView {
                     return;
                 }
                 match turn_id.and_then(|turn_id| self.unqueueing.remove(&turn_id)) {
+                    // Routed by the intent captured when the row's button
+                    // was clicked, with the text captured then — never by an
+                    // echo that may be missing.
                     Some(pending) => match pending.kind {
                         super::Unqueue::Remove => {}
                         super::Unqueue::Edit => self.restore_prompt(pending.text, cx),
                         super::Unqueue::Steer => self.steer_text(pending.text, cx),
                     },
-                    None => self.restore_prompt(text, cx),
+                    // Reclaimed by someone else, or retracted: the words go
+                    // back in the composer rather than evaporating.
+                    None if !text.is_empty() => self.restore_prompt(text, cx),
+                    None => {}
                 }
                 cx.notify();
             }
@@ -632,7 +651,18 @@ impl SessionView {
                 self.clear_running();
                 self.external_approvals.clear();
                 self.external_questions.clear();
-                self.set_banner(&format!("{CONNECTION_LOST}{reason}"), None, cx);
+                // A child that will not come back closes the session for the
+                // window (a handoff destination that never acknowledged its
+                // pack fails its run); a shared one (Muse) comes back.
+                if !matches!(self.provider_kind(), ProviderId::ClaudeCode | ProviderId::Muse) {
+                    cx.emit(super::SessionEvent::Closed);
+                }
+                // A Muse session wears the window's own reconnect banner
+                // (its one child is the window's connection); any other
+                // lane says it here.
+                if self.provider_kind() != ProviderId::Muse {
+                    self.set_banner(&format!("{CONNECTION_LOST}{reason}"), None, cx);
+                }
             }
         }
     }
@@ -642,7 +672,7 @@ impl SessionView {
     fn test_provider(&self) -> Arc<Mutex<provider::Provider>> {
         match &self.lane {
             Lane::Provider(lane) => lane.provider.clone(),
-            Lane::Muse | Lane::Opening(_) => panic!("this view has no provider attached"),
+            Lane::Opening(_) => panic!("this view has no provider attached"),
         }
     }
 
@@ -683,13 +713,19 @@ impl SessionView {
     pub(crate) fn lane_provider(&self) -> Option<SharedProvider> {
         match &self.lane {
             Lane::Provider(lane) => Some(lane.provider.clone()),
-            Lane::Muse | Lane::Opening(_) => None,
+            Lane::Opening(_) => None,
         }
     }
 
     /// Whether a provider is attached: a provider lane past its opening.
     pub(super) fn lane_attached(&self) -> bool {
         matches!(self.lane, Lane::Provider(_))
+    }
+
+    /// Whether a live provider is attached: an attached lane that is not the
+    /// read-only one a replay or an offline row rides.
+    pub(super) fn lane_live(&self) -> bool {
+        self.lane_attached() && !self.read_only
     }
 
     /// The lane's latest usage reading, if any. A peek only — no wire
@@ -1171,7 +1207,6 @@ impl SessionView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::MuseEvent;
     use gpui::{AppContext as _, Entity};
 
     /// A provider-lane view over a connected scripted provider, with the
@@ -1277,32 +1312,6 @@ mod tests {
             texts.iter().any(|text| text.contains("echo: hello")),
             "the folded session has the scripted turn text, drew {texts:?}"
         );
-    }
-
-    #[gpui::test]
-    fn provider_lane_refuses_muse_events(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (view, tx) = open_lane_view(vc, "s-1");
-        submit_and_deliver(&view, &tx, vc, "hello");
-        let before = vc.update(|_, cx| view.read(cx).session().cloned());
-        vc.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.apply(
-                    MuseEvent::Notification {
-                        method: "turn/started".to_owned(),
-                        params: serde_json::json!({"turnId": "t-9"}),
-                        cursor: None,
-                        session_id: Some("s-1".to_owned()),
-                    },
-                    cx,
-                );
-            });
-        });
-        vc.update(|_, cx| {
-            assert_eq!(view.read(cx).session().cloned(), before, "a muse event folds nothing");
-            assert!(!view.read(cx).busy(), "a refused start never marks running");
-        });
     }
 
     /// Claude Code acks a submit before the CLI names the turn: the ack's
@@ -1569,59 +1578,9 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn seed_session_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (view, _tx) = open_lane_view(vc, "s-1");
-        // The lane records an empty model at construction; a `session/started`
-        // seed carrying one would overwrite it if it ever folded.
-        vc.update(|_, cx| {
-            assert_eq!(view.read(cx).session().map(|s| s.model.clone()), Some(String::new()));
-            view.update(cx, |view, cx| {
-                view.seed_session(
-                    serde_json::json!({
-                        "sessionId": "s-1",
-                        "modelId": "seeded-model",
-                        "createdAt": "2026-09-26T00:00:00Z",
-                        "path": "/tmp/w1-lane",
-                        "status": "idle",
-                        "turnCount": 0,
-                        "updatedAt": "2026-09-26T00:00:00Z",
-                    }),
-                    cx,
-                );
-            });
-        });
-        vc.update(|_, cx| {
-            assert_eq!(
-                view.read(cx).session().map(|s| s.model.clone()),
-                Some(String::new()),
-                "the refused seed changes nothing about the folded session"
-            );
-        });
-    }
-
     // `reconnected`'s guard test lives beside the view in `session.rs`:
     // driving it needs a real child handle, and this file must stay out of
     // the seam ratchet's coupling list.
-
-    #[gpui::test]
-    fn load_replay_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (view, _tx) = open_lane_view(vc, "s-1");
-        vc.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.load_replay(std::path::Path::new("/nonexistent/capture.jsonl"), cx)
-            });
-        });
-        vc.update(|_, cx| {
-            let view = view.read(cx);
-            assert!(!view.replay, "the refused replay leaves the live view live");
-            assert!(view.banner.is_none(), "the refused replay banners nothing");
-        });
-    }
 
     #[gpui::test]
     fn dropping_the_view_shuts_its_child_down(cx: &mut gpui::TestAppContext) {

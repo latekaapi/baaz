@@ -164,7 +164,7 @@ pub fn looks_like_side_session(
 /// `side_session` override) lands first and a crash between the start and
 /// the hide still hides by record. Two generations never share an identity.
 pub fn side_session_id() -> String {
-    muse_client::new_command_id()
+    provider::new_request_id()
 }
 
 /// Whether this session earns a title generation now: the first

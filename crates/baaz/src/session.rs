@@ -34,7 +34,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aui::composer::{
@@ -62,20 +61,8 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, Position, TextareaState};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
-use muse_adapter::MuseFold;
-use muse_client::schema::{
-    ApprovalDecideParams, ApprovalListPendingParams, ApprovalMode, ApprovalResolutionSummary,
-    ErrorKind, ForkCutPoint, ModelCatalogEntry,
-    ModelListParams, ModelSelection, SessionCompactParams, SessionForkParams,
-    SessionSetApprovalModeParams, SessionSetModelParams, SessionUserShellParams, TurnInputPart,
-    TurnInterruptParams, TurnStartDisposition, TurnStartParams, TurnStartResult, TurnSteerParams,
-    TurnUnqueueParams, UserInputAnswer, UserInputAnswerParams, UserInputCancelParams,
-    UserInputClarification, UserInputClarifyParams, ViewPageParams,
-    UnframedViewNotification,
-};
-use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
+use muse_client::schema::{ApprovalMode, ModelCatalogEntry};
 
-use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
 use crate::providers::{ExternalApprovalStore, ProviderId};
@@ -334,14 +321,6 @@ pub enum SessionEvent {
     OpenTurnChanges {
         /// The folded turn's id.
         turn_id: String,
-    },
-    /// `session/fork` succeeded: open the new session as the active one.
-    Forked {
-        /// The new session's id. Its resume envelope has already been served.
-        session_id: String,
-        /// The envelope's own `session` object, so the new view can fold it and
-        /// draw the `ForkedFrom` marker its `forkedFrom` carries.
-        session: serde_json::Value,
     },
     /// `ForkSession` on a provider lane succeeded: open the fork as a new
     /// provider-lane view on the same provider. The application connects
@@ -639,13 +618,13 @@ pub struct SessionView {
     /// What the view renders, for every lane: the transcript, the facts
     /// beside it, the changed turns and the prompts this view sent.
     store: session_store::SessionStore,
-    /// The Muse lane's MSP translator. Its every step is mirrored into
-    /// [`Self::store`]; nothing renders from it. Unused on a provider lane,
-    /// and gone once Muse rides the seam (docs/63 step 5).
-    muse_fold: MuseFold,
-    muse_mirror: muse_adapter::Mirror,
-    /// The child, or `None` for a replayed capture, which has no child at all.
-    client: Option<Arc<MuseClient>>,
+    /// The lane is the read-only one ([`SessionView::new`]): nothing live is
+    /// behind this view, so a provider's offline fallbacks (Claude Code's
+    /// supplied catalog) stand in for asking.
+    read_only: bool,
+    /// Tests: the wire translation [`Self::apply`] folds raw events through.
+    #[cfg(test)]
+    test_wire: provider_muse::replay::Folder,
     /// A `--replay` session: the transcript is a file, and every command is
     /// refused rather than quietly dropped.
     replay: bool,
@@ -925,9 +904,6 @@ pub struct SessionView {
     retry_started: Option<(String, Instant)>,
     /// A 1 s clock, held only while a countdown is on screen.
     countdown: Option<Task<()>>,
-    /// A reconnect or a resume happened; `approval/listPending` needs
-    /// re-reading before the next frame is trusted.
-    refresh_pending: bool,
     /// Whether `initialize` granted the `userShell` capability. Without it the
     /// `!` path is disabled and says so rather than failing on the wire.
     user_shell: bool,
@@ -1146,17 +1122,18 @@ impl WireCall for SessionView {
 }
 
 impl SessionView {
-    /// A view over `session_id`. Nothing is loaded yet: the caller either just
-    /// started the session or is about to [`SessionView::backfill`] it.
-    pub fn new(
-        session_id: String,
-        client: Option<Arc<MuseClient>>,
-        host: SessionHost,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    /// A view over `session_id` with nothing live behind it: a replayed
+    /// capture, an offline row, a test. It rides a read-only lane that
+    /// answers the catalog and pending pulls with nothing and refuses every
+    /// command that would act, saying why.
+    pub fn new(session_id: String, host: SessionHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        use provider::ProviderAdapter as _;
+        let mut lane = provider_muse::replay::ReadOnly::new("Nothing is running behind this session here: it is read-only.");
+        let _ = lane.connect(&crate::conn::connect_info());
+        let (provider, events) = crate::conn::gate_quiet(provider::Provider::new(lane));
         let mut this = Self::new_unowned(session_id, host, window, cx);
-        this.client = client;
+        this.read_only = true;
+        this.install_lane(provider, events, cx);
         this
     }
 
@@ -1202,13 +1179,13 @@ impl SessionView {
         let sent_items = crate::sent::load(&session_id);
         Self {
             store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
+            read_only: false,
+            #[cfg(test)]
+            test_wire: provider_muse::replay::Folder::new(),
             session_id,
-            muse_fold: MuseFold::new(),
-            muse_mirror: muse_adapter::Mirror::new(),
-            client: None,
             replay: false,
             provider_id,
-            lane: lane::Lane::Muse,
+            lane: lane::Lane::unattached(),
             external_approvals: ExternalApprovalStore::empty(),
             external_outbox: Vec::new(),
             external_questions: lane::ExternalQuestions::default(),
@@ -1297,7 +1274,6 @@ impl SessionView {
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,
-            refresh_pending: false,
             user_shell: true,
             titles: Rc::new(HashMap::new()),
             at_rest: false,
@@ -1371,49 +1347,37 @@ impl SessionView {
         self.store.session()
     }
 
-    /// Fold one Muse event through the lane's translator and mirror the
-    /// step into the store; returns the deltas that landed there.
-    pub(crate) fn muse_apply(&mut self, event: MuseEvent) -> Vec<Delta> {
-        let deltas = self.muse_fold.apply(event);
-        self.muse_mirror_sync(deltas)
-    }
-
-    /// Mirror the translator's current step into the store: `deltas` are
-    /// what it returned (empty for a bookkeeping change such as a queued row).
-    pub(crate) fn muse_mirror_sync(&mut self, deltas: Vec<Delta>) -> Vec<Delta> {
-        let id = self.session_id.clone();
-        self.muse_mirror.sync(&mut self.muse_fold, &id, deltas, &mut self.store)
-    }
-
-    /// Remember the text a request was sent with — in the store for every
-    /// lane, and in the Muse translator too while this is a Muse view, which
-    /// hands it back on a retraction or an unqueue.
+    /// Remember the text a request was sent with: retry resends it, the
+    /// first prompt titles the row, the queue strip shows it.
     pub(crate) fn remember_command(&mut self, request_id: &str, text: &str) {
         self.store.record_command(request_id, text);
-        if !self.is_provider_lane() {
-            let id = self.session_id.clone();
-            self.muse_fold.record_command(&id, request_id, text);
-        }
     }
 
     /// Append a client-authored block in a turn of its own (`id`).
     pub(crate) fn append_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
-        if self.is_provider_lane() {
-            return self.store.append_client_block(id, block);
-        }
-        let session_id = self.session_id.clone();
-        let deltas = self.muse_fold.append_client_block(&session_id, id, block);
-        self.muse_mirror_sync(deltas)
+        self.store.append_client_block(id, block)
     }
 
     /// Replace the first block of a client-authored turn.
     pub(crate) fn replace_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
-        if self.is_provider_lane() {
-            return self.store.replace_client_block(id, block);
+        self.store.replace_client_block(id, block)
+    }
+
+    /// Tests: fold one raw Muse wire event through the same translation a
+    /// hub lane runs, then into this view, as a live Muse session would see
+    /// it.
+    #[cfg(test)]
+    pub(crate) fn apply(&mut self, event: muse_client::MuseEvent, cx: &mut Context<Self>) {
+        let events = self.test_wire.fold(event);
+        self.fold_provider_events(events, cx);
+    }
+
+    /// Fold provider events as the lane task would: a replayed capture,
+    /// folded at once on this update, and tests.
+    pub(crate) fn fold_provider_events(&mut self, events: Vec<provider::ProviderEvent>, cx: &mut Context<Self>) {
+        for event in events {
+            self.on_provider_event(event, cx);
         }
-        let session_id = self.session_id.clone();
-        let deltas = self.muse_fold.replace_client_block(&session_id, id, block);
-        self.muse_mirror_sync(deltas)
     }
 
     /// B8c: the cached Changes-pane edit list when it is still fresh — `Some`
@@ -1765,16 +1729,6 @@ impl SessionView {
                 self.models_error = Some(MUSE_DOWN_MENU.to_owned());
             }
             cx.notify();
-        }
-    }
-
-    /// Re-list an open model menu's rows for this view: a promoted draft
-    /// inherits the menu its stand-in opened, which listed nothing.
-    pub(crate) fn refresh_open_model_menu(&mut self, cx: &mut Context<Self>) {
-        let open = self.overlays.read(cx).menu.as_ref().is_some_and(|menu| menu.kind == MenuKind::Model);
-        if open {
-            self.load_models(cx);
-            self.sync_model_menu_check(cx);
         }
     }
 
@@ -2162,141 +2116,21 @@ impl SessionView {
         cx.notify();
     }
 
-    /// Fold a session envelope the app was handed as a **result**.
-    ///
-    /// `session/start`, `session/resume` and `session/fork` all return the
-    /// session object that `session/started` would have carried, and the view
-    /// stream never repeats it. Without this the provenance a fork records —
-    /// `session.forkedFrom` — would never reach the transcript, and the new
-    /// session would open with no sign of where it came from.
-    pub fn seed_session(&mut self, session: serde_json::Value, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            crate::baaz_log!(
-                "seed_session refused: session {} rides the provider lane",
-                self.session_id
-            );
-            return;
-        }
-        if session.is_null() {
-            return;
-        }
-        let session_id = self.session_id.clone();
-        self.muse_apply(MuseEvent::Notification {
-            method: "session/started".to_owned(),
-            params: serde_json::json!({ "session": session }),
-            cursor: None,
-            session_id: Some(session_id),
-        });
-        self.follow = true;
-        cx.notify();
-    }
-
-    /// Point the view at the respawned child after a reconnect. The fold and
-    /// the transcript are untouched: the resume streamed only the suffix.
-    /// Notifies: the cached centre reuses a clean view.
-    pub fn reconnected(&mut self, client: Arc<MuseClient>, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            crate::baaz_log!(
-                "reconnected refused: session {} rides the provider lane",
-                self.session_id
-            );
-            return;
-        }
-        self.client = Some(client);
-        // A reconnect can have missed an `approval/request`, and the server does
-        // not re-issue one it has already sent. The pull dual closes that hole.
-        self.refresh_pending = true;
-        cx.notify();
-    }
-
-    /// The child, or the banner explaining why there isn't one.
-    ///
-    /// Every command goes through here, so "this transcript came out of a file"
-    /// is said once and refused once, instead of each call site quietly doing
-    /// nothing and leaving the person to wonder.
-    fn wire_client(&mut self, cx: &mut Context<Self>) -> Option<Arc<MuseClient>> {
-        // A session the server does not know yet (or never will) takes no
-        // command: the start's own landing releases the first case.
-        match self.start {
-            StartState::Started => {}
-            StartState::Starting(_) => return None,
-            StartState::Failed => {
-                self.banner = Some("This session did not start — open a new one.".to_owned());
-                self.banner_action = None;
-                cx.notify();
-                return None;
-            }
-        }
-        if let Some(client) = self.client.clone() {
-            return Some(client);
-        }
-        if self.replay {
-            self.banner = Some("Replayed capture — read-only".to_owned());
-            self.banner_action = None;
-            cx.notify();
-        }
-        None
-    }
-
-    /// Fold a capture file into this view: `--replay` (decision A0).
-    ///
-    /// The same `<-- ` lines the fixture test folds, through the same fold, with
-    /// no child and no wire, so screenshots can be produced without touching a
-    /// real connection, and it costs nothing at all.
-    pub fn load_replay(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            crate::baaz_log!(
-                "load_replay refused: session {} rides the provider lane",
-                self.session_id
-            );
-            return;
-        }
+    /// Fold a capture into this view: `--replay` (decision A0). The capture
+    /// folds through the same translation a live Muse lane does, at once and
+    /// with no child and no wire, so screenshots cost nothing. The view
+    /// follows the capture's own session id, learns the prompts its turns
+    /// were sent with, and a turn the capture leaves open reads running.
+    pub fn load_capture(&mut self, capture: provider_muse::replay::Capture, cx: &mut Context<Self>) {
         self.replay = true;
-        let (events, sent) = match parse_replay_file(path) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                self.banner = Some(format!("{}: {error}", path.display()));
-                cx.notify();
-                return;
-            }
-        };
-        // A capture cut before its last `turn/completed` is mid-turn, and the
-        // status row should say so ("Finishing up…" once the reply is whole):
-        // track the open turn per session while folding, then hold the
-        // followed session's one open exactly as a live `turn/started` would.
-        let mut open_turns: HashMap<String, String> = HashMap::new();
-        for event in events {
-            if let MuseEvent::Notification { method, params, session_id, .. } = &event {
-                if method == "turn/started" {
-                    if let (Some(session), Some(turn)) =
-                        (session_id.clone(), params.get("turnId").and_then(|v| v.as_str()))
-                    {
-                        open_turns.insert(session, turn.to_owned());
-                    }
-                } else if method == "turn/completed" {
-                    if let Some(session) = session_id {
-                        let ours = params.get("turnId").and_then(|v| v.as_str());
-                        if open_turns.get(session).is_some_and(|turn| Some(turn.as_str()) == ours) {
-                            open_turns.remove(session);
-                        }
-                    }
-                }
-            }
-            self.muse_fold.apply(event);
-        }
-        // The capture names its own session; the view was opened on whatever the
-        // caller guessed, so it follows the file rather than the guess.
-        if let Some(id) = self.muse_fold.session_ids().next().map(str::to_owned) {
+        if let Some(id) = capture.session_id() {
             self.session_id = id;
+            self.store.rename(&self.session_id);
         }
-        let id = self.session_id.clone();
-        self.muse_mirror.sync_whole(&mut self.muse_fold, &id, &mut self.store);
-        if let Some(turn_id) = open_turns.get(&self.session_id) {
-            self.running = Some(Running { turn_id: turn_id.clone(), started: crate::clock::now_instant() });
-        }
-        for (command_id, text) in sent {
+        for (command_id, text) in capture.sent.clone() {
             self.remember_command(&command_id, &text);
         }
+        self.fold_provider_events(capture.events(), cx);
         self.observe_clocks(cx);
         self.follow = true;
         cx.notify();
@@ -2600,16 +2434,6 @@ pub enum BannerAction {
 }
 
 
-/// The session a capture names (exactly one), for a bench or replayed view
-/// that opens before the first event is folded. Shared by the bare driver
-/// and the shell's `open_replay` in bench mode.
-pub(crate) fn capture_session_id(events: &[MuseEvent]) -> Option<String> {
-    events.iter().find_map(|event| match event {
-        MuseEvent::Notification { session_id: Some(id), .. } => Some(id.clone()),
-        _ => None,
-    })
-}
-
 /// The pending question a block id names, resolved once so the callers do not
 /// each re-walk the fold.
 struct Pending {
@@ -2618,14 +2442,6 @@ struct Pending {
     multi: bool,
     labels: Vec<String>,
     questions: usize,
-}
-
-/// The winning resolution an `approvalAlreadyResolved` error carries.
-fn resolution_of(error: &MuseError) -> Option<ApprovalResolutionSummary> {
-    match error {
-        MuseError::Rpc(rpc) => rpc.data.as_ref().and_then(|data| data.resolution.clone()),
-        _ => None,
-    }
 }
 
 impl Focusable for SessionView {
@@ -2662,87 +2478,6 @@ fn position_of(text: &str, offset: usize) -> Position {
     let line = head.matches('\n').count() as u32;
     let column = head.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
     Position::new(line, column)
-}
-
-/// The `(commandId, text)` a captured `turn/start` was submitted with.
-///
-/// `displayText` is what the person typed and is preferred; the text parts are
-/// the fallback, joined the way the server joins them. A fresh `turn/start`'s
-/// `commandId` equals its `turnId`, which is what makes this a turn-text map.
-/// A capture file parsed: fold events plus the prompts turns were sent with.
-type ParsedReplay = (Vec<MuseEvent>, Vec<(String, String)>);
-
-/// Read a capture file into fold events plus the prompts turns were sent
-/// with: the `<-- ` half the fixture tests fold, and the `--> ` half an
-/// error card's retry needs. Shared by `--replay` (folds all at once) and
-/// `--bench` (feeds one per cadence tick).
-pub(crate) fn parse_replay_file(path: &std::path::Path) -> Result<ParsedReplay, std::io::Error> {
-    let text = std::fs::read_to_string(path)?;
-    let mut events = Vec::new();
-    let mut sent: Vec<(String, String)> = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        // A capture holds both directions. The client-to-server half is what
-        // the fixture tests skip, but it is the only record of what a turn
-        // was *sent* with — and that is what an error card's retry needs, so
-        // the prompts are read back out of it here.
-        if let Some(body) = line.strip_prefix("--> ") {
-            sent.extend(submitted_text(body));
-            continue;
-        }
-        let Some(body) = line.strip_prefix("<-- ") else { continue };
-        match muse_client::frame::parse_line(body) {
-            // A `view/page` result carries its events whole (`result.events`,
-            // each a `{method, params}`); a capture of a real open path is
-            // mostly one of those, so they are unpacked into the notifications
-            // they would have been on a live stream. Without this a captured
-            // session replayed as nothing.
-            Ok(Some(muse_client::frame::Frame::Response { result, .. })) => {
-                events.extend(page_result_events(&result));
-            }
-            Ok(Some(frame)) => {
-                if let Some(event) = MuseEvent::from_frame(frame) {
-                    events.push(event);
-                }
-            }
-            Ok(None) => {}
-            Err(error) => crate::baaz_log!("{}:{}: {error}", path.display(), number + 1),
-        }
-    }
-    Ok((events, sent))
-}
-
-/// The notifications a `view/page` result holds, in page order; nothing for
-/// any other result.
-fn page_result_events(result: &serde_json::Value) -> Vec<MuseEvent> {
-    let Some(events) = result.get("events").and_then(|v| v.as_array()) else { return Vec::new() };
-    events
-        .iter()
-        .filter_map(|event| {
-            let method = event.get("method")?.as_str()?.to_owned();
-            let params = event.get("params").cloned().unwrap_or(serde_json::Value::Null);
-            MuseEvent::from_frame(muse_client::frame::Frame::Notification { method, params })
-        })
-        .collect()
-}
-
-fn submitted_text(line: &str) -> Option<(String, String)> {
-    let frame: serde_json::Value = serde_json::from_str(line).ok()?;
-    if frame.get("method")?.as_str()? != "turn/start" {
-        return None;
-    }
-    let params = frame.get("params")?;
-    let command_id = params.get("commandId")?.as_str()?.to_owned();
-    let text = match params.get("displayText").and_then(|v| v.as_str()) {
-        Some(text) => text.to_owned(),
-        None => params
-            .get("input")?
-            .as_array()?
-            .iter()
-            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(""),
-    };
-    (!text.is_empty()).then_some((command_id, text))
 }
 
 /// The `s` a count needs, so a banner never says "1 approvals".
@@ -2787,47 +2522,6 @@ fn parse_context(spec: &str) -> Option<provider::facts::ContextReading> {
         _ => provider::facts::ContextPressure::Normal,
     };
     Some(provider::facts::ContextReading { pressure, used_tokens: used, window_tokens: (window > 0).then_some(window) })
-}
-
-/// The protocol's effort tier as MSP spells it.
-fn effort_wire(effort: ReasoningEffort) -> muse_client::schema::ReasoningEffort {
-    use muse_client::schema::ReasoningEffort as Wire;
-    match effort {
-        ReasoningEffort::None => Wire::None,
-        ReasoningEffort::Minimal => Wire::Minimal,
-        ReasoningEffort::Low => Wire::Low,
-        ReasoningEffort::Medium => Wire::Medium,
-        ReasoningEffort::High => Wire::High,
-        ReasoningEffort::Xhigh => Wire::Xhigh,
-        ReasoningEffort::Max => Wire::Max,
-        ReasoningEffort::Ultra => Wire::Ultra,
-    }
-}
-
-/// The protocol's approval mode as MSP spells it. The two enums have the same
-/// four members by design (spec §3.6), so this is a rename and nothing more.
-fn wire_mode(mode: PermissionMode) -> ApprovalMode {
-    match mode {
-        PermissionMode::AllowAll => ApprovalMode::AllowAll,
-        PermissionMode::OnRequest => ApprovalMode::OnRequest,
-        PermissionMode::PromptUnmatched => ApprovalMode::PromptUnmatched,
-        PermissionMode::DenyUnmatched => ApprovalMode::DenyUnmatched,
-    }
-}
-
-/// The `session/resume` that re-selects `mode`'s permission profile on the
-/// loaded session `session_id`: metadata only (`excludeItems`), so the
-/// view already open replays nothing — probed live, it answers with one
-/// `session/statusChanged` and commits the profile at the next permission
-/// epoch.
-fn profile_resume_params(session_id: &str, mode: PermissionMode) -> muse_client::schema::SessionResumeParams {
-    muse_client::schema::SessionResumeParams {
-        command_id: new_command_id(),
-        session_id: session_id.to_owned(),
-        permission_profile: Some(muse_adapter::permission_profile(mode).to_owned()),
-        exclude_items: Some(true),
-        ..Default::default()
-    }
 }
 
 /// Page a session's whole view forward, from the beginning, into fold events.
@@ -3257,27 +2951,6 @@ pub(crate) fn note_root_frame_trace(
     let _ = trace.out.flush();
 }
 
-/// One `view/page` result as foldable wire events, in page order.
-///
-/// Events whose params do not serialize are dropped, exactly as the old
-/// whole-transcript backfill did: a page element the schema cannot carry is
-/// a transport concern, not a transcript hole.
-pub(crate) fn page_events(session_id: &str, events: &[UnframedViewNotification]) -> Vec<MuseEvent> {
-    events
-        .iter()
-        .filter_map(|event| {
-            let params = serde_json::to_value(&event.params).ok()?;
-            let event_cursor = params.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned);
-            Some(MuseEvent::Notification {
-                method: event.method.clone(),
-                params,
-                cursor: event_cursor,
-                session_id: Some(session_id.to_owned()),
-            })
-        })
-        .collect()
-}
-
 /// The `/fork` picker's row label: the first line of the user prompt that
 /// started the turn, falling back to the turn's own first text line.
 fn fork_label(prompt: &str, blocks: &[Block]) -> String {
@@ -3476,86 +3149,6 @@ mod tests {
         assert_eq!(compact_count(512), "512");
     }
 
-    #[test]
-    fn a_page_maps_to_foldable_events_in_order() {
-        use muse_client::schema::{
-            RecordPosition, SourceRange, StreamRef, UnframedViewNotificationParams,
-        };
-        let element = |cursor: &str| UnframedViewNotification {
-            method: "item/completed".to_owned(),
-            params: UnframedViewNotificationParams {
-                session_id: "s".to_owned(),
-                source_range: SourceRange {
-                    first: RecordPosition { id: "r".to_owned(), sequence: 1 },
-                    last: RecordPosition { id: "r".to_owned(), sequence: 1 },
-                    stream: StreamRef { id: "run".to_owned(), kind: "run".to_owned() },
-                },
-                view_cursor: cursor.to_owned(),
-                extra: serde_json::Map::new(),
-            },
-        };
-        let events = page_events("s", &[element("v:s:1"), element("v:s:2")]);
-        assert_eq!(events.len(), 2, "one wire event per page element");
-        for (event, cursor) in events.iter().zip(["v:s:1", "v:s:2"]) {
-            match event {
-                MuseEvent::Notification { method, session_id, cursor: at, .. } => {
-                    assert_eq!(method, "item/completed");
-                    assert_eq!(session_id.as_deref(), Some("s"));
-                    assert_eq!(at.as_deref(), Some(cursor), "the fold's reconnect cursor survives");
-                }
-                other => panic!("a page element is a notification, got {other:?}"),
-            }
-        }
-    }
-
-    /// `reconnected` refuses on a provider lane: the view keeps no muse
-    /// child and arms no approval pull. Drives a real state change — without
-    /// the guard the view would hold the child and arm the pull.
-    #[gpui::test]
-    fn reconnected_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
-        use provider::ProviderAdapter as _;
-
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let mut adapter = provider::scripted::ScriptedProvider::new();
-        adapter
-            .connect(&provider::ConnectInfo::new("baaz", "0.0.0"))
-            .expect("a scripted provider connects");
-        let provider = provider::Provider::new(adapter);
-        let (_, rx) = futures::channel::mpsc::unbounded();
-        let view = vc.update(|window, cx| {
-            let host = SessionHost {
-                provider_id: "codex".to_owned(),
-                workspace: "/tmp/w2-lane".to_owned(),
-                overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
-                terminal_host: None,
-            };
-            cx.new(|cx| SessionView::new_on_provider("s-1".to_owned(), provider, rx, host, window, cx))
-        });
-        // A real child handle with no session behind it: `true` exits at
-        // once, so this spawns nothing that can answer — it only proves the
-        // view refuses to take it.
-        let client = std::sync::Arc::new(
-            MuseClient::spawn(&muse_client::MuseConfig {
-                program: std::path::PathBuf::from("true"),
-                trust_workspace: false,
-                no_session_log: false,
-                extra_args: Vec::new(),
-            })
-            .expect("a throwaway child spawns"),
-        );
-        vc.update(|_, cx| {
-            view.update(cx, |view, cx| view.reconnected(client, cx));
-        });
-        vc.update(|_, cx| {
-            let view = view.read(cx);
-            assert!(view.client.is_none(), "the refused reconnect hands over no child");
-            assert!(!view.refresh_pending, "the refused reconnect arms no approval pull");
-        });
-    }
-
     /// B9: a reopened muse session chips its model, never the bare
     /// provider id. The fold names no model on a reopen, so the chip reads
     /// the session's own past through the `model/list` catalog: a known
@@ -3576,7 +3169,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| SessionView::new("s-b9".to_owned(), None, host, window, cx))
+            cx.new(|cx| SessionView::new("s-b9".to_owned(), host, window, cx))
         });
         let row = |id: &str, label: &str| ModelCatalogEntry {
             context_limit: None,
@@ -3650,7 +3243,7 @@ mod tests {
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
             };
-            cx.new(|cx| SessionView::new("s-b2".to_owned(), None, host, window, cx))
+            cx.new(|cx| SessionView::new("s-b2".to_owned(), host, window, cx))
         });
         let row = |id: &str, label: &str, active: bool| ModelCatalogEntry {
             context_limit: None,

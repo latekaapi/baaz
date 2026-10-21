@@ -165,21 +165,6 @@ pub fn from_path(id: impl Into<String>, path: &Path) -> Result<Image, String> {
 }
 
 impl Image {
-    /// The wire part. Width and height go together or not at all, and they
-    /// always come from the decoder here, so they always go together.
-    pub fn part(&self) -> muse_client::schema::TurnInputPart {
-        muse_client::schema::TurnInputPart {
-            r#type: muse_client::schema::TurnInputPartType::Image,
-            arguments: None,
-            base64_data: Some(self.base64_data.clone()),
-            media_type: Some(self.media_type.clone()),
-            selector: None,
-            width: Some(self.width),
-            height: Some(self.height),
-            text: None,
-            upload_id: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -203,14 +188,11 @@ mod tests {
     ];
 
     #[test]
-    fn a_png_decodes_to_a_wire_part() {
+    fn a_png_decodes_with_its_size() {
         let image = from_bytes("i1", "shot.png", PNG).expect("decodes");
         assert_eq!(image.media_type, "image/png");
         assert_eq!((image.width, image.height), (1, 1));
-        let part = image.part();
-        assert!(part.base64_data.is_some() && part.media_type.is_some());
-        // Width and height must be present together or not at all.
-        assert_eq!(part.width.is_some(), part.height.is_some());
+        assert!(!image.base64_data.is_empty() && !image.media_type.is_empty());
     }
 
     #[test]

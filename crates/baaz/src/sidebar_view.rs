@@ -2370,10 +2370,7 @@ mod tests {
         let session_id = session_id.to_owned();
         vc.update(|window, cx| {
             cx.new(|cx| {
-                crate::session::SessionView::new(
-                    session_id,
-                    None,
-                    crate::session::SessionHost {
+                crate::session::SessionView::new(session_id, crate::session::SessionHost {
                         provider_id: "muse".to_owned(),
                         workspace,
                         overlays: cx.new(|_| crate::overlays::Overlays::default()),
@@ -3181,7 +3178,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view =
-                    cx.new(|cx| crate::session::SessionView::new("s-fresh".into(), None, host, window, cx));
+                    cx.new(|cx| crate::session::SessionView::new("s-fresh".into(), host, window, cx));
                 h.active = Some(view);
                 h.invalidate_list();
             });
@@ -3234,7 +3231,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view =
-                    cx.new(|cx| crate::session::SessionView::new("s-root".into(), None, host, window, cx));
+                    cx.new(|cx| crate::session::SessionView::new("s-root".into(), host, window, cx));
                 h.active = Some(view);
                 h.invalidate_list();
             });
@@ -3270,7 +3267,7 @@ mod tests {
                     terminal_host: None,
                 };
                 let view =
-                    cx.new(|cx| crate::session::SessionView::new("h-dst".into(), None, host, window, cx));
+                    cx.new(|cx| crate::session::SessionView::new("h-dst".into(), host, window, cx));
                 h.active = Some(view);
                 h.invalidate_list();
             });

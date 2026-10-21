@@ -23,48 +23,16 @@ impl SessionView {
         // The provider lane runs the shell command out-of-turn through the
         // lane, gated by the registry mirror: Claude Code is `Native`,
         // Codex `Unverified` (attempted, errors surfaced).
-        if self.is_provider_lane() {
-            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::SessionShell)
-                .allows_attempt()
-            {
-                let reason = crate::providers::gate(self.provider_kind(), provider::Capability::SessionShell)
-                    .unwrap_or_else(|| "Shell commands are not available on this provider.".into());
-                self.banner = Some(reason);
-                self.banner_action = None;
-                cx.notify();
-                return;
-            }
-            if let Some(notice) = self.lease_notice.clone() {
-                self.banner = Some(notice);
-                self.banner_action = None;
-                cx.notify();
-                return;
-            }
-            self.banner = None;
+        if !crate::providers::capability_state(self.provider_kind(), provider::Capability::SessionShell)
+            .allows_attempt()
+        {
+            let reason = crate::providers::gate(self.provider_kind(), provider::Capability::SessionShell)
+                .unwrap_or_else(|| "Shell commands are not available on this provider.".into());
+            self.banner = Some(reason);
             self.banner_action = None;
-            let command_id = new_command_id();
-            self.remember_command(&command_id, &format!("!{command_text}"));
-            let command = ProviderCommand::RunShell {
-                request_id: command_id,
-                session_id: self.session_id.clone(),
-                command: command_text.clone(),
-            };
-            let retry = command_text.clone();
-            self.provider_send(command, cx, move |this, result, cx| {
-                if let Err(error) = result {
-                    this.report_provider_retryable(&error, BannerAction::RetryShell(retry), cx);
-                }
-            });
             cx.notify();
             return;
         }
-        if !self.user_shell {
-            self.set_banner("Muse did not grant this build the userShell capability.", None, cx);
-            return;
-        }
-        let Some(client) = self.wire_client(cx) else { return };
-        // The lease is gone: the shell would run with no view to stream
-        // back to. Refused like a send, with the notice re-shown.
         if let Some(notice) = self.lease_notice.clone() {
             self.banner = Some(notice);
             self.banner_action = None;
@@ -73,19 +41,17 @@ impl SessionView {
         }
         self.banner = None;
         self.banner_action = None;
-        let command_id = new_command_id();
-        // The shell item is filed under its own `commandId`, and so is any
-        // approval it raises, so remembering the text here is what makes the
-        // retry offer honest.
+        let command_id = provider::new_request_id();
         self.remember_command(&command_id, &format!("!{command_text}"));
-        let params = SessionUserShellParams {
-            command_id,
-            command_text: command_text.clone(),
+        let command = ProviderCommand::RunShell {
+            request_id: command_id,
             session_id: self.session_id.clone(),
+            command: command_text.clone(),
         };
-        self.wire_call(cx, move || client.session_user_shell(&params), move |this, result, cx| {
+        let retry = command_text.clone();
+        self.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
-                this.report_retryable(&error, BannerAction::RetryShell(command_text.clone()), cx);
+                this.report_provider_retryable(&error, BannerAction::RetryShell(retry), cx);
             }
         });
         cx.notify();
@@ -103,97 +69,40 @@ impl SessionView {
         // the capability is anything but `Unavailable`, the fork opening
         // as a new provider-lane view on the same provider — and a refusal
         // banners its reason rather than going quiet.
-        if self.is_provider_lane() {
-            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::ForkSession)
-                .allows_attempt()
-            {
-                let reason = crate::providers::gate(
-                    self.provider_kind(),
-                    provider::Capability::ForkSession,
-                )
-                .unwrap_or_else(|| "Forking is not available on this provider.".into());
-                self.banner = Some(reason);
-                self.banner_action = None;
-                cx.notify();
-                return;
-            }
-            let through_turn =
-                last_turn_id.or_else(|| self.newest_completed_turn());
-            let command = ProviderCommand::ForkSession {
-                request_id: new_command_id(),
-                session_id: self.session_id.clone(),
-                through_turn,
-                metadata_only: false,
-                mode: Some(self.mode()),
-            };
-            let provider = self.provider_kind();
-            self.provider_send(command, cx, move |this, result, cx| match result {
-                Ok(provider::Ack::Session { session_id, .. }) => {
-                    cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
-                }
-                Ok(_) => {
-                    this.set_banner("The fork answered without a session.", None, cx);
-                }
-                Err(error) if error.hint() == provider::RefusalHint::BadBoundary => {
-                    this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
-                }
-                Err(error) => this.report_provider_error(&error, cx),
-            });
+        if !crate::providers::capability_state(self.provider_kind(), provider::Capability::ForkSession)
+            .allows_attempt()
+        {
+            let reason = crate::providers::gate(
+                self.provider_kind(),
+                provider::Capability::ForkSession,
+            )
+            .unwrap_or_else(|| "Forking is not available on this provider.".into());
+            self.banner = Some(reason);
+            self.banner_action = None;
+            cx.notify();
             return;
         }
-        let Some(client) = self.wire_client(cx) else { return };
-        let cut_point =
-            last_turn_id.or_else(|| self.newest_completed_turn()).map(|last_turn_id| ForkCutPoint { last_turn_id });
-        let params = SessionForkParams {
-            command_id: new_command_id(),
-            cut_point,
-            // The fork's history comes through `view/page`, like every other
-            // attach in this app.
-            exclude_items: Some(true),
+        let through_turn =
+            last_turn_id.or_else(|| self.newest_completed_turn());
+        let command = ProviderCommand::ForkSession {
+            request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
+            through_turn,
+            metadata_only: false,
+            mode: Some(self.mode()),
         };
-        // A fork inherits its parent's profile but not its approval mode
-        // (the host starts it in its startup mode — Full access, probed
-        // live 2026-10-16), so the parent's mode is re-picked on the fork
-        // with the same ordered two steps as a chip pick; the chip then
-        // reads what the fork actually runs under.
-        let parent_mode = self.mode();
-        let work = move || {
-            let mut forked = client.session_fork(&params)?;
-            let reported = forked.session.approval_mode.as_ref().map(|state| muse_adapter::permission_mode(&state.mode));
-            let outcome = (reported != Some(parent_mode)).then(|| {
-                let from = reported.unwrap_or_default();
-                let outcome = super::commands::apply_muse_mode_pick(&client, &forked.session.session_id, from, parent_mode);
-                let landed = match &outcome {
-                    super::commands::MusePickOutcome::Applied
-                    | super::commands::MusePickOutcome::ProfileRefused { restored: false, .. } => parent_mode,
-                    _ => from,
-                };
-                if let Some(state) = forked.session.approval_mode.as_mut() {
-                    state.mode = wire_mode(landed);
-                }
-                outcome
-            });
-            Ok::<_, MuseError>((forked, outcome))
-        };
-        self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok((forked, outcome)) => {
-                if !matches!(outcome, None | Some(super::commands::MusePickOutcome::Applied)) {
-                    this.toast(
-                        "Fork opened in another mode",
-                        format!("{} could not be carried over to the fork; check its mode chip.", parent_mode.label()),
-                        cx,
-                    );
-                }
-                cx.emit(SessionEvent::Forked {
-                    session_id: forked.session.session_id.clone(),
-                    session: serde_json::to_value(&forked.session).unwrap_or_default(),
-                })
+        let provider = self.provider_kind();
+        self.provider_send(command, cx, move |this, result, cx| match result {
+            Ok(provider::Ack::Session { session_id, .. }) => {
+                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
             }
-            Err(error) if error.kind() == Some(&ErrorKind::ForkBoundaryInvalid) => {
+            Ok(_) => {
+                this.set_banner("The fork answered without a session.", None, cx);
+            }
+            Err(error) if error.hint() == provider::RefusalHint::BadBoundary => {
                 this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
             }
-            Err(error) => this.report(&error, cx),
+            Err(error) => this.report_provider_error(&error, cx),
         });
     }
 

@@ -243,15 +243,11 @@ impl SessionView {
 
     /// Submit the pack as the destination's first turn: the full pack text
     /// goes to the model, the user bubble shows only the short summary.
-    /// Both lanes; the ack comes back as [`SessionEvent::HandoffPackAccepted`]
+    /// The ack comes back as [`SessionEvent::HandoffPackAccepted`]
     /// (or [`SessionEvent::HandoffPackFailed`]), never through the generic
     /// turn-accepted paths, so only the pack's own ack can acknowledge the run.
     pub(crate) fn submit_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
-        if self.is_provider_lane() {
-            self.submit_pack_on_provider(pack, display, cx);
-            return;
-        }
-        self.submit_pack_on_muse(pack, display, cx);
+        self.submit_pack_on_provider(pack, display, cx);
     }
 
     /// The provider-lane half of [`Self::submit_pack`]: one `SubmitInput`
@@ -261,7 +257,7 @@ impl SessionView {
     fn submit_pack_on_provider(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
-        let request_id = new_command_id();
+        let request_id = provider::new_request_id();
         self.remember_command(&request_id, &display);
         // The provider echoes the whole pack; the bubble shows the short
         // summary, including across a restart (the record mirrors the map
@@ -306,47 +302,6 @@ impl SessionView {
                 }
             }
             cx.notify();
-        });
-        cx.notify();
-    }
-
-    /// The muse-lane half of [`Self::submit_pack`]: `turn/start` with the
-    /// pack as input and the short summary as `display_text`.
-    fn submit_pack_on_muse(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
-        if self.wire_client(cx).is_none() {
-            cx.emit(crate::session::SessionEvent::HandoffPackFailed {
-                session_id: self.session_id.clone(),
-                reason: "no connection to start the destination turn".to_owned(),
-            });
-            return;
-        }
-        self.banner = None;
-        self.submitting = true;
-        let command_id = new_command_id();
-        self.remember_command(&command_id, &display);
-        let params = TurnStartParams {
-            command_id,
-            session_id: self.session_id.clone(),
-            input: self.parts(pack),
-            display_text: Some(display),
-            reasoning_effort: self.effort.map(effort_wire),
-            ..Default::default()
-        };
-        let Some(client) = self.wire_client(cx) else { return };
-        let session_id = self.session_id.clone();
-        self.wire_call(cx, move || client.turn_start(&params), move |this, result, cx| {
-            this.submitting = false;
-            match result {
-                Ok(_) => {
-                    cx.emit(crate::session::SessionEvent::HandoffPackAccepted { session_id });
-                }
-                Err(error) => {
-                    cx.emit(crate::session::SessionEvent::HandoffPackFailed {
-                        session_id,
-                        reason: error.to_string(),
-                    });
-                }
-            }
         });
         cx.notify();
     }

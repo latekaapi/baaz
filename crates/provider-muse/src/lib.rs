@@ -19,6 +19,7 @@ pub mod facts;
 mod hub;
 pub mod modes;
 pub mod output;
+pub mod replay;
 pub mod terminal;
 mod translate;
 

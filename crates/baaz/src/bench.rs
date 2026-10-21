@@ -26,7 +26,6 @@ use gpui::{
 use gpui_kit::component::Root;
 
 use crate::session::{self, SessionView};
-use muse_client::MuseEvent;
 
 /// How the bench drives the transcript list while the stream lands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,26 +79,6 @@ pub struct BenchOptions {
     /// an open turn must request the frames its elapsed row needs — one a
     /// second — and no more.
     pub open_turn: bool,
-}
-
-/// The events to stream, cut before the last `turn/completed` when the run
-/// asked for an open turn.
-///
-/// The cut is what leaves the view "Working…" with a live ticker: the 1 Hz
-/// elapsed row is the only clock that should still be asking for frames, so
-/// `bench-idle` under this flag is that clock's own count and anything above
-/// it is a clock that failed to gate itself.
-fn cut_for_open_turn(events: Vec<MuseEvent>, open_turn: bool) -> Vec<MuseEvent> {
-    if !open_turn {
-        return events;
-    }
-    let last_completed = events.iter().rposition(|event| {
-        matches!(event, MuseEvent::Notification { method, .. } if method == "turn/completed")
-    });
-    match last_completed {
-        Some(at) => events.into_iter().take(at).collect(),
-        None => events,
-    }
 }
 
 /// The wheel instrument's phases: (name, vertical px per event, event
@@ -449,7 +428,7 @@ impl BenchRoot {
             capture: crate::shot::CaptureToken::default(),
             terminal_host: None,
         };
-        let view = cx.new(|cx| SessionView::new("bench".to_owned(), None, host, window, cx));
+        let view = cx.new(|cx| SessionView::new("bench".to_owned(), host, window, cx));
         Self { view }
     }
 }
@@ -590,19 +569,28 @@ const SHELL_VIEW_TIMEOUT: Duration = Duration::from_secs(10);
 /// Drive the bench: stream the capture, scroll the list, then print one line
 /// per metric and quit.
 pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, command: String, cx: &mut App) {
-    let (events, sent) = match session::parse_replay_file(&opts.capture) {
-        Ok(parsed) => parsed,
+    let mut capture = match provider_muse::replay::Capture::load(&opts.capture) {
+        Ok(capture) => capture,
         Err(error) => {
             eprintln!("bench: {}: {error}", opts.capture.display());
             cx.quit();
             return;
         }
     };
-    // `SessionView::apply` drops events for any other session, so the view
-    // opens on the capture's own id (a capture names exactly one) and learns
-    // the prompts turns were sent with, exactly like `--replay`.
-    let session_id = session::capture_session_id(&events).unwrap_or_else(|| "bench".to_owned());
-    let events = cut_for_open_turn(events, opts.open_turn);
+    // The view keeps only its own session's events, so it opens on the
+    // capture's own id (a capture names exactly one) and learns the prompts
+    // turns were sent with, exactly like `--replay`.
+    let session_id = capture.session_id().unwrap_or_else(|| "bench".to_owned());
+    let sent = std::mem::take(&mut capture.sent);
+    // An open turn: cut before the last `turn/completed`, which leaves the
+    // view "Working…" with a live ticker — the 1 Hz elapsed row is then the
+    // only clock that should still be asking for frames, so `bench-idle`
+    // under this flag is that clock's own count.
+    if opts.open_turn {
+        capture.cut_before_last_completion();
+    }
+    let total = capture.len();
+    let events = capture.steps();
     cx.spawn(async move |cx| {
         // Held to the end: dropping the window handle closes the window.
         let _window = handle;
@@ -636,7 +624,6 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                 view
             }
         };
-        let total = events.len();
         let start_samples = session::frame_sample_count();
         let run_start = Instant::now();
         // The stream: one fold-apply per cadence tick, so streaming cost is
@@ -656,7 +643,9 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
             let (micros, done): (u128, Instant) = cx.update(|cx| {
                 view.update(cx, |view, cx| {
                     let start = Instant::now();
-                    view.apply(event, cx);
+                    // The translation a hub lane runs, then the view's fold:
+                    // the whole per-event cost a live stream pays.
+                    view.fold_provider_events(event, cx);
                     let micros = start.elapsed().as_micros();
                     match opts.scroll {
                         BenchScroll::Top => {}
