@@ -850,7 +850,7 @@ impl SessionView {
                         // the stop button up on a settled turn (W8c).
                         // Genuinely new work always carries a new turn id,
                         // exactly as on the muse lane.
-                        if !self.completed_turns.contains(id) {
+                        if !self.completed_turns.contains(id) && !self.provider_kind().reports_turn_lifecycle() {
                             self.running = Some(super::Running {
                                 turn_id: id.clone(),
                                 started: crate::clock::now_instant(),

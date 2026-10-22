@@ -48,6 +48,17 @@ Live checks (BaazCheck, fresh state; the screen was locked, so logs plus the app
 - The owner's saved list (2,661 rows, written by an older build) read as `ListedRow` and topped up with one page.
 - A Claude Code session under `--approval-mode promptUnmatched`: real model menu, Ask chip, Muse rows beside it.
 
+**Driven by hand on 22 Oct (screen unlocked, BaazCheck, full-screen control):** sidebar loads 2,400+ Muse rows
+through the seam; the account menu shows Muse (pay-as-you-go), Claude Code (Max) and Codex usage; an old Muse
+session reopens with its history, model chip, token meter and billing banner; Muse's model, approval-mode and
+effort menus read the neutral rows (five models, Muse's mode wording, Minimal–Max with "default: Max").
+**One defect found and fixed (`fix(P4)` commit after `b39891c`):** reopening a Muse session whose history ends on a
+turn that never finished (a relay run cut off mid-turn) read "Working…" with a stop button for ever. The lane had
+started inferring a running turn from history deltas, which only Claude Code / Codex need; Muse announces its
+turns (`ProviderId::reports_turn_lifecycle`), and the resume envelope's active turn (when Muse sends one) now
+announces a running turn. Test `a_muse_history_turn_that_never_finished_is_not_working` fails without the fix.
+Not driven by hand: a new Muse session's generated title (costs a turn) and Muse sign-out/in (your real credential).
+
 ## 3. How to verify (unchanged gates)
 
 ```bash
