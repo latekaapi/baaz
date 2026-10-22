@@ -600,7 +600,7 @@ dependencies = [
 [[package]]
 name = "aui"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "anyhow",
  "aui-icons",
@@ -615,7 +615,7 @@ dependencies = [
 [[package]]
 name = "aui-cef"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "aui",
  "aui-webview",
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "aui-icons"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "aui-motion"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "aui-tokens",
  "gpui-kit",
@@ -651,7 +651,7 @@ dependencies = [
 [[package]]
 name = "aui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "anyhow",
  "serde",
@@ -660,7 +660,7 @@ dependencies = [
 [[package]]
 name = "aui-terminal"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "alacritty_terminal",
  "aui",
@@ -678,7 +678,7 @@ dependencies = [
 [[package]]
 name = "aui-tokens"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -691,7 +691,7 @@ dependencies = [
 [[package]]
 name = "aui-webview"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.1#7ab2008b47558809f54a7ab6e182246e192c11f6"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
 dependencies = [
  "aui",
  "aui-icons",
@@ -808,8 +808,6 @@ dependencies = [
  "ignore",
  "image",
  "libc",
- "muse-adapter",
- "muse-client",
  "notify",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
@@ -822,6 +820,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "session-store",
  "uuid",
  "zip",
 ]
@@ -877,7 +876,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -5355,8 +5354,10 @@ dependencies = [
  "chrono",
  "criterion",
  "muse-client",
+ "provider",
  "serde",
  "serde_json",
+ "session-store",
  "uuid",
 ]
 
@@ -6705,6 +6706,7 @@ dependencies = [
  "aui-protocol",
  "crossbeam-channel",
  "libc",
+ "uuid",
 ]
 
 [[package]]
@@ -6734,6 +6736,7 @@ name = "provider-muse"
 version = "0.1.0"
 dependencies = [
  "aui-protocol",
+ "base64 0.22.1",
  "crossbeam-channel",
  "muse-adapter",
  "muse-client",
@@ -7897,6 +7900,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
+]
+
+[[package]]
+name = "session-store"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "provider",
 ]
 
 [[package]]
