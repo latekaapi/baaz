@@ -3,22 +3,21 @@
 Read this first in the next session. It replaces docs/62 as the "where are we"; docs/60 §4 (how to verify) and §5
 (rules) still apply. The plan and the as-built record are docs/63 (§3 steps, §6 progress).
 
-**Stage status: BUILT (all eight steps), committed on harness main, NOT pushed.**
+**Stage status: P4 BUILT, owner-tested, PUSHED (2026-10-22).** One P4 remainder waits on an owner decision (§4.1).
 
-## 1. State of the code
+## 1. State of the code — pushed
 
 | Repo | Head | Pushed | Notes |
 |---|---|---|---|
-| agentic-ui (library) | `c2ae1a1` (unchanged by P4) | no | still owes the v0.6.2 tag from the speed stage (docs/62 §1) |
-| harness (Baaz) | `352ac09` (11 P4 commits on `b2fc333`) | no | builds only with the local `.cargo/config.toml` `[patch]` → `../agentic-ui` |
+| agentic-ui (library) | `c2ae1a1`, tag **v0.6.2** | yes | unchanged by P4 |
+| harness (Baaz) | `82e6212` (P4 + fixes, repin `c049d76`, baselines `82e6212`) | yes | `Cargo.toml` pins **v0.6.2** |
 
-`Cargo.lock` shows modified (the patch, the new `session-store` crate, and baaz losing two dependencies): **never
-commit it while the patch is on** — the repin at push regenerates it.
-
-**At "push"** (unchanged from docs/62 §1): tag and push agentic-ui **v0.6.2**, then the repin recipe in docs/61 §1
-(config aside → sed the tag → `cargo update -p aui …` → build + test → commit `Cargo.toml` + `Cargo.lock` → push →
-config back), then regenerate the visual baselines **on main** in their own commit (`right-files` and
-`right-files-reveal` differ on purpose; `right-files-scrolled` is new), then push both.
+- Main-only in both repos. The local `.cargo/config.toml` `[patch]` → `../agentic-ui` is back in place for work, so
+  `Cargo.lock` shows modified again: **never commit it while the patch is on.** The repin recipe is docs/61 §1.
+- Visual baselines regenerated on main at `82e6212` (right-files, right-files-reveal changed on purpose;
+  right-files-scrolled new); the probe against them reports 0 changed regions. **Park the pointer** before a probe
+  (warp it to a screen corner): a hover icon on the Changes fixture otherwise reads as a finding.
+- The owner's Baaz runs `target/bundle/Baaz.app` built from `7872ad6` (same code as the push).
 
 ## 2. What P4 did
 
@@ -122,3 +121,34 @@ Files-pane changes.
 - [ ] Reopen an old Muse session: history pages in; model and context read right.
 - [ ] Usage card in the account menu after a Muse turn.
 - [ ] Archive the stray "Reply with exactly one word: PONG" row (§4.2).
+
+## 7. Prompt for the next session
+
+> Continue the Baaz build. Read `docs/64-handoff-after-p4.md` first (where we are), then `docs/63` §6 (P4 as built),
+> `docs/50` §4/§6/§7 (the providers-equal plan and decisions) and `docs/51` (performance), and the live Baaz Tracker
+> (https://claude.ai/artifact/Fr965AKBn8toZ7BcUk7wCP) before changing anything. Both repos are pushed (agentic-ui
+> v0.6.2, Baaz `82e6212`); work on main with the local `[patch]`, never commit `Cargo.lock` while it is on.
+>
+> **First: finish P4 (docs/64 §4.1).** About 24 `== ProviderId::Muse` branches remain in `app/lifecycle.rs` (plus a
+> few in `app.rs`, `app/titles.rs`, `right_changes.rs`) on the open/reopen paths, Muse start parameters, the boot
+> catalog warm-up and the turn handlers whose Muse rows follow the hub's connection stream. The owner's decision:
+> **[OWNER: fill in — A: give Muse sessions Baaz records like Claude Code / Codex so open, reopen and rows are one
+> path; or B: name each remaining difference as a `ProviderId` registry property and keep the branches]**. Write a
+> short plan doc (docs/65) first; show it to me only if it changes a docs/50 decision. Build it step by step, one
+> commit each, with the same gates as P4: workspace tests, clippy, `python3 scripts/perf-budgets.py --binary
+> target/release/baaz`, the 18-entry probe in CLAUDE.md (plus `right-files-scrolled`), and a look at BaazCheck
+> (fresh state) for every step. Add a ratchet that counts `ProviderId::Muse` outside `providers.rs`, `login.rs`,
+> `tier.rs`, `billing.rs` and Settings content, and drive it to the agreed number.
+>
+> **Then:** the next item on the tracker's plan (Settings D5 beside the agent core R2 is the default; ask me if the
+> tracker says otherwise).
+>
+> Rules: tests never reach a real CLI or server. A Muse turn costs money on this login (pay-as-you-go): spend one
+> only where a step cannot be seen any other way, say so first, keep it to one short turn — and script held sends
+> with `--tier payg` (a cached pay-as-you-go answer older than 10 minutes re-verifies and does not block, which is
+> how four turns were spent by accident). Check `HIDIdleTime` before windowed runs if I might be at the machine; never
+> capture the full screen; prune `target/*/incremental` before long build chains (disk had 15 GB free). When the
+> screen is unlocked you may drive BaazCheck with computer use (bundle id `sh.baaz.check`, granted while it runs; use
+> full-screen control — background window captures miss popovers). Don't push until I say "push"; library changes ship
+> as an agentic-ui tag plus a repin. Design questions the specs don't answer come back to me. At the end: update the
+> tracker (merge into the live version, add a short checklist), memory, a handoff doc, and report per step.
