@@ -7,6 +7,10 @@
 use super::*;
 use aui_protocol::{Delta, Turn};
 
+/// What the notice over the composer says when the billing guard holds a
+/// send: the words are back in the composer, and this is the way through.
+pub(crate) const BILLING_HELD: &str = "Not sent: this login bills every turn. Press Send anyway to send it.";
+
 impl SessionView {
     // -------------------------------------------------------------- commands
 
@@ -123,8 +127,12 @@ impl SessionView {
         }
         // The billing guard holds the send while the pay-as-you-go banner
         // stands (only a Muse session ever carries it): the person says once,
-        // out loud, that they meant it.
+        // out loud, that they meant it. The words go back, and the notice
+        // says why — a held send that only restored the draft read as a
+        // dead send button.
         if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
+            self.banner = Some(BILLING_HELD.to_owned());
+            self.banner_action = None;
             self.restore_prompt(text, cx);
             return;
         }
@@ -661,7 +669,13 @@ impl SessionView {
         // list omits; Claude Code reports resolved full ids): list it as a
         // checked row rather than hiding what the session runs. A refold
         // never duplicates the pick path's row.
-        if !current.is_empty() && !self.models.iter().any(|row| row.model_id == current) {
+        // A provider id is never a model: it is what `model_id` falls back
+        // to when nothing names one yet (a fresh Muse session before its
+        // first turn), so it earns no row.
+        if !current.is_empty()
+            && current != self.provider_id
+            && !self.models.iter().any(|row| row.model_id == current)
+        {
             let label = match self.provider_kind() {
                 ProviderId::ClaudeCode => crate::providers::claude_code_model_label(&current),
                 _ => current.clone(),

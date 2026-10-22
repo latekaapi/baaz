@@ -33,6 +33,7 @@
 //! | `draft:<text>` | put text in the composer |
 //! | `send:<text>` | send a turn — **costs a turn** |
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
+//! | `send-anyway` | the pay-as-you-go banner's "Send anyway": sends what the guard held back — **costs a turn** |
 //! | `model` | open the model picker |
 //! | `effort` | open the reasoning-effort picker |
 //! | `provider` | open the provider picker |
@@ -751,6 +752,9 @@ fn post_key_event(code: u16, _flags: u64) {
 pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "draft", run: |v, rest, window, cx| v.set_draft(rest.to_owned(), window, cx) },
     SessionVerb { verb: "send", run: |v, rest, _, cx| v.send_text(rest.to_owned(), cx) },
+    // The billing banner's "Send anyway", as a verb: sends what the guard
+    // held back — **costs a turn** when there is anything to send.
+    SessionVerb { verb: "send-anyway", run: |v, _, window, cx| v.send_anyway(window, cx) },
     SessionVerb { verb: "steer", run: |v, rest, _, cx| v.steer_text(rest.to_owned(), cx) },
     SessionVerb { verb: "model", run: |v, _, _, cx| v.toggle_picker(MenuKind::Model, cx) },
     SessionVerb { verb: "effort", run: |v, _, _, cx| v.toggle_picker(MenuKind::Effort, cx) },
