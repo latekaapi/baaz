@@ -59,6 +59,17 @@ turns (`ProviderId::reports_turn_lifecycle`), and the resume envelope's active t
 announces a running turn. Test `a_muse_history_turn_that_never_finished_is_not_working` fails without the fix.
 Not driven by hand: a new Muse session's generated title (costs a turn) and Muse sign-out/in (your real credential).
 
+**Owner recording, 22 Oct evening ("not able to send", fixed in `7872ad6`):** the login is genuinely on
+pay-as-you-go (a fresh `--print-tier` probe of Muse's plan card agrees; `tier.json` still remembers an earlier
+"Subscription"), so the docs/06 §4 guard held every Muse send. It put the words back and said nothing, so the arrow
+read as dead. A held send now shows "Not sent: this login bills every turn. Press Send anyway to send it." Two
+P4 regressions found while reproducing it, also fixed: a new Muse session's row was built running ("Working · now"
+before any turn), and the catalog invented a checked "muse" model row (the chip read "muse"). New `send-anyway`
+step verb. **Four short Muse turns were spent by mistake** in a scripted check: a fresh state's cached
+pay-as-you-go answer was older than 10 min, so the banner was re-verifying and (by design, B7) did not block.
+Use `--tier payg` to script a held send. Park the pointer before probes (`tools/park` warps it to a corner): a
+hover icon on the Changes fixture otherwise reads as a finding.
+
 ## 3. How to verify (unchanged gates)
 
 ```bash
