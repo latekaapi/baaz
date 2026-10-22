@@ -3260,6 +3260,39 @@ mod tests {
         });
     }
 
+    /// A fresh Muse session names no model before its first turn: its
+    /// catalog lists Muse's models as they are, with no row invented from
+    /// the provider id (the chip read "muse" with a checked "muse" row).
+    #[gpui::test]
+    fn a_fresh_muse_catalog_invents_no_provider_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "muse".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let row = |id: &str, default: bool| provider::ModelSummary {
+                    id: id.to_owned(),
+                    label: id.to_owned(),
+                    is_default: default,
+                    ..Default::default()
+                };
+                view.apply_model_catalog(vec![row("spark", false), row("spark-contributor", true)], "meta", cx);
+                let ids: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+                assert_eq!(ids, ["spark", "spark-contributor"], "no row for the provider id");
+                assert_eq!(view.model_id(), "spark-contributor", "the chip reads the default model");
+            })
+        });
+    }
+
     /// A Muse session's history can end on a turn that never finished (a run
     /// cut off mid-turn). Reopening it must not read Working: Muse announces
     /// its turns, so the view never infers one from the transcript.

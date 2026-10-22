@@ -2711,13 +2711,17 @@ impl Harness {
         // is spent on one row.
         if provider_id == ProviderId::Muse {
             if !self.sessions.iter().any(|entry| entry.id == session_id) {
-                let row = sidebar::local_started_row(
+                let mut row = sidebar::local_started_row(
                     session_id,
                     sidebar::UNNAMED.to_owned(),
                     project,
                     Some(workspace),
                     crate::clock::now_local(),
                 );
+                // Opened, not started: nothing runs until the first turn
+                // (whose start arms the row). A draft that makes the row
+                // visible must not read Working.
+                row.running = false;
                 self.sessions.push(row);
                 self.invalidate_list();
             }
@@ -7947,6 +7951,7 @@ done
             let row = harness.sessions.iter().find(|entry| entry.id == minted).expect("the row is in");
             assert_eq!(row.project.as_deref(), Some(project.as_str()), "it files under its project");
             assert_eq!(row.turns, 0, "zero turns: out of view until its first send");
+            assert!(!row.running, "opened, not started: a draft that shows the row must not read Working");
             assert!(harness.overlays.read(cx).dialog.is_none(), "no failure dialog");
         });
         let requests = std::fs::read_to_string(&log).unwrap_or_default();

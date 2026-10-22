@@ -590,10 +590,16 @@ for line in sys.stdin:
         });
         assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("bill me"), "the guard holds the words back");
         assert!(stub.saw("turn/start").is_none(), "nothing left while the guard blocks");
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).banner.clone()).as_deref(),
+            Some(crate::session::commands::BILLING_HELD),
+            "a held send says why, rather than reading as a dead button"
+        );
         vc.update(|window, cx| view.update(cx, |view, cx| view.send_anyway(window, cx)));
         wait_for_wire(&stub, vc, "turn/start");
         let start = stub.saw("turn/start").expect("the press sent a turn");
         assert!(start.to_string().contains("bill me"), "the held-back words are the turn: {start}");
+        assert_eq!(vc.update(|_, cx| view.read(cx).banner.clone()), None, "the notice leaves with the send");
     }
 
     /// Quick picks never interleave on the wire, and the latest wins: the
