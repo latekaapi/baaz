@@ -240,6 +240,15 @@ impl ProviderId {
         matches!(self, ProviderId::Muse)
     }
 
+    /// The provider announces each turn's start and end as events
+    /// (`TurnRunning` / `TurnSettled`, from its live stream and its resume
+    /// answer), so a view never infers a running turn from the transcript —
+    /// history can hold a turn that never finished. The others' turns are
+    /// read off the transcript's own start and finish.
+    pub fn reports_turn_lifecycle(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
     /// A model can rule a mode out (Claude Code and Codex models that
     /// cannot run Auto): a mode left unsupported by a model change steps
     /// down to Ask.
@@ -1548,6 +1557,7 @@ mod tests {
             assert_eq!(id.has_reminder_tail(), muse);
             assert_eq!(id.catalog_flags_session_model(), muse);
             assert_eq!(id.models_limit_modes(), !muse);
+            assert_eq!(id.reports_turn_lifecycle(), muse);
             assert_eq!(id.row_mark().is_none(), muse);
         }
     }

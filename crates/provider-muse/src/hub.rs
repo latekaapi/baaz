@@ -564,6 +564,16 @@ impl Core {
                 session_id: Some(session_id.to_owned()),
             })
         });
+        // The envelope is the one word on whether a turn runs now: history
+        // may hold a turn that never finished (a run cut off mid-turn), and
+        // that is not work in progress. A turn the envelope names as active
+        // is, whether or not its start is in what the view has seen.
+        let running = matches!(session.status, muse_client::schema::SessionStatus::Running);
+        if let Some(turn_id) = session.active_turn_id.clone().filter(|_| running) {
+            let mut routed = self.routed.lock().expect("routed mutex");
+            let event = ProviderEvent::TurnRunning { session_id: session_id.to_owned(), turn_id };
+            route(&mut routed, &self.connection.0, session_id, vec![event], false);
+        }
     }
 
     /// Put `text` on the session's banner.

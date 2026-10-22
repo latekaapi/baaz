@@ -3260,6 +3260,52 @@ mod tests {
         });
     }
 
+    /// A Muse session's history can end on a turn that never finished (a run
+    /// cut off mid-turn). Reopening it must not read Working: Muse announces
+    /// its turns, so the view never infers one from the transcript.
+    #[gpui::test]
+    fn a_muse_history_turn_that_never_finished_is_not_working(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Delta, Turn, TurnMeta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "muse".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.provider_kind(), crate::providers::ProviderId::Muse);
+                view.fold_provider_events(
+                    vec![provider::ProviderEvent::Deltas {
+                        session_id: Some("s-1".to_owned()),
+                        deltas: vec![Delta::TurnStarted {
+                            turn: Turn::Assistant {
+                                id: "a-cut".to_owned(),
+                                blocks: Vec::new(),
+                                meta: TurnMeta::default(),
+                                timestamp: None,
+                            },
+                        }],
+                    }],
+                    cx,
+                );
+                assert!(!view.busy(), "a history turn with no end is not work in progress");
+                // A live start still is.
+                view.fold_provider_events(
+                    vec![provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: "a-new".into() }],
+                    cx,
+                );
+                assert!(view.busy(), "the announced turn runs");
+            })
+        });
+    }
+
     /// docs/43 §0: a sent quote's click scrolls back to its source and
     /// flashes the span it was quoted from, once, fading; a quote whose
     /// span is unknown (a reopened session) scrolls without a flash.
