@@ -179,4 +179,35 @@ native sessions (P7); a provider-version manifest fetched from the network.
 
 ## 7. Progress
 
-(filled in per step)
+| Step | Commit | State |
+|---|---|---|
+| plan + S1 + S2 | `8cd0603` | built, gated |
+| S3–S6 | `d8d46c6` | built, gated |
+| S3 fix (idle frames) | `ac6b6d8` | built, gated |
+| S7 (new probe entries) | — | not done: the uncovered states are drawn on the D5 board instead; entries follow the build |
+| D1 mocks | canvas v58, board `D5Providers` | **waiting for the owner** |
+| B1–B5 | — | after approval |
+
+Gates on `ac6b6d8`: `cargo test --workspace` 2,123 passed, 0 failed, 9 ignored; clippy clean; perf budgets: every
+budget met except `idle.cpu_pct` 0.6 > 0.5, which measures the same on the P4 baseline `2262d34` (the known gpui
+display-link wake on the tracker). S3 first added 3 idle frame requests (every probe landing woke the window; a
+landing that changed only `checked_at` redrew the sidebar) — fixed in `ac6b6d8`, 0 again. Visual probe: the 18
+entries + `right-files-scrolled`: 0 changed regions. `connect-first-run`, `connect-checking` and `launch-cached-shell`
+differ from their 2026-09-28 baselines, which predate the v2/v3 redesign; the captures were looked at and read
+right. Baselines not regenerated (that is a deliberate act on main, with the owner).
+
+Live (BaazCheck, fresh `BAAZ_STATE_DIR`, Dock-like `env -i`, launched with `--workspace` on a scratch git repo — the
+case that used to skip onboarding): the Connect your providers screen came up; all three real probes landed and
+the rows filled in with the pointer parked (the S3 wake). Log: `first_run=true`, Muse `Installed · sign-in not
+verified` → `Connected` once its connection answered (a fresh state has no cache to keep), Claude Code and Codex
+Connected. No turn was sent.
+
+Not seen live yet: the S5 Muse Sign in from Settings / the dialog (needs a signed-out Muse), Codex sign-in from
+Settings (needs a signed-out Codex), the S6 re-check after an install (needs a missing CLI). Each is covered by a
+unit test; each wants a hand check on a throwaway account or `CODEX_HOME`.
+
+Two traps met: a gpui test window must not take status wakes (another test's probe thread wakes it → "Your test is
+not deterministic"; tests get a closed channel); the Muse fallback-resolution test depended on being first to fill
+the process-wide login-PATH cache (now resolves against an uncached one). Canvas CSS: never reuse short class names
+(`.s .t .n .k .v .dl .sp .pick` collided with gen_d6) — the board's classes are `p5`-prefixed. `sips --cropOffset`
+ignored its offset here; crop with PIL.

@@ -4,14 +4,14 @@
  "boards": {
   "BrowseClosed.dc.html": {
    "h": 900,
-   "title": "Browse \u00b7 closed",
+   "title": "Browse · closed",
    "w": 1440,
    "x": 1520,
    "y": 3020
   },
   "BrowseOpen.dc.html": {
    "h": 900,
-   "title": "Browse \u00b7 open",
+   "title": "Browse · open",
    "w": 1440,
    "x": 0,
    "y": 3020
@@ -25,105 +25,105 @@
   },
   "D4Answer.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Answer",
+   "title": "D4 · Answer",
    "w": 1440,
    "x": 0,
    "y": 7920
   },
   "D4Approve.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Approval pending",
+   "title": "D4 · Approval pending",
    "w": 1440,
    "x": 0,
    "y": 13700
   },
   "D4Ask.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Question pending",
+   "title": "D4 · Question pending",
    "w": 1440,
    "x": 0,
    "y": 8940
   },
   "D4Blocks.dc.html": {
    "h": 3760,
-   "title": "D4 \u00b7 Blocks",
+   "title": "D4 · Blocks",
    "w": 1440,
    "x": 0,
    "y": 4040
   },
   "D4Cards.dc.html": {
    "h": 1980,
-   "title": "D4 \u00b7 Cards + homes",
+   "title": "D4 · Cards + homes",
    "w": 1440,
    "x": 1520,
    "y": 4040
   },
   "D4Composer.dc.html": {
    "h": 2240,
-   "title": "D4 \u00b7 Composer states",
+   "title": "D4 · Composer states",
    "w": 1440,
    "x": 1520,
    "y": 11220
   },
   "D4Error.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Error + retry",
+   "title": "D4 · Error + retry",
    "w": 1440,
    "x": 1520,
    "y": 13700
   },
   "D4Grill.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Several questions",
+   "title": "D4 · Several questions",
    "w": 1440,
    "x": 3040,
    "y": 13700
   },
   "D4HomeBrowse.dc.html": {
    "h": 900,
-   "title": "Homes \u00b7 Browse",
+   "title": "Homes · Browse",
    "w": 1440,
    "x": 1520,
    "y": 10080
   },
   "D4HomeSessions.dc.html": {
    "h": 900,
-   "title": "Homes \u00b7 Sessions",
+   "title": "Homes · Sessions",
    "w": 1440,
    "x": 0,
    "y": 10080
   },
   "D4More.dc.html": {
    "h": 2240,
-   "title": "D4 \u00b7 More cards",
+   "title": "D4 · More cards",
    "w": 1440,
    "x": 3040,
    "y": 11220
   },
   "D4Pickers.dc.html": {
    "h": 2270,
-   "title": "D4 \u00b7 Pickers + send",
+   "title": "D4 · Pickers + send",
    "w": 1440,
    "x": 0,
    "y": 14720
   },
   "D4Progress.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Goal + tasks",
+   "title": "D4 · Goal + tasks",
    "w": 1440,
    "x": 1520,
    "y": 8940
   },
   "D4Reading.dc.html": {
    "h": 1680,
-   "title": "D4 \u00b7 Reading",
+   "title": "D4 · Reading",
    "w": 1440,
    "x": 0,
    "y": 11220
   },
   "D4Work.dc.html": {
    "h": 900,
-   "title": "D4 \u00b7 Work, fold open",
+   "title": "D4 · Work, fold open",
    "w": 1440,
    "x": 1520,
    "y": 7920
@@ -144,14 +144,14 @@
   },
   "SessionsClosed.dc.html": {
    "h": 900,
-   "title": "Sessions \u00b7 closed",
+   "title": "Sessions · closed",
    "w": 1440,
    "x": 1520,
    "y": 2000
   },
   "SessionsOpen.dc.html": {
    "h": 900,
-   "title": "Sessions \u00b7 open",
+   "title": "Sessions · open",
    "w": 1440,
    "x": 0,
    "y": 2000
@@ -161,175 +161,175 @@
    "y": 14720,
    "w": 1440,
    "h": 1000,
-   "title": "D4 \u00b7 As shipped (captures, 2026-10-17)"
+   "title": "D4 · As shipped (captures, 2026-10-17)"
   },
   "D4QuoteSelect.dc.html": {
    "x": 0,
    "y": 17400,
    "w": 1440,
    "h": 900,
-   "title": "Quote \u00b7 selecting"
+   "title": "Quote · selecting"
   },
   "D4QuoteCompose.dc.html": {
    "x": 1520,
    "y": 17400,
    "w": 1440,
    "h": 900,
-   "title": "Quote \u00b7 in the composer"
+   "title": "Quote · in the composer"
   },
   "D4Quote.dc.html": {
    "x": 3040,
    "y": 17400,
    "w": 1440,
    "h": 1760,
-   "title": "D4 \u00b7 Quote"
+   "title": "D4 · Quote"
   },
   "D6Today.dc.html": {
    "x": 0,
    "y": 19640,
    "w": 1440,
    "h": 1000,
-   "title": "D6 \u00b7 Today (captures)"
+   "title": "D6 · Today (captures)"
   },
   "D6Header.dc.html": {
    "x": 1520,
    "y": 19640,
    "w": 1440,
    "h": 760,
-   "title": "D6 \u00b7 Choosing the pane (locked)"
+   "title": "D6 · Choosing the pane (locked)"
   },
   "D6Changes.dc.html": {
    "x": 0,
    "y": 20760,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Changes"
+   "title": "D6 · Changes"
   },
   "D6Files.dc.html": {
    "x": 1520,
    "y": 20760,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Files"
+   "title": "D6 · Files"
   },
   "D6Preview.dc.html": {
    "x": 3040,
    "y": 20760,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 File preview"
+   "title": "D6 · File preview"
   },
   "D6Page.dc.html": {
    "x": 4560,
    "y": 20760,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Page"
+   "title": "D6 · Page"
   },
   "D6Output.dc.html": {
    "x": 0,
    "y": 21780,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Full output"
+   "title": "D6 · Full output"
   },
   "D6Image.dc.html": {
    "x": 1520,
    "y": 21780,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Image"
+   "title": "D6 · Image"
   },
   "D6PRForm.dc.html": {
    "x": 3040,
    "y": 21780,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Create PR"
+   "title": "D6 · Create PR"
   },
   "D6ChangesLight.dc.html": {
    "x": 4560,
    "y": 21780,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Changes, light"
+   "title": "D6 · Changes, light"
   },
   "D6Narrow.dc.html": {
    "x": 0,
    "y": 22800,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Narrow (280)"
+   "title": "D6 · Narrow (280)"
   },
   "D6Wide.dc.html": {
    "x": 1520,
    "y": 22800,
    "w": 1440,
    "h": 900,
-   "title": "D6 \u00b7 Wide (720), sidebar closed"
+   "title": "D6 · Wide (720), sidebar closed"
   },
   "D6StatesChanges.dc.html": {
    "x": 0,
    "y": 23820,
    "w": 1440,
    "h": 2580,
-   "title": "D6 \u00b7 Changes + git states"
+   "title": "D6 · Changes + git states"
   },
   "D6StatesFiles.dc.html": {
    "x": 1520,
    "y": 23820,
    "w": 1440,
    "h": 2230,
-   "title": "D6 \u00b7 Files + preview states"
+   "title": "D6 · Files + preview states"
   },
   "D6StatesPage.dc.html": {
    "x": 3040,
    "y": 23820,
    "w": 1440,
    "h": 1520,
-   "title": "D6 \u00b7 Page states"
+   "title": "D6 · Page states"
   },
   "D6StatesViews.dc.html": {
    "x": 4560,
    "y": 23820,
    "w": 1440,
    "h": 1500,
-   "title": "D6 \u00b7 Output + image"
+   "title": "D6 · Output + image"
   },
   "D6Light.dc.html": {
    "x": 3040,
    "y": 25460,
    "w": 1440,
    "h": 1540,
-   "title": "D6 \u00b7 Light"
+   "title": "D6 · Light"
   },
   "D6OptA.dc.html": {
    "x": 0,
    "y": 27260,
    "w": 1440,
    "h": 900,
-   "title": "Option A \u00b7 toggles, one pane (recommended)"
+   "title": "Option A · toggles, one pane (recommended)"
   },
   "D6OptB.dc.html": {
    "x": 1520,
    "y": 27260,
    "w": 1440,
    "h": 900,
-   "title": "Option B \u00b7 toggles, stack two"
+   "title": "Option B · toggles, stack two"
   },
   "D6OptC.dc.html": {
    "x": 3040,
    "y": 27260,
    "w": 1440,
    "h": 900,
-   "title": "Option C \u00b7 toggles, side by side"
+   "title": "Option C · toggles, side by side"
   },
   "D6OptD.dc.html": {
    "x": 4560,
    "y": 27260,
    "w": 1440,
    "h": 900,
-   "title": "Option D \u00b7 no chooser"
+   "title": "Option D · no chooser"
   },
   "D6Carousel.dc.html": {
    "x": 0,
@@ -337,6 +337,27 @@
    "w": 1440,
    "h": 1560,
    "title": "Option A + strip: panes as screens, a toggle slides"
+  },
+  "D6PageRecent.dc.html": {
+   "x": 6080,
+   "y": 23820,
+   "w": 1440,
+   "h": 1500,
+   "title": "D6 · Page — recent pages (2026-10-18)"
+  },
+  "D6OneBar.dc.html": {
+   "x": 7600,
+   "y": 23820,
+   "w": 1440,
+   "h": 1440,
+   "title": "D6 · One bar per screen — PROPOSAL (2026-10-21)"
+  },
+  "D5Providers.dc.html": {
+   "x": 0,
+   "y": 30040,
+   "w": 1440,
+   "h": 4200,
+   "title": "D5 · Providers — first run, setup, provider card — PROPOSAL (2026-10-24)"
   }
  },
  "createdOnFiles": {
@@ -360,7 +381,7 @@
    "y": 11220,
    "w": 420,
    "fill": "blue",
-   "text": "Round 3. Reading: body 14.3 / 23 with 12 between paragraphs, headings with their own air, quote as a 2 px rule, image as a Raised block with its caption inside; content is a new fixture of real project prose (fixtures/msp/synthetic-reading.jsonl). Composer: the chip row for attachments (image thumbnail or file glyph + name + meta, \u2715), uploading and failed states, the drop ring, the @ and / menus at Floating, the queued row, running with stop. More cards: plan, summary, search, web, browser, delegated, MCP, your own $ command, skill loaded, markers, needs-you banner, streaming caret and shimmer, the hand-off as a marker row (no card: the confirm dialog already lists what crosses over), unknown kind, the empty session. Everything from the app's captures or the library's own sample data."
+   "text": "Round 3. Reading: body 14.3 / 23 with 12 between paragraphs, headings with their own air, quote as a 2 px rule, image as a Raised block with its caption inside; content is a new fixture of real project prose (fixtures/msp/synthetic-reading.jsonl). Composer: the chip row for attachments (image thumbnail or file glyph + name + meta, ✕), uploading and failed states, the drop ring, the @ and / menus at Floating, the queued row, running with stop. More cards: plan, summary, search, web, browser, delegated, MCP, your own $ command, skill loaded, markers, needs-you banner, streaming caret and shimmer, the hand-off as a marker row (no card: the confirm dialog already lists what crosses over), unknown kind, the empty session. Everything from the app's captures or the library's own sample data."
   },
   "n11": {
    "x": 4560,
@@ -374,7 +395,7 @@
    "y": 14720,
    "w": 420,
    "fill": "blue",
-   "text": "Round 5. The four composer pickers on the one dropdown (Floating, r 10, the edge + float drop, 6 px padding so the row highlight never touches the panel's edge; rows r 6, selected 9 % + semibold + check): provider rows as mark + name only (another provider on a session with turns opens the hand-off confirm; hand-off also sits in the \u22ef menu), models with context in faint mono and 9 % badges, effort with its nine meanings, approval mode with four. Nested: a submenu opens beside its row, 4 px away \u2014 to the left for the right-side pickers (model, mode, effort), as shipped; pickers hang 6 px above their own button. Effort as a slider: 4 px track, 8 ticks, 16 px thumb, name + meaning above, Default kept as a row. Send / stop: the composer's only solid fill \u2014 foreground when a draft, attachment or queued line exists and while running (stop square), muted at Floating when empty. Applied to every screen with a draft or a running turn."
+   "text": "Round 5. The four composer pickers on the one dropdown (Floating, r 10, the edge + float drop, 6 px padding so the row highlight never touches the panel's edge; rows r 6, selected 9 % + semibold + check): provider rows as mark + name only (another provider on a session with turns opens the hand-off confirm; hand-off also sits in the ⋯ menu), models with context in faint mono and 9 % badges, effort with its nine meanings, approval mode with four. Nested: a submenu opens beside its row, 4 px away — to the left for the right-side pickers (model, mode, effort), as shipped; pickers hang 6 px above their own button. Effort as a slider: 4 px track, 8 ticks, 16 px thumb, name + meaning above, Default kept as a row. Send / stop: the composer's only solid fill — foreground when a draft, attachment or queued line exists and while running (stop square), muted at Floating when empty. Applied to every screen with a draft or a running turn."
   },
   "n2": {
    "fill": "blue",
@@ -392,14 +413,14 @@
   },
   "n4": {
    "fill": "blue",
-   "text": "Revised 2026-10-13 (owner round 7): the sidebar column full height on the frame with its chrome row on top \u2014 lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line over a 64 px fade, like Claude Desktop \u2014 no app-wide header in either mode. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once) and NOTHING stays \u2014 no row, no toggle, not even the traffic lights (hidden with the column). A 150 ms rest on the window's top edge (the 6 px frame band above the sheet) or its left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, rounded 8 at the bottom right with a drop to its right, its own row (lights \u00b7 toggle \u00b7 switch) riding in with it; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % \u2192 0 over 20 px); rows fade under the row (24 px).",
+   "text": "Revised 2026-10-13 (owner round 7): the sidebar column full height on the frame with its chrome row on top — lights (12,16), Hide/Show sidebar at x 84, the switch ending 12 before the column's edge; the sheet 6 px in with its own 32 px title row (title at 16, actions right) on the lights' line over a 64 px fade, like Claude Desktop — no app-wide header in either mode. Closed: only the column leaves (ease-out 260 / 220 ms, the sheet's content laid out once) and NOTHING stays — no row, no toggle, not even the traffic lights (hidden with the column). A 150 ms rest on the window's top edge (the 6 px frame band above the sheet) or its left edge peeks the whole sidebar as the frame-coloured column flush with the window's left, top and bottom, rounded 8 at the bottom right with a drop to its right, its own row (lights · toggle · switch) riding in with it; after a toggle the peek waits for the pointer to leave and come back. Depth: the sheet's contact shadow beside the open sidebar (black 16 % → 0 over 20 px); rows fade under the row (24 px).",
    "w": 420,
    "x": 3040,
    "y": 2000
   },
   "n5": {
    "fill": "blue",
-   "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed (owner round 7): nothing sits over the page \u2014 the sheet is the whole window less the 6 px frame; the top or left edge peeks the sidebar with the address, the tabs and the controls over the page. No tab strip. The peek over the native page is a hole cut through the page window (holes add up, so an overlap never flips back).",
+   "text": "Browse: the page is the sheet, white on the frame. The address and the page controls live in the sidebar's own header, open or peeked. Closed (owner round 7): nothing sits over the page — the sheet is the whole window less the 6 px frame; the top or left edge peeks the sidebar with the address, the tabs and the controls over the page. No tab strip. The peek over the native page is a hole cut through the page window (holes add up, so an overlap never flips back).",
    "w": 420,
    "x": 3040,
    "y": 3020
@@ -413,7 +434,7 @@
   },
   "n7": {
    "fill": "blue",
-   "text": "D4 rules (proposed, 2026-10-13). Inside the sheet only Raised, Raised-lit and the Well, with the one edge; blocks and cards take radius 8 (the sheet's own), the user turn keeps 12 like the composer. Rows that only report \u2014 Worked for\u2026, Thought\u2026, Allowed, Answered, the live activity row \u2014 carry no surface: a 32 px quiet row, chevron left, muted text, the 5 % overlay on hover. A card that needs you (approval, question, failure) swaps the white ring for a 70 % ring in its status colour; nothing else is marked. Shell output and commands sit on the Well; a diff on Raised with 10 % line tints. Text is the FF roles at the app's 1.1 scale (body 14.3 / 22, caption 13.2 / 18, title 17.6 / 24, mono 12.65 / 20); spacing is unscaled. No standing actions anywhere: a hovered turn shows copy (and edit on yours) with its meta; code blocks show copy on hover; tool cards have no buttons; cards carry only the choices the provider minted. Content is lifted from the fixture captures, nothing invented.",
+   "text": "D4 rules (proposed, 2026-10-13). Inside the sheet only Raised, Raised-lit and the Well, with the one edge; blocks and cards take radius 8 (the sheet's own), the user turn keeps 12 like the composer. Rows that only report — Worked for…, Thought…, Allowed, Answered, the live activity row — carry no surface: a 32 px quiet row, chevron left, muted text, the 5 % overlay on hover. A card that needs you (approval, question, failure) swaps the white ring for a 70 % ring in its status colour; nothing else is marked. Shell output and commands sit on the Well; a diff on Raised with 10 % line tints. Text is the FF roles at the app's 1.1 scale (body 14.3 / 22, caption 13.2 / 18, title 17.6 / 24, mono 12.65 / 20); spacing is unscaled. No standing actions anywhere: a hovered turn shows copy (and edit on yours) with its meta; code blocks show copy on hover; tool cards have no buttons; cards carry only the choices the provider minted. Content is lifted from the fixture captures, nothing invented.",
    "w": 420,
    "x": 3040,
    "y": 4040
@@ -427,7 +448,7 @@
   },
   "n9": {
    "fill": "blue",
-   "text": "Homes for the three controls (owner's placements, docs/40 \u00a73). Toast chip and feedback slot: a corner stack 12 px from the sheet's right, newest toast above the slot, 8 apart; in Sessions the stack sits 8 above the composer's top edge, in Browse 12 above the sheet's bottom \u2014 an overlay window over the native page. Both are Floating with the edge and the float drop. Downloads: a 28 px icon button in the Browse sidebar's control row before \u2726 and \u22ef, a 6 px dot while a download runs, present only while downloads list; its list is the menu. Open for you: (1) quiet rows instead of cards for Worked / Thought / resolved; (2) radius 8 on blocks; (3) the status-colour ring on cards that need you; (4) actions only on hover, and only copy / edit; (5) the corner-stack rule.",
+   "text": "Homes for the three controls (owner's placements, docs/40 §3). Toast chip and feedback slot: a corner stack 12 px from the sheet's right, newest toast above the slot, 8 apart; in Sessions the stack sits 8 above the composer's top edge, in Browse 12 above the sheet's bottom — an overlay window over the native page. Both are Floating with the edge and the float drop. Downloads: a 28 px icon button in the Browse sidebar's control row before ✦ and ⋯, a 6 px dot while a download runs, present only while downloads list; its list is the menu. Open for you: (1) quiet rows instead of cards for Worked / Thought / resolved; (2) radius 8 on blocks; (3) the status-colour ring on cards that need you; (4) actions only on hover, and only copy / edit; (5) the corner-stack rule.",
    "w": 420,
    "x": 3040,
    "y": 10080
@@ -435,7 +456,7 @@
   "t1": {
    "kind": "title1",
    "maxW": 2960,
-   "text": "Baaz v3 \u2014 FINAL 2026-10-12: tone, depth, composer, then the four screens",
+   "text": "Baaz v3 — FINAL 2026-10-12: tone, depth, composer, then the four screens",
    "w": 240,
    "x": 0,
    "y": -240
@@ -443,7 +464,7 @@
   "t2": {
    "kind": "title1",
    "maxW": 2960,
-   "text": "The four screens \u2014 Sessions and Browse, open and closed",
+   "text": "The four screens — Sessions and Browse, open and closed",
    "w": 240,
    "x": 0,
    "y": 1760
@@ -451,7 +472,7 @@
   "t3": {
    "kind": "title1",
    "maxW": 2960,
-   "text": "D4 \u2014 the transcript on the v3 ladder (2026-10-13): the blocks, the cards, four screens, three homes",
+   "text": "D4 — the transcript on the v3 ladder (2026-10-13): the blocks, the cards, four screens, three homes",
    "w": 240,
    "x": 0,
    "y": 3800
@@ -459,7 +480,7 @@
   "t4": {
    "kind": "title1",
    "maxW": 4400,
-   "text": "Round 3 (owner, 2026-10-13): reading, the composer\u2019s states, the remaining cards",
+   "text": "Round 3 (owner, 2026-10-13): reading, the composer’s states, the remaining cards",
    "w": 240,
    "x": 0,
    "y": 10980
@@ -483,7 +504,7 @@
   "t7": {
    "kind": "title1",
    "maxW": 4400,
-   "text": "D4 leftover (2026-10-17): the quote flow \u2014 select, Quote, a block in the composer, a quote in your message",
+   "text": "D4 leftover (2026-10-17): the quote flow — select, Quote, a block in the composer, a quote in your message",
    "w": 240,
    "x": 0,
    "y": 17160
@@ -493,19 +514,19 @@
    "y": 17400,
    "w": 420,
    "fill": "blue",
-   "text": "Quote flow (proposed 2026-10-17). Select text in any turn \u2014 an answer, your own message, a card's output \u2014 and on mouse-up one Floating bar hangs 6 px above the selection's first line, left edge at the selection's start: one control, Quote. (Under the title row it hangs below the last line instead.) Quote moves the words into the composer's field as a block above your draft (2 px rule, muted, two lines, \u2715) and gives the field the keyboard. A selection across blocks stays one quote and keeps its Markdown; one inside a code block or shell output is a code quote (mono, its language). A selection never crosses a turn: it stops at the turn it started in. Quote again \u2192 a second block; the same text twice \u2192 nothing new. Sent, it is the D4 quote block at the top of your bubble; clicking it scrolls to the source and flashes it. Esc, a click elsewhere or clearing the selection removes the bar; it rides with the text while scrolling and hides under the title row or the composer. No Copy in the bar (\u2318C), no shortcut."
+   "text": "Quote flow (proposed 2026-10-17). Select text in any turn — an answer, your own message, a card's output — and on mouse-up one Floating bar hangs 6 px above the selection's first line, left edge at the selection's start: one control, Quote. (Under the title row it hangs below the last line instead.) Quote moves the words into the composer's field as a block above your draft (2 px rule, muted, two lines, ✕) and gives the field the keyboard. A selection across blocks stays one quote and keeps its Markdown; one inside a code block or shell output is a code quote (mono, its language). A selection never crosses a turn: it stops at the turn it started in. Quote again → a second block; the same text twice → nothing new. Sent, it is the D4 quote block at the top of your bubble; clicking it scrolls to the source and flashes it. Esc, a click elsewhere or clearing the selection removes the bar; it rides with the text while scrolling and hides under the title row or the composer. No Copy in the bar (⌘C), no shortcut."
   },
   "n14": {
    "x": 3040,
    "y": 15420,
    "w": 420,
    "fill": "blue",
-   "text": "Refreshed 2026-10-17 to the build you reviewed and shipped (baaz 65f3698, aui v0.5.1), measured from the captures beside this note: reading 16 / 26 (h2 20, h3 17, blocks 14 / turns 28 apart); the composer in Claude Desktop's shape (field 50 tall with send inside, edge 8 % \u2192 22 % focused, a soft drop, controls row 6 below, 20 to the sheet's edge, floating over a fade); progress inline at the end of the transcript (no pinned row, no printed esc hint); the opaque title row with a 24 px fade; the sidebar list fading at both edges; right-side pickers' submenus open left. Sessions open / closed now show the real app's sheet. Board labels carry the new numbers; docs/41 'Owner review of the live build' is the source."
+   "text": "Refreshed 2026-10-17 to the build you reviewed and shipped (baaz 65f3698, aui v0.5.1), measured from the captures beside this note: reading 16 / 26 (h2 20, h3 17, blocks 14 / turns 28 apart); the composer in Claude Desktop's shape (field 50 tall with send inside, edge 8 % → 22 % focused, a soft drop, controls row 6 below, 20 to the sheet's edge, floating over a fade); progress inline at the end of the transcript (no pinned row, no printed esc hint); the opaque title row with a 24 px fade; the sidebar list fading at both edges; right-side pickers' submenus open left. Sessions open / closed now show the real app's sheet. Board labels carry the new numbers; docs/41 'Owner review of the live build' is the source."
   },
   "t8": {
    "kind": "title1",
    "maxW": 5960,
-   "text": "D6 \u2014 the right pane, LOCKED 2026-10-17: toggles in the transcript row, panes as screens on a strip; Changes with git, Files and preview, the session\u2019s Page, full output and image",
+   "text": "D6 — the right pane, LOCKED 2026-10-17: toggles in the transcript row, panes as screens on a strip; Changes with git, Files and preview, the session’s Page, full output and image",
    "w": 240,
    "x": 0,
    "y": 19400
@@ -515,19 +536,19 @@
    "y": 19640,
    "w": 440,
    "fill": "blue",
-   "text": "D6, LOCKED by the owner 2026-10-17 (A + strip). Reference: Claude Desktop. The pane is a second sheet; its row is the screen\u2019s glyph, name, own actions and \u2715 \u2014 no tab bar. Toggles in the transcript\u2019s title row (Changes \u00b7 Files \u00b7 Page, then Terminal) choose the screen: the lit one is what the pane shows; another slides the strip there (240 ms ease-out, screens keep their state); the lit one again, the \u2715 or \u2318\u2325B closes. Inside a screen, one \u2018pushed view\u2019 (\u2190 back, title, \u22642 actions, \u2715) for a file preview, the PR form, a tool\u2019s full output, an image. Changes carries git (owner): this session\u2019s files, the others, the diff inline, and one box at the foot whose single primary follows the branch \u2014 Commit N files \u2192 Push \u2192 Create PR \u2192 the PR card. Page is the session\u2019s one page (owner): nav row under the pane row, no tab strip, \u2018open in Browse\u2019. Removed: tab bar, Files\u2019 refresh and footer, the browser tab strip, the console button. FF rows on the v3 ladder (28 / 32, r 6, 5 % / 9 %). Light drawn for the first time."
+   "text": "D6, LOCKED by the owner 2026-10-17 (A + strip). Reference: Claude Desktop. The pane is a second sheet; its row is the screen’s glyph, name, own actions and ✕ — no tab bar. Toggles in the transcript’s title row (Changes · Files · Page, then Terminal) choose the screen: the lit one is what the pane shows; another slides the strip there (240 ms ease-out, screens keep their state); the lit one again, the ✕ or ⌘⌥B closes. Inside a screen, one ‘pushed view’ (← back, title, ≤2 actions, ✕) for a file preview, the PR form, a tool’s full output, an image. Changes carries git (owner): this session’s files, the others, the diff inline, and one box at the foot whose single primary follows the branch — Commit N files → Push → Create PR → the PR card. Page is the session’s one page (owner): nav row under the pane row, no tab strip, ‘open in Browse’. Removed: tab bar, Files’ refresh and footer, the browser tab strip, the console button. FF rows on the v3 ladder (28 / 32, r 6, 5 % / 9 %). Light drawn for the first time."
   },
   "n16": {
    "x": 3040,
    "y": 22800,
    "w": 440,
    "fill": "blue",
-   "text": "Widths 280 (min) \u2013 720 (max), default 400. Narrow drops the Page row\u2019s back / forward and Changes\u2019 folder names; nothing else changes; the diff stays unified at every width. Still open for you (defaults drawn): (1) Commit takes every listed file \u2014 no staging; (2) the PR card\u2019s View opens in Browse; (3) the light values."
+   "text": "Widths 280 (min) – 720 (max), default 400. Narrow drops the Page row’s back / forward and Changes’ folder names; nothing else changes; the diff stays unified at every width. Still open for you (defaults drawn): (1) Commit takes every listed file — no staging; (2) the PR card’s View opens in Browse; (3) the light values."
   },
   "t9": {
    "kind": "title1",
    "maxW": 5960,
-   "text": "D6 \u00b7 round 2 (owner, 2026-10-17): no tab bar \u2014 four ways to choose what the pane shows",
+   "text": "D6 · round 2 (owner, 2026-10-17): no tab bar — four ways to choose what the pane shows",
    "w": 240,
    "x": 0,
    "y": 27020
@@ -537,7 +558,7 @@
    "y": 27260,
    "w": 440,
    "fill": "blue",
-   "text": "DECIDED (owner, 2026-10-17): Option A + the strip (board below). B, C and D are kept for the record only. No tab bar in any option: the pane's own row is just its glyph, its name and its actions. A \u00b7 Toggles in the transcript's title row (Changes \u00b7 Files \u00b7 Page, then Terminal, which already works this way): a lit icon is the pane on screen; click another to swap, the lit one to close. One pane at a time; the terminal docks below as today, so 'several selected' means one right pane + the terminal. B \u00b7 The same toggles, but up to two can be on: the pane splits top / bottom (drag the line); a third replaces the older one. C \u00b7 Two on = two columns side by side; needs a wide window (here the sidebar had to close). D \u00b7 No chooser: one pane toggle; the pane shows whatever you last opened from the transcript (a diff chip, a file link, an output, a page) with Back; Files would be \u2318P, Changes the fold row's chip. Recommendation: A \u2014 one mechanism the header already uses for the terminal, nothing hidden, no layout to manage; B only if you often want Changes and the Page together."
+   "text": "DECIDED (owner, 2026-10-17): Option A + the strip (board below). B, C and D are kept for the record only. No tab bar in any option: the pane's own row is just its glyph, its name and its actions. A · Toggles in the transcript's title row (Changes · Files · Page, then Terminal, which already works this way): a lit icon is the pane on screen; click another to swap, the lit one to close. One pane at a time; the terminal docks below as today, so 'several selected' means one right pane + the terminal. B · The same toggles, but up to two can be on: the pane splits top / bottom (drag the line); a third replaces the older one. C · Two on = two columns side by side; needs a wide window (here the sidebar had to close). D · No chooser: one pane toggle; the pane shows whatever you last opened from the transcript (a diff chip, a file link, an output, a page) with Back; Files would be ⌘P, Changes the fold row's chip. Recommendation: A — one mechanism the header already uses for the terminal, nothing hidden, no layout to manage; B only if you often want Changes and the Page together."
   }
  },
  "order": [
@@ -588,7 +609,10 @@
   "SessionsOpen.dc.html",
   "Composers.dc.html",
   "Depth.dc.html",
-  "Main.dc.html"
+  "Main.dc.html",
+  "D6PageRecent.dc.html",
+  "D6OneBar.dc.html",
+  "D5Providers.dc.html"
  ],
  "pages": [],
  "title": "Baaz v3"
