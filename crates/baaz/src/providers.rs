@@ -257,6 +257,53 @@ impl ProviderId {
     }
 }
 
+/// How a person gets, updates and reads about each provider's CLI — one
+/// table for the connect screen and Settings (docs/65 §3.1 #9). Commands
+/// are typed into a terminal for the person to run, never run by Baaz.
+impl ProviderId {
+    /// The vendor install command. Muse has none: no installer is
+    /// published, so its missing row links to [`Self::docs_url`] instead.
+    pub fn install_command(self) -> Option<&'static str> {
+        match self {
+            ProviderId::ClaudeCode => Some("curl -fsSL https://claude.ai/install.sh | bash"),
+            ProviderId::Codex => Some("npm i -g @openai/codex"),
+            ProviderId::Muse => None,
+        }
+    }
+
+    /// The CLI's own update command, offered beside a too-old advisory.
+    /// Muse's launcher updates itself.
+    pub fn update_command(self) -> Option<&'static str> {
+        match self {
+            ProviderId::ClaudeCode => Some("claude update"),
+            ProviderId::Codex => Some("npm i -g @openai/codex@latest"),
+            ProviderId::Muse => None,
+        }
+    }
+
+    /// The oldest CLI Baaz supports, as data: below it the status carries a
+    /// too-old advisory (never a block). Muse's is the seam's floor; Claude
+    /// Code's and Codex's are the versions their adapters were probed and
+    /// verified against (docs/23, docs/65 §3.1 #5).
+    pub fn version_floor(self) -> &'static str {
+        match self {
+            ProviderId::Muse => provider_muse::MUSE_VERSION_FLOOR,
+            ProviderId::ClaudeCode => "2.1.276",
+            ProviderId::Codex => "0.144.6",
+        }
+    }
+
+    /// The vendor docs behind every Docs button — for Muse, the page a
+    /// person gets it from (the owner's link, 2026-10-23).
+    pub fn docs_url(self) -> &'static str {
+        match self {
+            ProviderId::ClaudeCode => "https://docs.anthropic.com/en/docs/claude-code",
+            ProviderId::Codex => "https://developers.openai.com/codex",
+            ProviderId::Muse => "https://dev.meta.ai/lp/muse-code",
+        }
+    }
+}
+
 // ------------------------------------------------- finding the CLIs
 
 /// The binary a provider lane spawns: `None` for muse, which rides the

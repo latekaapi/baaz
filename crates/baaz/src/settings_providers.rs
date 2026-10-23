@@ -39,8 +39,12 @@ pub(crate) const PROVIDERS_SECTION_ID: &str = "providers";
 /// Install + Docs; Can't run → Re-check + Docs. Checking and Disabled
 /// only re-check (the switch beside them is the action); Unverified
 /// offers Sign in + Re-check like Signed out.
-pub(crate) fn actions_for(headline: Headline) -> Vec<ProviderActionDef> {
+pub(crate) fn actions_for(id: ProviderId, headline: Headline) -> Vec<ProviderActionDef> {
     match headline {
+        // No command to type (Muse): the link is the whole way in.
+        Headline::NotInstalled if id.install_command().is_none() => {
+            vec![crate::connect::get_action(id)]
+        }
         Headline::Connected => vec![ProviderActionDef::sign_out(), ProviderActionDef::recheck()],
         Headline::SignedOut | Headline::Unverified => {
             vec![ProviderActionDef::sign_in(), ProviderActionDef::recheck()]
@@ -78,8 +82,8 @@ pub(crate) fn account_line(auth: &Auth) -> Option<String> {
     }
 }
 
-/// The version chip and the advisory line. A `TooOld` advisory reads
-/// `"Too old — need ≥ <need>"`; a `CantRun` advisory surfaces its
+/// The version chip and the advisory line. A `TooOld` advisory names the
+/// floor and the CLI's own update command; a `CantRun` advisory surfaces its
 /// excerpt (timeouts name the timeout).
 pub(crate) fn version_parts(status: &ProviderStatus) -> (Option<String>, Option<String>) {
     let version = match &status.installed {
@@ -90,9 +94,10 @@ pub(crate) fn version_parts(status: &ProviderStatus) -> (Option<String>, Option<
     };
     let advisory = match &status.advisory {
         crate::provider_status::Advisory::None => None,
-        crate::provider_status::Advisory::TooOld { need } => {
-            Some(format!("Too old — need ≥ {need}"))
-        }
+        crate::provider_status::Advisory::TooOld { need } => Some(match status.provider.update_command() {
+            Some(command) => format!("Older than Baaz supports (≥ {need}) — update with `{command}`"),
+            None => format!("Older than Baaz supports (≥ {need})"),
+        }),
         crate::provider_status::Advisory::CantRun { stderr, timed_out } => {
             if *timed_out {
                 Some(format!("Couldn't check — {stderr}"))
@@ -118,7 +123,7 @@ pub(crate) fn card_data(status: &ProviderStatus) -> ProviderCardData {
         version: version.map(SharedString::from),
         advisory: advisory.map(SharedString::from),
         enabled: status.enabled,
-        actions: actions_for(headline),
+        actions: actions_for(status.provider, headline),
     }
 }
 
@@ -172,22 +177,15 @@ pub(crate) fn disabled_banner(id: ProviderId) -> String {
     format!("{} is disabled in Settings — Enable", id.label())
 }
 
-/// The install command typed (not run) into the dock terminal.
-pub(crate) fn install_command(id: ProviderId) -> &'static str {
-    match id {
-        ProviderId::ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
-        ProviderId::Codex => "npm i -g @openai/codex",
-        ProviderId::Muse => "curl -fsSL https://www.muse.dev/install.sh | bash",
-    }
+/// The install command typed (not run) into the dock terminal, when the
+/// provider has one (the registry's table).
+pub(crate) fn install_command(id: ProviderId) -> Option<&'static str> {
+    id.install_command()
 }
 
 /// Where the card's Docs button goes.
 pub(crate) fn docs_url(id: ProviderId) -> &'static str {
-    match id {
-        ProviderId::ClaudeCode => "https://docs.anthropic.com/en/docs/claude-code",
-        ProviderId::Codex => "https://developers.openai.com/codex",
-        ProviderId::Muse => "https://www.muse.dev/docs",
-    }
+    id.docs_url()
 }
 
 // ------------------------------------------------------------ sign out
@@ -645,7 +643,8 @@ impl Harness {
             ProviderAction::SignIn => self.begin_provider_signin(id, window, cx),
             ProviderAction::SignOut => self.ask_provider_signout(id, cx),
             ProviderAction::Install => {
-                self.open_terminal_typed(install_command(id), window, cx);
+                let Some(command) = install_command(id) else { return };
+                self.open_terminal_typed(command, window, cx);
                 self.overlays.update(cx, |overlays, _| {
                     overlays.toast(
                         format!("Install {}", id.label()),
@@ -965,7 +964,7 @@ mod tests {
     #[test]
     fn missing_card_installs() {
         let data = card_data(&status(
-            ProviderId::Muse,
+            ProviderId::Codex,
             Installed::No,
             Auth::Unknown,
             true,
@@ -974,6 +973,10 @@ mod tests {
         let labels: Vec<&str> =
             data.actions.iter().map(|def| def.label.as_ref()).collect();
         assert_eq!(labels, vec!["Install", "Docs"]);
+        // Muse has no command to type: its missing card is the one link.
+        let muse = card_data(&status(ProviderId::Muse, Installed::No, Auth::Unknown, true));
+        let labels: Vec<&str> = muse.actions.iter().map(|def| def.label.as_ref()).collect();
+        assert_eq!(labels, vec!["Get Muse"]);
     }
 
     #[test]
