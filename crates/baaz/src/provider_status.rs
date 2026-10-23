@@ -499,13 +499,38 @@ fn real_run(program: &str, args: &[String], timeout: Duration) -> RunOutcome {
 }
 
 /// What the existing muse connection says: the account state without a
-/// second connection. `None` means the connection has said nothing yet.
+/// second connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MuseAccount {
     /// The account email, when the connection reported one.
     pub email: Option<String>,
     /// The plan or tier label, when known.
     pub plan: Option<String>,
+}
+
+/// What the live Muse connection has said about the login, three ways: it
+/// has not answered yet, it answered "no login", or it answered with one.
+/// The second used to collapse into the first, so a signed-out Muse read
+/// "sign-in not verified" for ever (docs/65 §1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MuseAuthRead {
+    /// No `account/read` or `account/changed` yet (or no connection).
+    #[default]
+    NotRead,
+    /// The connection reported no login.
+    SignedOut,
+    /// The connection reported this login.
+    SignedIn(MuseAccount),
+}
+
+impl From<Option<MuseAccount>> for MuseAuthRead {
+    /// What the connection reported: an account, or no login.
+    fn from(account: Option<MuseAccount>) -> Self {
+        match account {
+            Some(account) => MuseAuthRead::SignedIn(account),
+            None => MuseAuthRead::SignedOut,
+        }
+    }
 }
 
 /// Unix seconds now. Best-effort: zero when the clock is unavailable.
@@ -529,13 +554,38 @@ fn parse_version(stdout: &str) -> String {
     excerpt(first, 80)
 }
 
+/// The first `x.y.z` in a `--version` line: `2.1.276 (Claude Code)`,
+/// `codex-cli 0.144.6`, `Muse Code 1.4.11 (1.4.11-R6667.1)`. `None` when
+/// there is none — an unreadable version is never called too old.
+pub(crate) fn version_triplet(text: &str) -> Option<(u64, u64, u64)> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter_map(|word| {
+            let mut parts = word.split('.').filter(|part| !part.is_empty());
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let patch = parts.next()?.parse().ok()?;
+            Some((major, minor, patch))
+        })
+        .next()
+}
+
+/// The too-old advisory for a version line, against the registry's floor
+/// ([`ProviderId::version_floor`]). Advisory only: it never blocks a turn.
+fn floor_advisory(id: ProviderId, version_line: &str) -> Advisory {
+    let floor = id.version_floor();
+    match (version_triplet(version_line), version_triplet(floor)) {
+        (Some(have), Some(need)) if have < need => Advisory::TooOld { need: floor.into() },
+        _ => Advisory::None,
+    }
+}
+
 /// The status service: the three statuses, when each was last probed,
 /// and the injectable command surface behind every probe.
 pub struct Service {
     statuses: HashMap<ProviderId, ProviderStatus>,
     last_probe: HashMap<ProviderId, Instant>,
     probes: Probes,
-    muse_auth: Option<MuseAccount>,
+    muse_auth: MuseAuthRead,
     /// The last Muse read carried no numbers while a good snapshot stands:
     /// the rows keep the old numbers and their age, with an "unavailable
     /// now" note beside them, instead of wiping to an empty snapshot.
@@ -553,7 +603,7 @@ impl Service {
             statuses,
             last_probe: HashMap::new(),
             probes,
-            muse_auth: None,
+            muse_auth: MuseAuthRead::NotRead,
             muse_unavailable_now: false,
         }
     }
@@ -567,8 +617,8 @@ impl Service {
 
     /// Feed the service the existing muse connection's account state. No
     /// second connection is ever opened: the Muse auth probe is this.
-    pub fn set_muse_auth(&mut self, account: Option<MuseAccount>) {
-        self.muse_auth = account;
+    pub fn set_muse_auth(&mut self, account: impl Into<MuseAuthRead>) {
+        self.muse_auth = account.into();
     }
 
     /// This provider's status.
@@ -632,6 +682,17 @@ impl Service {
         let id = status.provider;
         if status.usage.is_none() {
             status.usage = self.statuses.get(&id).and_then(|old| old.usage.clone());
+        }
+        // A probe that never asked who is signed in (Muse before its
+        // connection answers) keeps the last answer instead of flashing
+        // "sign-in not verified" over a login that has not changed — the
+        // cached status renders until the connection speaks.
+        if status.auth == Auth::Unknown && matches!(status.installed, Installed::Yes { .. }) {
+            if let Some(old) = self.statuses.get(&id) {
+                if matches!(old.auth, Auth::SignedIn { .. } | Auth::SignedOut) {
+                    status.auth = old.auth.clone();
+                }
+            }
         }
         self.statuses.insert(id, status);
         self.last_probe.insert(id, Instant::now());
@@ -840,7 +901,7 @@ impl Service {
 fn probe_provider(
     id: ProviderId,
     probes: &Probes,
-    muse_auth: Option<MuseAccount>,
+    muse_auth: MuseAuthRead,
 ) -> ProviderStatus {
     let mut status = ProviderStatus::checking(id);
     let Some(program) = (probes.resolve)(id) else {
@@ -872,7 +933,9 @@ fn probe_provider(
                 let detail = if stderr.trim().is_empty() { &stdout } else { &stderr };
                 status.advisory = Advisory::cant_run(&excerpt(detail.trim(), 500), false);
             } else {
-                status.installed = Installed::yes(&parse_version(&stdout), &program);
+                let version = parse_version(&stdout);
+                status.advisory = floor_advisory(id, &version);
+                status.installed = Installed::yes(&version, &program);
             }
         }
     }
@@ -889,12 +952,14 @@ fn probe_provider(
     match id {
         ProviderId::Muse => {
             status.auth = match muse_auth {
-                Some(account) => Auth::SignedIn {
+                MuseAuthRead::SignedIn(account) => Auth::SignedIn {
                     email: account.email,
                     plan: account.plan,
                     method: Some("account".into()),
                 },
-                None => Auth::Unknown,
+                MuseAuthRead::SignedOut => Auth::SignedOut,
+                // Not asked yet: the install keeps the last answer it held.
+                MuseAuthRead::NotRead => Auth::Unknown,
             };
         }
         ProviderId::ClaudeCode => {
@@ -1122,7 +1187,7 @@ impl Drop for TestSandbox {
 /// second one: `None` until `account/read` or `account/changed` speaks.
 /// Background refreshes seed their Muse probe from this, so a normal
 /// launch reports Muse Connected once the connection signs in.
-static MUSE_LIVE: OnceLock<Mutex<Option<MuseAccount>>> = OnceLock::new();
+static MUSE_LIVE: OnceLock<Mutex<MuseAuthRead>> = OnceLock::new();
 
 /// How often the account menu refreshes its usage cards: lane peeks are
 /// cheap but not free, and the probes behind a re-check are not cheap at
@@ -1157,9 +1222,9 @@ struct LiveService {
 
 static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
 
-fn muse_live() -> MutexGuard<'static, Option<MuseAccount>> {
+fn muse_live() -> MutexGuard<'static, MuseAuthRead> {
     MUSE_LIVE
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(MuseAuthRead::NotRead))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -1459,11 +1524,11 @@ pub fn record_refreshed_usage(
 /// Remember the existing muse connection's account state: the Muse auth
 /// probe. Read-only — it never opens a second connection.
 pub fn note_muse_account(account: Option<MuseAccount>) {
-    *muse_live() = account;
+    *muse_live() = account.into();
 }
 
 /// The live connection's account, for seeding a refresh's Muse probe.
-fn live_muse_auth() -> Option<MuseAccount> {
+fn live_muse_auth() -> MuseAuthRead {
     muse_live().clone()
 }
 
@@ -1872,6 +1937,91 @@ mod tests {
         );
         service.probe_one(ProviderId::Codex);
         assert_eq!(service.status(ProviderId::Codex).headline(), Headline::SignedOut);
+    }
+
+    #[test]
+    fn the_real_version_lines_parse_and_old_ones_read_too_old() {
+        assert_eq!(version_triplet("2.1.276 (Claude Code)"), Some((2, 1, 276)));
+        assert_eq!(version_triplet("codex-cli 0.144.6"), Some((0, 144, 6)));
+        assert_eq!(version_triplet("Muse Code 1.4.11 (1.4.11-R6667.1)"), Some((1, 4, 11)));
+        assert_eq!(version_triplet("not a version"), None);
+        assert_eq!(floor_advisory(ProviderId::ClaudeCode, "2.1.276 (Claude Code)"), Advisory::None);
+        assert_eq!(floor_advisory(ProviderId::ClaudeCode, "2.1.300 (Claude Code)"), Advisory::None);
+        assert_eq!(
+            floor_advisory(ProviderId::ClaudeCode, "2.0.9 (Claude Code)"),
+            Advisory::TooOld { need: "2.1.276".into() }
+        );
+        assert_eq!(
+            floor_advisory(ProviderId::Codex, "codex-cli 0.99.0"),
+            Advisory::TooOld { need: "0.144.6".into() }
+        );
+        assert_eq!(
+            floor_advisory(ProviderId::Muse, "Muse Code 1.1.0 (1.1.0-R1.1)"),
+            Advisory::TooOld { need: "1.2.1".into() }
+        );
+        // An unreadable version is never called too old.
+        assert_eq!(floor_advisory(ProviderId::Codex, "garbage"), Advisory::None);
+    }
+
+    #[test]
+    fn a_too_old_cli_is_still_usable_and_says_so() {
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::Codex, ok_version("codex-cli 0.99.0"));
+        let mut service = scripted_service(
+            versions,
+            ok_version("x"),
+            Ok(provider_codex::probe::CodexProbe::signed_out()),
+        );
+        service.probe_one(ProviderId::Codex);
+        let status = service.status(ProviderId::Codex);
+        assert_eq!(status.advisory, Advisory::TooOld { need: "0.144.6".into() });
+        // Advisory only: the headline still follows the login.
+        assert_eq!(status.headline(), Headline::SignedOut);
+    }
+
+    #[test]
+    fn muse_reads_signed_out_when_its_connection_says_so() {
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::Muse, ok_version("Muse Code 1.4.11 (1.4.11-R6667.1)"));
+        let mut service = scripted_service(versions, ok_version("x"), Err("unused".into()));
+        // Not read yet: unverified (there is nothing cached to keep).
+        service.probe_one(ProviderId::Muse);
+        assert_eq!(service.status(ProviderId::Muse).headline(), Headline::Unverified);
+        // The connection said "no login": Signed out, not "not verified".
+        service.set_muse_auth(None);
+        service.probe_one(ProviderId::Muse);
+        assert_eq!(service.status(ProviderId::Muse).headline(), Headline::SignedOut);
+        service.set_muse_auth(Some(MuseAccount { email: Some("a@x.com".into()), plan: None }));
+        service.probe_one(ProviderId::Muse);
+        assert_eq!(service.status(ProviderId::Muse).headline(), Headline::Connected);
+    }
+
+    #[test]
+    fn a_muse_probe_before_the_connection_answers_keeps_the_cached_login() {
+        // The boot probe runs before `account/read` lands; it used to replace
+        // a cached Connected with "sign-in not verified" + Sign in, the flash
+        // every signed-in launch showed (docs/65 §1 case d).
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::Muse, ok_version("Muse Code 1.4.11 (1.4.11-R6667.1)"));
+        let mut service = scripted_service(versions, ok_version("x"), Err("unused".into()));
+        service.set_muse_auth(Some(MuseAccount { email: Some("a@x.com".into()), plan: None }));
+        service.probe_one(ProviderId::Muse);
+        assert_eq!(service.status(ProviderId::Muse).headline(), Headline::Connected);
+        service.set_muse_auth(MuseAuthRead::NotRead);
+        service.probe_one(ProviderId::Muse);
+        assert_eq!(service.status(ProviderId::Muse).headline(), Headline::Connected);
+        // A binary that is gone is not kept signed in.
+        let mut gone = Service::with_probes(Probes {
+            resolve: Arc::new(|_| None),
+            run: Arc::new(|_, _| RunOutcome::NotFound),
+            codex_server: Arc::new(|_, _| Err("unused".into())),
+        });
+        gone.put(service.status(ProviderId::Muse));
+        gone.probe_one(ProviderId::Muse);
+        assert_eq!(gone.status(ProviderId::Muse).headline(), Headline::NotInstalled);
     }
 
     #[test]

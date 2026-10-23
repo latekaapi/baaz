@@ -162,10 +162,18 @@ pub fn probe_app_server(program: &str, timeout: Duration) -> Result<CodexProbe, 
         let account = child
             .send_request_with_timeout("account/read", serde_json::json!({}), timeout)
             .map_err(failed)?;
-        let limits = child
-            .send_request_with_timeout("account/rateLimits/read", serde_json::json!({}), timeout)
-            .map_err(failed)?;
-        let (plan, windows) = parse_rate_limit_windows(&limits);
+        // Best-effort: `rateLimits/read` refuses a signed-out account
+        // ("codex account authentication required"), and that refusal must
+        // not throw away `account/read`'s answer — a signed-out Codex read
+        // "sign-in not verified" instead of "Signed out" (docs/65 §1).
+        let (plan, windows) = match child.send_request_with_timeout(
+            "account/rateLimits/read",
+            serde_json::json!({}),
+            timeout,
+        ) {
+            Ok(limits) => parse_rate_limit_windows(&limits),
+            Err(_) => (None, Vec::new()),
+        };
         Ok::<CodexProbe, String>(CodexProbe {
             account: parse_account_read(&account),
             plan,
@@ -180,6 +188,38 @@ pub fn probe_app_server(program: &str, timeout: Duration) -> Result<CodexProbe, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A fake `codex app-server` that answers like the real 0.144.6 under an
+    /// empty `CODEX_HOME` (probed 2026-10-23): `account/read` says no
+    /// account, `account/rateLimits/read` refuses.
+    const SIGNED_OUT_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
+    *'"account/read"'*) printf '{"id":%s,"result":{"account":null,"requiresOpenaiAuth":true}}\n' "$id" ;;
+    *'"account/rateLimits/read"'*) printf '{"id":%s,"error":{"code":-32600,"message":"codex account authentication required to read rate limits"}}\n' "$id" ;;
+  esac
+done
+"#;
+
+    #[test]
+    fn a_refused_rate_limit_read_keeps_the_signed_out_answer() {
+        let dir = std::env::temp_dir().join(format!("baaz-codex-probe-signed-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("codex");
+        std::fs::write(&path, SIGNED_OUT_SERVER).expect("fake writes");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("fake executable");
+        }
+        let probe = probe_app_server(path.to_str().expect("utf8 path"), Duration::from_secs(5))
+            .expect("account/read answered, so the probe answers");
+        assert!(!probe.account.signed_in, "no account is signed out, not unverified");
+        assert!(probe.windows.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn null_account_with_openai_auth_required_is_signed_out() {

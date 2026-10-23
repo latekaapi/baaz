@@ -121,7 +121,7 @@ pub fn primary_action(status: &ProviderStatus) -> Option<ProviderActionDef> {
             if install_command(status.provider).is_some() {
                 Some(ProviderActionDef::install())
             } else {
-                Some(ProviderActionDef::docs())
+                Some(get_action(status.provider))
             }
         }
         H::SignedOut | H::Unverified => Some(ProviderActionDef::sign_in()),
@@ -160,14 +160,19 @@ pub fn build_rows(
                 };
                 account = Some(joined.into());
             }
+            let primary = primary_action(&status);
             ConnectRowData {
                 id: gpui::SharedString::from(id.as_str()),
                 provider: aui_provider(id),
                 headline: headline_for(&status),
                 account,
-                primary: primary_action(&status),
-                // Every row offers Docs beside its primary action.
-                docs: true,
+                // Every row offers Docs beside its primary action, unless
+                // the primary already is the link (Muse's "Get Muse").
+                docs: !matches!(
+                    &primary,
+                    Some(action) if action.action == aui::screens::ProviderAction::Docs
+                ),
+                primary,
             }
         })
         .collect()
@@ -197,23 +202,24 @@ pub fn terminal_prefill(id: ProviderId, sign_in: bool) -> Option<&'static str> {
     install_command(id)
 }
 
-/// The vendor install command, typed into the dock terminal and not run.
-/// Muse names none: no installer is documented in this repo or in
-/// `muse --help`, so its missing row offers Docs instead of Install.
+/// The vendor install command, typed into the dock terminal and not run
+/// (the registry's table, [`ProviderId::install_command`]).
 pub fn install_command(id: ProviderId) -> Option<&'static str> {
-    match id {
-        ProviderId::ClaudeCode => Some("curl -fsSL https://claude.ai/install.sh | bash"),
-        ProviderId::Codex => Some("npm i -g @openai/codex"),
-        ProviderId::Muse => None,
-    }
+    id.install_command()
 }
 
 /// The vendor docs behind every row's Docs button.
 pub fn docs_url(id: ProviderId) -> &'static str {
-    match id {
-        ProviderId::ClaudeCode => "https://docs.anthropic.com/en/docs/claude-code",
-        ProviderId::Codex => "https://developers.openai.com/codex",
-        ProviderId::Muse => "https://github.com/latekaapi/baaz",
+    id.docs_url()
+}
+
+/// "Get Muse": the missing row's way to the CLI when there is no command to
+/// type — a link, and the row's only button (no second Docs beside it).
+pub fn get_action(id: ProviderId) -> ProviderActionDef {
+    ProviderActionDef {
+        action: aui::screens::ProviderAction::Docs,
+        label: format!("Get {}", id.label()).into(),
+        primary: true,
     }
 }
 
@@ -1088,6 +1094,38 @@ mod tests {
         for id in ProviderId::all() {
             assert!(!docs_url(id).is_empty(), "{id:?} names its docs");
         }
+    }
+
+    #[test]
+    fn a_missing_muse_offers_one_get_link_and_never_a_command() {
+        // docs/65 S1: Settings once typed `curl … www.muse.dev/install.sh | bash`;
+        // muse.dev is another product (it redirects to sonatype.com). Muse has
+        // no install command anywhere, and its missing row is one link.
+        assert_eq!(ProviderId::Muse.install_command(), None);
+        assert_eq!(crate::settings_providers::install_command(ProviderId::Muse), None);
+        for id in ProviderId::all() {
+            assert!(!id.docs_url().contains("muse.dev"), "{id:?} must not link muse.dev");
+        }
+        assert_eq!(ProviderId::Muse.docs_url(), "https://dev.meta.ai/lp/muse-code");
+        let mut status = ProviderStatus::checking(ProviderId::Muse);
+        status.installed = crate::provider_status::Installed::No;
+        status.checked_at = Some(1);
+        let rows = build_rows(&[status.clone()], &HashMap::new());
+        let muse = rows.iter().find(|row| row.id.as_ref() == "muse").expect("muse row");
+        let primary = muse.primary.as_ref().expect("a way in");
+        assert_eq!(primary.label.as_ref(), "Get Muse");
+        assert!(!muse.docs, "no second Docs beside Get Muse");
+        let actions = crate::settings_providers::actions_for(ProviderId::Muse, status.headline());
+        assert_eq!(actions.len(), 1, "Settings shows the one link, no Install");
+        assert_eq!(actions[0].label.as_ref(), "Get Muse");
+        // The other two keep Install + Docs.
+        let mut claude = ProviderStatus::checking(ProviderId::ClaudeCode);
+        claude.installed = crate::provider_status::Installed::No;
+        claude.checked_at = Some(1);
+        let rows = build_rows(&[claude], &HashMap::new());
+        let row = rows.iter().find(|row| row.id.as_ref() == "claude-code").expect("claude row");
+        assert_eq!(row.primary.as_ref().map(|a| a.label.as_ref()), Some("Install"));
+        assert!(row.docs);
     }
 
     #[test]
