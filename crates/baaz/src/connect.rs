@@ -525,6 +525,19 @@ pub(crate) fn status_stamp() -> StatusStamp {
     (mtime, crate::provider_status::status_generation())
 }
 
+/// The part of the statuses a person can see: all of it but when each was
+/// last checked — except whether it has been checked at all (Checking).
+fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
+    statuses
+        .iter()
+        .cloned()
+        .map(|mut status| {
+            status.checked_at = status.checked_at.map(|_| 0);
+            status
+        })
+        .collect()
+}
+
 /// Why Muse was not started at launch: the person has it off, or the last
 /// probe found it missing. [`Harness::start_muse_once_available`] starts it
 /// when that stops being true.
@@ -806,7 +819,14 @@ impl Harness {
             return;
         }
         self.connect_status_stamp = stamp;
-        self.connect_statuses = initial_connect_statuses();
+        let fresh = initial_connect_statuses();
+        // A re-probe that found what the window already shows moves only
+        // `checked_at`: nothing to redraw (nothing renders at rest, P0).
+        if visible(&fresh) == visible(&self.connect_statuses) {
+            self.connect_statuses = fresh;
+            return;
+        }
+        self.connect_statuses = fresh;
         self.sync_banners_from_statuses();
         self.follow_default_provider();
         self.start_muse_once_available(cx);
