@@ -691,7 +691,7 @@ pub struct Harness {
     pub(crate) pending_codex_start: bool,
     /// The provider-status cache's mtime when last read, so the connect
     /// screen and banners follow background probes without polling reads.
-    pub(crate) connect_cache_mtime: Option<std::time::SystemTime>,
+    pub(crate) connect_status_stamp: crate::connect::StatusStamp,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
     /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
@@ -1547,7 +1547,7 @@ impl Harness {
             seen_connected: HashSet::new(),
             pending_prefill: None,
             pending_codex_start: false,
-            connect_cache_mtime: None,
+            connect_status_stamp: (None, 0),
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
@@ -1835,6 +1835,20 @@ impl Harness {
                 }
             }
         }));
+        // A provider probe landed off the UI thread: re-read the statuses
+        // now. Nothing renders at rest (P0), so waiting for a frame left a
+        // finished probe — an install, a sign-in — unseen until the pointer
+        // moved (docs/65 §1).
+        let mut status_wake = crate::provider_status::window_status_wake();
+        this.tasks.push(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while status_wake.next().await.is_some() {
+                while status_wake.try_recv().is_ok() {}
+                if this.update(cx, |this, cx| this.sync_provider_state(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
         // header title that shares the field.
@@ -1929,17 +1943,17 @@ impl Harness {
         // shell at once from the cached statuses. Muse's `account/read`
         // still reports (and refreshes Muse's row), but never gates the
         // window.
-        this.show_connect = crate::connect::decide_launch(crate::provider_status::is_first_run())
+        this.show_connect = crate::connect::decide_launch(crate::provider_status::first_run_at_boot())
             == crate::connect::LaunchDecision::Connect;
         this.connect_statuses = crate::connect::initial_connect_statuses();
-        this.connect_cache_mtime = crate::connect::cache_mtime();
+        this.connect_status_stamp = crate::connect::status_stamp();
         // Muse is one provider among three (docs/50 P1): it starts only when
         // the person has it on and it was not found missing. Otherwise the
         // shell settles on the local and provider records at once.
         if crate::provider_status::muse_wanted() {
             this.connect(cx);
         } else {
-            this.muse_unavailable("Muse is off or not installed".into(), cx);
+            this.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
         }
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
@@ -2135,7 +2149,7 @@ impl Harness {
     // ------------------------------------------------------------ connection
 
     /// Spawn `muse serve`, initialize, and start draining its events.
-    fn connect(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn connect(&mut self, cx: &mut Context<Self>) {
         crate::log::boot_mark("connect-sent");
         let program = self.args.program.clone();
         self.wire_call(

@@ -157,6 +157,20 @@ pub(crate) fn default_new_provider(statuses: &[ProviderStatus]) -> Option<Provid
         .map(|s| s.provider)
 }
 
+/// The first Connected provider, when `current` is not Connected itself:
+/// what finishing onboarding switches new sessions to, so a person with only
+/// Claude Code signed in never starts on a signed-out Muse (docs/65 §1 c).
+pub(crate) fn prefer_connected(statuses: &[ProviderStatus], current: ProviderId) -> Option<ProviderId> {
+    use crate::provider_status::Headline;
+    let connected = |id: ProviderId| {
+        statuses.iter().any(|s| s.provider == id && s.enabled && s.headline() == Headline::Connected)
+    };
+    if connected(current) {
+        return None;
+    }
+    ProviderId::all().into_iter().find(|id| connected(*id))
+}
+
 /// Whether `id` can start a session now: on, and not found missing.
 pub(crate) fn usable_provider(statuses: &[ProviderStatus], id: ProviderId) -> bool {
     statuses
@@ -248,18 +262,22 @@ pub enum SignOutStep {
 /// The steps signing `id` out takes (exactly one).
 pub(crate) fn signout_steps(
     id: ProviderId,
-    codex_program: Option<std::path::PathBuf>,
+    resolved: Option<std::path::PathBuf>,
 ) -> Vec<SignOutStep> {
+    // The binary the probe resolved, not the bare name: a Dock launch's
+    // PATH holds neither `~/.local/bin` nor an nvm install (docs/65 §1).
+    let program = |name: &str| {
+        resolved
+            .as_ref()
+            .map(|program| program.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.into())
+    };
     match id {
         ProviderId::ClaudeCode => vec![SignOutStep::Shell {
-            program: "claude".into(),
+            program: program("claude"),
             args: vec!["auth".into(), "logout".into()],
         }],
-        ProviderId::Codex => vec![SignOutStep::CodexLogout {
-            program: codex_program
-                .map(|program| program.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "codex".into()),
-        }],
+        ProviderId::Codex => vec![SignOutStep::CodexLogout { program: program("codex") }],
         ProviderId::Muse => vec![SignOutStep::MuseLogout],
     }
 }
@@ -267,8 +285,7 @@ pub(crate) fn signout_steps(
 /// Run the sign-out steps through `commander`. The caller confirms first
 /// and re-probes after.
 pub(crate) fn run_sign_out(id: ProviderId, commander: &dyn AuthCommander) -> Result<(), String> {
-    let codex_program = crate::provider_status::binary_path(id);
-    for step in signout_steps(id, codex_program) {
+    for step in signout_steps(id, crate::provider_status::binary_path(id)) {
         match step {
             SignOutStep::Shell { program, args } => {
                 let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -298,7 +315,7 @@ pub struct LiveCommander;
 /// [`provider::child_env`]).
 pub(crate) fn auth_command(program: &str, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(program);
-    command.args(args);
+    command.args(args).env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)));
     provider::child_env::scrub_command(&mut command);
     command
 }
@@ -645,6 +662,7 @@ impl Harness {
             ProviderAction::Install => {
                 let Some(command) = install_command(id) else { return };
                 self.open_terminal_typed(command, window, cx);
+                crate::provider_status::watch_setup(id);
                 self.overlays.update(cx, |overlays, _| {
                     overlays.toast(
                         format!("Install {}", id.label()),
@@ -714,13 +732,12 @@ impl Harness {
         match signin_plan(id) {
             SignInPlan::MuseSheet => {
                 self.close_settings(cx);
-                self.auth = crate::login::Auth::SignedOut;
-                self.active = None;
-                self.login.reset_to_choose();
+                self.open_muse_sheet();
                 cx.notify();
             }
             SignInPlan::ClaudeTerminal { command } => {
                 self.open_terminal_typed(&command, window, cx);
+                crate::provider_status::watch_setup(id);
                 self.overlays.update(cx, |overlays, _| {
                     overlays.toast(
                         "Sign in to Claude Code",
@@ -728,45 +745,13 @@ impl Harness {
                     );
                 });
             }
+            // The one Codex sign-in: the connect screen's, which keeps its
+            // app-server alive until `account/login/completed` and runs it
+            // with the login-shell PATH (docs/65 §3.1 #10).
             SignInPlan::CodexBrowser => {
-                self.codex_browser_signin(window, cx);
+                self.start_codex_login(cx);
             }
         }
-    }
-
-    /// Codex ChatGPT sign-in: `account/login/start`, open the returned
-    /// URL, then poll `account/read` until the login completes and
-    /// re-probe. All blocking work stays off the UI thread.
-    fn codex_browser_signin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let program =
-            crate::provider_status::binary_path(ProviderId::Codex).unwrap_or_else(|| "codex".into());
-        let program = program.to_string_lossy().into_owned();
-        std::thread::spawn(move || {
-            match codex_login_start(&program) {
-                Ok(url) => {
-                    if let Err(error) = crate::auth::open_in_browser(&url) {
-                        eprintln!("baaz: codex sign-in: could not open the browser: {error}");
-                        return;
-                    }
-                    // Completion: poll `account/read` until the login
-                    // lands (up to ~2 minutes), then re-probe.
-                    for _ in 0..24 {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        if codex_signed_in(&program) {
-                            break;
-                        }
-                    }
-                    crate::provider_status::recheck_provider(ProviderId::Codex);
-                }
-                Err(error) => eprintln!("baaz: codex account/login/start: {error}"),
-            }
-        });
-        self.overlays.update(cx, |overlays, _| {
-            overlays.toast(
-                "Sign in to Codex",
-                "Complete sign-in in the browser — the card re-checks when it lands.",
-            );
-        });
     }
 
     /// Open the dock terminal with `command` typed but not run: the
@@ -798,61 +783,6 @@ impl Harness {
         }
         cx.notify();
     }
-}
-
-/// Start Codex's ChatGPT login and return the browser URL:
-/// `account/login/start {type: chatgpt}` over a short-lived app-server.
-/// Blocking; call it off the UI thread.
-pub(crate) fn codex_login_start(program: &str) -> Result<String, String> {
-    use crossbeam_channel::unbounded;
-    use provider_codex::child::RunningChild;
-    use provider_codex::fold::CodexFold;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    let (events, _dropped) = unbounded();
-    let mut child = RunningChild::spawn(
-        program,
-        &[],
-        Arc::new(Mutex::new(CodexFold::new())),
-        events,
-    )
-    .map_err(|error| format!("could not spawn {program} app-server: {error}"))?;
-    let timeout = Duration::from_secs(30);
-    let result = (|| {
-        child
-            .send_frame(provider_codex::child::initialize_request(
-                child.next_request_id(),
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .map_err(|error| error.reason)?;
-        child
-            .send_notification(
-                "initialized",
-                provider_codex::child::initialized_notification()["params"].clone(),
-            )
-            .map_err(|error| format!("the session child is unreachable: {error}"))?;
-        let started = child
-            .send_request_with_timeout(
-                "account/login/start",
-                serde_json::json!({"type": "chatgpt"}),
-                timeout,
-            )
-            .map_err(|error| error.reason)?;
-        started
-            .get("authUrl")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| "account/login/start answered without an authUrl".to_owned())
-    })();
-    child.shutdown();
-    result
-}
-
-/// Whether Codex `account/read` reports a login right now. Blocking.
-fn codex_signed_in(program: &str) -> bool {
-    provider_codex::probe::probe_app_server(program, std::time::Duration::from_secs(12))
-        .map(|probe| probe.account.signed_in)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -959,6 +889,31 @@ mod tests {
         let labels: Vec<&str> =
             data.actions.iter().map(|def| def.label.as_ref()).collect();
         assert_eq!(labels, vec!["Sign in", "Re-check"]);
+    }
+
+    #[test]
+    fn onboarding_prefers_a_connected_provider_over_an_installed_one() {
+        // docs/65 §1 case (c): Muse installed but signed out, only Claude
+        // Code signed in. Boot picked Muse from Checking statuses; finishing
+        // onboarding must land new sessions on Claude Code.
+        let signed_in = Auth::SignedIn { email: Some("a@x.com".into()), plan: None, method: None };
+        let statuses = vec![
+            status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true),
+            status(ProviderId::ClaudeCode, Installed::yes("2.1.276", "/bin/claude"), signed_in.clone(), true),
+            status(ProviderId::Codex, Installed::No, Auth::Unknown, true),
+        ];
+        assert_eq!(prefer_connected(&statuses, ProviderId::Muse), Some(ProviderId::ClaudeCode));
+        assert_eq!(prefer_connected(&statuses, ProviderId::ClaudeCode), None, "a Connected pick stays");
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::ClaudeCode));
+        // Nothing Connected: nothing to switch to.
+        let none = vec![status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true)];
+        assert_eq!(prefer_connected(&none, ProviderId::Muse), None);
+        // A disabled Connected provider is not a default.
+        let off = vec![
+            status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true),
+            status(ProviderId::Codex, Installed::yes("0.144.6", "/bin/codex"), signed_in, false),
+        ];
+        assert_eq!(prefer_connected(&off, ProviderId::Muse), None);
     }
 
     #[test]
@@ -1085,6 +1040,25 @@ mod tests {
     }
 
     #[test]
+    fn auth_children_carry_the_login_path() {
+        // From the Dock the inherited PATH lacks ~/.local/bin and nvm: the
+        // sign-out and the Codex sign-in run with the login-shell PATH, the
+        // program's own directory first (docs/65 §3.1 #10).
+        for command in [
+            auth_command("/opt/tools/claude", &["auth", "logout"]),
+            crate::connect::codex_login_command("/opt/tools/codex"),
+        ] {
+            let path = command
+                .get_envs()
+                .find(|(name, _)| *name == "PATH")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+                .expect("PATH is set");
+            assert!(path.starts_with("/opt/tools"), "program dir first: {path}");
+        }
+    }
+
+    #[test]
     fn signout_runs_the_right_command() {
         let commander = Recording {
             shells: std::sync::Mutex::new(Vec::new()),
@@ -1092,9 +1066,24 @@ mod tests {
             muse: std::sync::Mutex::new(0),
         };
         run_sign_out(ProviderId::ClaudeCode, &commander).unwrap();
+        {
+            let shells = commander.shells.lock().unwrap();
+            assert_eq!(shells.len(), 1);
+            assert!(shells[0].0.ends_with("claude"), "the claude binary: {:?}", shells[0].0);
+            assert_eq!(shells[0].1, vec!["auth".to_owned(), "logout".to_owned()]);
+        }
+        // The resolved binary, never the bare name a Dock PATH can't find;
+        // the bare name only when nothing resolved.
         assert_eq!(
-            commander.shells.lock().unwrap().as_slice(),
-            &[("claude".to_owned(), vec!["auth".to_owned(), "logout".to_owned()])]
+            signout_steps(ProviderId::ClaudeCode, Some("/Users/a/.local/bin/claude".into())),
+            vec![SignOutStep::Shell {
+                program: "/Users/a/.local/bin/claude".into(),
+                args: vec!["auth".into(), "logout".into()],
+            }]
+        );
+        assert_eq!(
+            signout_steps(ProviderId::ClaudeCode, None),
+            vec![SignOutStep::Shell { program: "claude".into(), args: vec!["auth".into(), "logout".into()] }]
         );
         assert!(commander.codex.lock().unwrap().is_empty());
         run_sign_out(ProviderId::Codex, &commander).unwrap();

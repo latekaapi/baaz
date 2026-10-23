@@ -1242,8 +1242,7 @@ impl Harness {
                     // The login screen is never the app's first screen, but
                     // it stays reachable here.
                     AccountAction::SignOut => {
-                        self.login.reset_to_choose();
-                        self.muse_sheet = true;
+                        self.open_muse_sheet();
                     }
                 }
             }

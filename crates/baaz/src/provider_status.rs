@@ -382,34 +382,38 @@ impl Probes {
 /// `PATH` never names.
 fn default_resolve(id: ProviderId) -> Option<PathBuf> {
     match id {
-        ProviderId::Muse => {
-            if let Some(program) = std::env::var_os("BAAZ_MUSE") {
-                let candidate = PathBuf::from(&program);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-            // The override Muse sessions honour too (`MUSE_BIN`), so the
-            // Providers page never disagrees with a session that works —
-            // named here rather than called through the muse wire crate, which the
-            // seam ratchet keeps out of this file.
-            if let Some(program) = std::env::var_os("MUSE_BIN") {
-                let candidate = PathBuf::from(&program);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-            if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
-                    candidate.is_file()
-                })
-            }) {
-                return Some(program);
-            }
-            provider::env_path::find_program("muse")
-        }
+        ProviderId::Muse => resolve_muse(provider::env_path::find_program),
         ProviderId::ClaudeCode | ProviderId::Codex => crate::providers::resolve_program(id),
     }
+}
+
+/// Muse's resolution ladder — `BAAZ_MUSE`, `MUSE_BIN`, `PATH`, then the
+/// login `PATH` through `find_login` (the cached lookup in production).
+fn resolve_muse(find_login: fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(program) = std::env::var_os("BAAZ_MUSE") {
+        let candidate = PathBuf::from(&program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // The override Muse sessions honour too (`MUSE_BIN`), so the
+    // Providers page never disagrees with a session that works —
+    // named here rather than called through the muse wire crate, which the
+    // seam ratchet keeps out of this file.
+    if let Some(program) = std::env::var_os("MUSE_BIN") {
+        let candidate = PathBuf::from(&program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
+            candidate.is_file()
+        })
+    }) {
+        return Some(program);
+    }
+    find_login("muse")
 }
 
 /// Resolve one provider's binary the way the probes do. Used for the
@@ -590,6 +594,10 @@ pub struct Service {
     /// the rows keep the old numbers and their age, with an "unavailable
     /// now" note beside them, instead of wiping to an empty snapshot.
     muse_unavailable_now: bool,
+    /// Whether a probe result writes the cache. A scratch service (one
+    /// background probe) never does: it holds only the provider it probes,
+    /// and writing its whole map raced newer results (docs/65 §1 case d).
+    persist: bool,
 }
 
 impl Service {
@@ -605,7 +613,15 @@ impl Service {
             probes,
             muse_auth: MuseAuthRead::NotRead,
             muse_unavailable_now: false,
+            persist: true,
         }
+    }
+
+    /// A service for one background probe: it starts from what the live
+    /// service holds and never writes the cache — the live service, which
+    /// the result is published into, does.
+    fn scratch(probes: Probes) -> Self {
+        Self { persist: false, ..Self::with_probes(probes) }
     }
 
     /// Whether the last Muse read found no numbers while a good snapshot
@@ -631,9 +647,11 @@ impl Service {
         self.statuses.insert(status.provider, status);
     }
 
-    /// Overlay the on-disk cache: boot reads it before any probe, so the
+    /// Overlay the on-disk cache (tests: production seeds the live service
+    /// from [`boot_statuses`]). Boot reads it before any probe, so the
     /// window can render from what the last run learned. Never reads
     /// under `BAAZ_DETERMINISTIC=1`.
+    #[cfg(test)]
     pub fn load_cache(&mut self) {
         for cached in read_cache() {
             self.statuses.insert(cached.provider, cached);
@@ -696,7 +714,9 @@ impl Service {
         }
         self.statuses.insert(id, status);
         self.last_probe.insert(id, Instant::now());
-        self.save_cache();
+        if self.persist {
+            self.save_cache();
+        }
     }
 
     /// The person's Re-check: probe one provider now.
@@ -709,6 +729,7 @@ impl Service {
     /// probe lands. Disabled providers keep their cached status and are
     /// not probed. In deterministic mode this only applies the scripted
     /// source.
+    #[cfg(test)]
     pub fn probe_all(&mut self) {
         if deterministic() {
             self.apply_scripted();
@@ -1065,6 +1086,17 @@ pub fn is_first_run() -> bool {
     true
 }
 
+/// [`is_first_run`] as boot read it, before the window adopts the launch
+/// directory as a project — which made every launch from a project dir skip
+/// onboarding (docs/65 §1).
+static FIRST_RUN_AT_BOOT: OnceLock<bool> = OnceLock::new();
+
+/// Whether this launch is a first run: the fact boot recorded, or (when
+/// boot did not run, as in tests) the stored facts now.
+pub fn first_run_at_boot() -> bool {
+    FIRST_RUN_AT_BOOT.get().copied().unwrap_or_else(is_first_run)
+}
+
 // ------------------------------------------------------------- boot
 
 /// One `provider=headline` cell of the startup log.
@@ -1218,7 +1250,20 @@ struct LiveService {
     /// reading is still in the lane's fold, and the next TurnFinished or
     /// menu open persists it.
     usage_pending: HashSet<ProviderId>,
+    /// The providers with a status probe running: a second refresh for one
+    /// of them waits for it (one probe per provider at a time — overlapping
+    /// Codex probes each spawned an app-server).
+    in_flight: HashSet<ProviderId>,
+    /// Refreshes asked for while that provider's probe ran: one re-run each
+    /// after it lands, so a sign-in finished mid-probe is still read.
+    rerun: HashSet<ProviderId>,
+    /// The window's wake channels: one message per published status.
+    wakers: Vec<futures::channel::mpsc::UnboundedSender<()>>,
 }
+
+/// Bumped on every published probe result: what the window compares to
+/// know the statuses moved, without reading the cache file.
+static STATUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
 
@@ -1237,6 +1282,9 @@ fn live_service() -> MutexGuard<'static, LiveService> {
             last_usage_refresh: HashMap::new(),
             usage_refreshing: HashSet::new(),
             usage_pending: HashSet::new(),
+            in_flight: HashSet::new(),
+            rerun: HashSet::new(),
+            wakers: Vec::new(),
         })
     })
     .lock()
@@ -1582,29 +1630,165 @@ pub fn recheck_provider(id: ProviderId) {
 /// re-log the line. Read-only probes only — never a login, logout or
 /// other auth-changing call.
 fn refresh_in_background(ids: Vec<ProviderId>) {
-    std::thread::spawn(move || {
-        let mut probed = Service::with_probes(Probes::real());
-        probed.set_muse_auth(live_muse_auth());
-        probed.load_cache();
-        for id in &ids {
-            probed.recheck(*id);
-        }
-        let statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
-            .into_iter()
-            .map(|id| (id, probed.status(id)))
-            .collect();
-        {
-            let mut live = live_service();
-            let now = Instant::now();
-            for id in &ids {
-                if let Some(status) = statuses.get(id) {
-                    live.service.put(status.clone());
-                    live.service.mark_probed(*id, now);
+    refresh_with(ids, Probes::real);
+}
+
+/// [`refresh_in_background`] with the probe surface injected (tests). One
+/// thread per provider, so a slow Codex app-server never holds up Claude's
+/// answer; a provider already being probed is queued for one re-run.
+fn refresh_with(ids: Vec<ProviderId>, probes: fn() -> Probes) {
+    let start: Vec<ProviderId> = {
+        let mut live = live_service();
+        ids.into_iter()
+            .filter(|id| {
+                if live.in_flight.contains(id) {
+                    live.rerun.insert(*id);
+                    false
+                } else {
+                    live.in_flight.insert(*id);
+                    true
                 }
+            })
+            .collect()
+    };
+    for id in start {
+        std::thread::spawn(move || probe_and_publish(id, probes));
+    }
+}
+
+/// Probe one provider from what the live service holds, publish only that
+/// provider back, write the cache from the live service, wake the window,
+/// and run the re-run a refresh asked for meanwhile.
+fn probe_and_publish(id: ProviderId, probes: fn() -> Probes) {
+    let held = live_service().service.status(id);
+    let mut scratch = Service::scratch(probes());
+    scratch.set_muse_auth(live_muse_auth());
+    scratch.put(held);
+    scratch.recheck(id);
+    let mut probed = scratch.status(id);
+    let (again, statuses) = {
+        let mut live = live_service();
+        let current = live.service.status(id);
+        // The switch is the person's: a flip during the probe stands.
+        probed.enabled = current.enabled;
+        // A usage reading recorded while the probe ran is newer than the
+        // one the probe started from.
+        if let (Some(now), Some(then)) = (&current.usage, &probed.usage) {
+            if now.as_of > then.as_of {
+                probed.usage = Some(now.clone());
+            }
+        } else if probed.usage.is_none() {
+            probed.usage = current.usage.clone();
+        }
+        live.service.put(probed);
+        live.service.mark_probed(id, Instant::now());
+        live.in_flight.remove(&id);
+        publish(&mut live);
+        let statuses: HashMap<ProviderId, ProviderStatus> =
+            ProviderId::all().into_iter().map(|each| (each, live.service.status(each))).collect();
+        (live.rerun.remove(&id), statuses)
+    };
+    log_statuses(&statuses);
+    if again {
+        refresh_with(vec![id], probes);
+    }
+}
+
+/// A probe result landed in the live service: persist every status from
+/// it (the one copy that is never stale), bump the generation and wake the
+/// window. Called with the live lock held.
+fn publish(live: &mut LiveService) {
+    save_cache_in_background(all_statuses(&live.service));
+    STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    live.wakers.retain(|waker| waker.unbounded_send(()).is_ok());
+}
+
+/// How many probe results have been published this process: the window
+/// re-reads the statuses when it moves.
+pub fn status_generation() -> u64 {
+    STATUS_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A channel that receives one message per published probe result, so the
+/// window updates the moment a probe lands — nothing renders at rest
+/// (P0), and waiting for a frame left finished probes unseen.
+pub fn status_wake() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    live_service().wakers.push(sender);
+    receiver
+}
+
+/// How often a setup watch re-probes, and for how long at most.
+pub const SETUP_WATCH_EVERY: Duration = Duration::from_secs(3);
+/// See [`SETUP_WATCH_EVERY`]: an install or a browser sign-in left open
+/// longer than this is re-read on the next focus instead.
+pub const SETUP_WATCH_FOR: Duration = Duration::from_secs(600);
+
+/// Re-probe `id` every [`SETUP_WATCH_EVERY`] until its headline moves off
+/// what it read when the watch began (an install landed, a sign-in
+/// finished), for at most [`SETUP_WATCH_FOR`]. Called when Baaz types an
+/// install or sign-in command for the person: nothing else would notice the
+/// command finishing, and an exit code is never trusted as success —
+/// only a re-probe is (docs/65 §3.1 #6). One watch per provider; a second
+/// call while one runs extends nothing and starts nothing.
+pub fn watch_setup(id: ProviderId) {
+    if deterministic() {
+        return;
+    }
+    watch_setup_with(id, SETUP_WATCH_EVERY, SETUP_WATCH_FOR, Probes::real);
+}
+
+fn setup_watches() -> MutexGuard<'static, HashSet<ProviderId>> {
+    static WATCHES: OnceLock<Mutex<HashSet<ProviderId>>> = OnceLock::new();
+    WATCHES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn watch_setup_with(id: ProviderId, every: Duration, limit: Duration, probes: fn() -> Probes) {
+    if !setup_watches().insert(id) {
+        return;
+    }
+    let began = live_service().service.status(id).headline();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            std::thread::sleep(every);
+            refresh_with(vec![id], probes);
+            // Let the probe this tick asked for land before judging it.
+            while live_service().in_flight.contains(&id) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if live_service().service.status(id).headline() != began {
+                break;
             }
         }
-        log_statuses(&statuses);
+        setup_watches().remove(&id);
     });
+}
+
+/// Whether a setup watch is running for `id` (tests).
+#[cfg(test)]
+fn setup_watched(id: ProviderId) -> bool {
+    setup_watches().contains(&id)
+}
+
+/// [`status_wake`] for the window. A window built inside a gpui test gets a
+/// channel that is already closed: the test scheduler refuses a wake from
+/// another test's probe thread ("Your test is not deterministic"), and those
+/// tests drive `sync_provider_state` themselves.
+pub fn window_status_wake() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    if cfg!(test) {
+        return futures::channel::mpsc::unbounded().1;
+    }
+    status_wake()
+}
+
+/// Whether any provider's status probe is still running (tests wait on it).
+#[cfg(test)]
+fn probes_in_flight() -> bool {
+    !live_service().in_flight.is_empty()
 }
 
 /// The live muse connection spoke (`account/read` or `account/changed`):
@@ -1667,31 +1851,19 @@ pub fn boot() {
     seed_live(&seeded);
     // The first-run fact is stored facts only, never a live probe — log
     // it here so the next task can wire the screen; nothing shown changes.
-    eprintln!("baaz: first_run={}", is_first_run());
+    let first_run = is_first_run();
+    let _ = FIRST_RUN_AT_BOOT.set(first_run);
+    eprintln!("baaz: first_run={first_run}");
     if deterministic() {
         return;
     }
-    std::thread::spawn(|| {
-        let mut service = Service::with_probes(Probes::real());
-        service.set_muse_auth(live_muse_auth());
-        service.load_cache();
-        service.probe_all();
-        let now = Instant::now();
-        let statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
-            .into_iter()
-            .map(|id| (id, service.status(id)))
-            .collect();
-        {
-            let mut live = live_service();
-            for id in ProviderId::all() {
-                if let Some(status) = statuses.get(&id) {
-                    live.service.put(status.clone());
-                    live.service.mark_probed(id, now);
-                }
-            }
-        }
-        log_statuses(&statuses);
-    });
+    // Every enabled provider, each on its own thread, through the one
+    // single-flight path: a refresh asked for before these land waits.
+    let enabled: Vec<ProviderId> = {
+        let live = live_service();
+        ProviderId::all().into_iter().filter(|id| live.service.status(*id).enabled).collect()
+    };
+    refresh_in_background(enabled);
 }
 
 #[cfg(test)]
@@ -2024,6 +2196,162 @@ mod tests {
         assert_eq!(gone.status(ProviderId::Muse).headline(), Headline::NotInstalled);
     }
 
+    /// Probe runs the single-flight tests count, and how long each takes.
+    static SLOW_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A Claude Code that answers slowly and signed in, counting its probes.
+    fn slow_claude() -> Probes {
+        Probes {
+            resolve: Arc::new(|_| Some(PathBuf::from("/bin/claude"))),
+            run: Arc::new(|_, args| {
+                if args.first().map(String::as_str) == Some("--version") {
+                    SLOW_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(300));
+                    return RunOutcome::Output {
+                        code: Some(0),
+                        stdout: "2.1.276 (Claude Code)\n".into(),
+                        stderr: String::new(),
+                        timed_out: false,
+                    };
+                }
+                RunOutcome::Output {
+                    code: Some(0),
+                    stdout: r#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@x.com","subscriptionType":"max"}"#.into(),
+                    stderr: String::new(),
+                    timed_out: false,
+                }
+            }),
+            codex_server: Arc::new(|_, _| Err("unused".into())),
+        }
+    }
+
+    /// Reset the process-wide live service to Checking for every provider.
+    fn reset_live() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probes_in_flight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut live = live_service();
+        live.rerun.clear();
+        for id in ProviderId::all() {
+            live.service.put(ProviderStatus::checking(id));
+        }
+    }
+
+    fn wait_for_probes() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        std::thread::sleep(Duration::from_millis(20));
+        while probes_in_flight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!probes_in_flight(), "probes settle");
+    }
+
+    #[test]
+    fn refreshes_during_a_probe_coalesce_into_one_rerun() {
+        let _env = sandbox();
+        reset_live();
+        SLOW_RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+        refresh_with(vec![ProviderId::ClaudeCode], slow_claude);
+        std::thread::sleep(Duration::from_millis(50));
+        // Three more asks while the first runs: one re-run, not three probes.
+        for _ in 0..3 {
+            refresh_with(vec![ProviderId::ClaudeCode], slow_claude);
+        }
+        wait_for_probes();
+        assert_eq!(SLOW_RUNS.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(live_service().service.status(ProviderId::ClaudeCode).headline(), Headline::Connected);
+    }
+
+    #[test]
+    fn a_slow_probe_never_overwrites_what_landed_meanwhile() {
+        // The Muse flip (docs/65 §1 case d): a refresh started before Muse
+        // signed in used to write its whole stale map back, cache included.
+        let env = sandbox();
+        reset_live();
+        refresh_with(vec![ProviderId::ClaudeCode], slow_claude);
+        std::thread::sleep(Duration::from_millis(50));
+        let mut muse = ProviderStatus::checking(ProviderId::Muse);
+        muse.installed = Installed::yes("Muse Code 1.4.11", "/bin/muse");
+        muse.auth = Auth::SignedIn { email: Some("m@x.com".into()), plan: None, method: None };
+        muse.checked_at = Some(1);
+        {
+            let mut live = live_service();
+            live.service.put(muse.clone());
+            publish(&mut live);
+        }
+        wait_for_probes();
+        assert_eq!(live_service().service.status(ProviderId::Muse).headline(), Headline::Connected);
+        assert_eq!(live_service().service.status(ProviderId::ClaudeCode).headline(), Headline::Connected);
+        // The file follows the live service, not the probe's stale copy.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let cached = read_cache();
+            let muse_ok = cached.iter().any(|s| s.provider == ProviderId::Muse && s.headline() == Headline::Connected);
+            let claude_ok =
+                cached.iter().any(|s| s.provider == ProviderId::ClaudeCode && s.headline() == Headline::Connected);
+            if muse_ok && claude_ok {
+                break;
+            }
+            assert!(Instant::now() < deadline, "cache holds both: {cached:?} in {:?}", env.state_dir());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_setup_watch_rechecks_until_the_install_lands_then_stops() {
+        // docs/65 S6: Baaz typed an install; the person runs it; the watch
+        // re-probes until the status moves, then stops on its own.
+        let _env = sandbox();
+        reset_live();
+        let mut missing = ProviderStatus::checking(ProviderId::ClaudeCode);
+        missing.installed = Installed::No;
+        missing.checked_at = Some(1);
+        live_service().service.put(missing);
+        SLOW_RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+        watch_setup_with(ProviderId::ClaudeCode, Duration::from_millis(20), Duration::from_secs(10), slow_claude);
+        // A second ask while it runs starts nothing.
+        watch_setup_with(ProviderId::ClaudeCode, Duration::from_millis(20), Duration::from_secs(10), slow_claude);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while setup_watched(ProviderId::ClaudeCode) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!setup_watched(ProviderId::ClaudeCode), "the watch stopped once the status moved");
+        assert_eq!(live_service().service.status(ProviderId::ClaudeCode).headline(), Headline::Connected);
+        assert_eq!(SLOW_RUNS.load(std::sync::atomic::Ordering::SeqCst), 1, "one probe was enough");
+    }
+
+    #[test]
+    fn a_setup_watch_gives_up_at_its_limit() {
+        let _env = sandbox();
+        reset_live();
+        let mut connected = ProviderStatus::checking(ProviderId::ClaudeCode);
+        connected.installed = Installed::yes("2.1.276 (Claude Code)", "/bin/claude");
+        connected.auth = Auth::SignedIn { email: Some("a@x.com".into()), plan: Some("Max".into()), method: None };
+        connected.checked_at = Some(1);
+        live_service().service.put(connected);
+        // The status never moves (already Connected): the limit ends it.
+        watch_setup_with(ProviderId::ClaudeCode, Duration::from_millis(20), Duration::from_millis(400), slow_claude);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while setup_watched(ProviderId::ClaudeCode) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!setup_watched(ProviderId::ClaudeCode));
+        wait_for_probes();
+    }
+
+    #[test]
+    fn a_published_probe_wakes_the_window() {
+        let _env = sandbox();
+        reset_live();
+        let mut wake = status_wake();
+        let before = status_generation();
+        refresh_with(vec![ProviderId::ClaudeCode], slow_claude);
+        wait_for_probes();
+        assert!(status_generation() > before);
+        assert!(wake.try_recv().is_ok(), "the window was woken");
+    }
+
     #[test]
     fn cache_round_trips_every_field() {
         let env = sandbox();
@@ -2086,12 +2414,9 @@ mod tests {
         std::env::set_var("PATH", "/usr/bin:/bin");
         std::env::remove_var("BAAZ_MUSE");
         std::env::remove_var(provider::env_path::LOGIN_PATH_ENV);
-        let probes = Probes {
-            resolve: Arc::new(default_resolve),
-            run: Arc::new(|_, _| panic!("no run needed: resolution is the claim")),
-            codex_server: Arc::new(|_, _| Err("unreachable".into())),
-        };
-        let resolved = (probes.resolve)(ProviderId::Muse);
+        // The uncached login PATH: the process-wide one may already hold
+        // the real HOME from an earlier test.
+        let resolved = resolve_muse(provider::env_path::find_program_uncached);
         match &old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),

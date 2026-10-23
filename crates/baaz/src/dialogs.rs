@@ -34,7 +34,6 @@ use gpui_kit::component::input::Textarea;
 
 use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP};
 use crate::layout::{self, RightKind};
-use crate::login::Auth;
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Palette, PaletteKind};
 use crate::wire::WireCall;
 use crate::{files, skills};
@@ -1177,9 +1176,7 @@ impl Harness {
                     this.reconnect(cx);
                 }
                 DialogAction::SignIn => {
-                    this.auth = Auth::SignedOut;
-                    this.active = None;
-                    this.login.reset_to_choose();
+                    this.open_muse_sheet();
                 }
                 DialogAction::Archive => {}
                 // Confirmed through the early return above, like Archive.
