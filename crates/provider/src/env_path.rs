@@ -92,6 +92,14 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
     find_program_in(name, &split_login_path())
 }
 
+/// [`find_program`] against a freshly computed login `PATH`
+/// ([`login_path_uncached`]): for tests that change `HOME` or
+/// [`LOGIN_PATH_ENV`] after another test already filled the cache.
+pub fn find_program_uncached(name: &str) -> Option<PathBuf> {
+    let path = login_path_uncached();
+    find_program_in(name, &std::env::split_paths(&path).collect::<Vec<_>>())
+}
+
 /// The search behind [`find_program`], with the dirs injected so tests can
 /// drive it without touching the cached [`login_path`].
 fn find_program_in(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {

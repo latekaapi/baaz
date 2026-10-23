@@ -725,7 +725,7 @@ impl Harness {
                 self.show_connect = true;
                 self.muse_sheet = false;
                 self.connect_statuses = crate::connect::initial_connect_statuses();
-                self.connect_cache_mtime = crate::connect::cache_mtime();
+                self.connect_status_stamp = crate::connect::status_stamp();
                 cx.notify();
             }
         }

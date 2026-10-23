@@ -6549,7 +6549,7 @@ mod tests {
                 z4_seed_stored_codex(harness, cx);
                 harness.sessions.retain(|entry| !entry.provider.lists_sessions());
                 harness.sessions_loaded = false;
-                harness.muse_unavailable("Muse is off or not installed".into(), cx);
+                harness.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
                 assert!(harness.sessions_loaded, "the sidebar settles without a Muse list");
                 assert!(harness.sessions.iter().any(|e| e.id == "s-codex-old"), "the Codex row shows");
                 assert!(!matches!(harness.wire, crate::app::Wire::Ready));

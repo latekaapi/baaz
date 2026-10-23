@@ -404,6 +404,10 @@ pub(crate) fn codex_login_command(program: &str) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     command
         .arg("app-server")
+        // The login-shell PATH with the program's own directory first, as
+        // every lane gets: from the Dock an npm/nvm `codex` is an
+        // `env node` script whose node is not on the inherited PATH.
+        .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -486,7 +490,7 @@ use crate::wire::WireCall;
 /// The statuses a boot renders from: scripted in deterministic mode (or all
 /// Checking when nothing is scripted), the on-disk cache over Checking
 /// defaults live. Never probes — probes only write the cache file, and the
-/// mtime guard in [`Harness::sync_provider_state`] picks their results up.
+/// stamp guard in [`Harness::sync_provider_state`] picks their results up.
 pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
     let mut statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
         .into_iter()
@@ -499,8 +503,10 @@ pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
             }
         }
     } else {
-        for cached in crate::provider_status::read_cache() {
-            statuses.insert(cached.provider, cached);
+        // The live service: seeded from the cache at boot, and the one copy
+        // every probe publishes into (the file can lag it).
+        for live in crate::provider_status::live_statuses() {
+            statuses.insert(live.provider, live);
         }
     }
     ProviderId::all().into_iter().map(|id| statuses.remove(&id).expect("all ids seeded")).collect()
@@ -509,14 +515,25 @@ pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
 /// The provider-status cache's mtime, for the refresh guard. `None` when
 /// the cache was never written (or in deterministic mode, where no file is
 /// ever read).
-pub(crate) fn cache_mtime() -> Option<std::time::SystemTime> {
+pub(crate) fn status_stamp() -> StatusStamp {
     if crate::provider_status::deterministic() {
-        return None;
+        return (None, 0);
     }
-    std::fs::metadata(crate::provider_status::cache_path())
+    let mtime = std::fs::metadata(crate::provider_status::cache_path())
         .and_then(|meta| meta.modified())
-        .ok()
+        .ok();
+    (mtime, crate::provider_status::status_generation())
 }
+
+/// Why Muse was not started at launch: the person has it off, or the last
+/// probe found it missing. [`Harness::start_muse_once_available`] starts it
+/// when that stops being true.
+pub(crate) const MUSE_OFF: &str = "Muse is off or not installed";
+
+/// What [`Harness::sync_provider_state`] compares: the cache file's mtime
+/// (writes from usage readings and the Enabled switch) and the live
+/// service's publish count (probe results, which also wake the window).
+pub(crate) type StatusStamp = (Option<std::time::SystemTime>, u64);
 
 impl Harness {
     /// The first-run Connect your providers screen: rows from the status
@@ -595,6 +612,16 @@ impl Harness {
         )
     }
 
+    /// Raise Muse's sign-in sheet from its first step, over whatever is on
+    /// screen. Every Muse "Sign in" comes here: the Settings card and the
+    /// "Signed out of Muse" dialog used to reset the login and drop the open
+    /// session without ever raising the sheet, so nothing appeared
+    /// (docs/65 §1). The open session stays; it waits on the sign-in.
+    pub(crate) fn open_muse_sheet(&mut self) {
+        self.login.reset_to_choose();
+        self.muse_sheet = true;
+    }
+
     /// Leave the connect screen: Continue and Skip both set
     /// `onboarding_completed`, so this launch and the next open the shell.
     pub(crate) fn finish_connect(&mut self) {
@@ -606,7 +633,10 @@ impl Harness {
         // while it still can, else the first connected one (docs/50 P1).
         let statuses = crate::provider_status::live_statuses();
         let current = ProviderId::parse(&self.new_provider);
-        if !crate::settings_providers::usable_provider(&statuses, current) {
+        if let Some(id) = crate::settings_providers::prefer_connected(&statuses, current) {
+            self.new_provider = id.as_str().to_owned();
+            crate::providers::write_last_provider(id);
+        } else if !crate::settings_providers::usable_provider(&statuses, current) {
             let id = crate::settings_providers::live_default_new_provider();
             self.new_provider = id.as_str().to_owned();
             crate::providers::write_last_provider(id);
@@ -622,7 +652,7 @@ impl Harness {
     pub(crate) fn open_connect_screen(&mut self, cx: &mut Context<Self>) {
         self.muse_sheet = false;
         self.connect_statuses = initial_connect_statuses();
-        self.connect_cache_mtime = cache_mtime();
+        self.connect_status_stamp = status_stamp();
         self.show_connect = true;
         cx.notify();
     }
@@ -651,8 +681,7 @@ impl Harness {
         match action {
             ProviderAction::SignIn => match id {
                 ProviderId::Muse => {
-                    self.login.reset_to_choose();
-                    self.muse_sheet = true;
+                    self.open_muse_sheet();
                 }
                 ProviderId::Codex => {
                     if matches!(self.codex_login, CodexLogin::Waiting { .. }) {
@@ -667,6 +696,7 @@ impl Harness {
                     if let Some(command) = terminal_prefill(id, true) {
                         self.pending_prefill = Some(command.to_owned());
                         self.connect_notes.insert(id, prefill_note(command));
+                        crate::provider_status::watch_setup(id);
                     }
                 }
             },
@@ -674,6 +704,7 @@ impl Harness {
                 if let Some(command) = install_command(id) {
                     self.pending_prefill = Some(command.to_owned());
                     self.connect_notes.insert(id, prefill_note(command));
+                    crate::provider_status::watch_setup(id);
                 }
             }
             ProviderAction::Docs => {
@@ -688,7 +719,7 @@ impl Harness {
     /// Start the Codex Sign in flow: the Waiting row applies at once, the
     /// blocking app-server login runs off the UI thread, and its terminal
     /// state re-probes Codex on success.
-    fn start_codex_login(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_codex_login(&mut self, cx: &mut Context<Self>) {
         let program = crate::providers::resolve_program(ProviderId::Codex)
             .map(|program| program.to_string_lossy().into_owned());
         let Some(program) = program else {
@@ -770,14 +801,49 @@ impl Harness {
             }
             return;
         }
-        let mtime = cache_mtime();
-        if mtime == self.connect_cache_mtime {
+        let stamp = status_stamp();
+        if stamp == self.connect_status_stamp {
             return;
         }
-        self.connect_cache_mtime = mtime;
+        self.connect_status_stamp = stamp;
         self.connect_statuses = initial_connect_statuses();
         self.sync_banners_from_statuses();
+        self.follow_default_provider();
+        self.start_muse_once_available(cx);
         cx.notify();
+    }
+
+    /// Muse was parked at launch as off or not installed, and a probe now
+    /// finds it on and installed (installed since, or switched on in
+    /// Settings): start it now. Before, its sign-in said "Muse is not
+    /// running" until the next launch (docs/65 §1). A Muse that failed to
+    /// start for any other reason keeps its own dialog and retry.
+    fn start_muse_once_available(&mut self, cx: &mut Context<Self>) {
+        if self.args.offline || self.args.replay.is_some() {
+            return;
+        }
+        let parked = matches!(&self.wire, crate::app::Wire::Down(reason) if reason == MUSE_OFF);
+        if parked
+            && crate::provider_status::muse_wanted()
+            && crate::provider_status::muse_known_installed()
+        {
+            self.wire = crate::app::Wire::Connecting;
+            self.connect(cx);
+        }
+    }
+
+    /// With no provider picked by the person (nothing stored, no
+    /// `--provider`), the default follows the probes as they land: boot
+    /// chose it from Checking statuses, which is a placeholder.
+    fn follow_default_provider(&mut self) {
+        if self.args.provider_explicit || crate::providers::read_last_provider().is_some() {
+            return;
+        }
+        if let Some(id) = crate::settings_providers::default_new_provider(&self.connect_statuses) {
+            if id.as_str() != self.new_provider {
+                self.new_provider = id.as_str().to_owned();
+            }
+        }
     }
 
     /// The quiet banners: a provider the cache once called Connected that
@@ -840,8 +906,7 @@ impl Harness {
         let action = ProviderAction::SignIn;
         match id {
             ProviderId::Muse => {
-                self.login.reset_to_choose();
-                self.muse_sheet = true;
+                self.open_muse_sheet();
             }
             ProviderId::Codex => self.connect_provider_action(id, action, window, cx),
             ProviderId::ClaudeCode => self.connect_provider_action(id, action, window, cx),
