@@ -691,6 +691,10 @@ pub struct Harness {
     /// Quiet per-provider banners for cached-Connected providers that later
     /// probe Signed out: shown on that provider's composer, never a gate.
     pub(crate) provider_banners: HashMap<ProviderId, String>,
+    /// Banners a typed auth failure raised (D5 B5): a re-probe that still
+    /// reads Connected (an invalid API key reads "logged in") must not clear
+    /// them; the person's own Sign in hands them back to the status.
+    pub(crate) typed_signed_out: HashSet<ProviderId>,
     /// Providers the cache has called Connected this launch: only these
     /// earn a sign-out banner (a provider never connected gets none).
     pub(crate) seen_connected: HashSet<ProviderId>,
@@ -1554,6 +1558,7 @@ impl Harness {
             setup_terminals: crate::setup::SetupTerminals::default(),
             setup_focus: cx.focus_handle(),
             provider_banners: HashMap::new(),
+            typed_signed_out: HashSet::new(),
             seen_connected: HashSet::new(),
             connect_status_stamp: (None, 0),
             sessions: Vec::new(),
@@ -5567,7 +5572,7 @@ impl Harness {
         // frame changes is in [`Self::on_frame`].
         self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
-        let provider_banner = self.render_provider_banner(cx);
+        let mut provider_banner = self.render_provider_banner(cx);
         // The transcript column has its own cached entity boundary (owner
         // round 6, part 4): a sidebar-only frame reuses the retained
         // transcript instead of rebuilding it. The composer band and the
@@ -5638,7 +5643,10 @@ impl Harness {
                                 let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
                                 let _ = inset_to.update(cx, |view, cx| view.set_bottom_inset(height, cx));
                             })
-                            .child(band),
+                            // The signed-out banner rides the composer (D5
+                            // B5), inside the measured child so the list
+                            // ends above both.
+                            .child(gpui_kit::base::v_flex().w_full().children(provider_banner.take()).child(band)),
                     )
                     .children(self.render_corner_stack(cx).map(Self::corner_above_band))
                     .into_any_element();
@@ -5774,7 +5782,6 @@ impl Harness {
                 this.with_session(cx, |view, cx| view.choose_nth(index, window, cx));
             }))
             .children(banner)
-            .children(provider_banner)
             .child(body)
             .children(dock)
             .into_any_element()

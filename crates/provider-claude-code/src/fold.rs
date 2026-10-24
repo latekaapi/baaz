@@ -3069,6 +3069,26 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     if let Some(tap) = tap {
         emit(tap);
     }
+    // A typed credential failure ends the turn with the sign-in hint the app
+    // turns into its signed-out banner (D5 B5). Cheap guard first: only a
+    // line naming the error is parsed twice.
+    if line.contains("authentication_failed") {
+        if let (Some(message_id), Some(session_id)) = (
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| crate::frame::authentication_failed(&value)),
+            session_id.clone(),
+        ) {
+            emit(ProviderEvent::TurnSettled {
+                session_id,
+                turn_id: message_id,
+                outcome: provider::facts::TurnOutcome::Failed {
+                    message: Some("Claude Code is signed out.".into()),
+                    signed_out: true,
+                },
+            });
+        }
+    }
     if let (Some(mode), Some(session_id)) = (reported, session_id) {
         if fold.note_permission_mode(mode) {
             emit(ProviderEvent::ApprovalModeChanged { session_id, mode });
@@ -3086,6 +3106,24 @@ pub fn pump_reader<R: BufRead>(reader: R, fold: &mut ClaudeFold, mut emit: impl 
 
 #[cfg(test)]
 mod tests {
+    /// D5 B5: Claude Code's typed `authentication_failed` (the SDK's
+    /// `SDKAssistantMessage.error`) settles the turn with the sign-in hint;
+    /// the same words in a reply's text never do.
+    #[test]
+    fn a_typed_authentication_failure_settles_the_turn_signed_out() {
+        let mut fold = ClaudeFold::new();
+        let mut events = Vec::new();
+        let line = r#"{"type":"assistant","session_id":"s1","uuid":"u1","error":"authentication_failed","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"Invalid API key · Please run /login"}]}}"#;
+        step_line(&mut fold, line, &mut |event| events.push(event));
+        assert!(events.iter().any(|event| matches!(event,
+            ProviderEvent::TurnSettled { session_id, turn_id, outcome: provider::facts::TurnOutcome::Failed { signed_out: true, .. } }
+                if session_id == "s1" && turn_id == "msg_1")), "{events:?}");
+        let mut quiet = Vec::new();
+        let words = r#"{"type":"assistant","session_id":"s1","uuid":"u2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"authentication_failed is a string"}]}}"#;
+        step_line(&mut fold, words, &mut |event| quiet.push(event));
+        assert!(!quiet.iter().any(|event| matches!(event, ProviderEvent::TurnSettled { .. })), "text is not a signal");
+    }
+
     use super::*;
     use crate::frame::decode_line;
 

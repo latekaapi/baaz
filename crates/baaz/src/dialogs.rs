@@ -1175,9 +1175,6 @@ impl Harness {
                     this.wire = Wire::Reconnecting;
                     this.reconnect(cx);
                 }
-                DialogAction::SignIn => {
-                    this.open_muse_sheet();
-                }
                 DialogAction::Archive => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::RemoveProject => {}

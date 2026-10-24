@@ -398,6 +398,11 @@ pub enum Notification {
     ErrorNotice {
         /// Human text, or the raw params when no message field exists.
         message: String,
+        /// The typed `codexErrorInfo` says the credential was refused
+        /// (`unauthorized`, or an HTTP 401 on a connection variant).
+        signed_out: bool,
+        /// The thread it is about (`threadId`), when named.
+        thread_id: Option<String>,
     },
     /// A `warning` notification.
     WarningNotice {
@@ -641,9 +646,27 @@ fn decode_item(item: &Value) -> Item {
     }
 }
 
+/// Whether a `TurnError` (`{message, codexErrorInfo}`) is a refused
+/// credential: `codexErrorInfo == "unauthorized"`, or any variant carrying
+/// `httpStatusCode: 401` (codex-cli 0.144.6's `CodexErrorInfo`). Typed
+/// only — never the message text.
+pub fn error_info_signed_out(error: &Value) -> bool {
+    let Some(info) = error.get("codexErrorInfo") else { return false };
+    if info.as_str() == Some("unauthorized") {
+        return true;
+    }
+    info.as_object().is_some_and(|variants| {
+        variants.values().any(|detail| detail.get("httpStatusCode").and_then(Value::as_u64) == Some(401))
+    })
+}
+
 fn notice_message(params: &Value) -> String {
     if let Some(text) = params.as_str() {
         return text.to_owned();
+    }
+    // The v2 `error` notification nests its words: `{error: {message}}`.
+    if let Some(message) = params.get("error").and_then(|error| error.get("message")).and_then(Value::as_str) {
+        return message.to_owned();
     }
     if let Some(message) = params.get("message").and_then(Value::as_str) {
         return message.to_owned();
@@ -751,7 +774,11 @@ fn decode_notification(method: &str, params: &Value) -> Notification {
             name: str_field(params, "name"),
             status: str_field(params, "status"),
         },
-        "error" => Notification::ErrorNotice { message: notice_message(params) },
+        "error" => Notification::ErrorNotice {
+            message: notice_message(params),
+            signed_out: params.get("error").is_some_and(error_info_signed_out),
+            thread_id: params.get("threadId").and_then(Value::as_str).map(str::to_owned),
+        },
         "warning" => Notification::WarningNotice { message: notice_message(params) },
         "serverRequest/resolved" => Notification::ServerRequestResolved {
             thread_id: params.get("threadId").and_then(Value::as_str).map(str::to_owned),
@@ -1053,9 +1080,9 @@ impl Notification {
             | Notification::PlanUpdated { thread_id, .. }
             | Notification::TokenUsage { thread_id, .. } => Some(thread_id),
             Notification::McpStatus { thread_id, .. }
-            | Notification::ServerRequestResolved { thread_id, .. } => thread_id.as_deref(),
+            | Notification::ServerRequestResolved { thread_id, .. }
+            | Notification::ErrorNotice { thread_id, .. } => thread_id.as_deref(),
             Notification::RateLimitsUpdated { .. }
-            | Notification::ErrorNotice { .. }
             | Notification::WarningNotice { .. }
             | Notification::Unknown { .. } => None,
         }
@@ -1113,7 +1140,7 @@ impl Notification {
     /// Human text, for `error` and `warning` notices.
     pub fn notice_text(&self) -> Option<&str> {
         match self {
-            Notification::ErrorNotice { message } | Notification::WarningNotice { message } => {
+            Notification::ErrorNotice { message, .. } | Notification::WarningNotice { message } => {
                 Some(message)
             }
             _ => None,

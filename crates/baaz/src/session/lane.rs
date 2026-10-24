@@ -571,8 +571,8 @@ impl SessionView {
                 self.submitting = false;
                 self.plan_completed(&turn_id, cx);
                 self.record_created_files(cx);
-                if let provider::facts::TurnOutcome::Failed { message, signed_out: true } = outcome {
-                    cx.emit(super::SessionEvent::SignedOut { message: message.unwrap_or_default() });
+                if let provider::facts::TurnOutcome::Failed { signed_out: true, .. } = outcome {
+                    cx.emit(super::SessionEvent::SignedOut);
                 }
                 cx.notify();
             }

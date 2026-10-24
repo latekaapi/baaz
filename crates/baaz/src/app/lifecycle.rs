@@ -4254,15 +4254,16 @@ impl Harness {
                     archive_target: None,
                 });
             }
-            SessionEvent::SignedOut { message } => {
-                self.set_dialog(cx, Dialog {
-                    title: "Signed out of Muse".into(),
-                    detail: format!("Muse refused the turn: {message}"),
-                    kind: DialogKind::Warning,
-                    primary: "Sign in",
-                    action: DialogAction::SignIn,
-                    archive_target: None,
-                });
+            // A typed credential failure from any provider (Claude Code's
+            // `authentication_failed`, Codex's `unauthorized`/401, Muse's
+            // refusal): the one quiet banner above the composer, and a
+            // re-probe so every surface agrees (D5 B5). No dialog.
+            SessionEvent::SignedOut => {
+                let id = view.read(cx).provider_kind();
+                self.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
+                self.typed_signed_out.insert(id);
+                crate::provider_status::reprobe_provider(id);
+                cx.notify();
             }
             // The child's exit already reached the hub's connection stream,
             // whose handler owns the reconnect.
