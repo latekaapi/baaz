@@ -163,6 +163,7 @@
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
+//! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session records a step failure, free |
 //! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
 //! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
@@ -426,6 +427,21 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
+    WindowVerb {
+        verb: "signed-out",
+        run: |this, _, _, cx| {
+            // The banner a typed auth failure raises, on the open session's
+            // provider; no session records a step failure.
+            match this.active.as_ref().map(|view| view.read(cx).provider_kind()) {
+                Some(id) => {
+                    this.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
+                    this.typed_signed_out.insert(id);
+                    cx.notify();
+                }
+                None => record_step_failure("signed-out"),
+            }
+        },
+    },
     WindowVerb {
         verb: "diagnostics",
         run: |_, rest, _, cx| {

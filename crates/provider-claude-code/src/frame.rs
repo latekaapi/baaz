@@ -672,6 +672,27 @@ fn decode_assistant(value: &Value) -> Frame {
     }
 }
 
+/// The typed auth failure on a raw stream line (D5 B5): an `assistant`
+/// line whose `error` is `authentication_failed` — the SDK's
+/// `SDKAssistantMessage.error` — names the message it failed. Text in a
+/// reply never counts: only the typed field. `None` for every other line.
+pub fn authentication_failed(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    if value.get("error").and_then(Value::as_str) != Some("authentication_failed") {
+        return None;
+    }
+    Some(
+        value
+            .get("message")
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
 /// B12: Unix milliseconds from a line's `timestamp` (RFC3339), for
 /// thinking durations on replay. `None` when absent or unparseable —
 /// unknown, never the epoch. Parsed by hand (no date dependency on this

@@ -90,13 +90,13 @@ const PAGE_LIMIT: u32 = 1000;
 /// page would buy nothing: every page, first included, runs at the ceiling.
 const FIRST_PAGE_LIMIT: u32 = PAGE_LIMIT;
 /// The transcript's own padding, matching the assistant screen's `.tr`.
-const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
+pub(crate) const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
 /// The transcript measure: the design bounds the transcript column to
 /// ~760-800 px and centres it, composer included. At the 1.1 text scale that
 /// is 880 px here (800 x 1.1). Centre-pane rows keep their `TRANSCRIPT_PAD_X`
 /// gutters and centre their content inside them with [`centred`], so below
 /// 880 px of content nothing changes.
-const TRANSCRIPT_MEASURE: f32 = 880.0;
+pub(crate) const TRANSCRIPT_MEASURE: f32 = 880.0;
 /// Bound a full-width centre-pane row to the transcript measure and centre it.
 ///
 /// An inner `w_full` wrapper: capped at `TRANSCRIPT_MEASURE`, the leftover
@@ -345,11 +345,9 @@ pub enum SessionEvent {
         /// The body paragraph.
         detail: String,
     },
-    /// A turn failed with a credential-shaped message: go to the login screen.
-    SignedOut {
-        /// What the provider said, for the dialog that offers to sign in again.
-        message: String,
-    },
+    /// A turn failed because the credential is gone (a typed signal from
+    /// the provider): the app raises its signed-out banner (D5 B5).
+    SignedOut,
     /// The child exited; the application owns the reconnect.
     Closed,
     /// A window-level slash command typed in the composer or picked from its

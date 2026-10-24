@@ -608,7 +608,6 @@ pub fn run_codex_login(
 
 // ------------------------------------------------------------ app wiring
 
-use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::screens::{connect_providers, ConnectIntent, ProviderAction, ProviderIntent};
 use gpui::{AnyElement, AppContext as _, Context, Window};
 
@@ -1035,7 +1034,9 @@ impl Harness {
             match status.headline() {
                 crate::provider_status::Headline::Connected => {
                     self.seen_connected.insert(id);
-                    self.provider_banners.remove(&id);
+                    if !self.typed_signed_out.contains(&id) {
+                        self.provider_banners.remove(&id);
+                    }
                     if id == ProviderId::Codex && matches!(self.codex_login, CodexLogin::Completed)
                     {
                         self.codex_login = CodexLogin::Idle;
@@ -1052,9 +1053,10 @@ impl Harness {
         }
     }
 
-    /// The quiet banner over the centre column when the open session's
-    /// provider is signed out, with a Sign in button that starts that
-    /// provider's own flow. `None` anywhere else.
+    /// The quiet banner above the composer when the open session's provider
+    /// is signed out (D5 B5): a warning dot, "<Provider> is signed out. Sign
+    /// in to send.", Sign in. On the composer's measure, inside the band the
+    /// transcript ends above. `None` anywhere else.
     pub(crate) fn render_provider_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui::prelude::*;
         let id = self.active.as_ref().map(|view| view.read(cx).provider_kind())?;
@@ -1063,16 +1065,14 @@ impl Harness {
         Some(
             gpui::div()
                 .w_full()
-                .px(gpui::px(aui_tokens::scale::SP_7))
-                .pt(gpui::px(aui_tokens::scale::SP_4))
+                .px(gpui::px(crate::session::TRANSCRIPT_PAD_X))
+                .pb(gpui::px(10.0))
                 .child(
-                    banner("provider-signed-out", BannerKind::Waiting, vec![BannerRun::Text(
-                        text.into(),
-                    )])
-                    .action("Sign in", BannerActionStyle::Primary)
-                    .on_action(move |window, cx| {
-                        let _ = weak.update(cx, |this, cx| this.banner_sign_in(id, window, cx));
-                    }),
+                    gpui::div().w_full().max_w(gpui::px(crate::session::TRANSCRIPT_MEASURE)).mx_auto().child(
+                        aui::screens::signed_out_banner("provider-signed-out", text).on_action(move |window, cx| {
+                            let _ = weak.update(cx, |this, cx| this.banner_sign_in(id, window, cx));
+                        }),
+                    ),
                 )
                 .into_any_element(),
         )
@@ -1081,6 +1081,9 @@ impl Harness {
     /// The provider banner's Sign in: Muse opens the sheet, Codex starts
     /// (or cancels) its flow, Claude types its sign-in into the terminal.
     fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
+        // The person is acting on it: from here the status decides when the
+        // banner goes (the next probe that reads Connected).
+        self.typed_signed_out.remove(&id);
         // Window-needing work parks flags for `on_frame`, like the rows.
         let action = ProviderAction::SignIn;
         match id {

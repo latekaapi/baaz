@@ -2239,6 +2239,21 @@ pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(Provide
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
     }
+    // A typed refused credential (`codexErrorInfo: unauthorized` / 401)
+    // ends the turn with the sign-in hint the app turns into its signed-out
+    // banner (D5 B5).
+    if let (Frame::Notification(Notification::ErrorNotice { signed_out: true, .. }), Some(session_id)) =
+        (&frame, session_id.clone())
+    {
+        emit(ProviderEvent::TurnSettled {
+            session_id,
+            turn_id: fold.current_turn().unwrap_or_default().to_owned(),
+            outcome: provider::facts::TurnOutcome::Failed {
+                message: Some("Codex is signed out.".into()),
+                signed_out: true,
+            },
+        });
+    }
     if let (Some(mode), Some(session_id)) = (reported, session_id.or(settings_thread)) {
         if fold.note_permission_mode(mode) {
             emit(ProviderEvent::ApprovalModeChanged { session_id, mode });
@@ -2260,6 +2275,29 @@ fn is_agent_delta(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// D5 B5: Codex's typed refused credential — `codexErrorInfo:
+    /// "unauthorized"` or an HTTP 401 on a connection variant — settles the
+    /// turn with the sign-in hint; other errors do not.
+    #[test]
+    fn a_typed_unauthorized_error_settles_the_turn_signed_out() {
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        let line = r#"{"method":"error","params":{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"401 Unauthorized","codexErrorInfo":"unauthorized"}}}"#;
+        step_line(&mut fold, line, &mut |event| events.push(event));
+        assert!(events.iter().any(|event| matches!(event,
+            ProviderEvent::TurnSettled { outcome: provider::facts::TurnOutcome::Failed { signed_out: true, .. }, .. })), "{events:?}");
+        assert!(crate::frame::error_info_signed_out(&serde_json::json!({
+            "message": "x", "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": 401}}
+        })));
+        assert!(!crate::frame::error_info_signed_out(&serde_json::json!({
+            "message": "x", "codexErrorInfo": "usageLimitExceeded"
+        })));
+        let mut quiet = Vec::new();
+        let other = r#"{"method":"error","params":{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"unauthorized words only","codexErrorInfo":"serverOverloaded"}}}"#;
+        step_line(&mut fold, other, &mut |event| quiet.push(event));
+        assert!(!quiet.iter().any(|event| matches!(event, ProviderEvent::TurnSettled { .. })));
+    }
+
     use super::*;
     use crate::frame::decode_envelope;
 

@@ -46,8 +46,6 @@ pub enum DialogAction {
     Dismiss,
     /// Respawn `muse serve` and resume.
     Reconnect,
-    /// Go to the login screen.
-    SignIn,
     /// Archive the dialog's `archive_target` out of the sidebar.
     Archive,
     /// Remove the dialog's `archive_target` project from the sidebar (its
