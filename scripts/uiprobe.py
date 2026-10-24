@@ -440,6 +440,106 @@ ENTRIES = {
 }
 
 
+# D5 Providers (docs/66 §3, the approved board): one entry per board state.
+# All offline and scripted through BAAZ_PROVIDER_STATUS_SCRIPT (or a
+# `--steps` verb that sets the state with sample values); the setup sheet's
+# terminal is a scripted backend in deterministic mode, never a shell.
+def _status(provider, installed, auth, advisory="None"):
+    return {"provider": provider, "installed": installed, "auth": auth, "enabled": True,
+            "advisory": advisory, "checked_at": 1790000000, "usage": None}
+
+
+def _yes(version, path):
+    return {"Yes": {"version": version, "path": path}}
+
+
+def _signed_in(email, plan, method, source=None):
+    auth = {"email": email, "plan": plan, "method": method}
+    if source:
+        auth["source"] = source
+    return {"SignedIn": auth}
+
+
+D5_ALL_MISSING = json.dumps([
+    _status("claude-code", "No", "Unknown"),
+    _status("codex", "No", "Unknown"),
+    _status("muse", "No", "Unknown"),
+])
+D5_ALL_SIGNED_OUT = json.dumps([
+    _status("claude-code", _yes("2.1.276", "/Users/ada/.local/bin/claude"), "SignedOut"),
+    _status("codex", _yes("codex-cli 0.144.6", "/opt/homebrew/bin/codex"), "SignedOut"),
+    _status("muse", _yes("1.4.13", "/Users/ada/.local/bin/muse"), "SignedOut"),
+])
+D5_TOO_OLD = json.dumps([
+    _status("claude-code", _yes("2.0.9 (Claude Code)", "/Users/ada/.local/bin/claude"),
+            _signed_in("ada@example.com", "Claude Max", "claude.ai"), {"TooOld": {"need": "2.1.276"}}),
+    _status("codex", _yes("codex-cli 0.144.6", "/opt/homebrew/bin/codex"),
+            _signed_in("ada@example.com", "ChatGPT Pro", "chatgpt")),
+    _status("muse", _yes("", "/Users/ada/.local/bin/muse"), "Unknown",
+            {"CantRun": {"stderr": "timed out after 5s", "timed_out": True}}),
+])
+D5_CLAUDE_CONNECTED = json.dumps([
+    _status("claude-code", _yes("2.1.276 (Claude Code)", "/Users/ada/.local/bin/claude"),
+            _signed_in("ada@example.com", "Claude Max", "claude.ai")),
+    _status("codex", _yes("codex-cli 0.144.6", "/opt/homebrew/bin/codex"), "SignedOut"),
+    _status("muse", "No", "Unknown"),
+])
+D5_TWO_CONNECTED = json.dumps([
+    _status("claude-code", _yes("2.1.276 (Claude Code)", "/Users/ada/.local/bin/claude"),
+            _signed_in("ada@example.com", "Claude Max", "claude.ai")),
+    _status("codex", _yes("codex-cli 0.144.6", "/opt/homebrew/bin/codex"),
+            _signed_in("ada@example.com", "ChatGPT Pro", "chatgpt")),
+    _status("muse", "No", "Unknown"),
+])
+D5_API_KEY = json.dumps([
+    _status("claude-code", _yes("2.1.276 (Claude Code)", "/Users/ada/.local/bin/claude"),
+            _signed_in(None, None, "api_key", "ANTHROPIC_API_KEY")),
+    _status("codex", _yes("codex-cli 0.144.6", "/opt/homebrew/bin/codex"), "SignedOut"),
+    _status("muse", "No", "Unknown"),
+])
+
+
+def _d5(steps=None, script=None, login="connect"):
+    shot = ["--no-connect", "--login", login]
+    if steps:
+        shot += ["--steps", steps]
+    entry = {"shot": shot}
+    if script:
+        entry["env"] = {"BAAZ_PROVIDER_STATUS_SCRIPT": script}
+    return entry
+
+
+ENTRIES.update({
+    # B1 · the connect screen
+    "connect-all-missing":     _d5(script=D5_ALL_MISSING),
+    "connect-all-signed-out":  _d5(script=D5_ALL_SIGNED_OUT),
+    "connect-too-old":         _d5(script=D5_TOO_OLD),
+    "connect-menu":            _d5("connect-menu", D5_TWO_CONNECTED),
+    # B2 · the setup sheet: waiting (Claude signed out) and done (Connected)
+    "setup-sheet-install":     _d5("setup:claude-code:install", D5_ALL_MISSING),
+    "setup-sheet-signin":      _d5("setup:claude-code:signin", D5_ALL_SIGNED_OUT),
+    "setup-sheet-done":        _d5("setup:claude-code:signin", D5_CLAUDE_CONNECTED),
+    # B3 · Codex in its row (browser link, device code) and Muse's sheet
+    "codex-signing-in":        _d5("codex-login:waiting", D5_CLAUDE_CONNECTED),
+    "codex-device-code":       _d5("codex-login:device", D5_CLAUDE_CONNECTED),
+    "muse-sheet":              _d5("muse-sheet", D5_ALL_SIGNED_OUT),
+    # B4 · the Settings card: Details open, and an API-key login
+    "settings-card-details":   _d5("settings:providers/claude-code;details:claude-code",
+                                   D5_CLAUDE_CONNECTED, login="signed-in"),
+    "settings-card-api-key":   _d5("settings:providers/claude-code;details:claude-code",
+                                   D5_API_KEY, login="signed-in"),
+    # B5 · the signed-out banner above the composer
+    "signed-out-banner":       _d5("new;signed-out", login="signed-in"),
+})
+
+D5_ENTRIES = [
+    "connect-first-run", "connect-checking", "connect-all-missing", "connect-all-signed-out",
+    "connect-too-old", "connect-menu", "setup-sheet-install", "setup-sheet-signin",
+    "setup-sheet-done", "codex-signing-in", "codex-device-code", "muse-sheet",
+    "settings-card-details", "settings-card-api-key", "signed-out-banner",
+]
+
+
 # B8 merged Diff review and Git changes into one Changes view: the old
 # `right-diff` and `right-git` entry names stay as aliases of
 # `right-changes` (same steps, same screen), so older invocations keep
