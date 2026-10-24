@@ -185,8 +185,9 @@ native sessions (P7); a provider-version manifest fetched from the network.
 | S3–S6 | `d8d46c6` | built, gated |
 | S3 fix (idle frames) | `ac6b6d8` | built, gated |
 | S7 (new probe entries) | — | not done: the uncovered states are drawn on the D5 board instead; entries follow the build |
-| D1 mocks | canvas v58, board `D5Providers` | **waiting for the owner** |
-| B1–B5 | — | after approval |
+| D1 mocks | canvas v58, board `D5Providers` | approved |
+| D1 approval | — | owner approved canvas v58, 2026-10-24 |
+| B1–B5 + S7 entries | `8c1493a` … `e134d36` | **built, gated, seen live; not pushed** — docs/67 |
 
 Gates on `ac6b6d8`: `cargo test --workspace` 2,123 passed, 0 failed, 9 ignored; clippy clean; perf budgets: every
 budget met except `idle.cpu_pct` 0.6 > 0.5, which measures the same on the P4 baseline `2262d34` (the known gpui
