@@ -671,6 +671,9 @@ pub struct Harness {
     pub(crate) codex_login: crate::connect::CodexLogin,
     /// Cancel for the running Codex login thread, replaced on every start.
     pub(crate) codex_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Bumped by every Codex sign-in start: a superseded flow's updates are
+    /// dropped (Use a code instead after the browser flow).
+    pub(crate) codex_generation: u64,
     /// Today's Muse login flow, presented as a sheet over the connect
     /// screen (or over the shell from the account menu) — never the app's
     /// first screen.
@@ -1541,6 +1544,7 @@ impl Harness {
             connect_statuses: Vec::new(),
             codex_login: crate::connect::CodexLogin::Idle,
             codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            codex_generation: 0,
             muse_sheet: false,
             connect_menu_open: false,
             setup_sheet: None,
@@ -7383,7 +7387,11 @@ impl Harness {
             self.close_setup_sheet(cx);
             return;
         }
-        if self.login_screen_up() || self.muse_sheet {
+        if self.muse_sheet && !self.login_screen_up() {
+            self.close_muse_sheet(window, cx);
+            return;
+        }
+        if self.login_screen_up() {
             self.login_escape(window, cx);
             return;
         }

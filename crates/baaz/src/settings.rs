@@ -1473,9 +1473,13 @@ impl Harness {
         let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, window, cx| {
             this.handle_provider_intent(intent.clone(), window, cx);
         });
+        let assist = cx.listener(|this: &mut Self, key: &gpui::SharedString, _, cx| {
+            this.codex_assist_link(key, cx);
+        });
         let mut card_rows = vec![
             aui::screens::provider_card(format!("settings-card-{}", id.as_str()), &data)
                 .on_intent(move |event, window, cx| intent(&event, window, cx))
+                .on_assist(move |key, window, cx| assist(&key, window, cx))
                 .into_any_element(),
         ];
         if crate::settings_providers::own_mcp_providers().contains(&id) {
