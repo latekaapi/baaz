@@ -11,11 +11,11 @@
 //! Continue enables once any provider is Connected ([`continue_enabled`]);
 //! Continue and Skip both set `onboarding_completed` ([`complete_onboarding`]).
 //!
-//! Row actions: Muse Sign in reuses today's Muse login flow as a sheet over
-//! the connect screen; Codex Sign in runs `account/login/start` on a
-//! short-lived app-server ([`run_codex_login`]); Claude Code Sign in and every
-//! Install only type into the dock terminal — the person presses Enter
-//! ([`terminal_prefill`], [`install_command`]).
+//! Row actions: Muse Sign in opens Muse's sign-in sheet; Codex Sign in runs
+//! `account/login/start` on a short-lived app-server ([`run_codex_login`]);
+//! Claude Code Sign in, every Install and every Update open the setup sheet
+//! ([`crate::setup`]) with the command typed, not run — the person presses
+//! Enter.
 
 use std::collections::HashMap;
 use std::io::BufRead as _;
@@ -286,24 +286,8 @@ pub fn signed_out_banner_text(id: ProviderId) -> String {
 
 // ------------------------------------------------------------ terminal prefill + docs
 
-/// What a row action types into the dock terminal without running: the
-/// Claude Code sign-in (`claude auth login`, typed, never run — the person
-/// presses Enter) and every vendor install command. `send_enter` is always
-/// false at these call sites; this only names the bytes.
-pub fn terminal_prefill(id: ProviderId, sign_in: bool) -> Option<&'static str> {
-    if sign_in {
-        return match id {
-            // Muse signs in through the in-app sheet, Codex through the
-            // in-app app-server flow: neither types into the terminal.
-            ProviderId::Muse | ProviderId::Codex => None,
-            ProviderId::ClaudeCode => Some("claude auth login"),
-        };
-    }
-    install_command(id)
-}
-
-/// The vendor install command, typed into the dock terminal and not run
-/// (the registry's table, [`ProviderId::install_command`]).
+/// The vendor install command, typed into the setup sheet's terminal and
+/// not run (the registry's table, [`ProviderId::install_command`]).
 pub fn install_command(id: ProviderId) -> Option<&'static str> {
     id.install_command()
 }
@@ -576,6 +560,7 @@ use aui_tokens::ActiveAui as _;
 use gpui::{AnyElement, App, Context, Window};
 
 use crate::app::Harness;
+use crate::setup::SetupKind;
 use crate::wire::WireCall;
 
 /// The statuses a boot renders from: scripted in deterministic mode (or all
@@ -687,6 +672,7 @@ impl Harness {
                     .child(card),
             );
         }
+        stack = stack.children(self.render_setup_sheet(cx));
         stack.into_any_element()
     }
 
@@ -777,7 +763,7 @@ impl Harness {
     }
 
     /// One connect-screen intent: row buttons, Continue, Skip.
-    fn connect_intent(&mut self, intent: ConnectIntent, window: &mut Window, cx: &mut App) {
+    fn connect_intent(&mut self, intent: ConnectIntent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
             ConnectIntent::Continue | ConnectIntent::Skip => self.finish_connect(),
             ConnectIntent::Provider(ProviderIntent { id, action }) => {
@@ -804,9 +790,8 @@ impl Harness {
         id: ProviderId,
         action: ProviderAction,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) {
-        let _ = (window, cx);
         match action {
             ProviderAction::SignIn => match id {
                 ProviderId::Muse => {
@@ -814,31 +799,16 @@ impl Harness {
                 }
                 ProviderId::Codex => {
                     if !matches!(self.codex_login, CodexLogin::Waiting { .. } | CodexLogin::Device { .. }) {
-                        self.pending_codex_start = true;
+                        self.start_codex_login(cx);
                     }
                 }
-                ProviderId::ClaudeCode => {
-                    if let Some(command) = terminal_prefill(id, true) {
-                        self.pending_prefill = Some(command.to_owned());
-                        crate::provider_status::watch_setup(id);
-                    }
-                }
+                ProviderId::ClaudeCode => self.open_setup_sheet(id, SetupKind::SignIn, window, cx),
             },
-            ProviderAction::Install => {
-                if let Some(command) = install_command(id) {
-                    self.pending_prefill = Some(command.to_owned());
-                    crate::provider_status::watch_setup(id);
-                }
-            }
+            ProviderAction::Install => self.open_setup_sheet(id, SetupKind::Install, window, cx),
             ProviderAction::Docs => {
                 let _ = crate::auth::open_in_browser(docs_url(id));
             }
-            ProviderAction::Update => {
-                if let Some(command) = id.update_command() {
-                    self.pending_prefill = Some(command.to_owned());
-                    crate::provider_status::watch_setup(id);
-                }
-            }
+            ProviderAction::Update => self.open_setup_sheet(id, SetupKind::Update, window, cx),
             ProviderAction::Cancel => {
                 if id == ProviderId::Codex {
                     self.codex_cancel.store(true, Ordering::SeqCst);
@@ -855,7 +825,7 @@ impl Harness {
     }
 
     /// A link in the assist line under the rows (D5 B3).
-    pub(crate) fn codex_assist_link(&mut self, key: &str, cx: &mut App) {
+    pub(crate) fn codex_assist_link(&mut self, key: &str, cx: &mut Context<Self>) {
         let _ = (key, cx);
     }
 
@@ -885,36 +855,6 @@ impl Harness {
                 cx.notify();
             },
         );
-    }
-
-    /// Type `command` into the dock terminal without running it: the
-    /// person presses Enter. Runs in `on_frame`, where the window lives.
-    fn prefill_in_terminal(
-        &mut self,
-        command: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let root = self
-            .current_project()
-            .map(|project| project.root.clone())
-            .unwrap_or_else(|| self.args.workspace.clone());
-        self.run_in_terminal(&root, command, false, window, cx);
-    }
-
-    /// Run what the row actions parked (prefills, the Codex login start).
-    pub(crate) fn run_pending_connect_actions(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending_codex_start {
-            self.pending_codex_start = false;
-            self.start_codex_login(cx);
-        }
-        if let Some(command) = self.pending_prefill.take() {
-            self.prefill_in_terminal(&command, window, cx);
-        }
     }
 
     /// Follow the status cache while shown, and the sign-out banners while
@@ -1036,7 +976,7 @@ impl Harness {
 
     /// The provider banner's Sign in: Muse opens the sheet, Codex starts
     /// (or cancels) its flow, Claude types its sign-in into the terminal.
-    fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut App) {
+    fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         // Window-needing work parks flags for `on_frame`, like the rows.
         let action = ProviderAction::SignIn;
         match id {
@@ -1324,17 +1264,10 @@ mod tests {
     #[test]
     fn claude_sign_in_types_but_never_runs_and_installs_are_exact() {
         assert_eq!(
-            terminal_prefill(ProviderId::ClaudeCode, true),
-            Some("claude auth login")
-        );
-        assert_eq!(
             install_command(ProviderId::ClaudeCode),
             Some("curl -fsSL https://claude.ai/install.sh | bash")
         );
         assert_eq!(install_command(ProviderId::Codex), Some("npm i -g @openai/codex"));
-        // Muse and the in-app flows never type into the terminal.
-        assert_eq!(terminal_prefill(ProviderId::Muse, true), None);
-        assert_eq!(terminal_prefill(ProviderId::Codex, true), None);
         assert_eq!(install_command(ProviderId::Muse), None);
         for id in ProviderId::all() {
             assert!(!docs_url(id).is_empty(), "{id:?} names its docs");
@@ -1347,7 +1280,6 @@ mod tests {
         // muse.dev is another product (it redirects to sonatype.com). Muse has
         // no install command anywhere, and its missing row is one link.
         assert_eq!(ProviderId::Muse.install_command(), None);
-        assert_eq!(crate::settings_providers::install_command(ProviderId::Muse), None);
         for id in ProviderId::all() {
             assert!(!id.docs_url().contains("muse.dev"), "{id:?} must not link muse.dev");
         }

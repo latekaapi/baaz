@@ -159,6 +159,8 @@
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
 //! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names record a step failure, free |
 //! | `page-focus` | give the active browser page the keyboard, free |
+//! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for records a step failure, free |
+//! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
@@ -414,6 +416,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "key", run: |this, rest, _, _| this.step_key(rest) },
     WindowVerb { verb: "page-focus", run: |this, _, window, cx| this.step_page_focus(window, cx) },
+    // D5 providers: the setup sheet (`setup:<provider>:<install|signin|update>`)
+    // and the connect screen's footer menu. Both run on the connect screen too.
+    WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
+    WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
 ];
 
 impl Harness {

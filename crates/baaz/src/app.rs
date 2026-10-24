@@ -677,17 +677,18 @@ pub struct Harness {
     pub(crate) muse_sheet: bool,
     /// The connect screen's footer picker menu is open.
     pub(crate) connect_menu_open: bool,
+    /// The setup sheet (D5 B2) while it is up: which provider, what for.
+    pub(crate) setup_sheet: Option<crate::setup::SetupSheet>,
+    /// The sheet's terminals, one per provider, kept across Close.
+    pub(crate) setup_terminals: crate::setup::SetupTerminals,
+    /// The sheet terminal's keyboard focus.
+    pub(crate) setup_focus: FocusHandle,
     /// Quiet per-provider banners for cached-Connected providers that later
     /// probe Signed out: shown on that provider's composer, never a gate.
     pub(crate) provider_banners: HashMap<ProviderId, String>,
     /// Providers the cache has called Connected this launch: only these
     /// earn a sign-out banner (a provider never connected gets none).
     pub(crate) seen_connected: HashSet<ProviderId>,
-    /// A terminal prefill parked by a row action, run in `on_frame` where
-    /// the window lives.
-    pub(crate) pending_prefill: Option<String>,
-    /// A Codex login start parked by its row action, run in `on_frame`.
-    pub(crate) pending_codex_start: bool,
     /// The provider-status cache's mtime when last read, so the connect
     /// screen and banners follow background probes without polling reads.
     pub(crate) connect_status_stamp: crate::connect::StatusStamp,
@@ -1542,10 +1543,11 @@ impl Harness {
             codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             muse_sheet: false,
             connect_menu_open: false,
+            setup_sheet: None,
+            setup_terminals: crate::setup::SetupTerminals::default(),
+            setup_focus: cx.focus_handle(),
             provider_banners: HashMap::new(),
             seen_connected: HashSet::new(),
-            pending_prefill: None,
-            pending_codex_start: false,
             connect_status_stamp: (None, 0),
             sessions: Vec::new(),
             list_epoch: 0,
@@ -3412,7 +3414,10 @@ impl Harness {
 
     /// D51 "Open terminal" on a terminal tool card: open the dock and
     /// focus the card's tab. A tab the host no longer holds (or none
-    /// named) opens the dock on its active tab instead of failing.
+    /// named) opens the dock on its active tab instead of failing. Only
+    /// its test reaches it since the setup sheet took the typed commands
+    /// (D5 B2); kept for the tool card it was written for.
+    #[cfg(test)]
     pub(crate) fn open_terminal_tab(
         &mut self,
         tab: Option<String>,
@@ -6342,7 +6347,11 @@ impl Harness {
         // lifecycle below like a signed-in one.
         if self.show_connect {
             self.sync_provider_state(cx);
-            self.run_pending_connect_actions(window, cx);
+            // Window verbs (the setup sheet, the footer menu) script the
+            // connect screen's captures; nothing else runs here.
+            if crate::steps::all_window_steps(&self.args.steps) {
+                self.maybe_run_steps(window, cx);
+            }
             return;
         }
         if !matches!(self.auth, Auth::SignedIn(_))
@@ -6351,7 +6360,6 @@ impl Harness {
             return;
         }
         self.sync_provider_state(cx);
-        self.run_pending_connect_actions(window, cx);
         // The right pane's git and filesystem reads, reconciled off the render
         // path: at once on open, kind or project change, on the 2 s interval
         // while open on a data kind, never while closed or on Browser.
@@ -6835,7 +6843,7 @@ impl Render for Harness {
         let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
-        let muse_sheet = self.render_muse_sheet(window, cx);
+        let muse_sheet = self.render_muse_sheet(window, cx).or_else(|| self.render_setup_sheet(cx));
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
@@ -7371,6 +7379,10 @@ impl Harness {
         // capture-only login screen or the Muse sign-in sheet. A signed-out
         // Muse used to take every press, so nothing else ever got Escape
         // on a machine that does not use Muse (docs/50 P1).
+        if self.setup_sheet.is_some() {
+            self.close_setup_sheet(cx);
+            return;
+        }
         if self.login_screen_up() || self.muse_sheet {
             self.login_escape(window, cx);
             return;

@@ -91,6 +91,7 @@ mod session_migration;
 mod sessions;
 mod settings;
 mod settings_providers;
+mod setup;
 mod shot;
 mod sidebar;
 mod sidebar_view;

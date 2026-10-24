@@ -2220,7 +2220,7 @@ impl Harness {
         // shows its session's Browser kind with nothing over it.
         let overlays = self.overlays.read(cx);
         let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
-        let settings_open = self.settings_open() || self.muse_sheet;
+        let settings_open = self.settings_open() || self.muse_sheet || self.setup_sheet.is_some();
         // A modal the overlay window hosts sits above the live page: it
         // covers nothing (`OverlayKind::Modal`).
         let modal_hosted = self.modal_overlay_wanted(cx);

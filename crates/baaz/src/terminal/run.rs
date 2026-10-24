@@ -1,5 +1,6 @@
-//! The dock's entry point for running a command (D49): the connect flow and
-//! the block rerun call it. (D4 removed the transcript's play buttons.) Open the
+//! The dock's entry point for running a command (D49): the block rerun calls
+//! it. (D4 removed the transcript's play buttons; D5 moved the connect flow's
+//! typed commands into the setup sheet's own terminal.) Open the
 //! dock, pick the tab by D43's rule, bracketed-paste the command, send Enter
 //! unless asked not to, and focus the grid. Entirely local: no turn, no
 //! wire, so it works under `--replay` too.
@@ -12,27 +13,7 @@ use super::{Pick, TabOwner};
 use crate::app::Harness;
 
 impl Harness {
-    /// Run `command` in the terminal dock (D49): open the dock, pick the
-    /// project's active tab when it is idle and open a new tab otherwise
-    /// ([`Pick`], D43), bracketed-paste the whole command, send Enter
-    /// unless `send_enter` is false, and focus the grid.
-    pub fn run_in_terminal(
-        &mut self,
-        project: &Path,
-        command: &str,
-        send_enter: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if command.trim().is_empty() {
-            return;
-        }
-        let pick = self.terminal_host.read(cx).pick(cx, project, true);
-        self.run_in_picked(project, pick, command, send_enter, window, cx);
-    }
-
-    /// The shared tail of every dock run: [`run_in_terminal`](Self::run_in_terminal)
-    /// for play buttons (D43 over the active tab), the block rerun for its
+    /// The shared tail of every dock run: the block rerun for its
     /// originating tab. `pick` is the caller's D43 choice; the dock open,
     /// paste, Enter and focus below are one path.
     pub(crate) fn run_in_picked(
