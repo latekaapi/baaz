@@ -4,7 +4,10 @@ Read this first in the next session. It replaces docs/64 as "where are we" for p
 decision) is still open and untouched. The why, the evidence and the competitor comparison are **docs/65**; this doc
 is the build spec.
 
-**Stage status:** detection + sign-in fixes (docs/65 S1–S6) **built on main, NOT pushed**. The screens are
+**Superseded 2026-10-24 (evening) by docs/67:** everything in §4 is built, gated and seen live; not pushed. This doc stays the
+build spec.
+
+**Stage status (as written, morning):** detection + sign-in fixes (docs/65 S1–S6) **built on main, NOT pushed**. The screens are
 **APPROVED by the owner (2026-10-24, "Looks good")** as drawn on the canvas "Baaz v3"
 (https://claude.ai/artifact/7SwC39oc2nEakd4TpCdp8e), **version 58, board `D5Providers`**. Nothing on the board
 is built. The board is the spec: where this doc and the board disagree, the board wins; where neither answers,
