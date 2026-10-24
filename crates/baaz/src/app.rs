@@ -680,6 +680,8 @@ pub struct Harness {
     pub(crate) muse_sheet: bool,
     /// The connect screen's footer picker menu is open.
     pub(crate) connect_menu_open: bool,
+    /// Settings provider cards whose Details are open (closed by default).
+    pub(crate) provider_details_open: HashSet<ProviderId>,
     /// The setup sheet (D5 B2) while it is up: which provider, what for.
     pub(crate) setup_sheet: Option<crate::setup::SetupSheet>,
     /// The sheet's terminals, one per provider, kept across Close.
@@ -1547,6 +1549,7 @@ impl Harness {
             codex_generation: 0,
             muse_sheet: false,
             connect_menu_open: false,
+            provider_details_open: HashSet::new(),
             setup_sheet: None,
             setup_terminals: crate::setup::SetupTerminals::default(),
             setup_focus: cx.focus_handle(),
@@ -2156,7 +2159,12 @@ impl Harness {
     /// Spawn `muse serve`, initialize, and start draining its events.
     pub(crate) fn connect(&mut self, cx: &mut Context<Self>) {
         crate::log::boot_mark("connect-sent");
-        let program = self.args.program.clone();
+        // The path set in Settings (D5 B4) unless an env override names one.
+        let env_named = ["BAAZ_MUSE", "MUSE_BIN"].iter().any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()));
+        let program = match crate::details::path_override(ProviderId::Muse) {
+            Some(chosen) if !env_named => chosen.to_string_lossy().into_owned(),
+            _ => self.args.program.clone(),
+        };
         self.wire_call(
             cx,
             move || {

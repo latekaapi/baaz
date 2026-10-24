@@ -163,6 +163,8 @@
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
+//! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
+//! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
@@ -424,6 +426,27 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
+    WindowVerb {
+        verb: "diagnostics",
+        run: |_, rest, _, cx| {
+            // Captures and live checks only: the text "Copy diagnostics"
+            // would put on the clipboard, printed to stderr instead.
+            let id = crate::providers::ProviderId::parse(rest);
+            let status = crate::provider_status::live_statuses()
+                .into_iter()
+                .find(|status| status.provider == id)
+                .unwrap_or_else(|| crate::provider_status::ProviderStatus::checking(id));
+            gpui::AppContext::background_spawn(cx, async move { eprintln!("baaz: diagnostics ↓\n{}", crate::details::collect(id, &status)) })
+                .detach();
+        },
+    },
+    WindowVerb {
+        verb: "details",
+        run: |this, rest, _, cx| {
+            this.provider_details_open.insert(crate::providers::ProviderId::parse(rest));
+            cx.notify();
+        },
+    },
 ];
 
 impl Harness {

@@ -359,7 +359,14 @@ pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
             path_dirs.push(dir);
         }
     }
-    let env = env_override(id).and_then(std::env::var_os).map(PathBuf::from);
+    // The env override wins; then the path the person set in Settings
+    // (D5 B4); either names the binary outright — a wrong one reads Not
+    // installed rather than silently falling back to another.
+    let env = env_override(id)
+        .and_then(std::env::var_os)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::details::path_override(id));
     resolve_program_with(id, env.as_deref(), &path_dirs, &fallback_dirs(&home))
 }
 

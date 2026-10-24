@@ -427,7 +427,7 @@ mod tests {
         ProviderStatus {
             provider: id,
             installed: Installed::yes("1.0", "/bin/x"),
-            auth: Auth::SignedIn { email: None, plan: None, method: None },
+            auth: Auth::SignedIn { email: None, plan: None, method: None, source: None },
             enabled: true,
             advisory: crate::provider_status::Advisory::None,
             checked_at: Some(1700000000),
@@ -752,14 +752,14 @@ mod tests {
         // provider prefix dropped; Codex the same when its snapshot is
         // plan-less (its "prolite" snapshot keeps showing as before).
         let mut claude = status(ProviderId::ClaudeCode);
-        claude.auth = Auth::SignedIn { email: None, plan: Some("Claude Max".into()), method: None };
+        claude.auth = Auth::SignedIn { email: None, plan: Some("Claude Max".into()), method: None, source: None };
         let rows = usage_rows(&[claude], None, 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].plan.as_deref(), Some("Max"));
         assert!(unavailable_text(&rows[0]).contains("Claude Code turn"));
 
         let mut codex = status(ProviderId::Codex);
-        codex.auth = Auth::SignedIn { email: None, plan: Some("prolite".into()), method: None };
+        codex.auth = Auth::SignedIn { email: None, plan: Some("prolite".into()), method: None, source: None };
         codex.usage = Some(UsageSnapshot {
             provider: "codex".into(),
             plan: None,

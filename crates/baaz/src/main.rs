@@ -47,6 +47,7 @@ mod clock;
 mod connect;
 mod conn;
 mod default_browser;
+mod details;
 mod dialogs;
 mod external_urls;
 mod feedback;
