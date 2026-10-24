@@ -869,6 +869,7 @@ impl Harness {
             | ProviderAction::SetEnabled(_)
             | ProviderAction::ToggleDetails
             | ProviderAction::ChangePath
+            | ProviderAction::ClearPath
             | ProviderAction::CopyDiagnostics => {}
         }
     }
@@ -1176,7 +1177,7 @@ mod tests {
         ProviderStatus {
             provider: id,
             installed: Installed::yes("1.0", "/bin/x"),
-            auth: Auth::SignedIn { email: Some("a@x.com".into()), plan: None, method: None },
+            auth: Auth::SignedIn { email: Some("a@x.com".into()), plan: None, method: None, source: None },
             enabled: true,
             advisory: Advisory::None,
             checked_at: Some(1),

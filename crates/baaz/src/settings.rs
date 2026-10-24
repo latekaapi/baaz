@@ -1469,27 +1469,28 @@ impl Harness {
         let Some(status) = status else {
             return self.settings_providers_overview(window, cx);
         };
-        let data = crate::settings_providers::card_data(status, &self.codex_login);
+        let data = crate::settings_providers::card_data(
+            status,
+            &self.codex_login,
+            self.provider_details_open.contains(&id),
+        );
         let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, window, cx| {
             this.handle_provider_intent(intent.clone(), window, cx);
         });
         let assist = cx.listener(|this: &mut Self, key: &gpui::SharedString, _, cx| {
             this.codex_assist_link(key, cx);
         });
-        let mut card_rows = vec![
-            aui::screens::provider_card(format!("settings-card-{}", id.as_str()), &data)
-                .on_intent(move |event, window, cx| intent(&event, window, cx))
-                .on_assist(move |key, window, cx| assist(&key, window, cx))
-                .into_any_element(),
-        ];
+        // The card sits on the page itself (the D5 board), not inside a
+        // settings group; the MCP switch keeps its own Tools group under it.
+        let card = aui::screens::provider_card(format!("settings-card-{}", id.as_str()), &data)
+            .on_intent(move |event, window, cx| intent(&event, window, cx))
+            .on_assist(move |key, window, cx| assist(&key, window, cx))
+            .into_any_element();
+        let mut page = v_flex().w_full().gap(px(scale::SP_4)).child(card);
         if crate::settings_providers::own_mcp_providers().contains(&id) {
-            card_rows.push(self.use_own_mcp_row(id, cx));
+            page = page.child(self.settings_group("Tools", vec![self.use_own_mcp_row(id, cx)], cx));
         }
-        v_flex()
-            .w_full()
-            .gap(px(scale::SP_4))
-            .child(self.settings_group("Account", card_rows, cx))
-            .into_any_element()
+        page.into_any_element()
     }
 
     /// Shortcuts: a search field pinned at the top (⌘F focuses it),

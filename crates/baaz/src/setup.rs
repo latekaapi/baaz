@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(setup_status(SetupKind::SignIn, &installed), SetupStatus::Waiting("Waiting for sign-in…".into()));
         let signed_in = status(
             Installed::yes("2.1.276", "/bin/claude"),
-            Auth::SignedIn { email: Some("ada@example.com".into()), plan: Some("Max".into()), method: None },
+            Auth::SignedIn { email: Some("ada@example.com".into()), plan: Some("Max".into()), method: None, source: None },
         );
         assert_eq!(setup_status(SetupKind::SignIn, &signed_in), SetupStatus::Connected("Connected · ada@example.com · Max".into()));
         assert_eq!(setup_note(SetupKind::SignIn, &signed_in), "Claude Code is ready. New sessions can start in it.");

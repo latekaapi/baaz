@@ -85,6 +85,9 @@ pub enum Auth {
         plan: Option<String>,
         /// How it signed in (`oauth`, `chatgpt`, `apiKey`, …), when known.
         method: Option<String>,
+        /// Where an API key comes from (`ANTHROPIC_API_KEY`), when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// The auth probe ran and found no login.
     SignedOut,
@@ -387,6 +390,11 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
     }
 }
 
+/// [`default_resolve`] for "Copy diagnostics": where Baaz finds `id` now.
+pub(crate) fn resolve_for_diagnostics(id: ProviderId) -> Option<PathBuf> {
+    default_resolve(id)
+}
+
 /// Muse's resolution ladder — `BAAZ_MUSE`, `MUSE_BIN`, `PATH`, then the
 /// login `PATH` through `find_login` (the cached lookup in production).
 fn resolve_muse(find_login: fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
@@ -405,6 +413,10 @@ fn resolve_muse(find_login: fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
+    }
+    // The path the person set in Settings (D5 B4), after the env overrides.
+    if let Some(chosen) = crate::details::path_override(ProviderId::Muse) {
+        return chosen.is_file().then_some(chosen);
     }
     if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
@@ -977,6 +989,7 @@ fn probe_provider(
                     email: account.email,
                     plan: account.plan,
                     method: Some("account".into()),
+                    source: None,
                 },
                 MuseAuthRead::SignedOut => Auth::SignedOut,
                 // Not asked yet: the install keeps the last answer it held.
@@ -1002,6 +1015,7 @@ fn probe_provider(
                             plan: parsed.plan_label(),
                             email: parsed.email,
                             method: parsed.auth_method,
+                            source: parsed.api_key_source,
                         },
                         _ => Auth::SignedOut,
                     }
@@ -1019,6 +1033,7 @@ fn probe_provider(
                             email: probe.account.email,
                             plan: probe.plan.or(probe.account.plan),
                             method: probe.account.method,
+                            source: None,
                         }
                     } else {
                         Auth::SignedOut
@@ -1964,6 +1979,7 @@ mod tests {
             email: Some("a@x.com".into()),
             plan: Some("Claude Max".into()),
             method: Some("oauth".into()),
+            source: None,
         };
         assert_eq!(status.headline_text(), "Connected · a@x.com · Claude Max");
     }
@@ -2304,7 +2320,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         let mut muse = ProviderStatus::checking(ProviderId::Muse);
         muse.installed = Installed::yes("Muse Code 1.4.11", "/bin/muse");
-        muse.auth = Auth::SignedIn { email: Some("m@x.com".into()), plan: None, method: None };
+        muse.auth = Auth::SignedIn { email: Some("m@x.com".into()), plan: None, method: None, source: None };
         muse.checked_at = Some(1);
         {
             let mut live = live_service();
@@ -2358,7 +2374,7 @@ mod tests {
         reset_live();
         let mut connected = ProviderStatus::checking(ProviderId::ClaudeCode);
         connected.installed = Installed::yes("2.1.276 (Claude Code)", "/bin/claude");
-        connected.auth = Auth::SignedIn { email: Some("a@x.com".into()), plan: Some("Max".into()), method: None };
+        connected.auth = Auth::SignedIn { email: Some("a@x.com".into()), plan: Some("Max".into()), method: None, source: None };
         connected.checked_at = Some(1);
         live_service().service.put(connected);
         // The status never moves (already Connected): the limit ends it.
@@ -2394,6 +2410,7 @@ mod tests {
             email: Some("a@x.com".into()),
             plan: Some("Ultra".into()),
             method: Some("account".into()),
+            source: None,
         };
         status.set_usage(UsageSnapshot {
             provider: "muse".into(),
@@ -2624,7 +2641,7 @@ mod tests {
         service.put(ProviderStatus {
             provider: ProviderId::ClaudeCode,
             installed: Installed::yes("2.1.276", "/bin/claude"),
-            auth: Auth::SignedIn { email: None, plan: None, method: None },
+            auth: Auth::SignedIn { email: None, plan: None, method: None, source: None },
             enabled: true,
             advisory: Advisory::None,
             checked_at: Some(1_700_000_000),
@@ -2693,7 +2710,7 @@ mod tests {
         let connected = |id| {
             let mut status = ProviderStatus::checking(id);
             status.installed = Installed::yes("1.0", "/bin/x");
-            status.auth = Auth::SignedIn { email: None, plan: None, method: None };
+            status.auth = Auth::SignedIn { email: None, plan: None, method: None, source: None };
             status.checked_at = Some(1_700_000_000);
             status
         };

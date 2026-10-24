@@ -22,6 +22,9 @@ pub struct ClaudeAuthStatus {
     pub org_name: Option<String>,
     /// The raw `subscriptionType`, when reported.
     pub subscription_type: Option<String>,
+    /// Where an API-key login's key comes from (`apiKeySource`, e.g.
+    /// `ANTHROPIC_API_KEY`), when reported.
+    pub api_key_source: Option<String>,
 }
 
 impl ClaudeAuthStatus {
@@ -75,6 +78,7 @@ pub fn parse_auth_status(text: &str) -> Option<ClaudeAuthStatus> {
         org_id: text_field(&value, "orgId"),
         org_name: text_field(&value, "orgName"),
         subscription_type: text_field(&value, "subscriptionType"),
+        api_key_source: text_field(&value, "apiKeySource"),
     })
 }
 

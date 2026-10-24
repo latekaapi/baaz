@@ -65,7 +65,7 @@ pub(crate) fn actions_for(status: &ProviderStatus) -> Vec<ProviderActionDef> {
 /// installed…) and the state actions. While Codex signs in from here its
 /// card follows the flow like its connect row: a spinner and Cancel. Pure,
 /// so tests drive every state without a window.
-pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLogin) -> ProviderCardData {
+pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLogin, details_open: bool) -> ProviderCardData {
     use crate::connect::CodexLogin;
     let mut line = crate::connect::status_line(status, true);
     let mut actions = actions_for(status);
@@ -85,7 +85,7 @@ pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLo
     if status.provider == ProviderId::Codex {
         data = data.assist(crate::connect::codex_assist_runs(codex));
     }
-    data
+    data.details(crate::details::card_details(status, details_open))
 }
 
 /// The providers a composer menu may list: the enabled ones, in
@@ -607,9 +607,62 @@ impl Harness {
             ProviderAction::Docs => {
                 cx.open_url(docs_url(id));
             }
-            // B4: the Details disclosure, the path override and diagnostics.
-            ProviderAction::ToggleDetails | ProviderAction::ChangePath | ProviderAction::CopyDiagnostics => {}
+            ProviderAction::ToggleDetails => {
+                if !self.provider_details_open.remove(&id) {
+                    self.provider_details_open.insert(id);
+                }
+                cx.notify();
+            }
+            ProviderAction::ChangePath => self.choose_provider_path(id, cx),
+            ProviderAction::ClearPath => {
+                crate::details::set_path_override(id, None);
+                crate::provider_status::recheck_provider(id);
+                cx.notify();
+            }
+            ProviderAction::CopyDiagnostics => self.copy_provider_diagnostics(id, cx),
         }
+    }
+
+    /// "Change path…": a file panel for the binary Baaz should run; the
+    /// choice is stored (D5 B4) and the provider re-checked against it.
+    fn choose_provider_path(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |_, cx| {
+                crate::details::set_path_override(id, Some(&path));
+                crate::provider_status::recheck_provider(id);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Copy diagnostics": collected off the UI thread (it runs the CLI),
+    /// then put on the clipboard with a toast saying so.
+    fn copy_provider_diagnostics(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        let status = crate::provider_status::live_statuses()
+            .into_iter()
+            .find(|status| status.provider == id)
+            .unwrap_or_else(|| ProviderStatus::checking(id));
+        let collect = cx.background_spawn(async move { crate::details::collect(id, &status) });
+        cx.spawn(async move |this, cx| {
+            let text = collect.await;
+            let _ = this.update(cx, |this, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                this.overlays.update(cx, |overlays, _| {
+                    overlays.toast(format!("{} diagnostics copied", id.label()), "Paste them where you need them.");
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Raise the sign-out confirm. The detail names the real command, so
@@ -702,7 +755,7 @@ mod tests {
     #[test]
     fn the_default_provider_is_the_first_that_can_run() {
         use crate::provider_status::{Auth, Installed};
-        let signed_in = || Auth::SignedIn { email: Some("a@b".into()), plan: None, method: None };
+        let signed_in = || Auth::SignedIn { email: Some("a@b".into()), plan: None, method: None, source: None };
         let yes = || Installed::yes("1.0", "/bin/x");
         // Claude connected, Muse missing: Claude.
         let statuses = [
@@ -758,6 +811,7 @@ mod tests {
                 email: Some("ada@example.com".into()),
                 plan: Some("pro".into()),
                 method: Some("chatgpt".into()),
+                source: None,
             },
             true,
         )
@@ -771,7 +825,7 @@ mod tests {
 
     #[test]
     fn connected_card_names_email_plan_and_signs_out() {
-        let data = card_data(&connected(), &IDLE);
+        let data = card_data(&connected(), &IDLE, false);
         assert_eq!(data.status, StatusLine::ok("Connected · ada@example.com · pro"));
         assert_eq!(labels(&data), vec!["Re-check", "Sign out"]);
         assert_eq!(data.actions[0].style, aui::screens::ActionStyle::Text, "the card's Re-check is a text button");
@@ -782,6 +836,7 @@ mod tests {
         let data = card_data(
             &status(ProviderId::ClaudeCode, Installed::yes("2.1.276", "/bin/claude"), Auth::SignedOut, true),
             &IDLE,
+            false,
         );
         assert_eq!(data.status, StatusLine::warn("Signed out"));
         assert_eq!(labels(&data), vec!["Re-check", "Sign in"]);
@@ -793,10 +848,11 @@ mod tests {
             &status(
                 ProviderId::ClaudeCode,
                 Installed::yes("2.1.276", "/bin/claude"),
-                Auth::SignedIn { email: None, plan: None, method: Some("api_key".into()) },
+                Auth::SignedIn { email: None, plan: None, method: Some("api_key".into()), source: None },
                 true,
             ),
             &IDLE,
+            false,
         );
         assert_eq!(data.status, StatusLine::warn("Connected · API key · billed per token"));
     }
@@ -806,7 +862,7 @@ mod tests {
         let mut old = connected();
         old.installed = Installed::yes("codex-cli 0.120.0", "/bin/codex");
         old.advisory = Advisory::TooOld { need: "0.144.6".into() };
-        let data = card_data(&old, &IDLE);
+        let data = card_data(&old, &IDLE, false);
         assert_eq!(data.status, StatusLine::warn("0.120.0 is older than Baaz supports (0.144.6)"));
         assert_eq!(labels(&data), vec!["Re-check", "Update"]);
     }
@@ -815,18 +871,18 @@ mod tests {
     fn a_codex_card_follows_its_sign_in() {
         let signed_out = status(ProviderId::Codex, Installed::yes("0.144.6", "/bin/codex"), Auth::SignedOut, true);
         let waiting = crate::connect::CodexLogin::Waiting { auth_url: "https://auth".into() };
-        let data = card_data(&signed_out, &waiting);
+        let data = card_data(&signed_out, &waiting, false);
         assert_eq!(data.status.tone, aui::screens::StatusTone::Busy);
         assert_eq!(labels(&data), vec!["Re-check", "Cancel"]);
     }
 
     #[test]
     fn missing_card_installs() {
-        let data = card_data(&status(ProviderId::Codex, Installed::No, Auth::Unknown, true), &IDLE);
+        let data = card_data(&status(ProviderId::Codex, Installed::No, Auth::Unknown, true), &IDLE, false);
         assert_eq!(data.status, StatusLine::off("Not installed"));
         assert_eq!(labels(&data), vec!["Re-check", "Install"]);
         // Muse has no command to type: its missing card is the one link.
-        let muse = card_data(&status(ProviderId::Muse, Installed::No, Auth::Unknown, true), &IDLE);
+        let muse = card_data(&status(ProviderId::Muse, Installed::No, Auth::Unknown, true), &IDLE, false);
         assert_eq!(labels(&muse), vec!["Re-check", "Get Muse"]);
         assert!(muse.actions[1].external);
     }
@@ -835,7 +891,7 @@ mod tests {
     fn cant_run_card_rechecks() {
         let mut cant = status(ProviderId::Codex, Installed::yes("", "/bin/codex"), Auth::Unknown, true);
         cant.advisory = Advisory::cant_run("boom", false);
-        let data = card_data(&cant, &IDLE);
+        let data = card_data(&cant, &IDLE, false);
         assert_eq!(data.status, StatusLine::bad("Couldn’t run — boom"));
         assert_eq!(labels(&data), vec!["Re-check"]);
     }
