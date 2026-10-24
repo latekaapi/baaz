@@ -310,6 +310,10 @@ impl Harness {
                 }
             },
             LoginIntent::Cancel => self.cancel_login_flow(cx),
+            LoginIntent::Close => {
+                self.muse_sheet = false;
+                cx.notify();
+            }
         }
     }
 

@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aui::screens::{ConnectRowData, ProviderActionDef, ProviderHeadline as AuiHeadline};
+use aui::screens::{ConnectRowData, ProviderActionDef, ProviderHeadline as AuiHeadline, StatusLine};
 use aui_icons::Provider as AuiProvider;
 
 use crate::providers::ProviderId;
@@ -73,6 +73,11 @@ pub fn complete_onboarding() {
 
 // ------------------------------------------------------------ rows
 
+/// The connect screen's row order (the D5 board): Claude Code, Codex, Muse.
+/// The footer picker lists Connected providers in this order too, and the
+/// first of them is the default when the person has not picked one.
+pub const CONNECT_ORDER: [ProviderId; 3] = [ProviderId::ClaudeCode, ProviderId::Codex, ProviderId::Muse];
+
 /// The connect row's headline: the status headline, except a provider that
 /// has not reported yet this launch (no probe result and no cache) always
 /// reads Checking — never Not installed while a probe is pending.
@@ -92,30 +97,100 @@ pub fn headline_for(status: &ProviderStatus) -> AuiHeadline {
     }
 }
 
-/// `"Signed in as <email> · <plan>"`, omitting what the probe did not say.
-pub fn row_account(status: &ProviderStatus) -> Option<String> {
-    match &status.auth {
-        Auth::SignedIn { email, plan, .. } => {
-            let mut line = String::from("Signed in");
-            if let Some(email) = email.as_ref().map(|email| email.trim()).filter(|email| !email.is_empty()) {
-                line.push_str(&format!(" as {email}"));
-            }
-            if let Some(plan) = plan.as_ref().map(|plan| plan.trim()).filter(|plan| !plan.is_empty()) {
-                line.push_str(&format!(" · {plan}"));
-            }
-            Some(line)
+/// `"<email> · <plan>"`, omitting what the probe did not say; `None` when
+/// it said neither (or the login is not a signed-in one).
+pub fn account_words(status: &ProviderStatus) -> Option<String> {
+    let Auth::SignedIn { email, plan, .. } = &status.auth else { return None };
+    let parts: Vec<&str> = [email.as_deref(), plan.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Whether the login in force is an API key (Claude Code's
+/// `authMethod: "api_key"`, Codex's `account.type == "apiKey"`): every turn
+/// bills that key, which the status line says (owner 2026-10-23: say it,
+/// don't block).
+pub fn api_key_login(status: &ProviderStatus) -> bool {
+    matches!(&status.auth, Auth::SignedIn { method: Some(method), .. }
+        if matches!(method.to_ascii_lowercase().replace('_', "").as_str(), "apikey"))
+}
+
+/// The installed version, when the CLI is below Baaz's floor: the status
+/// line then reads "<version> is older than Baaz supports (<floor>)".
+pub fn too_old(status: &ProviderStatus) -> Option<(String, String)> {
+    let crate::provider_status::Advisory::TooOld { need } = &status.advisory else { return None };
+    let version = match &status.installed {
+        crate::provider_status::Installed::Yes { version, .. } => {
+            crate::provider_status::version_triplet(version)
+                .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+                .unwrap_or_else(|| version.clone())
         }
-        _ => None,
+        _ => return None,
+    };
+    Some((version, need.clone()))
+}
+
+/// The status line every provider surface shows (D5 board): the tone and
+/// the words, first match wins — Checking, too old, couldn't check,
+/// Connected (`email · plan`; an API key says so with a warning dot),
+/// Signed out, Not installed. `card` prefixes Connected lines with
+/// "Connected · " (the Settings card has no ✓ beside it).
+pub fn status_line(status: &ProviderStatus, card: bool) -> StatusLine {
+    use AuiHeadline as H;
+    let headline = headline_for(status);
+    if headline == H::Checking {
+        return StatusLine::busy("Checking…");
+    }
+    if let Some((version, need)) = too_old(status) {
+        return StatusLine::warn(format!("{version} is older than Baaz supports ({need})"));
+    }
+    match headline {
+        H::Checking => StatusLine::busy("Checking…"),
+        H::Disabled => StatusLine::off("Turned off in Settings"),
+        H::NotInstalled => StatusLine::off("Not installed"),
+        H::CantRun => match &status.advisory {
+            crate::provider_status::Advisory::CantRun { timed_out: true, .. } => {
+                StatusLine::bad("Couldn’t check — the CLI timed out")
+            }
+            crate::provider_status::Advisory::CantRun { stderr, .. } if !stderr.trim().is_empty() => {
+                StatusLine::bad(format!("Couldn’t run — {}", stderr.lines().next().unwrap_or("").trim()))
+            }
+            _ => StatusLine::bad("Couldn’t run"),
+        },
+        H::SignedOut => StatusLine::warn("Signed out"),
+        H::Unverified => StatusLine::warn("Installed · sign-in not verified"),
+        H::Connected => {
+            if api_key_login(status) {
+                return StatusLine::warn(if card {
+                    "Connected · API key · billed per token"
+                } else {
+                    "API key · billed per token"
+                });
+            }
+            let words = account_words(status);
+            match (card, words) {
+                (true, Some(words)) => StatusLine::ok(format!("Connected · {words}")),
+                (false, Some(words)) => StatusLine::ok(words),
+                (_, None) => StatusLine::ok("Connected"),
+            }
+        }
     }
 }
 
-/// One row's primary action: Install when missing, Sign in when signed out
-/// or unverified, Re-check when the binary would not run, nothing when
-/// Connected, Checking or Disabled. Muse names no documented installer
-/// ([`install_command`]), so its missing row offers Docs instead.
+/// One row's action: Update when too old, Install (or "Get Muse ↗") when
+/// missing, Sign in when signed out or unverified, Re-check when the check
+/// failed, nothing when Connected, Checking or Disabled.
 pub fn primary_action(status: &ProviderStatus) -> Option<ProviderActionDef> {
     use AuiHeadline as H;
-    match headline_for(status) {
+    let headline = headline_for(status);
+    if headline != H::Checking && too_old(status).is_some() && status.provider.update_command().is_some() {
+        return Some(ProviderActionDef::update());
+    }
+    match headline {
         H::Connected | H::Checking | H::Disabled => None,
         H::NotInstalled => {
             if install_command(status.provider).is_some() {
@@ -137,51 +212,76 @@ fn aui_provider(id: ProviderId) -> AuiProvider {
     }
 }
 
-/// The three connect rows in switcher order, with per-row notes (Codex
-/// "Waiting for sign-in…", terminal-prefill confirmations) appended to the
-/// account line when present.
-pub fn build_rows(
-    statuses: &[ProviderStatus],
-    notes: &HashMap<ProviderId, String>,
-) -> Vec<ConnectRowData> {
+/// Whether `status` counts as Connected on the connect screen: signed in,
+/// and not flagged too old (that row offers Update instead).
+pub fn row_connected(status: &ProviderStatus) -> bool {
+    headline_for(status) == AuiHeadline::Connected && too_old(status).is_none()
+}
+
+/// The three connect rows in [`CONNECT_ORDER`]. Codex's row follows its
+/// sign-in while one runs (`codex`): a spinner and Cancel while waiting,
+/// the failure reason when it failed.
+pub fn build_rows(statuses: &[ProviderStatus], codex: &CodexLogin) -> Vec<ConnectRowData> {
     let by_id: HashMap<ProviderId, &ProviderStatus> = statuses.iter().map(|s| (s.provider, s)).collect();
-    ProviderId::all()
+    CONNECT_ORDER
         .into_iter()
         .map(|id| {
             let status = by_id
                 .get(&id)
                 .map(|status| (*status).clone())
                 .unwrap_or_else(|| ProviderStatus::checking(id));
-            let mut account = row_account(&status).map(gpui::SharedString::from);
-            if let Some(note) = notes.get(&id) {
-                let joined = match account {
-                    Some(line) => format!("{line} — {note}"),
-                    None => note.clone(),
-                };
-                account = Some(joined.into());
+            let mut line = status_line(&status, false);
+            let mut action = primary_action(&status);
+            let connected = row_connected(&status);
+            if id == ProviderId::Codex && !connected {
+                match codex {
+                    CodexLogin::Waiting { .. } | CodexLogin::Device { .. } => {
+                        line = StatusLine::busy("Finish signing in with your browser…");
+                        action = Some(ProviderActionDef::cancel());
+                    }
+                    CodexLogin::Completed => {
+                        line = StatusLine::busy("Signed in — checking…");
+                        action = None;
+                    }
+                    CodexLogin::Failed { reason } => line = StatusLine::warn(reason.clone()),
+                    CodexLogin::Idle | CodexLogin::Cancelled => {}
+                }
             }
-            let primary = primary_action(&status);
             ConnectRowData {
                 id: gpui::SharedString::from(id.as_str()),
                 provider: aui_provider(id),
-                headline: headline_for(&status),
-                account,
-                // Every row offers Docs beside its primary action, unless
-                // the primary already is the link (Muse's "Get Muse").
-                docs: !matches!(
-                    &primary,
-                    Some(action) if action.action == aui::screens::ProviderAction::Docs
-                ),
-                primary,
+                status: line,
+                action,
+                connected,
             }
         })
         .collect()
 }
 
-/// The quiet composer banner when a cached-Connected provider later probes
-/// Signed out: names the provider and its way back, never a full-screen gate.
+/// The provider new sessions start in, as the footer shows it: `current`
+/// while it is Connected, else the first Connected in [`CONNECT_ORDER`];
+/// `None` when nothing is Connected (the footer reads "Nothing is ready").
+pub fn connect_default(statuses: &[ProviderStatus], current: ProviderId) -> Option<ProviderId> {
+    let connected: Vec<ProviderId> = connected_choices(statuses);
+    if connected.contains(&current) {
+        return Some(current);
+    }
+    connected.first().copied()
+}
+
+/// The Connected providers, in [`CONNECT_ORDER`]: what the footer picker
+/// lists.
+pub fn connected_choices(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
+    CONNECT_ORDER
+        .into_iter()
+        .filter(|id| statuses.iter().any(|s| s.provider == *id && s.enabled && row_connected(s)))
+        .collect()
+}
+
+/// The quiet composer banner's words when the session's provider is
+/// signed out (D5 B5).
 pub fn signed_out_banner_text(id: ProviderId) -> String {
-    format!("{} is signed out — Sign in", id.label())
+    format!("{} is signed out. Sign in to send.", id.label())
 }
 
 // ------------------------------------------------------------ terminal prefill + docs
@@ -216,17 +316,7 @@ pub fn docs_url(id: ProviderId) -> &'static str {
 /// "Get Muse": the missing row's way to the CLI when there is no command to
 /// type — a link, and the row's only button (no second Docs beside it).
 pub fn get_action(id: ProviderId) -> ProviderActionDef {
-    ProviderActionDef {
-        action: aui::screens::ProviderAction::Docs,
-        label: format!("Get {}", id.label()).into(),
-        primary: true,
-    }
-}
-
-/// The row note after a terminal prefill: says what happened and that the
-/// command is typed, not run.
-pub fn prefill_note(command: &str) -> String {
-    format!("`{command}` is typed in the terminal — press Enter to run it")
+    ProviderActionDef::link(format!("Get {}", id.label()))
 }
 
 // ------------------------------------------------------------ Codex login
@@ -246,6 +336,15 @@ pub enum CodexLogin {
     },
     /// `account/login/completed` arrived: re-probe Codex now.
     Completed,
+    #[allow(dead_code)] // constructed by the device-code flow (D5 B3)
+    /// The device-code fallback ("Use a code instead"): the person types
+    /// `code` at `url` in any browser.
+    Device {
+        /// Where the code goes (`verificationUrl`).
+        url: String,
+        /// The one-time code (`userCode`).
+        code: String,
+    },
     /// The person pressed Cancel.
     Cancelled,
     /// The flow failed with the human reason.
@@ -269,14 +368,6 @@ impl CodexLogin {
     /// The person pressed Cancel: abandon the flow.
     pub fn cancel(&mut self) {
         *self = CodexLogin::Cancelled;
-    }
-
-    /// The row's waiting line, while waiting.
-    pub fn waiting_text(&self) -> Option<String> {
-        match self {
-            CodexLogin::Waiting { .. } => Some("Waiting for sign-in… Cancel".into()),
-            _ => None,
-        }
     }
 }
 
@@ -549,25 +640,32 @@ pub(crate) const MUSE_OFF: &str = "Muse is off or not installed";
 pub(crate) type StatusStamp = (Option<std::time::SystemTime>, u64);
 
 impl Harness {
-    /// The first-run Connect your providers screen: rows from the status
-    /// service (Checking until probes land), the tally, Continue (enabled
-    /// once any provider is Connected) and Skip. The Muse login flow
-    /// renders as a sheet over it when its row asked for sign-in.
+    /// The first-run Connect your providers screen (D5 B1): rows from the
+    /// status service (Checking until probes land) in the board's order, the
+    /// footer's default picker over the Connected providers, Continue
+    /// (enabled once any provider is Connected) and Skip. The Muse sign-in
+    /// sheet renders over it when its row asked for sign-in.
     pub(crate) fn render_connect(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         use gpui::prelude::*;
-        let mut notes = self.connect_notes.clone();
-        if let Some(waiting) = self.codex_login.waiting_text() {
-            notes.insert(ProviderId::Codex, waiting);
-        }
-        if let CodexLogin::Failed { reason } = &self.codex_login {
-            notes.insert(ProviderId::Codex, reason.clone());
-        }
-        let rows = build_rows(&self.connect_statuses, &notes);
-        let weak = cx.entity().downgrade();
-        let mark = crate::mascot::welcome_mascot(window, cx);
-        let screen = connect_providers("connect", rows).mark(mark).on_intent(move |intent, window, cx| {
-            let _ = weak.update(cx, |this, cx| this.connect_intent(intent, window, cx));
+        let rows = build_rows(&self.connect_statuses, &self.codex_login);
+        let current = ProviderId::parse(&self.new_provider);
+        let picker = connect_default(&self.connect_statuses, current).map(|shown| aui::screens::DefaultPicker {
+            current: aui_provider(shown),
+            choices: connected_choices(&self.connect_statuses).into_iter().map(aui_provider).collect(),
+            open: self.connect_menu_open,
         });
+        let weak = cx.entity().downgrade();
+        let mark = crate::mascot::connect_mascot(window, cx);
+        let screen = connect_providers("connect", rows)
+            .mark(mark)
+            .default_picker(picker)
+            .assist(self.codex_assist())
+            .on_intent(move |intent, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.connect_intent(intent, window, cx);
+                    cx.notify();
+                });
+            });
         let mut stack = gpui::div().size_full().relative().child(screen);
         if self.muse_sheet {
             let weak = cx.entity().downgrade();
@@ -590,6 +688,12 @@ impl Harness {
             );
         }
         stack.into_any_element()
+    }
+
+    /// The muted line under the rows while Codex signs in (D5 B3): empty
+    /// until B3 wires its links.
+    pub(crate) fn codex_assist(&self) -> Vec<aui::screens::AssistRun> {
+        Vec::new()
     }
 
     /// The Muse sign-in sheet over the shell (the account menu's Sign in,
@@ -641,14 +745,16 @@ impl Harness {
         complete_onboarding();
         self.show_connect = false;
         self.muse_sheet = false;
-        self.connect_notes.clear();
-        // New sessions start on a provider that can run: the stored pick
-        // while it still can, else the first connected one (docs/50 P1).
+        self.connect_menu_open = false;
+        // New sessions start where the footer said: the stored pick while it
+        // is Connected, else the first Connected in the board's order.
         let statuses = crate::provider_status::live_statuses();
         let current = ProviderId::parse(&self.new_provider);
-        if let Some(id) = crate::settings_providers::prefer_connected(&statuses, current) {
-            self.new_provider = id.as_str().to_owned();
-            crate::providers::write_last_provider(id);
+        if let Some(id) = connect_default(&statuses, current) {
+            if id != current {
+                self.new_provider = id.as_str().to_owned();
+                crate::providers::write_last_provider(id);
+            }
         } else if !crate::settings_providers::usable_provider(&statuses, current) {
             let id = crate::settings_providers::live_default_new_provider();
             self.new_provider = id.as_str().to_owned();
@@ -675,8 +781,18 @@ impl Harness {
         match intent {
             ConnectIntent::Continue | ConnectIntent::Skip => self.finish_connect(),
             ConnectIntent::Provider(ProviderIntent { id, action }) => {
+                self.connect_menu_open = false;
                 self.connect_provider_action(ProviderId::parse(&id), action, window, cx);
             }
+            ConnectIntent::ToggleDefaultMenu => self.connect_menu_open = !self.connect_menu_open,
+            ConnectIntent::CloseDefaultMenu => self.connect_menu_open = false,
+            ConnectIntent::SetDefault(provider) => {
+                self.connect_menu_open = false;
+                let id = ProviderId::from_icon(provider);
+                self.new_provider = id.as_str().to_owned();
+                crate::providers::write_last_provider(id);
+            }
+            ConnectIntent::Assist(key) => self.codex_assist_link(&key, cx),
         }
     }
 
@@ -697,18 +813,13 @@ impl Harness {
                     self.open_muse_sheet();
                 }
                 ProviderId::Codex => {
-                    if matches!(self.codex_login, CodexLogin::Waiting { .. }) {
-                        // The waiting line reads "… Cancel": the row's
-                        // button is the cancel while a login runs.
-                        self.codex_cancel.store(true, Ordering::SeqCst);
-                    } else {
+                    if !matches!(self.codex_login, CodexLogin::Waiting { .. } | CodexLogin::Device { .. }) {
                         self.pending_codex_start = true;
                     }
                 }
                 ProviderId::ClaudeCode => {
                     if let Some(command) = terminal_prefill(id, true) {
                         self.pending_prefill = Some(command.to_owned());
-                        self.connect_notes.insert(id, prefill_note(command));
                         crate::provider_status::watch_setup(id);
                     }
                 }
@@ -716,17 +827,36 @@ impl Harness {
             ProviderAction::Install => {
                 if let Some(command) = install_command(id) {
                     self.pending_prefill = Some(command.to_owned());
-                    self.connect_notes.insert(id, prefill_note(command));
                     crate::provider_status::watch_setup(id);
                 }
             }
             ProviderAction::Docs => {
                 let _ = crate::auth::open_in_browser(docs_url(id));
             }
+            ProviderAction::Update => {
+                if let Some(command) = id.update_command() {
+                    self.pending_prefill = Some(command.to_owned());
+                    crate::provider_status::watch_setup(id);
+                }
+            }
+            ProviderAction::Cancel => {
+                if id == ProviderId::Codex {
+                    self.codex_cancel.store(true, Ordering::SeqCst);
+                }
+            }
             ProviderAction::Recheck => crate::provider_status::reprobe_provider(id),
-            // Connect rows offer no sign-out and no switch.
-            ProviderAction::SignOut | ProviderAction::SetEnabled(_) => {}
+            // Connect rows offer no sign-out, switch or Details.
+            ProviderAction::SignOut
+            | ProviderAction::SetEnabled(_)
+            | ProviderAction::ToggleDetails
+            | ProviderAction::ChangePath
+            | ProviderAction::CopyDiagnostics => {}
         }
+    }
+
+    /// A link in the assist line under the rows (D5 B3).
+    pub(crate) fn codex_assist_link(&mut self, key: &str, cx: &mut App) {
+        let _ = (key, cx);
     }
 
     /// Start the Codex Sign in flow: the Waiting row applies at once, the
@@ -736,35 +866,21 @@ impl Harness {
         let program = crate::providers::resolve_program(ProviderId::Codex)
             .map(|program| program.to_string_lossy().into_owned());
         let Some(program) = program else {
-            self.connect_notes
-                .insert(ProviderId::Codex, "Codex is not installed — Install first.".into());
-            self.codex_login = CodexLogin::Idle;
+            self.codex_login = CodexLogin::Failed { reason: "Codex is not installed — Install first.".into() };
             cx.notify();
             return;
         };
         self.codex_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = Arc::clone(&self.codex_cancel);
         self.codex_login = CodexLogin::Waiting { auth_url: String::new() };
-        self.connect_notes.remove(&ProviderId::Codex);
         cx.notify();
         self.wire_call(
             cx,
             move || run_codex_login(&program, &cancel),
             |this, terminal, cx| {
                 this.codex_login = terminal.clone();
-                match terminal {
-                    CodexLogin::Completed => {
-                        this.connect_notes
-                            .insert(ProviderId::Codex, "Signed in — re-checking…".into());
-                        crate::provider_status::reprobe_provider(ProviderId::Codex);
-                    }
-                    CodexLogin::Cancelled => {
-                        this.connect_notes.remove(&ProviderId::Codex);
-                    }
-                    CodexLogin::Failed { reason } => {
-                        this.connect_notes.insert(ProviderId::Codex, reason);
-                    }
-                    CodexLogin::Waiting { .. } | CodexLogin::Idle => {}
+                if terminal == CodexLogin::Completed {
+                    crate::provider_status::reprobe_provider(ProviderId::Codex);
                 }
                 cx.notify();
             },
@@ -879,7 +995,6 @@ impl Harness {
                     if id == ProviderId::Codex && matches!(self.codex_login, CodexLogin::Completed)
                     {
                         self.codex_login = CodexLogin::Idle;
-                        self.connect_notes.remove(&id);
                     }
                 }
                 crate::provider_status::Headline::SignedOut
@@ -1047,10 +1162,9 @@ mod tests {
     #[test]
     fn a_returning_launch_without_any_cache_still_shows_the_shell() {
         // No cache row at all: the shell renders Checking rows, never a gate.
-        let rows = build_rows(&[], &HashMap::new());
+        let rows = build_rows(&[], &CodexLogin::Idle);
         assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|row| row.headline
-            == aui::screens::ProviderHeadline::Checking));
+        assert!(rows.iter().all(|row| row.status == StatusLine::busy("Checking…")));
         assert_eq!(decide_launch(false), LaunchDecision::Shell);
     }
 
@@ -1096,14 +1210,66 @@ mod tests {
     }
 
     #[test]
-    fn rows_carry_account_version_and_the_right_primary() {
+    fn rows_follow_the_boards_order_words_and_one_action() {
         use ProviderId as P;
-        let rows = build_rows(&[connected(P::Muse), signed_out(P::Codex)], &HashMap::new());
+        let rows = build_rows(&[connected(P::Muse), signed_out(P::Codex)], &CodexLogin::Idle);
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
+        assert_eq!(ids, vec!["claude-code", "codex", "muse"], "Claude Code, Codex, Muse");
         let muse = rows.iter().find(|row| row.id == "muse").expect("muse row");
-        assert!(muse.account.as_ref().is_some_and(|line| line.contains("a@x.com")));
-        assert!(muse.primary.is_none(), "Connected shows ✓, no button");
+        assert!(muse.status.text.contains("a@x.com"), "{:?}", muse.status);
+        assert!(!muse.status.text.starts_with("Connected"), "the ✓ says Connected; the line says who");
+        assert!(muse.connected && muse.action.is_none(), "Connected shows ✓, no button");
         let codex = rows.iter().find(|row| row.id == "codex").expect("codex row");
-        assert!(codex.primary.as_ref().is_some_and(|def| *def == ProviderActionDef::sign_in()));
+        assert_eq!(codex.status, StatusLine::warn("Signed out"));
+        assert!(codex.action.as_ref().is_some_and(|def| *def == ProviderActionDef::sign_in()));
+    }
+
+    #[test]
+    fn too_old_and_timeouts_read_as_the_board_says() {
+        let mut old = connected(ProviderId::ClaudeCode);
+        old.installed = Installed::yes("2.0.9 (Claude Code)", "/bin/claude");
+        old.advisory = Advisory::TooOld { need: "2.1.276".into() };
+        let rows = build_rows(&[old], &CodexLogin::Idle);
+        let claude = &rows[0];
+        assert_eq!(claude.status, StatusLine::warn("2.0.9 is older than Baaz supports (2.1.276)"));
+        assert_eq!(claude.action, Some(ProviderActionDef::update()));
+        assert!(!claude.connected, "too old offers Update, not ✓");
+        let mut slow = connected(ProviderId::Muse);
+        slow.auth = Auth::Unknown;
+        slow.advisory = Advisory::cant_run("timed out after 5s", true);
+        let rows = build_rows(&[slow], &CodexLogin::Idle);
+        let muse = rows.iter().find(|row| row.id == "muse").expect("muse row");
+        assert_eq!(muse.status, StatusLine::bad("Couldn’t check — the CLI timed out"));
+        assert_eq!(muse.action, Some(ProviderActionDef::recheck()));
+    }
+
+    #[test]
+    fn the_footer_defaults_to_the_first_connected_in_row_order() {
+        use ProviderId as P;
+        // docs/65 §1 case (c): Muse installed but signed out, only Claude
+        // Code signed in — new sessions start in Claude Code.
+        let statuses = vec![signed_out(P::Muse), connected(P::ClaudeCode), connected(P::Codex)];
+        assert_eq!(connect_default(&statuses, P::Muse), Some(P::ClaudeCode));
+        assert_eq!(connect_default(&statuses, P::Codex), Some(P::Codex), "a Connected pick stays");
+        assert_eq!(connected_choices(&statuses), vec![P::ClaudeCode, P::Codex], "Connected only, row order");
+        assert_eq!(connect_default(&[signed_out(P::Muse)], P::Muse), None, "nothing ready");
+        let mut off = connected(P::Codex);
+        off.enabled = false;
+        assert_eq!(connect_default(&[signed_out(P::Muse), off], P::Muse), None, "a disabled provider is no default");
+    }
+
+    #[test]
+    fn a_codex_row_follows_its_sign_in() {
+        let waiting = CodexLogin::Waiting { auth_url: "https://example.invalid/auth".into() };
+        let rows = build_rows(&[signed_out(ProviderId::Codex)], &waiting);
+        let codex = rows.iter().find(|row| row.id == "codex").expect("codex row");
+        assert_eq!(codex.status, StatusLine::busy("Finish signing in with your browser…"));
+        assert_eq!(codex.action, Some(ProviderActionDef::cancel()));
+        let failed = CodexLogin::Failed { reason: "no browser".into() };
+        let rows = build_rows(&[signed_out(ProviderId::Codex)], &failed);
+        let codex = rows.iter().find(|row| row.id == "codex").expect("codex row");
+        assert_eq!(codex.status, StatusLine::warn("no browser"));
+        assert_eq!(codex.action, Some(ProviderActionDef::sign_in()), "try again");
     }
 
     #[test]
@@ -1117,10 +1283,7 @@ mod tests {
         let terminal =
             drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), |_| {});
         assert_eq!(terminal, CodexLogin::Completed);
-        assert!(
-            state.waiting_text().is_none(),
-            "completed is terminal: no waiting line"
-        );
+        assert_eq!(state, CodexLogin::Completed, "completed is terminal");
         // The start request went out as chatgpt on the short-lived server.
         assert!(io.written.iter().any(|frame| frame.get("method").and_then(
             serde_json::Value::as_str
@@ -1130,13 +1293,10 @@ mod tests {
     }
 
     #[test]
-    fn the_codex_waiting_row_reads_waiting_and_cancel_ends_it() {
-        let waiting = CodexLogin::Waiting { auth_url: "https://example.invalid/auth".into() };
-        assert_eq!(waiting.waiting_text().as_deref(), Some("Waiting for sign-in… Cancel"));
-        let mut state = waiting;
+    fn cancel_ends_a_waiting_codex_login() {
+        let mut state = CodexLogin::Waiting { auth_url: "https://example.invalid/auth".into() };
         state.cancel();
         assert_eq!(state, CodexLogin::Cancelled);
-        assert_eq!(state.waiting_text(), None);
     }
 
     #[test]
@@ -1195,29 +1355,32 @@ mod tests {
         let mut status = ProviderStatus::checking(ProviderId::Muse);
         status.installed = crate::provider_status::Installed::No;
         status.checked_at = Some(1);
-        let rows = build_rows(&[status.clone()], &HashMap::new());
+        let rows = build_rows(&[status.clone()], &CodexLogin::Idle);
         let muse = rows.iter().find(|row| row.id.as_ref() == "muse").expect("muse row");
-        let primary = muse.primary.as_ref().expect("a way in");
-        assert_eq!(primary.label.as_ref(), "Get Muse");
-        assert!(!muse.docs, "no second Docs beside Get Muse");
-        let actions = crate::settings_providers::actions_for(ProviderId::Muse, status.headline());
-        assert_eq!(actions.len(), 1, "Settings shows the one link, no Install");
-        assert_eq!(actions[0].label.as_ref(), "Get Muse");
-        // The other two keep Install + Docs.
+        let action = muse.action.as_ref().expect("a way in");
+        assert_eq!(action.label.as_ref(), "Get Muse");
+        assert!(action.external, "Get Muse ↗ leaves the app");
+        assert_eq!(action.style, aui::screens::ActionStyle::Secondary);
+        let actions = crate::settings_providers::actions_for(&status);
+        assert_eq!(
+            actions.iter().map(|a| a.label.as_ref()).collect::<Vec<_>>(),
+            vec!["Re-check", "Get Muse"],
+            "Settings shows the one link, no Install"
+        );
+        // The other two install, with no Docs beside it (the board).
         let mut claude = ProviderStatus::checking(ProviderId::ClaudeCode);
         claude.installed = crate::provider_status::Installed::No;
         claude.checked_at = Some(1);
-        let rows = build_rows(&[claude], &HashMap::new());
+        let rows = build_rows(&[claude], &CodexLogin::Idle);
         let row = rows.iter().find(|row| row.id.as_ref() == "claude-code").expect("claude row");
-        assert_eq!(row.primary.as_ref().map(|a| a.label.as_ref()), Some("Install"));
-        assert!(row.docs);
+        assert_eq!(row.action, Some(ProviderActionDef::install()));
     }
 
     #[test]
     fn the_signed_out_banner_names_the_provider_and_its_way_back() {
         assert_eq!(
             signed_out_banner_text(ProviderId::Codex),
-            "Codex is signed out — Sign in"
+            "Codex is signed out. Sign in to send."
         );
     }
 

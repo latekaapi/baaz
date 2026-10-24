@@ -667,9 +667,6 @@ pub struct Harness {
     /// The statuses the connect screen renders: cache/script at boot, kept
     /// fresh from the cache file while shown.
     pub(crate) connect_statuses: Vec<crate::provider_status::ProviderStatus>,
-    /// Per-row notes appended under the account line (Codex waiting,
-    /// terminal-prefill confirmations).
-    pub(crate) connect_notes: HashMap<ProviderId, String>,
     /// The Codex Sign in flow's state (Idle until its row starts it).
     pub(crate) codex_login: crate::connect::CodexLogin,
     /// Cancel for the running Codex login thread, replaced on every start.
@@ -678,6 +675,8 @@ pub struct Harness {
     /// screen (or over the shell from the account menu) — never the app's
     /// first screen.
     pub(crate) muse_sheet: bool,
+    /// The connect screen's footer picker menu is open.
+    pub(crate) connect_menu_open: bool,
     /// Quiet per-provider banners for cached-Connected providers that later
     /// probe Signed out: shown on that provider's composer, never a gate.
     pub(crate) provider_banners: HashMap<ProviderId, String>,
@@ -1539,10 +1538,10 @@ impl Harness {
             login: Login::new(api_key.clone()),
             show_connect: false,
             connect_statuses: Vec::new(),
-            connect_notes: HashMap::new(),
             codex_login: crate::connect::CodexLogin::Idle,
             codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             muse_sheet: false,
+            connect_menu_open: false,
             provider_banners: HashMap::new(),
             seen_connected: HashSet::new(),
             pending_prefill: None,

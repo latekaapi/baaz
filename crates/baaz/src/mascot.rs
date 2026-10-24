@@ -203,7 +203,7 @@ impl AssetSource for BaazAssets {
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
 /// it appears. Under reduced motion it draws settled.
 pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
-    mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", window, cx)
+    mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", (BOOT_PT, BOOT_PT), window, cx)
 }
 
 /// The welcome hero on the signed-out screen: the same greeting the boot
@@ -214,12 +214,22 @@ pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
 /// second one a presence the first had already settled, so it would draw
 /// without its enter the first time a person saw it.
 pub fn welcome_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
-    mascot_hero_element(BOOT_GREETING, "baaz-welcome-mascot", window, cx)
+    mascot_hero_element(BOOT_GREETING, "baaz-welcome-mascot", (BOOT_PT, BOOT_PT), window, cx)
 }
+
+/// The connect screen's mascot (D5 board): 72 × 81, the greeting contained
+/// in it — smaller than the welcome hero, so the rows lead.
+pub fn connect_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
+    mascot_hero_element(BOOT_GREETING, "baaz-connect-mascot", (CONNECT_W, CONNECT_H), window, cx)
+}
+
+/// The connect screen mascot's box.
+const CONNECT_W: f32 = 72.0;
+const CONNECT_H: f32 = 81.0;
 
 /// One hero-sized mascot, faded and risen in once on appear. `id` keys the
 /// presence, so two heroes on different surfaces do not share a state.
-fn mascot_hero_element(path: &'static str, id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
+fn mascot_hero_element(path: &'static str, id: &'static str, (w, h): (f32, f32), window: &mut Window, cx: &mut App) -> AnyElement {
     // Pinned for reduced motion and for deterministic captures alike.
     let style = if cx.reduce_motion() || crate::clock::deterministic() {
         PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
@@ -240,7 +250,7 @@ fn mascot_hero_element(path: &'static str, id: &'static str, window: &mut Window
         .opacity(style.opacity)
         .relative()
         .top(style.offset_y)
-        .child(img(path).w(px(BOOT_PT)).h(px(BOOT_PT)))
+        .child(img(path).w(px(w)).h(px(h)).object_fit(gpui::ObjectFit::Contain))
         .into_any_element()
 }
 

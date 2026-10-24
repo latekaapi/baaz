@@ -1469,7 +1469,7 @@ impl Harness {
         let Some(status) = status else {
             return self.settings_providers_overview(window, cx);
         };
-        let data = crate::settings_providers::card_data(status);
+        let data = crate::settings_providers::card_data(status, &self.codex_login);
         let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, window, cx| {
             this.handle_provider_intent(intent.clone(), window, cx);
         });
