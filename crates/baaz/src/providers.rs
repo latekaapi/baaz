@@ -128,6 +128,16 @@ impl ProviderId {
         }
     }
 
+    /// The provider behind a library mark; marks Baaz does not run map to
+    /// Muse (never reached: Baaz only draws its own three).
+    pub fn from_icon(provider: aui_icons::Provider) -> ProviderId {
+        match provider {
+            aui_icons::Provider::Claude => ProviderId::ClaudeCode,
+            aui_icons::Provider::Codex => ProviderId::Codex,
+            _ => ProviderId::Muse,
+        }
+    }
+
     /// The needs-you banner headline: whoever the session runs on is the
     /// one waiting on the person.
     pub fn waiting_headline(self) -> String {

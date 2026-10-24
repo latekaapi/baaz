@@ -20,7 +20,7 @@
 
 use aui::data::button;
 use aui::overlay::{SettingsRow, SettingsSection};
-use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderHeadline, ProviderIntent};
+use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{prelude::*, px, AnyElement, Context, SharedString, Window};
 use gpui_kit::base::{h_flex, v_flex};
@@ -28,103 +28,59 @@ use gpui_kit::component::switch::Switch;
 
 use crate::app::Harness;
 use crate::overlays::{Dialog, DialogAction};
-use crate::provider_status::{Auth, Headline, ProviderStatus};
+use crate::provider_status::{Headline, ProviderStatus};
 use crate::providers::ProviderId;
 
 /// The Settings rail section id. `settings:providers` opens it.
 pub(crate) const PROVIDERS_SECTION_ID: &str = "providers";
 
-/// One card per state, as the spec's action table says: Connected →
-/// Sign out + Re-check; Signed out → Sign in + Re-check; Not installed →
-/// Install + Docs; Can't run → Re-check + Docs. Checking and Disabled
-/// only re-check (the switch beside them is the action); Unverified
-/// offers Sign in + Re-check like Signed out.
-pub(crate) fn actions_for(id: ProviderId, headline: Headline) -> Vec<ProviderActionDef> {
-    match headline {
-        // No command to type (Muse): the link is the whole way in.
-        Headline::NotInstalled if id.install_command().is_none() => {
-            vec![crate::connect::get_action(id)]
-        }
-        Headline::Connected => vec![ProviderActionDef::sign_out(), ProviderActionDef::recheck()],
-        Headline::SignedOut | Headline::Unverified => {
-            vec![ProviderActionDef::sign_in(), ProviderActionDef::recheck()]
-        }
-        Headline::NotInstalled => vec![ProviderActionDef::install(), ProviderActionDef::docs()],
-        Headline::CantRun => vec![ProviderActionDef::recheck(), ProviderActionDef::docs()],
-        Headline::Checking | Headline::Disabled => vec![ProviderActionDef::recheck()],
-    }
-}
-
-/// The status headline in the card library's spelling.
-pub(crate) fn card_headline(headline: Headline) -> ProviderHeadline {
-    match headline {
-        Headline::Checking => ProviderHeadline::Checking,
-        Headline::Connected => ProviderHeadline::Connected,
-        Headline::SignedOut => ProviderHeadline::SignedOut,
-        Headline::NotInstalled => ProviderHeadline::NotInstalled,
-        Headline::CantRun => ProviderHeadline::CantRun,
-        Headline::Unverified => ProviderHeadline::Unverified,
-        Headline::Disabled => ProviderHeadline::Disabled,
-    }
-}
-
-/// `"Signed in as <email> · <plan>"`, degrading gracefully when the
-/// probe reported only one half. `None` unless signed in.
-pub(crate) fn account_line(auth: &Auth) -> Option<String> {
-    let Auth::SignedIn { email, plan, .. } = auth else {
-        return None;
-    };
-    match (email, plan) {
-        (Some(email), Some(plan)) => Some(format!("Signed in as {email} · {plan}")),
-        (Some(email), None) => Some(format!("Signed in as {email}")),
-        (None, Some(plan)) => Some(format!("Signed in · {plan}")),
-        (None, None) => Some("Signed in".to_owned()),
-    }
-}
-
-/// The version chip and the advisory line. A `TooOld` advisory names the
-/// floor and the CLI's own update command; a `CantRun` advisory surfaces its
-/// excerpt (timeouts name the timeout).
-pub(crate) fn version_parts(status: &ProviderStatus) -> (Option<String>, Option<String>) {
-    let version = match &status.installed {
-        crate::provider_status::Installed::Yes { version, .. } if !version.is_empty() => {
-            Some(version.clone())
-        }
-        _ => None,
-    };
-    let advisory = match &status.advisory {
-        crate::provider_status::Advisory::None => None,
-        crate::provider_status::Advisory::TooOld { need } => Some(match status.provider.update_command() {
-            Some(command) => format!("Older than Baaz supports (≥ {need}) — update with `{command}`"),
-            None => format!("Older than Baaz supports (≥ {need})"),
-        }),
-        crate::provider_status::Advisory::CantRun { stderr, timed_out } => {
-            if *timed_out {
-                Some(format!("Couldn't check — {stderr}"))
-            } else {
-                Some(stderr.clone())
-            }
-        }
-    };
-    (version, advisory)
-}
-
-/// The full card data for one status: headline, account, version +
-/// advisory, the Enabled switch, and the state actions. Pure, so tests
-/// drive every state without a window.
-pub(crate) fn card_data(status: &ProviderStatus) -> ProviderCardData {
+/// The card's top-row buttons (D5 B4): the text Re-check always, then the
+/// state's one action — Update when too old, Sign out when Connected, Sign
+/// in when signed out or unverified, Install (or "Get Muse ↗") when
+/// missing. Checking, Disabled and Can't run have only the Re-check.
+pub(crate) fn actions_for(status: &ProviderStatus) -> Vec<ProviderActionDef> {
+    let mut actions = vec![ProviderActionDef::recheck_text()];
     let headline = status.headline();
-    let (version, advisory) = version_parts(status);
-    ProviderCardData {
-        id: SharedString::from(status.provider.as_str()),
-        provider: status.provider.icon(),
-        headline: card_headline(headline),
-        account: account_line(&status.auth).map(SharedString::from),
-        version: version.map(SharedString::from),
-        advisory: advisory.map(SharedString::from),
-        enabled: status.enabled,
-        actions: actions_for(status.provider, headline),
+    if headline != Headline::Checking
+        && crate::connect::too_old(status).is_some()
+        && status.provider.update_command().is_some()
+    {
+        actions.push(ProviderActionDef::update());
+        return actions;
     }
+    match headline {
+        Headline::Connected => actions.push(ProviderActionDef::sign_out()),
+        Headline::SignedOut | Headline::Unverified => actions.push(ProviderActionDef::sign_in()),
+        Headline::NotInstalled if status.provider.install_command().is_none() => {
+            actions.push(crate::connect::get_action(status.provider));
+        }
+        Headline::NotInstalled => actions.push(ProviderActionDef::install()),
+        Headline::CantRun | Headline::Checking | Headline::Disabled => {}
+    }
+    actions
+}
+
+/// The full card data for one status: the status line ("Connected ·
+/// email · plan", an API key said with a warning dot, too old, Not
+/// installed…) and the state actions. While Codex signs in from here its
+/// card follows the flow like its connect row: a spinner and Cancel. Pure,
+/// so tests drive every state without a window.
+pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLogin) -> ProviderCardData {
+    use crate::connect::CodexLogin;
+    let mut line = crate::connect::status_line(status, true);
+    let mut actions = actions_for(status);
+    if status.provider == ProviderId::Codex && status.headline() != Headline::Connected {
+        match codex {
+            CodexLogin::Waiting { .. } | CodexLogin::Device { .. } => {
+                line = StatusLine::busy("Finish signing in with your browser…");
+                actions = vec![ProviderActionDef::recheck_text(), ProviderActionDef::cancel()];
+            }
+            CodexLogin::Completed => line = StatusLine::busy("Signed in — checking…"),
+            CodexLogin::Failed { reason } => line = StatusLine::warn(reason.clone()),
+            CodexLogin::Idle | CodexLogin::Cancelled => {}
+        }
+    }
+    ProviderCardData::new(SharedString::from(status.provider.as_str()), status.provider.icon(), line).actions(actions)
 }
 
 /// The providers a composer menu may list: the enabled ones, in
@@ -155,20 +111,6 @@ pub(crate) fn default_new_provider(statuses: &[ProviderStatus]) -> Option<Provid
         .or_else(|| enabled.iter().find(|s| matches!(s.installed, Installed::Yes { .. })))
         .or_else(|| enabled.first())
         .map(|s| s.provider)
-}
-
-/// The first Connected provider, when `current` is not Connected itself:
-/// what finishing onboarding switches new sessions to, so a person with only
-/// Claude Code signed in never starts on a signed-out Muse (docs/65 §1 c).
-pub(crate) fn prefer_connected(statuses: &[ProviderStatus], current: ProviderId) -> Option<ProviderId> {
-    use crate::provider_status::Headline;
-    let connected = |id: ProviderId| {
-        statuses.iter().any(|s| s.provider == id && s.enabled && s.headline() == Headline::Connected)
-    };
-    if connected(current) {
-        return None;
-    }
-    ProviderId::all().into_iter().find(|id| connected(*id))
 }
 
 /// Whether `id` can start a session now: on, and not found missing.
@@ -670,9 +612,21 @@ impl Harness {
                     );
                 });
             }
+            ProviderAction::Update => {
+                let Some(command) = id.update_command() else { return };
+                self.open_terminal_typed(command, window, cx);
+                crate::provider_status::watch_setup(id);
+            }
+            ProviderAction::Cancel => {
+                if id == ProviderId::Codex {
+                    self.codex_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
             ProviderAction::Docs => {
                 cx.open_url(docs_url(id));
             }
+            // B4: the Details disclosure, the path override and diagnostics.
+            ProviderAction::ToggleDetails | ProviderAction::ChangePath | ProviderAction::CopyDiagnostics => {}
         }
     }
 
@@ -861,93 +815,81 @@ mod tests {
         )
     }
 
+    fn labels(data: &aui::screens::ProviderCardData) -> Vec<String> {
+        data.actions.iter().map(|def| def.label.to_string()).collect()
+    }
+
+    const IDLE: crate::connect::CodexLogin = crate::connect::CodexLogin::Idle;
+
     #[test]
-    fn connected_card_names_email_plan_and_switch() {
-        let data = card_data(&connected());
-        assert_eq!(data.headline, ProviderHeadline::Connected);
-        assert_eq!(
-            data.account.as_deref(),
-            Some("Signed in as ada@example.com · pro")
-        );
-        assert_eq!(data.version.as_deref(), Some("0.144.6"));
-        assert!(data.enabled);
-        let labels: Vec<&str> =
-            data.actions.iter().map(|def| def.label.as_ref()).collect();
-        assert_eq!(labels, vec!["Sign out", "Re-check"]);
+    fn connected_card_names_email_plan_and_signs_out() {
+        let data = card_data(&connected(), &IDLE);
+        assert_eq!(data.status, StatusLine::ok("Connected · ada@example.com · pro"));
+        assert_eq!(labels(&data), vec!["Re-check", "Sign out"]);
+        assert_eq!(data.actions[0].style, aui::screens::ActionStyle::Text, "the card's Re-check is a text button");
     }
 
     #[test]
     fn signed_out_card_signs_in() {
-        let data = card_data(&status(
-            ProviderId::ClaudeCode,
-            Installed::yes("2.1.276", "/bin/claude"),
-            Auth::SignedOut,
-            true,
-        ));
-        assert_eq!(data.headline, ProviderHeadline::SignedOut);
-        assert_eq!(data.account, None);
-        let labels: Vec<&str> =
-            data.actions.iter().map(|def| def.label.as_ref()).collect();
-        assert_eq!(labels, vec!["Sign in", "Re-check"]);
+        let data = card_data(
+            &status(ProviderId::ClaudeCode, Installed::yes("2.1.276", "/bin/claude"), Auth::SignedOut, true),
+            &IDLE,
+        );
+        assert_eq!(data.status, StatusLine::warn("Signed out"));
+        assert_eq!(labels(&data), vec!["Re-check", "Sign in"]);
     }
 
     #[test]
-    fn onboarding_prefers_a_connected_provider_over_an_installed_one() {
-        // docs/65 §1 case (c): Muse installed but signed out, only Claude
-        // Code signed in. Boot picked Muse from Checking statuses; finishing
-        // onboarding must land new sessions on Claude Code.
-        let signed_in = Auth::SignedIn { email: Some("a@x.com".into()), plan: None, method: None };
-        let statuses = vec![
-            status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true),
-            status(ProviderId::ClaudeCode, Installed::yes("2.1.276", "/bin/claude"), signed_in.clone(), true),
-            status(ProviderId::Codex, Installed::No, Auth::Unknown, true),
-        ];
-        assert_eq!(prefer_connected(&statuses, ProviderId::Muse), Some(ProviderId::ClaudeCode));
-        assert_eq!(prefer_connected(&statuses, ProviderId::ClaudeCode), None, "a Connected pick stays");
-        assert_eq!(default_new_provider(&statuses), Some(ProviderId::ClaudeCode));
-        // Nothing Connected: nothing to switch to.
-        let none = vec![status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true)];
-        assert_eq!(prefer_connected(&none, ProviderId::Muse), None);
-        // A disabled Connected provider is not a default.
-        let off = vec![
-            status(ProviderId::Muse, Installed::yes("1.4.11", "/bin/muse"), Auth::SignedOut, true),
-            status(ProviderId::Codex, Installed::yes("0.144.6", "/bin/codex"), signed_in, false),
-        ];
-        assert_eq!(prefer_connected(&off, ProviderId::Muse), None);
+    fn an_api_key_login_says_it_bills_per_token() {
+        let data = card_data(
+            &status(
+                ProviderId::ClaudeCode,
+                Installed::yes("2.1.276", "/bin/claude"),
+                Auth::SignedIn { email: None, plan: None, method: Some("api_key".into()) },
+                true,
+            ),
+            &IDLE,
+        );
+        assert_eq!(data.status, StatusLine::warn("Connected · API key · billed per token"));
+    }
+
+    #[test]
+    fn a_too_old_card_offers_update() {
+        let mut old = connected();
+        old.installed = Installed::yes("codex-cli 0.120.0", "/bin/codex");
+        old.advisory = Advisory::TooOld { need: "0.144.6".into() };
+        let data = card_data(&old, &IDLE);
+        assert_eq!(data.status, StatusLine::warn("0.120.0 is older than Baaz supports (0.144.6)"));
+        assert_eq!(labels(&data), vec!["Re-check", "Update"]);
+    }
+
+    #[test]
+    fn a_codex_card_follows_its_sign_in() {
+        let signed_out = status(ProviderId::Codex, Installed::yes("0.144.6", "/bin/codex"), Auth::SignedOut, true);
+        let waiting = crate::connect::CodexLogin::Waiting { auth_url: "https://auth".into() };
+        let data = card_data(&signed_out, &waiting);
+        assert_eq!(data.status.tone, aui::screens::StatusTone::Busy);
+        assert_eq!(labels(&data), vec!["Re-check", "Cancel"]);
     }
 
     #[test]
     fn missing_card_installs() {
-        let data = card_data(&status(
-            ProviderId::Codex,
-            Installed::No,
-            Auth::Unknown,
-            true,
-        ));
-        assert_eq!(data.headline, ProviderHeadline::NotInstalled);
-        let labels: Vec<&str> =
-            data.actions.iter().map(|def| def.label.as_ref()).collect();
-        assert_eq!(labels, vec!["Install", "Docs"]);
+        let data = card_data(&status(ProviderId::Codex, Installed::No, Auth::Unknown, true), &IDLE);
+        assert_eq!(data.status, StatusLine::off("Not installed"));
+        assert_eq!(labels(&data), vec!["Re-check", "Install"]);
         // Muse has no command to type: its missing card is the one link.
-        let muse = card_data(&status(ProviderId::Muse, Installed::No, Auth::Unknown, true));
-        let labels: Vec<&str> = muse.actions.iter().map(|def| def.label.as_ref()).collect();
-        assert_eq!(labels, vec!["Get Muse"]);
+        let muse = card_data(&status(ProviderId::Muse, Installed::No, Auth::Unknown, true), &IDLE);
+        assert_eq!(labels(&muse), vec!["Re-check", "Get Muse"]);
+        assert!(muse.actions[1].external);
     }
 
     #[test]
     fn cant_run_card_rechecks() {
-        let mut cant = status(
-            ProviderId::Codex,
-            Installed::yes("", "/bin/codex"),
-            Auth::Unknown,
-            true,
-        );
+        let mut cant = status(ProviderId::Codex, Installed::yes("", "/bin/codex"), Auth::Unknown, true);
         cant.advisory = Advisory::cant_run("boom", false);
-        let data = card_data(&cant);
-        assert_eq!(data.headline, ProviderHeadline::CantRun);
-        let labels: Vec<&str> =
-            data.actions.iter().map(|def| def.label.as_ref()).collect();
-        assert_eq!(labels, vec!["Re-check", "Docs"]);
+        let data = card_data(&cant, &IDLE);
+        assert_eq!(data.status, StatusLine::bad("Couldn’t run — boom"));
+        assert_eq!(labels(&data), vec!["Re-check"]);
     }
 
     #[test]

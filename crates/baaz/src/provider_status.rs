@@ -989,15 +989,21 @@ fn probe_provider(
                 &["auth".into(), "status".into(), "--json".into()],
             );
             status.auth = match auth {
-                RunOutcome::Output { code: Some(0), stdout, .. } => {
+                // A signed-out `claude auth status --json` exits 1 with
+                // `{"loggedIn": false}` on stdout (claude 2.1.276, verified
+                // with an empty CLAUDE_CONFIG_DIR): the JSON decides, not
+                // the exit code — else a signed-out CLI read "sign-in not
+                // verified" (found live, D5 B1).
+                RunOutcome::Output { code: Some(_), stdout, timed_out: false, .. }
+                    if provider_claude_code::auth_status::parse_auth_status(&stdout).is_some() =>
+                {
                     match provider_claude_code::auth_status::parse_auth_status(&stdout) {
                         Some(parsed) if parsed.logged_in => Auth::SignedIn {
                             plan: parsed.plan_label(),
                             email: parsed.email,
                             method: parsed.auth_method,
                         },
-                        Some(_) => Auth::SignedOut,
-                        None => Auth::Unverified,
+                        _ => Auth::SignedOut,
                     }
                 }
                 // The binary runs but the auth probe failed: installed,
@@ -2073,6 +2079,28 @@ mod tests {
             Some(saved.clone());
         service.probe_one(ProviderId::ClaudeCode);
         assert_eq!(service.status(ProviderId::ClaudeCode).usage, Some(saved));
+    }
+
+    /// claude 2.1.276 signed out: exit 1 with `loggedIn: false` on stdout
+    /// (verified live with an empty CLAUDE_CONFIG_DIR). The JSON decides:
+    /// Signed out, never "sign-in not verified".
+    #[test]
+    fn a_signed_out_claude_reads_signed_out_despite_exit_one() {
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::ClaudeCode, ok_version("2.1.276"));
+        let mut service = scripted_service(
+            versions,
+            RunOutcome::Output {
+                code: Some(1),
+                stdout: r#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#.into(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+            Err("unreachable".into()),
+        );
+        service.probe_one(ProviderId::ClaudeCode);
+        assert_eq!(service.status(ProviderId::ClaudeCode).headline(), Headline::SignedOut);
     }
 
     #[test]
