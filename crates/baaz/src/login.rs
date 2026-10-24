@@ -103,6 +103,12 @@ impl Login {
     /// The method choice: forget the flow. The field keeps whatever it
     /// holds — callers that leave the key form (`Back`, `ChooseAnother`,
     /// a returned submit) clear it explicitly — so notify after calling.
+    /// Whether a sign-in flow is running (the device flow starting or
+    /// waiting): closing the sheet cancels it.
+    pub(crate) fn flow_running(&self) -> bool {
+        matches!(self.state, LoginState::Starting | LoginState::Device { .. })
+    }
+
     pub(crate) fn reset_to_choose(&mut self) {
         self.state = LoginState::Choose;
         self.url = None;
@@ -310,10 +316,7 @@ impl Harness {
                 }
             },
             LoginIntent::Cancel => self.cancel_login_flow(cx),
-            LoginIntent::Close => {
-                self.muse_sheet = false;
-                cx.notify();
-            }
+            LoginIntent::Close => self.close_muse_sheet(window, cx),
         }
     }
 
@@ -745,7 +748,10 @@ impl Harness {
     /// has to be built here instead. Without the strip the window cannot be
     /// moved or zoomed at all while signed out, which is what a person meets
     /// before anything else.
-    pub(crate) fn render_login(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The Muse sign-in component over today's login state: the state (with
+    /// the API-key field's live `can_submit`), the field, and the intents.
+    /// The full-window login and the sheet both draw it.
+    fn login_component(&self, cx: &mut Context<Self>) -> aui::screens::Login {
         let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
             this.login_intent(*intent, window, cx);
         });
@@ -770,16 +776,29 @@ impl Harness {
                 toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
                 let _ = baaz.update(cx, |this, _| this.login.revealed = next);
             });
-        // A deterministic capture draws the card settled: the login screen's
-        // enter presence never lands on the same frame twice.
-        let card = login("login", state)
+        login("login", state)
             .product("Muse")
             .headline("Sign in to Muse")
-            .subtitle("Baaz signs in over the wire, the same way the muse CLI does.")
             .provider(aui_icons::Provider::Muse)
-            .api_key_field(field);
+            .api_key_field(field)
+            .on_intent(move |i, window, cx| intent(&i, window, cx))
+    }
+
+    /// Muse's sign-in drawn as a sheet (D5 B3): no masthead, no second
+    /// mascot, ✕ in the header.
+    pub(crate) fn render_login_sheet(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let card = self.login_component(cx).sheet();
         let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        let card = card.on_intent(move |i, window, cx| intent(&i, window, cx));
+        card.into_any_element()
+    }
+
+    pub(crate) fn render_login(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // A deterministic capture draws the card settled: the login screen's
+        // enter presence never lands on the same frame twice.
+        let card = self
+            .login_component(cx)
+            .subtitle("Baaz signs in over the wire, the same way the muse CLI does.");
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
 
         let p = cx.aui().colors;
         // The strip matches the shell's header height, so the native traffic

@@ -258,6 +258,32 @@ pub fn build_rows(statuses: &[ProviderStatus], codex: &CodexLogin) -> Vec<Connec
         .collect()
 }
 
+/// The assist line's runs for a Codex sign-in in `state` (see
+/// [`Harness::codex_assist`]). Pure, so tests read it without a window.
+pub fn codex_assist_runs(state: &CodexLogin) -> Vec<aui::screens::AssistRun> {
+    use aui::screens::AssistRun as R;
+    match state {
+        CodexLogin::Waiting { auth_url } if !auth_url.is_empty() => vec![
+            R::Text("Browser didn’t open?".into()),
+            R::Link("copy-link".into(), "Copy the link".into()),
+            R::Text("·".into()),
+            R::Link("use-code".into(), "Use a code instead".into()),
+        ],
+        CodexLogin::Device { url, code } => {
+            let place = url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+            vec![
+                R::Text("Enter".into()),
+                R::Code(code.clone().into()),
+                R::Text(format!("at {place} ·").into()),
+                R::Link("copy-code".into(), "Copy code".into()),
+                R::Text("·".into()),
+                R::Link("open-page".into(), "Open page".into()),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The provider new sessions start in, as the footer shows it: `current`
 /// while it is Connected, else the first Connected in [`CONNECT_ORDER`];
 /// `None` when nothing is Connected (the footer reads "Nothing is ready").
@@ -320,7 +346,6 @@ pub enum CodexLogin {
     },
     /// `account/login/completed` arrived: re-probe Codex now.
     Completed,
-    #[allow(dead_code)] // constructed by the device-code flow (D5 B3)
     /// The device-code fallback ("Use a code instead"): the person types
     /// `code` at `url` in any browser.
     Device {
@@ -339,11 +364,6 @@ pub enum CodexLogin {
 }
 
 impl CodexLogin {
-    /// `account/login/start` answered: remember the URL and show waiting.
-    pub fn start(&mut self, auth_url: String) {
-        *self = CodexLogin::Waiting { auth_url };
-    }
-
     /// `account/login/completed` arrived on the app-server: done, re-probe.
     pub fn completed(&mut self) {
         *self = CodexLogin::Completed;
@@ -355,13 +375,25 @@ impl CodexLogin {
     }
 }
 
-/// The `account/login/start {type: "chatgpt"}` request frame.
-pub fn login_start_request(id: u64) -> serde_json::Value {
+/// The `account/login/start` request frame: `{type: "chatgpt"}` (the
+/// browser flow) or `{type: "chatgptDeviceCode"}` ("Use a code instead",
+/// codex-cli 0.144.6's `LoginAccountParams`).
+pub fn login_start_request(id: u64, device: bool) -> serde_json::Value {
+    let kind = if device { "chatgptDeviceCode" } else { "chatgpt" };
     serde_json::json!({
         "id": id,
         "method": "account/login/start",
-        "params": {"type": "chatgpt"},
+        "params": {"type": kind},
     })
+}
+
+/// The `userCode` and `verificationUrl` in a device-code start answer
+/// (`{loginId, type: "chatgptDeviceCode", userCode, verificationUrl}`).
+pub fn parse_login_start_device(result: &serde_json::Value) -> Option<(String, String)> {
+    let field = |name: &str| {
+        result.get(name).and_then(serde_json::Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned)
+    };
+    Some((field("verificationUrl")?, field("userCode")?))
 }
 
 /// The `authUrl` in an `account/login/start` result, when it names one.
@@ -397,25 +429,31 @@ pub trait LoginIo {
 }
 
 /// Drive the login over `io` until it ends: returns the terminal state.
-/// `on_waiting` runs once, when the start answer names the browser URL.
-/// Pure against [`LoginIo`] — the unit tests script the whole RPC here.
+/// `on_started` runs once, when the start answer lands: with the Waiting
+/// state (the browser URL) or, for `device`, the Device state (the code and
+/// where to type it). Pure against [`LoginIo`] — the unit tests script the
+/// whole RPC here.
 pub fn drive_codex_login(
     io: &mut impl LoginIo,
     state: &mut CodexLogin,
     cancel: &AtomicBool,
     deadline: Instant,
-    mut on_waiting: impl FnMut(&str),
+    device: bool,
+    mut on_started: impl FnMut(&CodexLogin),
 ) -> CodexLogin {
     let mut next_id: u64 = 1;
     io.write(&serde_json::json!({
         "id": next_id, "method": "initialize",
-        "params": {"clientInfo": {"name": "baaz", "title": "Baaz"},
+        // codex 0.144.6 refuses an `initialize` without `clientInfo.version`
+        // (-32600 "missing field `version`"), and every request after it:
+        // the sign-in never started live (found D5 B3).
+        "params": {"clientInfo": {"name": "baaz", "title": "Baaz", "version": env!("CARGO_PKG_VERSION")},
                    "capabilities": {"experimentalApi": true}},
     }));
     next_id += 1;
     io.write(&serde_json::json!({"method": "initialized", "params": {}}));
     let start_id = next_id;
-    io.write(&login_start_request(start_id));
+    io.write(&login_start_request(start_id, device));
     let mut started = false;
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -447,10 +485,16 @@ pub fn drive_codex_login(
         let is_start_answer =
             frame.get("id").and_then(serde_json::Value::as_u64) == Some(start_id);
         if is_start_answer && !started {
-            match frame.get("result").and_then(parse_login_start_auth_url) {
-                Some(auth_url) => {
-                    on_waiting(&auth_url);
-                    state.start(auth_url);
+            let result = frame.get("result");
+            let begun = if device {
+                result.and_then(parse_login_start_device).map(|(url, code)| CodexLogin::Device { url, code })
+            } else {
+                result.and_then(parse_login_start_auth_url).map(|auth_url| CodexLogin::Waiting { auth_url })
+            };
+            match begun {
+                Some(begun) => {
+                    *state = begun;
+                    on_started(state);
                     started = true;
                 }
                 None => {
@@ -490,11 +534,18 @@ pub(crate) fn codex_login_command(program: &str) -> std::process::Command {
     command
 }
 
-/// Run the real Codex login against `program`'s short-lived app-server:
-/// opens `authUrl` in the browser and returns the terminal state (the
-/// caller applied the Waiting row before this started, and applies the
-/// terminal state on return). Blocking; call it off the UI thread.
-pub fn run_codex_login(program: &str, cancel: &AtomicBool) -> CodexLogin {
+/// Run the real Codex login against `program`'s short-lived app-server and
+/// return the terminal state. The browser flow opens `authUrl` itself; the
+/// device flow (`device`) opens nothing — the person copies the code first.
+/// `on_started` reports the Waiting / Device state the moment it is known,
+/// so the row can offer "Copy the link" and show the code. Blocking; call it
+/// off the UI thread.
+pub fn run_codex_login(
+    program: &str,
+    cancel: &AtomicBool,
+    device: bool,
+    mut on_started: impl FnMut(&CodexLogin),
+) -> CodexLogin {
     struct PipeIo {
         stdin: std::process::ChildStdin,
         lines: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
@@ -544,8 +595,11 @@ pub fn run_codex_login(program: &str, cancel: &AtomicBool) -> CodexLogin {
             std::thread::sleep(Duration::from_millis(200));
         });
         // The browser opens once, when the start answer names its URL.
-        let terminal = drive_codex_login(&mut io, &mut state, cancel, deadline, |auth_url| {
-            let _ = crate::auth::open_in_browser(auth_url);
+        let terminal = drive_codex_login(&mut io, &mut state, cancel, deadline, device, |begun| {
+            if let CodexLogin::Waiting { auth_url } = begun {
+                let _ = crate::auth::open_in_browser(auth_url);
+            }
+            on_started(begun);
         });
         finished.store(true, Ordering::SeqCst);
         terminal
@@ -556,12 +610,10 @@ pub fn run_codex_login(program: &str, cancel: &AtomicBool) -> CodexLogin {
 
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::screens::{connect_providers, ConnectIntent, ProviderAction, ProviderIntent};
-use aui_tokens::ActiveAui as _;
-use gpui::{AnyElement, App, Context, Window};
+use gpui::{AnyElement, AppContext as _, Context, Window};
 
 use crate::app::Harness;
 use crate::setup::SetupKind;
-use crate::wire::WireCall;
 
 /// The statuses a boot renders from: scripted in deterministic mode (or all
 /// Checking when nothing is scripted), the on-disk cache over Checking
@@ -653,66 +705,63 @@ impl Harness {
             });
         let mut stack = gpui::div().size_full().relative().child(screen);
         if self.muse_sheet {
-            let weak = cx.entity().downgrade();
-            let card = self.render_login(window, cx);
-            let p = cx.aui().colors;
-            stack = stack.child(
-                gpui::div()
-                    .id("muse-sheet-scrim")
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(p.overlay)
-                    .opacity(0.97)
-                    .on_click(move |_, _, cx: &mut App| {
-                        let _ = weak.update(cx, |this, _| this.muse_sheet = false);
-                    })
-                    .child(card),
-            );
+            stack = stack.child(self.muse_sheet_layer(window, cx));
         }
         stack = stack.children(self.render_setup_sheet(cx));
         stack.into_any_element()
     }
 
-    /// The muted line under the rows while Codex signs in (D5 B3): empty
-    /// until B3 wires its links.
+    /// The muted line under the rows while Codex signs in (D5 B3): "Browser
+    /// didn't open? Copy the link · Use a code instead" while the browser
+    /// flow waits; "Enter <code> at <host/path> · Copy code · Open page"
+    /// once the person asked for a code (owner 2026-10-24: the code goes in
+    /// this line, no new surface). Empty otherwise.
     pub(crate) fn codex_assist(&self) -> Vec<aui::screens::AssistRun> {
-        Vec::new()
+        codex_assist_runs(&self.codex_login)
     }
 
     /// The Muse sign-in sheet over the shell (the account menu's Sign in,
-    /// the provider banner's button). `None` unless the sheet is up outside
+    /// Settings, the provider banner). `None` unless the sheet is up outside
     /// the connect screen, which renders its own.
     pub(crate) fn render_muse_sheet(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        use gpui::prelude::*;
         if !self.muse_sheet || self.show_connect {
             return None;
         }
-        let weak = cx.entity().downgrade();
-        let card = self.render_login(window, cx);
-        let p = cx.aui().colors;
-        Some(
-            gpui::div()
-                .id("muse-sheet-shell-scrim")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(p.overlay)
-                .opacity(0.97)
-                .on_click(move |_, _, cx: &mut App| {
-                    let _ = weak.update(cx, |this, _| this.muse_sheet = false);
-                })
-                .child(card)
-                .into_any_element(),
-        )
+        Some(self.muse_sheet_layer(window, cx))
+    }
+
+    /// Muse's sign-in as a sheet (D5 B3): the setup sheet's frame at 460
+    /// wide over the 45 % scrim — mark, "Sign in to Muse", ✕ — with the
+    /// login's own steps inside. ✕ and Escape close it; the scrim does not.
+    fn muse_sheet_layer(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use gpui::prelude::*;
+        let card = self.render_login_sheet(window, cx);
+        let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                this.close_muse_sheet(window, cx);
+                cx.stop_propagation();
+            }
+        });
+        gpui::div()
+            .absolute()
+            .inset_0()
+            .capture_key_down(move |event, window, cx| escape(event, window, cx))
+            .child(aui::screens::sheet_scrim("muse-sheet-scrim", card, None))
+            .into_any_element()
+    }
+
+    /// Close Muse's sign-in sheet (✕, Escape): a flow it started is
+    /// cancelled with it, so nothing keeps polling behind a closed sheet.
+    pub(crate) fn close_muse_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.login.flow_running() {
+            self.cancel_login_flow(cx);
+        }
+        self.muse_sheet = false;
+        cx.notify();
     }
 
     /// Raise Muse's sign-in sheet from its first step, over whatever is on
@@ -799,7 +848,7 @@ impl Harness {
                 }
                 ProviderId::Codex => {
                     if !matches!(self.codex_login, CodexLogin::Waiting { .. } | CodexLogin::Device { .. }) {
-                        self.start_codex_login(cx);
+                        self.start_codex_login(false, cx);
                     }
                 }
                 ProviderId::ClaudeCode => self.open_setup_sheet(id, SetupKind::SignIn, window, cx),
@@ -824,15 +873,48 @@ impl Harness {
         }
     }
 
-    /// A link in the assist line under the rows (D5 B3).
+    /// `codex-login:<waiting|device|failed>` (`--steps`): Codex's sign-in in
+    /// that state with sample values, for captures. Starts nothing.
+    pub(crate) fn step_codex_login(&mut self, rest: &str, cx: &mut Context<Self>) {
+        self.codex_login = match rest {
+            "waiting" => CodexLogin::Waiting { auth_url: "https://example.invalid/oauth/authorize".into() },
+            "device" => CodexLogin::Device { url: "https://auth.openai.com/codex/device".into(), code: "K7QX-9P2M".into() },
+            "failed" => CodexLogin::Failed { reason: "The sign-in timed out.".into() },
+            _ => {
+                crate::steps::record_step_failure(&format!("codex-login:{rest}"));
+                return;
+            }
+        };
+        cx.notify();
+    }
+
+    /// A link in the assist line (the connect screen's, or the Codex card's
+    /// in Settings): copy the browser link, switch to a device code, copy the
+    /// code, open the page the code goes in.
     pub(crate) fn codex_assist_link(&mut self, key: &str, cx: &mut Context<Self>) {
-        let _ = (key, cx);
+        match (key, &self.codex_login) {
+            ("copy-link", CodexLogin::Waiting { auth_url }) if !auth_url.is_empty() => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(auth_url.clone()));
+            }
+            ("use-code", CodexLogin::Waiting { .. }) => self.start_codex_login(true, cx),
+            ("copy-code", CodexLogin::Device { code, .. }) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+            }
+            ("open-page", CodexLogin::Device { url, .. }) => {
+                let _ = crate::auth::open_in_browser(url);
+            }
+            _ => {}
+        }
     }
 
     /// Start the Codex Sign in flow: the Waiting row applies at once, the
-    /// blocking app-server login runs off the UI thread, and its terminal
-    /// state re-probes Codex on success.
-    pub(crate) fn start_codex_login(&mut self, cx: &mut Context<Self>) {
+    /// blocking app-server login runs off the UI thread, its start answer
+    /// (the browser link, or the device code) reaches the row as it lands,
+    /// and its terminal state re-probes Codex on success. `device` is "Use a
+    /// code instead". A newer start (Use a code after the browser flow)
+    /// supersedes the older one: its updates carry an older generation and
+    /// are dropped.
+    pub(crate) fn start_codex_login(&mut self, device: bool, cx: &mut Context<Self>) {
         let program = crate::providers::resolve_program(ProviderId::Codex)
             .map(|program| program.to_string_lossy().into_owned());
         let Some(program) = program else {
@@ -840,21 +922,42 @@ impl Harness {
             cx.notify();
             return;
         };
+        // A running flow is abandoned: its thread sees the old flag.
+        self.codex_cancel.store(true, Ordering::SeqCst);
         self.codex_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = Arc::clone(&self.codex_cancel);
+        self.codex_generation += 1;
+        let generation = self.codex_generation;
         self.codex_login = CodexLogin::Waiting { auth_url: String::new() };
         cx.notify();
-        self.wire_call(
-            cx,
-            move || run_codex_login(&program, &cancel),
-            |this, terminal, cx| {
-                this.codex_login = terminal.clone();
-                if terminal == CodexLogin::Completed {
-                    crate::provider_status::reprobe_provider(ProviderId::Codex);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<CodexLogin>();
+        cx.background_spawn(async move {
+            let progress = tx.clone();
+            let terminal = run_codex_login(&program, &cancel, device, move |begun| {
+                let _ = progress.unbounded_send(begun.clone());
+            });
+            let _ = tx.unbounded_send(terminal);
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(state) = rx.next().await {
+                let alive = this.update(cx, |this, cx| {
+                    if this.codex_generation != generation {
+                        return;
+                    }
+                    if state == CodexLogin::Completed {
+                        crate::provider_status::reprobe_provider(ProviderId::Codex);
+                    }
+                    this.codex_login = state;
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
                 }
-                cx.notify();
-            },
-        );
+            }
+        })
+        .detach();
     }
 
     /// Follow the status cache while shown, and the sign-out banners while
@@ -1011,7 +1114,7 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
         });
         let started = Instant::now();
-        let terminal = run_codex_login(&script.to_string_lossy(), &cancel);
+        let terminal = run_codex_login(&script.to_string_lossy(), &cancel, false, |_| {});
         assert_eq!(terminal, CodexLogin::Cancelled);
         assert!(started.elapsed() < Duration::from_secs(5), "cancel took {:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1221,7 +1324,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut state = CodexLogin::Idle;
         let terminal =
-            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), |_| {});
+            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), false, |_| {});
         assert_eq!(terminal, CodexLogin::Completed);
         assert_eq!(state, CodexLogin::Completed, "completed is terminal");
         // The start request went out as chatgpt on the short-lived server.
@@ -1230,6 +1333,52 @@ mod tests {
         ) == Some("account/login/start")));
         let waiting_seen = CodexLogin::Waiting { auth_url: "https://example.invalid/auth".into() };
         assert_ne!(terminal, waiting_seen, "the run ends Completed, not Waiting");
+    }
+
+    /// "Use a code instead": the start asks for `chatgptDeviceCode` and the
+    /// answer's code and page reach the row before the person finishes.
+    #[test]
+    fn the_device_code_flow_reports_the_code_then_completes() {
+        let mut io = ScriptedIo::new(vec![
+            r#"{"id":2,"result":{"type":"chatgptDeviceCode","loginId":"l1","userCode":"K7QX-9P2M","verificationUrl":"https://auth.openai.com/codex/device"}}"#,
+            r#"{"method":"account/login/completed","params":{"success":true}}"#,
+        ]);
+        let cancel = AtomicBool::new(false);
+        let mut state = CodexLogin::Idle;
+        let mut seen = Vec::new();
+        let terminal = drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), true, |begun| {
+            seen.push(begun.clone())
+        });
+        assert_eq!(terminal, CodexLogin::Completed);
+        assert_eq!(
+            seen,
+            vec![CodexLogin::Device { url: "https://auth.openai.com/codex/device".into(), code: "K7QX-9P2M".into() }]
+        );
+        let start = io
+            .written
+            .iter()
+            .find(|frame| frame.get("method").and_then(serde_json::Value::as_str) == Some("account/login/start"))
+            .expect("a start frame");
+        assert_eq!(start["params"]["type"], "chatgptDeviceCode");
+        let init = io.written.first().expect("initialize first");
+        assert!(init["params"]["clientInfo"]["version"].is_string(), "codex 0.144.6 requires clientInfo.version");
+    }
+
+    #[test]
+    fn the_assist_line_offers_the_link_then_the_code() {
+        use aui::screens::AssistRun as R;
+        assert!(codex_assist_runs(&CodexLogin::Idle).is_empty());
+        assert!(codex_assist_runs(&CodexLogin::Waiting { auth_url: String::new() }).is_empty(), "no link yet");
+        let waiting = codex_assist_runs(&CodexLogin::Waiting { auth_url: "https://auth".into() });
+        assert!(waiting.contains(&R::Link("copy-link".into(), "Copy the link".into())));
+        assert!(waiting.contains(&R::Link("use-code".into(), "Use a code instead".into())));
+        let device = codex_assist_runs(&CodexLogin::Device {
+            url: "https://auth.openai.com/codex/device".into(),
+            code: "K7QX-9P2M".into(),
+        });
+        assert!(device.contains(&R::Code("K7QX-9P2M".into())));
+        assert!(device.contains(&R::Text("at auth.openai.com/codex/device ·".into())));
+        assert!(device.contains(&R::Link("copy-code".into(), "Copy code".into())));
     }
 
     #[test]
@@ -1245,7 +1394,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let mut state = CodexLogin::Idle;
         let terminal =
-            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), |_| {});
+            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), false, |_| {});
         assert_eq!(terminal, CodexLogin::Cancelled);
     }
 
@@ -1257,7 +1406,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut state = CodexLogin::Idle;
         let terminal =
-            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), |_| {});
+            drive_codex_login(&mut io, &mut state, &cancel, Instant::now() + Duration::from_secs(60), false, |_| {});
         assert!(matches!(terminal, CodexLogin::Failed { .. }));
     }
 

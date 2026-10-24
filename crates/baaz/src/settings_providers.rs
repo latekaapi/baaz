@@ -80,7 +80,12 @@ pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLo
             CodexLogin::Idle | CodexLogin::Cancelled => {}
         }
     }
-    ProviderCardData::new(SharedString::from(status.provider.as_str()), status.provider.icon(), line).actions(actions)
+    let mut data = ProviderCardData::new(SharedString::from(status.provider.as_str()), status.provider.icon(), line)
+        .actions(actions);
+    if status.provider == ProviderId::Codex {
+        data = data.assist(crate::connect::codex_assist_runs(codex));
+    }
+    data
 }
 
 /// The providers a composer menu may list: the enabled ones, in
@@ -661,8 +666,8 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         match signin_plan(id) {
+            // Over the Settings page, like every other sign-in (D5 B3).
             SignInPlan::MuseSheet => {
-                self.close_settings(cx);
                 self.open_muse_sheet();
                 cx.notify();
             }
@@ -671,7 +676,12 @@ impl Harness {
             // app-server alive until `account/login/completed` and runs it
             // with the login-shell PATH (docs/65 §3.1 #10).
             SignInPlan::CodexBrowser => {
-                self.start_codex_login(cx);
+                if !matches!(
+                    self.codex_login,
+                    crate::connect::CodexLogin::Waiting { .. } | crate::connect::CodexLogin::Device { .. }
+                ) {
+                    self.start_codex_login(false, cx);
+                }
             }
         }
     }

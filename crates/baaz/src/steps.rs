@@ -161,6 +161,8 @@
 //! | `page-focus` | give the active browser page the keyboard, free |
 //! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for records a step failure, free |
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
+//! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
+//! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
@@ -420,6 +422,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
+    WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
+    WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
 ];
 
 impl Harness {
