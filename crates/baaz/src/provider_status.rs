@@ -1756,7 +1756,10 @@ fn watch_setup_with(id: ProviderId, every: Duration, limit: Duration, probes: fn
     if !setup_watches().insert(id) {
         return;
     }
-    let began = live_service().service.status(id).headline();
+    // What the sheet waits on: the headline (installed, signed in) or the
+    // advisory (an update clears "too old" and leaves the headline alone).
+    let seen = |status: ProviderStatus| (status.headline(), status.advisory);
+    let began = seen(live_service().service.status(id));
     std::thread::spawn(move || {
         let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
@@ -1766,7 +1769,7 @@ fn watch_setup_with(id: ProviderId, every: Duration, limit: Duration, probes: fn
             while live_service().in_flight.contains(&id) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            if live_service().service.status(id).headline() != began {
+            if seen(live_service().service.status(id)) != began {
                 break;
             }
         }

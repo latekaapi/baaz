@@ -468,13 +468,13 @@ impl Default for TerminalHost {
 ///
 /// [`aui_terminal::FakePty`]'s shape without its clock, so the
 /// backend is `Send` and can ride [`TerminalSession`]'s reader thread.
-struct ScriptBackend {
+pub(crate) struct ScriptBackend {
     script: Vec<ScriptChunk>,
     next: usize,
 }
 
 impl ScriptBackend {
-    fn new(script: Vec<ScriptChunk>) -> Self {
+    pub(crate) fn new(script: Vec<ScriptChunk>) -> Self {
         Self { script, next: 0 }
     }
 }

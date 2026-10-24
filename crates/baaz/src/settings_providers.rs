@@ -133,12 +133,6 @@ pub(crate) fn disabled_banner(id: ProviderId) -> String {
     format!("{} is disabled in Settings — Enable", id.label())
 }
 
-/// The install command typed (not run) into the dock terminal, when the
-/// provider has one (the registry's table).
-pub(crate) fn install_command(id: ProviderId) -> Option<&'static str> {
-    id.install_command()
-}
-
 /// Where the card's Docs button goes.
 pub(crate) fn docs_url(id: ProviderId) -> &'static str {
     id.docs_url()
@@ -337,11 +331,8 @@ pub(crate) fn codex_account_logout(program: &str) -> Result<(), String> {
 pub enum SignInPlan {
     /// Back to the login screen's method choice (Muse's sign-in sheet).
     MuseSheet,
-    /// Prefill the dock terminal with this command, typed not run.
-    ClaudeTerminal {
-        /// The command to type.
-        command: String,
-    },
+    /// The setup sheet with `claude auth login` typed, not run.
+    ClaudeSheet,
     /// Start the ChatGPT login and open this provider's auth URL.
     CodexBrowser,
 }
@@ -350,7 +341,7 @@ pub enum SignInPlan {
 pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
     match id {
         ProviderId::Muse => SignInPlan::MuseSheet,
-        ProviderId::ClaudeCode => SignInPlan::ClaudeTerminal { command: "claude auth login".into() },
+        ProviderId::ClaudeCode => SignInPlan::ClaudeSheet,
         ProviderId::Codex => SignInPlan::CodexBrowser,
     }
 }
@@ -601,22 +592,8 @@ impl Harness {
             }
             ProviderAction::SignIn => self.begin_provider_signin(id, window, cx),
             ProviderAction::SignOut => self.ask_provider_signout(id, cx),
-            ProviderAction::Install => {
-                let Some(command) = install_command(id) else { return };
-                self.open_terminal_typed(command, window, cx);
-                crate::provider_status::watch_setup(id);
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast(
-                        format!("Install {}", id.label()),
-                        "The install command is typed in the terminal — press Enter to run it.",
-                    );
-                });
-            }
-            ProviderAction::Update => {
-                let Some(command) = id.update_command() else { return };
-                self.open_terminal_typed(command, window, cx);
-                crate::provider_status::watch_setup(id);
-            }
+            ProviderAction::Install => self.open_setup_sheet(id, crate::setup::SetupKind::Install, window, cx),
+            ProviderAction::Update => self.open_setup_sheet(id, crate::setup::SetupKind::Update, window, cx),
             ProviderAction::Cancel => {
                 if id == ProviderId::Codex {
                     self.codex_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -675,8 +652,8 @@ impl Harness {
         cx.notify();
     }
 
-    /// Start a sign-in: the Muse sheet, the Claude terminal prefill, or
-    /// the Codex browser flow.
+    /// Start a sign-in: the Muse sheet, the setup sheet with `claude auth
+    /// login` typed, or the Codex browser flow.
     pub(crate) fn begin_provider_signin(
         &mut self,
         id: ProviderId,
@@ -689,16 +666,7 @@ impl Harness {
                 self.open_muse_sheet();
                 cx.notify();
             }
-            SignInPlan::ClaudeTerminal { command } => {
-                self.open_terminal_typed(&command, window, cx);
-                crate::provider_status::watch_setup(id);
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast(
-                        "Sign in to Claude Code",
-                        "`claude auth login` is typed in the terminal — press Enter and follow it there.",
-                    );
-                });
-            }
+            SignInPlan::ClaudeSheet => self.open_setup_sheet(id, crate::setup::SetupKind::SignIn, window, cx),
             // The one Codex sign-in: the connect screen's, which keeps its
             // app-server alive until `account/login/completed` and runs it
             // with the login-shell PATH (docs/65 §3.1 #10).
@@ -706,36 +674,6 @@ impl Harness {
                 self.start_codex_login(cx);
             }
         }
-    }
-
-    /// Open the dock terminal with `command` typed but not run: the
-    /// person presses Enter, for installs and `claude auth login` alike.
-    pub(crate) fn open_terminal_typed(
-        &mut self,
-        command: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.layout.terminal_open = true;
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else {
-            // No project: still open the dock so the command has a home;
-            // without a root there is no tab to type into.
-            self.open_terminal_tab(None, window, cx);
-            cx.notify();
-            return;
-        };
-        if self.terminal_host.read(cx).tabs_for(&root).is_empty() {
-            let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-            self.terminal_host.update(cx, |host, cx| {
-                host.open(&root, "shell".to_owned(), crate::terminal::TabOwner::User, origin, cx);
-            });
-        }
-        self.open_terminal_tab(None, window, cx);
-        if let Some(session) = self.terminal_host.read(cx).active_for(&root).map(|tab| tab.session.clone()) {
-            let bytes = command.as_bytes().to_vec();
-            session.update(cx, |session, _| session.write(&bytes));
-        }
-        cx.notify();
     }
 }
 
@@ -1039,7 +977,7 @@ mod tests {
         assert_eq!(signin_plan(ProviderId::Muse), SignInPlan::MuseSheet);
         assert_eq!(
             signin_plan(ProviderId::ClaudeCode),
-            SignInPlan::ClaudeTerminal { command: "claude auth login".into() }
+            SignInPlan::ClaudeSheet
         );
         assert_eq!(signin_plan(ProviderId::Codex), SignInPlan::CodexBrowser);
     }
