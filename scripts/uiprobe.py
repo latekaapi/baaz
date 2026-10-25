@@ -519,6 +519,8 @@ ENTRIES.update({
     "setup-sheet-install":     _d5("setup:claude-code:install", D5_ALL_MISSING),
     "setup-sheet-signin":      _d5("setup:claude-code:signin", D5_ALL_SIGNED_OUT),
     "setup-sheet-done":        _d5("setup:claude-code:signin", D5_CLAUDE_CONNECTED),
+    # Codex installed but signed out: the sheet's next step, Sign in to Codex
+    "setup-sheet-codex-installed": _d5("setup:codex:install", D5_ALL_SIGNED_OUT),
     # B3 · Codex in its row (browser link, device code) and Muse's sheet
     "codex-signing-in":        _d5("codex-login:waiting", D5_CLAUDE_CONNECTED),
     "codex-device-code":       _d5("codex-login:device", D5_CLAUDE_CONNECTED),
@@ -535,7 +537,7 @@ ENTRIES.update({
 D5_ENTRIES = [
     "connect-first-run", "connect-checking", "connect-all-missing", "connect-all-signed-out",
     "connect-too-old", "connect-menu", "setup-sheet-install", "setup-sheet-signin",
-    "setup-sheet-done", "codex-signing-in", "codex-device-code", "muse-sheet",
+    "setup-sheet-done", "setup-sheet-codex-installed", "codex-signing-in", "codex-device-code", "muse-sheet",
     "settings-card-details", "settings-card-api-key", "signed-out-banner",
 ]
 
