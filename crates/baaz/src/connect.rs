@@ -989,6 +989,7 @@ impl Harness {
         self.sync_banners_from_statuses();
         self.follow_default_provider();
         self.start_muse_once_available(cx);
+        self.advance_setup_sheet(cx);
         cx.notify();
     }
 
@@ -1420,7 +1421,8 @@ mod tests {
             install_command(ProviderId::ClaudeCode),
             Some("curl -fsSL https://claude.ai/install.sh | bash")
         );
-        assert_eq!(install_command(ProviderId::Codex), Some("npm i -g @openai/codex"));
+        assert_eq!(install_command(ProviderId::Codex), Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"));
+        assert_eq!(ProviderId::Codex.update_command(), Some("codex update"));
         assert_eq!(install_command(ProviderId::Muse), None);
         for id in ProviderId::all() {
             assert!(!docs_url(id).is_empty(), "{id:?} names its docs");

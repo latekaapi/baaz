@@ -276,7 +276,10 @@ impl ProviderId {
     pub fn install_command(self) -> Option<&'static str> {
         match self {
             ProviderId::ClaudeCode => Some("curl -fsSL https://claude.ai/install.sh | bash"),
-            ProviderId::Codex => Some("npm i -g @openai/codex"),
+            // The vendor's own installer (owner 2026-10-25): no Node needed,
+            // lands in ~/.local/bin, updates itself. npm left new users
+            // without Node at a dead end.
+            ProviderId::Codex => Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
             ProviderId::Muse => None,
         }
     }
@@ -286,7 +289,8 @@ impl ProviderId {
     pub fn update_command(self) -> Option<&'static str> {
         match self {
             ProviderId::ClaudeCode => Some("claude update"),
-            ProviderId::Codex => Some("npm i -g @openai/codex@latest"),
+            // The CLI's own updater, whichever way it was installed.
+            ProviderId::Codex => Some("codex update"),
             ProviderId::Muse => None,
         }
     }
