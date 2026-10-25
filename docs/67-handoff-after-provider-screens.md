@@ -12,7 +12,7 @@ open and untouched.
 | Repo | Head | Pushed | Notes |
 |---|---|---|---|
 | harness (Baaz) | main head = the commit adding this doc (13 on `2262d34`; code complete at `e134d36`) | **no** | `Cargo.toml` still pins agentic-ui **v0.6.2**; the local `[patch]` → `../agentic-ui` is on, so `Cargo.lock` shows modified — **never commit it** while the patch is on |
-| agentic-ui | `de24f42`, tag **v0.6.3 (local only)** | **no** | 2 commits on `c2ae1a1` (v0.6.2) |
+| agentic-ui | `524184a`, tag **v0.6.3 (local only)** | **no** | 3 commits on `c2ae1a1` (v0.6.2) |
 
 At "push": push agentic-ui `main` + tag `v0.6.3`; in harness set the four `aui*` pins in `Cargo.toml` to `v0.6.3`,
 remove the local patch, `cargo update -p aui` (Cargo.lock then commits cleanly), rebuild, run the gates once more,
@@ -31,6 +31,20 @@ docs, from 23–24 Oct), then this stage:
 | B5 | `295d1ee` | typed auth signals (Claude `authentication_failed`, Codex `codexErrorInfo` unauthorized/401) → `TurnSettled{signed_out}` → the one banner above the composer for all three (the "Signed out of Muse" dialog is gone) |
 | 7 · probe | `928b527` | 13 uiprobe entries, one per board state |
 | baselines | `e134d36` | deliberate: the 13 new + connect-first-run, connect-checking, launch-cached-shell (stale since 2026-09-28) + settings-provider-codex (redrawn) |
+
+### Follow-up, 2026-10-25 (owner: fix friction points 1, 2, 5)
+
+| Commit | What |
+|---|---|
+| agentic-ui `524184a` | `PtyConfig::without_user_rc()` (a shell with only the hooks and a `~ %` prompt); `SetupSheet::next_step` |
+| `e3f48a6` | Install → Sign in in the same sheet (Claude types `claude auth login` once the installer is done; Codex offers "Sign in to Codex"); Codex installs with `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` and updates with `codex update`; the sheet's shell skips the person's rc files. Also: the prompt wait never matched (it waited for a `B` mark the hooks never emit) — it now waits for the shell to sit at a prompt, and clears the line before typing |
+| `3555a8b` | baseline for the new entry `setup-sheet-codex-installed` |
+
+Gates: 831 + 176 (aui-terminal real-shell tests, which the workspace run never enables — run `cargo test -p
+aui-terminal --features pty,tui`) + 2,142 tests pass; clippy clean; perf 0 missed; probe unchanged but
+`right-files-scrolled`. Live on BaazCheck: the chain (an override pointed at a binary that appeared mid-run → the sheet
+moved to Sign in, the typed install line replaced by `claude auth login`, the clean `~ %` prompt), and the Codex
+install sheet's "Sign in to Codex". **Not seen:** the real vendor installers running (nothing was installed).
 
 ## 2. Gates (every step, docs/66 §5)
 
@@ -69,8 +83,9 @@ transition is unit-tested; the watch is S6's), finishing a Codex browser or devi
 ## 4. Decisions taken where the board was silent (tell the owner; tracker "Decisions")
 
 1. Codex device code: in the line under the rows — **asked and answered by the owner (2026-10-24)**.
-2. An install that lands signed out: sheet status "Installed · <version>", footnote "<Provider> is installed. Sign in
-   from its row next.", Done.
+2. An install that lands signed out: superseded 2026-10-25 — Claude Code's sheet moves on to sign-in by itself;
+   Codex's shows "Installed · <version>", "Codex is installed. Sign in next: it opens your browser." and a "Sign in to
+   Codex" button.
 3. "Use automatic path" beside Change path… when an override is set (clearing needed a control).
 4. Codex and Muse API-key notices reuse the Claude note's shape.
 5. The card has no Enabled switch (the board has none; Settings' overview keeps the switches).
@@ -85,7 +100,9 @@ transition is unit-tested; the watch is S6's), finishing a Codex browser or devi
 
 - Push (above). Regenerate `right-files-scrolled` at push.
 - The dock terminal still gets the inherited PATH (the setup sheet now gets the login PATH); same fix would help it.
-- The owner's `.zshrc` calls `starship`, which is not installed — every Baaz terminal prints that error. Theirs.
+- The owner's `.zshrc` calls `starship`, which is not installed — the dock terminal still prints that error (the
+  setup sheet no longer runs rc files). The dock could take the same `without_user_rc` option, but people want their
+  own shell there.
 - P4 A/B (docs/64 §4.1) still open.
 - docs/65 S7's leftover states (Unverified, non-timeout Can't run) have no probe entry; both render through the same
   status-line code that the too-old entry covers.
