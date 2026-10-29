@@ -1344,6 +1344,7 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
         }
     }
     let mut pty = Pty::open(muse)?;
+    let opened = Instant::now();
     let mut text = String::new();
 
     // 1. Let it paint, answering the cursor-position query. Without the reply
@@ -1382,6 +1383,43 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
         pty.pump(&mut text, TICK);
         tier = parse_card(&text).or(tier);
     }
+
+    // 3b. An early pay-as-you-go is not an answer yet. muse 1.4.14 loads the
+    //    subscription a few seconds after its composer appears, and a card
+    //    opened before that draws "No active subscription — you're on
+    //    pay-as-you-go" on a subscribed login, and never redraws (measured
+    //    2026-10-29: typed at 3 s and 5 s after launch → pay-as-you-go;
+    //    at 6.5, 8, 8 and 10 s → the real plan; re-asking in the same TUI at
+    //    ~10 s → the real plan). So the card is asked again in this TUI once
+    //    the status has had [`STATUS_LOAD`] to land, and that answer stands.
+    //    A fresh TUI per confirmation, as before, raced the same way every
+    //    time and confirmed the wrong answer.
+    if matches!(tier, Some(Tier::PayAsYouGo)) {
+        let ready_at = opened + STATUS_LOAD;
+        let now = Instant::now();
+        if ready_at > now {
+            pty.pump(&mut text, (ready_at - now).min(deadline.saturating_duration_since(now)));
+        }
+        let _ = pty.write(b"\x1b");
+        pty.pump(&mut text, PALETTE);
+        let asked_again = text.len();
+        pty.write(b"/upgrade")?;
+        pty.pump_until_from(&mut text, asked_again, PALETTE_CEILING, |flat| flat.contains("upgrade"));
+        pty.pump(&mut text, PALETTE);
+        pty.write(b"\r")?;
+        let mut again = String::new();
+        pty.pump(&mut again, CARD.min(deadline.saturating_duration_since(Instant::now())));
+        let mut second = parse_card(&again);
+        while second.as_ref().is_none_or(|t| !complete(t)) && Instant::now() < deadline && again.len() < MAX_OUTPUT {
+            pty.pump(&mut again, TICK);
+            second = parse_card(&again).or(second);
+        }
+        if second.is_some() {
+            tier = second;
+        }
+        text.push_str(&again);
+    }
+    let tier = tier.map(|tier| reconcile_with_auth(tier, subs_active()));
 
     // 4. Two interrupts is how the TUI is asked to leave; the drop SIGKILLs
     //    it if it declines.
@@ -1440,6 +1478,44 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
             "the /upgrade card was not recognised; this build's wording may be out of date".to_owned()
         }
     })
+}
+
+/// How long after launch muse needs before its `/upgrade` card reflects the
+/// subscription (5–6.5 s measured on muse 1.4.14; see the probe's step 3b).
+const STATUS_LOAD: Duration = Duration::from_secs(9);
+
+/// `providers.meta.subs_active` from muse's `auth.json` (written by muse
+/// 1.4.x on each credential refresh; absent on older logins). Only flags,
+/// never the token, are read.
+pub fn subs_active() -> Option<bool> {
+    let text = std::fs::read_to_string(crate::auth::auth_path()).ok()?;
+    subs_active_in(&text)
+}
+
+/// [`subs_active`] over `auth.json`'s text. Pure, for tests.
+pub fn subs_active_in(auth_json: &str) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_str(auth_json).ok()?;
+    value.get("providers")?.get("meta")?.get("subs_active")?.as_bool()
+}
+
+/// The card's answer checked against muse's own `subs_active` flag. A
+/// pay-as-you-go card on a credential muse itself marks as subscribed is
+/// the card answering before the subscription loaded — never a reason to
+/// raise the blocking pay-as-you-go banner over a subscribed login. It reads
+/// as a subscription whose plan the card did not name. Every other answer
+/// stands: `subs_active: false` (or no flag) never overrides a subscription
+/// the card named.
+pub fn reconcile_with_auth(tier: Tier, subs_active: Option<bool>) -> Tier {
+    match (tier, subs_active) {
+        (Tier::PayAsYouGo, Some(true)) => Tier::Subscription {
+            plan: GENERIC_PLAN_LABEL.to_owned(),
+            current_pct: None,
+            weekly_pct: None,
+            resets: Vec::new(),
+            usage_unavailable: true,
+        },
+        (tier, _) => tier,
+    }
 }
 
 /// The literal sentences [`parse_card`] keys on.
@@ -2093,6 +2169,30 @@ mod tests {
     /// "used" glued onto it — unlike a real percentage or the still-drawing
     /// dash, both of which are a measurement and read naturally as "N% used"
     /// / "— used".
+    /// muse 1.4.x writes `subs_active` beside the credential; Baaz reads
+    /// only that flag, and an early pay-as-you-go card on a login muse marks
+    /// subscribed never raises the blocking banner (owner, 2026-10-29).
+    #[test]
+    fn subs_active_overrides_only_an_early_pay_as_you_go() {
+        let auth = r#"{"schema_version":1,"providers":{"meta":{"mechanism":"oauth","subs_active":true}}}"#;
+        assert_eq!(subs_active_in(auth), Some(true));
+        assert_eq!(subs_active_in(r#"{"providers":{"meta":{"mechanism":"oauth"}}}"#), None);
+        assert_eq!(subs_active_in("not json"), None);
+        let reconciled = reconcile_with_auth(Tier::PayAsYouGo, Some(true));
+        assert!(matches!(&reconciled, Tier::Subscription { plan, .. } if plan == GENERIC_PLAN_LABEL), "{reconciled:?}");
+        assert!(complete(&reconciled), "a reconciled subscription is a complete answer");
+        assert_eq!(reconcile_with_auth(Tier::PayAsYouGo, Some(false)), Tier::PayAsYouGo);
+        assert_eq!(reconcile_with_auth(Tier::PayAsYouGo, None), Tier::PayAsYouGo);
+        let named = Tier::Subscription {
+            plan: "Muse Code High Usage".into(),
+            current_pct: Some(3),
+            weekly_pct: Some(5),
+            resets: Vec::new(),
+            usage_unavailable: false,
+        };
+        assert_eq!(reconcile_with_auth(named.clone(), Some(false)), named, "the flag never demotes a named plan");
+    }
+
     #[test]
     fn print_tier_field_does_not_append_used_to_unavailable() {
         assert_eq!(print_tier_field(None, true), "unavailable");
