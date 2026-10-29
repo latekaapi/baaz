@@ -682,6 +682,10 @@ pub struct Harness {
     pub(crate) connect_menu_open: bool,
     /// Settings provider cards whose Details are open (closed by default).
     pub(crate) provider_details_open: HashSet<ProviderId>,
+    /// Provider cards waiting on something the person pressed (Re-check,
+    /// Sign out): the card says so until the result lands, then a toast
+    /// names it — a press with no visible answer read as broken.
+    pub(crate) provider_busy: HashMap<ProviderId, crate::settings_providers::ProviderBusy>,
     /// The setup sheet (D5 B2) while it is up: which provider, what for.
     pub(crate) setup_sheet: Option<crate::setup::SetupSheet>,
     /// The sheet's terminals, one per provider, kept across Close.
@@ -1554,6 +1558,7 @@ impl Harness {
             muse_sheet: false,
             connect_menu_open: false,
             provider_details_open: HashSet::new(),
+            provider_busy: HashMap::new(),
             setup_sheet: None,
             setup_terminals: crate::setup::SetupTerminals::default(),
             setup_focus: cx.focus_handle(),

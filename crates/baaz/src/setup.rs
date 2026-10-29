@@ -156,8 +156,11 @@ pub fn setup_note(kind: SetupKind, status: &ProviderStatus) -> String {
         };
     }
     match kind {
+        // The command waits typed at the prompt: say so first. "Waiting for
+        // sign-in" over a command nobody had run read as stuck (owner,
+        // 2026-10-29: "where's the terminal to type the command?").
         SetupKind::SignIn => format!(
-            "{name} signs in through your browser. This terminal is {name}’s own; Baaz never sees your credentials."
+            "Press Return to run it: {name} opens your browser to sign in. This terminal is {name}’s own; Baaz never sees your credentials."
         ),
         SetupKind::Install | SetupKind::Update => format!(
             "The command is typed, not run: read it, then press Enter. Baaz checks every few seconds and shows Connected here when {name} answers."

@@ -164,6 +164,9 @@
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
 //! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session records a step failure, free |
+//! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts record a step failure |
+//! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog records a step failure) — same warning |
+//! | `crumb:<n>` | press the n-th Settings breadcrumb (0-based); the current page's crumb, or a crumb that is no link, records a step failure, free |
 //! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
 //! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
@@ -463,9 +466,67 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             cx.notify();
         },
     },
+    // A card button as its click delivers it, for live checks of the
+    // sign-in/out round trip on throwaway logins. `signout` only raises
+    // the confirm; `signout-confirm` presses its Sign out.
+    WindowVerb { verb: "provider-action", run: |this, rest, window, cx| this.step_provider_action(rest, window, cx) },
+    WindowVerb {
+        verb: "signout-confirm",
+        run: |this, _, window, cx| {
+            let target = this
+                .overlays
+                .read(cx)
+                .dialog
+                .as_ref()
+                .filter(|dialog| dialog.action == crate::overlays::DialogAction::ProviderSignOut)
+                .and_then(|dialog| dialog.archive_target.clone());
+            match target {
+                Some(wire) => this.confirm_provider_signout(crate::providers::ProviderId::parse(&wire), window, cx),
+                None => record_step_failure("signout-confirm"),
+            }
+        },
+    },
+    WindowVerb {
+        verb: "crumb",
+        run: |this, rest, _, cx| {
+            let target = rest
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| crate::settings::settings_crumb_target(&this.settings_page.section, index));
+            match target {
+                Some(target) => this.open_settings_page(target, cx),
+                None => record_step_failure(&format!("crumb:{rest}")),
+            }
+        },
+    },
 ];
 
 impl Harness {
+    /// `provider-action:<provider>:<recheck|signin|signout>`: the Settings
+    /// card's button, through the same intent handler its click reaches.
+    /// An unknown provider or action records a step failure.
+    pub(crate) fn step_provider_action(&mut self, rest: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        use aui::screens::{ProviderAction, ProviderIntent};
+        let Some((wire, action)) = rest.split_once(':') else {
+            record_step_failure(&format!("provider-action:{rest}"));
+            return;
+        };
+        let action = match action {
+            "recheck" => ProviderAction::Recheck,
+            "signin" => ProviderAction::SignIn,
+            "signout" => ProviderAction::SignOut,
+            _ => {
+                record_step_failure(&format!("provider-action:{rest}"));
+                return;
+            }
+        };
+        if crate::providers::ProviderId::parse(wire).as_str() != wire {
+            record_step_failure(&format!("provider-action:{rest}"));
+            return;
+        }
+        self.handle_provider_intent(ProviderIntent { id: wire.to_owned().into(), action }, window, cx);
+    }
+
     /// `right:<browser|changes|files|off>`: open the right pane on that kind
     /// idempotently (a kind OPENS it, never toggles), so the capture shows
     /// the production pane. The pre-merge `diff`/`git` slugs still parse —
