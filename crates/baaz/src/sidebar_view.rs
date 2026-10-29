@@ -926,32 +926,12 @@ impl Harness {
     /// placeholder), the tier's plan label, and — only while the menu is
     /// open — one usage card per enabled provider from `usage_rows`.
     fn sidebar_account(&self, menu_open: bool) -> Account {
-        // Muse's account when Muse is signed in; otherwise the first
-        // connected provider's — a Claude Code or Codex person is signed in
-        // even with Muse off (docs/50 P1).
-        let other = || {
-            self.connect_statuses.iter().cloned().find_map(|status| {
-                if status.provider == crate::providers::ProviderId::Muse || !status.enabled {
-                    return None;
-                }
-                match status.auth {
-                    crate::provider_status::Auth::SignedIn { email, plan, .. } => {
-                        let label = email.clone().unwrap_or_else(|| status.provider.label().to_owned());
-                        let initial = label.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-                        Some((label, email.unwrap_or_default(), initial, plan.unwrap_or_default()))
-                    }
-                    _ => None,
-                }
-            })
-        };
+        // Every provider alike (owner, 2026-10-29: the footer read Muse's
+        // sign-in as the app's): the account of the provider new sessions
+        // start on when it is connected, else the first connected one in
+        // switcher order. Muse's plan label still comes from its tier.
         let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan) = match &self.auth {
-            Auth::SignedIn(identity) => (identity.display_name(), identity.email.clone(), identity.initial(), muse_plan()),
-            Auth::Probing if crate::provider_status::muse_wanted() && !matches!(self.wire, crate::app::Wire::Ready) => {
-                other().unwrap_or_else(|| ("Signing in…".to_owned(), String::new(), "·".to_owned(), String::new()))
-            }
-            _ => other().unwrap_or_else(|| ("Not signed in".to_owned(), String::new(), "?".to_owned(), String::new())),
-        };
+        let (name, email, initial, plan) = footer_identity(&self.connect_statuses, &self.new_provider, muse_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),
@@ -1238,12 +1218,10 @@ impl Harness {
                 match action {
                     AccountAction::Settings => self.open_settings(0, cx),
                     AccountAction::Providers => self.open_providers(cx),
-                    AccountAction::SignOut if matches!(self.auth, Auth::SignedIn(_)) => self.logout(cx),
-                    // The login screen is never the app's first screen, but
-                    // it stays reachable here.
-                    AccountAction::SignOut => {
-                        self.open_muse_sheet();
-                    }
+                    // The menu carries no sign-out row (each provider signs
+                    // out on its card); the intent, if anything sends it,
+                    // goes where those cards are.
+                    AccountAction::SignOut => self.open_providers(cx),
                 }
             }
             SidebarIntent::Hover(id, bounds) => {
@@ -3510,5 +3488,84 @@ mod tests {
         assert_eq!(browse.task_folders[0].id.as_ref(), "sess-1");
         assert_eq!(browse.task_folders[0].tabs[0].id.as_ref(), browse_tab_key(session));
         b3c_teardown(&dir, guard, old);
+    }
+}
+
+/// The footer's `(name, email, initial, plan)`: the connected account of
+/// `preferred` (the new-session provider), else of the first connected
+/// enabled provider in switcher order; "Checking providers…" while nothing
+/// has been probed; "No provider connected" otherwise. Muse is one provider
+/// among three here, never the app's account. Pure, so tests drive it.
+pub(crate) fn footer_identity(
+    statuses: &[crate::provider_status::ProviderStatus],
+    preferred: &str,
+    muse_plan: impl Fn() -> String,
+) -> (String, String, String, String) {
+    use crate::provider_status::{Auth as ProviderAuth, Headline};
+    use crate::providers::ProviderId;
+    let connected = |status: &&crate::provider_status::ProviderStatus| {
+        status.enabled && matches!(status.auth, ProviderAuth::SignedIn { .. })
+    };
+    let chosen = statuses
+        .iter()
+        .filter(connected)
+        .find(|status| status.provider.as_str() == preferred)
+        .or_else(|| ProviderId::all().into_iter().find_map(|id| statuses.iter().filter(connected).find(|s| s.provider == id)));
+    if let Some(status) = chosen {
+        if let ProviderAuth::SignedIn { email, plan, .. } = &status.auth {
+            let name = email.clone().unwrap_or_else(|| status.provider.label().to_owned());
+            let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            let plan = if status.provider == ProviderId::Muse {
+                Some(muse_plan()).filter(|label| !label.is_empty()).or_else(|| plan.clone())
+            } else {
+                plan.clone()
+            };
+            return (name, email.clone().unwrap_or_default(), initial, plan.unwrap_or_default());
+        }
+    }
+    let checking = statuses.iter().filter(|s| s.enabled).all(|s| s.headline() == Headline::Checking);
+    let name = if checking && !statuses.is_empty() { "Checking providers…" } else { "No provider connected" };
+    (name.to_owned(), String::new(), "?".to_owned(), String::new())
+}
+
+#[cfg(test)]
+mod footer_identity_tests {
+    use super::footer_identity;
+    use crate::provider_status::{Auth, Installed, ProviderStatus};
+    use crate::providers::ProviderId;
+
+    fn status(id: ProviderId, auth: Auth) -> ProviderStatus {
+        let mut status = ProviderStatus::checking(id);
+        status.installed = Installed::yes("1.0", "/bin/x");
+        status.auth = auth;
+        status.checked_at = Some(1);
+        status
+    }
+
+    fn signed_in(email: &str, plan: &str) -> Auth {
+        Auth::SignedIn { email: Some(email.into()), plan: Some(plan.into()), method: None, source: None }
+    }
+
+    /// Muse signed out, Claude Code and Codex connected: the footer names
+    /// the new-session provider's account, not "Not signed in".
+    #[test]
+    fn a_signed_out_muse_is_not_the_apps_account() {
+        let statuses = [
+            status(ProviderId::Muse, Auth::SignedOut),
+            status(ProviderId::ClaudeCode, signed_in("ada@example.com", "Claude Max")),
+            status(ProviderId::Codex, signed_in("bo@example.com", "prolite")),
+        ];
+        let (name, _, initial, plan) = footer_identity(&statuses, "codex", String::new);
+        assert_eq!((name.as_str(), initial.as_str(), plan.as_str()), ("bo@example.com", "B", "prolite"));
+        let (name, ..) = footer_identity(&statuses, "muse", String::new);
+        assert_eq!(name, "ada@example.com", "a signed-out preferred provider falls through to the first connected");
+    }
+
+    #[test]
+    fn nothing_connected_says_so_without_naming_a_provider() {
+        let statuses = [status(ProviderId::Muse, Auth::SignedOut), status(ProviderId::Codex, Auth::SignedOut)];
+        assert_eq!(footer_identity(&statuses, "muse", String::new).0, "No provider connected");
+        let checking = [ProviderStatus::checking(ProviderId::Muse), ProviderStatus::checking(ProviderId::Codex)];
+        assert_eq!(footer_identity(&checking, "muse", String::new).0, "Checking providers…");
     }
 }

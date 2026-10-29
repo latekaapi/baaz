@@ -978,6 +978,9 @@ impl Harness {
             return;
         }
         self.connect_status_stamp = stamp;
+        // Before the no-visible-change return: a Re-check that found what
+        // the card already showed still owes the person its answer.
+        self.settle_provider_busy(cx);
         let fresh = initial_connect_statuses();
         // A re-probe that found what the window already shows moves only
         // `checked_at`: nothing to redraw (nothing renders at rest, P0).

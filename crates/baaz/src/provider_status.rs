@@ -1724,6 +1724,11 @@ fn publish(live: &mut LiveService) {
     live.wakers.retain(|waker| waker.unbounded_send(()).is_ok());
 }
 
+/// Whether a probe of `id` is running now (a Re-check waits on this).
+pub fn probing(id: ProviderId) -> bool {
+    live_service().in_flight.contains(&id)
+}
+
 /// How many probe results have been published this process: the window
 /// re-reads the statuses when it moves.
 pub fn status_generation() -> u64 {

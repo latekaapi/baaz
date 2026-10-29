@@ -182,6 +182,21 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
     crumbs
 }
 
+/// The page crumb `index` of [`settings_breadcrumb`] opens, or `None` for
+/// the last crumb (the page already shown): `Settings` opens General and,
+/// on a provider sub-page, `Providers` opens the overview.
+pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'static str> {
+    let count = settings_breadcrumb(section).len();
+    if index + 1 >= count {
+        return None;
+    }
+    match index {
+        0 => Some("general"),
+        1 if is_provider_subpage(section) => Some("providers"),
+        _ => None,
+    }
+}
+
 /// Every former setting's exactly-one home page: the row id → page id.
 /// Table-driven so the coverage test enumerates it. Both spellings count:
 /// the `shortcut:<action>` deep-link id and the rendered row id the page
@@ -769,14 +784,22 @@ impl Harness {
                     .flex_none()
                     .items_center()
                     .gap(px(scale::SP_2))
-                    .px(px(scale::SP_4))
-                    .py(px(scale::SP_3))
+                    .mx(px(scale::SP_2))
+                    .mt(px(scale::SP_2))
+                    .mb(px(scale::SP_2))
+                    .px(px(scale::SP_2))
+                    .py(px(scale::SP_2))
+                    .rounded(px(scale::R_SM))
                     .cursor_pointer()
+                    .hover(|style| style.bg(p.surface_2))
                     .role(gpui::Role::Button)
                     .aria_label("Back")
                     .on_mouse_down(gpui::MouseButton::Left, back_down)
                     .on_click(back)
-                    .child(div().text_color(p.ink_3).ui(scale::FS_13).child("← Back")),
+                    // The label reads at the section rows' weight: muted, it
+                    // sat in the bar's shade and looked disabled (owner,
+                    // 2026-10-29).
+                    .child(div().text_color(p.ink_2).ui(scale::FS_13).child("← Back")),
             )
             .child(div().h(px(1.0)).w_full().flex_none().bg(p.line));
         let mut section_list = v_flex()
@@ -874,13 +897,30 @@ impl Harness {
                 trail = trail.child(div().flex_none().ui(scale::FS_13).text_color(p.ink_4).child("/"));
             }
             let last = index + 1 == crumbs.len();
-            trail = trail.child(
-                div()
-                    .flex_none()
-                    .ui(scale::FS_13)
-                    .text_color(if last { p.ink } else { p.ink_3 })
-                    .child(crumb.clone()),
-            );
+            let crumb_el = div()
+                .id(SharedString::from(format!("settings-crumb-{index}")))
+                .flex_none()
+                .ui(scale::FS_13)
+                .text_color(if last { p.ink } else { p.ink_3 })
+                .child(crumb.clone());
+            // Every crumb but the page itself is a link to its page (owner,
+            // 2026-10-29: the crumbs looked clickable and were not).
+            let crumb_el = match settings_crumb_target(&self.settings_page.section, index) {
+                Some(target) => {
+                    let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.open_settings_page(target, cx);
+                    });
+                    crumb_el
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(p.ink))
+                        .role(gpui::Role::Link)
+                        .aria_label(format!("Open {crumb}"))
+                        .on_click(open)
+                        .into_any_element()
+                }
+                None => crumb_el.into_any_element(),
+            };
+            trail = trail.child(crumb_el);
         }
         crate::app::BarChrome {
             lead: self.render_sidebar_toggle(cx),
@@ -1469,10 +1509,9 @@ impl Harness {
         let Some(status) = status else {
             return self.settings_providers_overview(window, cx);
         };
-        let data = crate::settings_providers::card_data(
-            status,
-            &self.codex_login,
-            self.provider_details_open.contains(&id),
+        let data = crate::settings_providers::with_busy(
+            crate::settings_providers::card_data(status, &self.codex_login, self.provider_details_open.contains(&id)),
+            self.provider_busy.get(&id).copied(),
         );
         let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, window, cx| {
             this.handle_provider_intent(intent.clone(), window, cx);
@@ -2339,6 +2378,16 @@ mod tests {
         assert!(is_provider_subpage("providers/muse"));
         assert!(!is_provider_subpage("providers"));
     }
+    /// Every crumb but the page's own opens its page (owner, 2026-10-29).
+    #[test]
+    fn breadcrumbs_link_to_their_pages() {
+        assert_eq!(settings_crumb_target("providers/codex", 0), Some("general"));
+        assert_eq!(settings_crumb_target("providers/codex", 1), Some("providers"));
+        assert_eq!(settings_crumb_target("providers/codex", 2), None, "the page itself is no link");
+        assert_eq!(settings_crumb_target("browser", 0), Some("general"));
+        assert_eq!(settings_crumb_target("browser", 1), None);
+    }
+
 
     /// Every setting id the pages render lives on exactly one page: the
     /// row models themselves are enumerated — General and Sidebar from

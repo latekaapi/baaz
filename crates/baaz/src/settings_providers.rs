@@ -88,6 +88,52 @@ pub(crate) fn card_data(status: &ProviderStatus, codex: &crate::connect::CodexLo
     data.details(crate::details::card_details(status, details_open))
 }
 
+/// What a provider card is waiting on after a press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderBusy {
+    /// A re-probe is running; `after_sign_out` when it follows a sign-out,
+    /// so the toast it ends in can say whether the sign-out took.
+    Checking {
+        /// The probe follows a confirmed sign-out.
+        after_sign_out: bool,
+    },
+    /// The sign-out command is running.
+    SigningOut,
+}
+
+/// `data` while `busy`: the status line says what is running and the
+/// buttons step aside, so a second press cannot start a second run.
+pub(crate) fn with_busy(mut data: ProviderCardData, busy: Option<ProviderBusy>) -> ProviderCardData {
+    match busy {
+        None => data,
+        Some(busy) => {
+            data.status = StatusLine::busy(match busy {
+                ProviderBusy::Checking { after_sign_out: false } => "Checking…",
+                ProviderBusy::Checking { after_sign_out: true } => "Signed out — checking…",
+                ProviderBusy::SigningOut => "Signing out…",
+            });
+            data.actions.clear();
+            data
+        }
+    }
+}
+
+/// The toast a settled press ends in: what the person asked, and what the
+/// re-probe found. `(title, body)`.
+pub(crate) fn settled_toast(status: &ProviderStatus, after_sign_out: bool) -> (String, String) {
+    let name = status.provider.label();
+    let found = status.headline_text();
+    if after_sign_out {
+        if status.headline() == Headline::Connected {
+            (format!("{name} still reads signed in"), found)
+        } else {
+            (format!("Signed out of {name}"), "Sign in again from its card.".to_owned())
+        }
+    } else {
+        (format!("{name} checked"), found)
+    }
+}
+
 /// The providers a composer menu may list: the enabled ones, in
 /// switcher order. A disabled provider disappears from the composer's
 /// provider menu and from the new-session provider choice.
@@ -468,15 +514,16 @@ impl Harness {
         let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
             this.flip_use_own_mcp(id, *next, cx);
         });
-        // Inset like the card above it: the card's padding plus its 20 px
-        // provider mark and gap, so this row's text starts under the
-        // provider's name and its switch sits under the card's switch.
+        // Its own Tools box now (D5 put the card on the page): with the
+        // group's own padding, the card's 18 px inset, so the text lines up
+        // with the card's mark above. The old inset under the provider's name left
+        // an empty column (owner, 2026-10-29: uneven spacing).
         h_flex()
             .w_full()
             .items_center()
             .gap(px(scale::SP_3))
-            .pl(px(scale::SP_4 + 20.0 + scale::SP_2))
-            .pr(px(scale::SP_4))
+            .px(px(18.0 - scale::SP_4))
+            .py(px(scale::SP_3))
             .child(
                 v_flex()
                     .flex_1()
@@ -591,10 +638,7 @@ impl Harness {
         let id = ProviderId::parse(intent.id.as_ref());
         match intent.action {
             ProviderAction::SetEnabled(on) => self.flip_provider_enabled(id, on, cx),
-            ProviderAction::Recheck => {
-                crate::provider_status::recheck_provider(id);
-                cx.notify();
-            }
+            ProviderAction::Recheck => self.recheck_with_feedback(id, false, cx),
             ProviderAction::SignIn => self.begin_provider_signin(id, window, cx),
             ProviderAction::SignOut => self.ask_provider_signout(id, cx),
             ProviderAction::Install => self.open_setup_sheet(id, crate::setup::SetupKind::Install, window, cx),
@@ -699,14 +743,69 @@ impl Harness {
             return;
         }
         // The CLI sign-outs run off the UI thread through the same seam
-        // the tests script; the card re-probes when the logout lands.
-        std::thread::spawn(move || {
-            let commander = LiveCommander;
-            match run_sign_out(id, &commander) {
-                Ok(()) => crate::provider_status::recheck_provider(id),
-                Err(error) => eprintln!("baaz: sign out of {}: {error}", id.as_str()),
+        // the tests script. The card says "Signing out…" meanwhile, then
+        // re-probes; a failure is a toast, never only a log line (owner,
+        // 2026-10-29: confirming Sign out looked like nothing happened).
+        self.provider_busy.insert(id, ProviderBusy::SigningOut);
+        cx.notify();
+        let run = cx.background_spawn(async move { run_sign_out(id, &LiveCommander) });
+        cx.spawn(async move |this, cx| {
+            let result = run.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.recheck_with_feedback(id, true, cx),
+                Err(error) => {
+                    eprintln!("baaz: sign out of {}: {error}", id.as_str());
+                    this.provider_busy.remove(&id);
+                    this.overlays.update(cx, |overlays, _| {
+                        overlays.toast(format!("Couldn't sign out of {}", id.label()), error);
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Re-probe `id` with the card saying so; [`Self::settle_provider_busy`]
+    /// clears it and names the result once the probe lands.
+    pub(crate) fn recheck_with_feedback(&mut self, id: ProviderId, after_sign_out: bool, cx: &mut Context<Self>) {
+        if crate::provider_status::deterministic() {
+            // Captures probe nothing: the scripted status is the answer.
+            crate::provider_status::recheck_provider(id);
+            cx.notify();
+            return;
+        }
+        self.provider_busy.insert(id, ProviderBusy::Checking { after_sign_out });
+        crate::provider_status::recheck_provider(id);
+        cx.notify();
+    }
+
+    /// A probe landed: every card waiting on a re-check whose probe is no
+    /// longer running settles, with a toast naming what it found.
+    pub(crate) fn settle_provider_busy(&mut self, cx: &mut Context<Self>) {
+        let settled: Vec<(ProviderId, bool)> = self
+            .provider_busy
+            .iter()
+            .filter_map(|(id, busy)| match busy {
+                ProviderBusy::Checking { after_sign_out } if !crate::provider_status::probing(*id) => {
+                    Some((*id, *after_sign_out))
+                }
+                _ => None,
+            })
+            .collect();
+        if settled.is_empty() {
+            return;
+        }
+        let statuses = crate::provider_status::live_statuses();
+        for (id, after_sign_out) in settled {
+            self.provider_busy.remove(&id);
+            if let Some(status) = statuses.iter().find(|status| status.provider == id) {
+                let (title, body) = settled_toast(status, after_sign_out);
+                self.overlays.update(cx, |overlays, _| {
+                    overlays.toast(title, body);
+                });
             }
-        });
+        }
         cx.notify();
     }
 
@@ -829,6 +928,26 @@ mod tests {
         assert_eq!(data.status, StatusLine::ok("Connected · ada@example.com · pro"));
         assert_eq!(labels(&data), vec!["Re-check", "Sign out"]);
         assert_eq!(data.actions[0].style, aui::screens::ActionStyle::Text, "the card's Re-check is a text button");
+    }
+
+    /// A press with no visible answer read as broken (owner, 2026-10-29):
+    /// while busy the card names what runs and offers no second press.
+    #[test]
+    fn a_busy_card_says_what_runs_and_offers_no_buttons() {
+        let checking = with_busy(card_data(&connected(), &IDLE, false), Some(ProviderBusy::Checking { after_sign_out: false }));
+        assert_eq!(checking.status, StatusLine::busy("Checking…"));
+        assert!(checking.actions.is_empty());
+        let out = with_busy(card_data(&connected(), &IDLE, false), Some(ProviderBusy::SigningOut));
+        assert_eq!(out.status, StatusLine::busy("Signing out…"));
+        assert_eq!(with_busy(card_data(&connected(), &IDLE, false), None), card_data(&connected(), &IDLE, false));
+    }
+
+    #[test]
+    fn a_settled_press_names_what_the_probe_found() {
+        assert_eq!(settled_toast(&connected(), false).0, "Codex checked");
+        assert_eq!(settled_toast(&connected(), true).0, "Codex still reads signed in");
+        let out = status(ProviderId::Codex, Installed::yes("0.153.2", "/bin/codex"), Auth::SignedOut, true);
+        assert_eq!(settled_toast(&out, true).0, "Signed out of Codex");
     }
 
     #[test]
