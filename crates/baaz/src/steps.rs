@@ -131,6 +131,7 @@
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
+//! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number records a step failure, free |
 //! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`browser-tabs=horizontal\|vertical`, `search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values record a step failure, free |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
@@ -383,6 +384,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "settings-set", run: |this, rest, _, cx| this.step_settings_set(rest, cx) },
+    WindowVerb { verb: "stall", run: |_, rest, _, _| step_stall(rest) },
     WindowVerb { verb: "feedback-mode", run: |this, rest, window, cx| this.step_feedback(rest, window, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
@@ -1031,9 +1033,32 @@ const ATTACH_WAIT_POLLS: usize = 100;
 pub(crate) fn window_step(this: &mut Harness, step: &str, window: &mut Window, cx: &mut Context<Harness>) -> bool {
     let (head, rest) = split(step);
     let Some(verb) = WINDOW_VERBS.iter().find(|v| v.verb == head) else { return false };
+    crate::log::crumb(verb.verb);
     (verb.run)(this, rest, window, cx);
     cx.notify();
     true
+}
+
+/// `stall:<ms>`: hold the UI thread, so a live run can watch the stall
+/// watchdog write (see [`crate::watchdog`]). Capped at 10 s.
+fn step_stall(rest: &str) {
+    let (ms, busy) = match rest.trim().strip_suffix(",busy") {
+        Some(ms) => (ms, true),
+        None => (rest.trim(), false),
+    };
+    let Ok(ms) = ms.parse::<u64>() else {
+        record_step_failure(&format!("stall:{rest}"));
+        return;
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(ms.min(10_000));
+    if busy {
+        // On CPU the whole time, as a runaway loop would be.
+        while std::time::Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    } else {
+        std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
+    }
 }
 
 /// One `--steps` item, run against the open session.

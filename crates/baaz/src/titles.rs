@@ -115,10 +115,12 @@ pub fn side_workspace_dir() -> std::path::PathBuf {
 /// same canonicalisation project resolution uses, so symlinked tmp dirs
 /// match.
 pub fn is_side_workspace_root(root: &str) -> bool {
-    let root = crate::projects::canonical_str(root);
+    // Through the run's memo: this runs per row on every rejoin, on the UI
+    // thread, and asked the disk three times a row (2026-10-31).
+    let root = crate::projects::canonical_cached(root);
     [crate::store::support_dir(), crate::store::default_support_dir()]
         .iter()
-        .map(|dir| crate::projects::canonical_str(&dir.join(SIDE_WORKSPACE_DIR_NAME).to_string_lossy()))
+        .map(|dir| crate::projects::canonical_cached(&dir.join(SIDE_WORKSPACE_DIR_NAME).to_string_lossy()))
         .any(|side| side == root)
 }
 
