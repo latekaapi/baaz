@@ -6454,6 +6454,7 @@ impl Render for Harness {
         // The whole-frame instrument's start; the trailing marker below
         // closes it after paint (see `session::draw_end_marker`).
         session::note_draw_start();
+        crate::log::crumb("render");
         crate::sidebar_view::note_baaz_render();
         crate::log::note_root_render();
         self.on_frame(window, cx);
@@ -8722,6 +8723,168 @@ mod tests {
         assert!(f32::from(list.size.height) > 0.0, "the header has height: {list:?}");
         let page = vc.debug_bounds("skills-page").expect("the Skills page draws");
         assert!(f32::from(page.size.height) > 200.0, "the page fills the centre, not a zero-height strip: {page:?}");
+        restore_state(state);
+    }
+
+    /// The Skills page keeps Settings' column: at a wide window its rows
+    /// sit in a centred 680 px measure instead of running edge to edge
+    /// (owner 2026-10-31: "looks too wide and ugly"); at a narrow one the
+    /// column is the page, never wider.
+    #[gpui::test]
+    fn the_skills_page_sits_in_the_settings_column(cx: &mut gpui::TestAppContext) {
+        use gpui::IntoElement as _;
+        assert_eq!(crate::skills_page::skills_column(false), (crate::settings::SETTINGS_COLUMN_MAX, 4.0));
+        assert_eq!(crate::skills_page::skills_column(true).0, crate::settings::SETTINGS_COLUMN_MAX + 460.0);
+        let state = hermetic_state("skills-column");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.step_skills("page", window, cx);
+                // No skill picked: the list alone, in Settings' 680.
+                h.skills.selected = None;
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        let page = vc.debug_bounds("skills-page").expect("the Skills page draws");
+        let column = vc.debug_bounds("skills-column").expect("the Skills column draws");
+        assert!(f32::from(page.size.width) > crate::settings::SETTINGS_COLUMN_MAX + 100.0, "a wide window: {page:?}");
+        assert!(f32::from(column.size.width) <= crate::settings::SETTINGS_COLUMN_MAX + 0.5, "{column:?} in {page:?}");
+        let left = f32::from(column.origin.x - page.origin.x);
+        let right = f32::from((page.origin.x + page.size.width) - (column.origin.x + column.size.width));
+        assert!((left - right).abs() < 1.0, "centred: {left} vs {right}");
+        // Narrow: the column is the page, never past it.
+        vc.simulate_resize(gpui::size(gpui::px(760.), gpui::px(700.)));
+        vc.draw(gpui::point(gpui::px(0.), gpui::px(0.)), gpui::size(gpui::px(760.), gpui::px(700.)), |_, _| {
+            baaz.clone().into_any_element()
+        });
+        let page = vc.debug_bounds("skills-page").expect("the Skills page draws narrow");
+        let column = vc.debug_bounds("skills-column").expect("the Skills column draws narrow");
+        assert!(column.size.width <= page.size.width + gpui::px(0.5), "{column:?} in {page:?}");
+        assert!(column.origin.x >= page.origin.x - gpui::px(0.5));
+        restore_state(state);
+    }
+
+    /// Settings › Providers' "New sessions start in" picker writes the same
+    /// default the connect footer does: `provider.json`, and the window's
+    /// own pick (owner 2026-10-31: the tracker sent them to a control
+    /// Settings did not have).
+    #[gpui::test]
+    fn the_settings_default_provider_picker_writes_provider_json(cx: &mut gpui::TestAppContext) {
+        use aui::screens::ConnectIntent;
+        let state = hermetic_state("settings-default-provider");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.open_settings_page("providers", cx);
+                h.default_provider_intent(ConnectIntent::ToggleDefaultMenu);
+                assert!(h.connect_menu_open, "the chip opens its menu");
+                h.default_provider_intent(ConnectIntent::SetDefault(aui_icons::Provider::Codex));
+                assert!(!h.connect_menu_open, "a pick closes it");
+                assert_eq!(h.new_provider, "codex");
+                h.default_provider_intent(ConnectIntent::ToggleDefaultMenu);
+                h.open_settings_page("general", cx);
+                assert!(!h.connect_menu_open, "leaving the page closes the menu");
+            })
+        });
+        let stored = std::fs::read_to_string(state.2.join("provider.json")).expect("provider.json written");
+        assert!(stored.contains("\"codex\""), "{stored}");
+        assert_eq!(crate::providers::read_last_provider(), Some(crate::providers::ProviderId::Codex));
+        // The page draws with the group (the picker, or the
+        // nothing-connected line when no provider is Connected here).
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("providers", cx)));
+        draw_shell(&mut *vc, &baaz);
+        restore_state(state);
+    }
+
+    /// The P7 import scan behind Settings › Providers' card line never runs
+    /// on the UI thread: opening the page only starts it on the background
+    /// executor, drawing the page reads the cache and never scans, and the
+    /// plan lands when the executor runs (1.7 s cold over the owner's 3.6 GB
+    /// `~/.claude`; the 2026-10-31 hang was on Settings).
+    #[gpui::test]
+    fn the_import_scan_never_runs_on_the_ui_thread(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("import-scan-thread");
+        let owner = state.2.join("owner-home");
+        crate::import::write_fixture_home(&owner, 30, 3, 0);
+        let old_owner = std::env::var_os("BAAZ_IMPORT_OWNER_HOME");
+        std::env::set_var("BAAZ_IMPORT_OWNER_HOME", &owner);
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.import.cache = None;
+                h.import.scanning = false;
+                h.open_settings_page("providers/claude-code", cx);
+                assert!(h.import.scanning, "opening the page starts the scan");
+                assert!(h.import.cache.is_none(), "the scan did not run inline on the UI thread");
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.update(|_, cx| baaz.read(cx).import.cache.is_none()), "drawing the page never scans");
+        vc.run_until_parked();
+        let offered = vc.update(|_, cx| {
+            baaz.read(cx).import.cache.as_ref().map(|cache| cache.plan.sessions.len())
+        });
+        assert!(offered.is_some_and(|n| n > 0), "the background scan landed a plan: {offered:?}");
+        match old_owner {
+            Some(value) => std::env::set_var("BAAZ_IMPORT_OWNER_HOME", value),
+            None => std::env::remove_var("BAAZ_IMPORT_OWNER_HOME"),
+        }
+        restore_state(state);
+    }
+
+    /// The Settings nav's "← Back" row sits below the sidebar column's
+    /// chrome row and the fade the shell lays under it: at an 8 px margin it
+    /// drew half under the top bar's shade (owner screenshot, 2026-10-31).
+    #[gpui::test]
+    fn the_settings_back_row_clears_the_top_bar_and_its_fade(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("settings-back-top");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.open_settings_page("general", cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        let back = vc.debug_bounds("settings-back").expect("the Back row draws");
+        let row_h = vc.update(|_, cx| {
+            use aui_tokens::ActiveAui as _;
+            f32::from(cx.aui().metrics.header)
+        });
+        let clear = row_h + aui::shell::LIST_FADE;
+        assert!(
+            f32::from(back.origin.y) >= clear - 0.5,
+            "Back starts below the chrome row ({row_h}) and its fade ({}): {back:?}",
+            aui::shell::LIST_FADE
+        );
         restore_state(state);
     }
 

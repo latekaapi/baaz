@@ -2647,9 +2647,12 @@ impl crate::app::Harness {
                     ),
             )
             .child(
-                Textarea::new(&field)
-                    .aria_label("Feedback note text")
-                    .into_any_element(),
+                aui::data::field_frame("feedback-note-field", &field, window, cx).w_full().child(
+                    Textarea::new(&field)
+                        .appearance(false)
+                        .bordered(false)
+                        .aria_label("Feedback note text"),
+                ),
             )
             .child(
                 h_flex()

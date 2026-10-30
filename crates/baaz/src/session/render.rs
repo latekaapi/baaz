@@ -1716,14 +1716,32 @@ impl SessionView {
         let back = cx.listener(|this: &mut Self, id: &String, _, cx| this.wizard_back(id.clone(), cx));
         // The two text fields are the app's, exactly as the composer's editor
         // is: the cards are handed an element and never a character.
+        // Each sits in the library's field frame: the composer's quiet edge
+        // that brightens with focus, never the kit's accent ring and halo
+        // (owner 2026-10-31: the heavy blue box was off the design system).
         let feedback_slot = self.feedback_open.is_some().then(|| {
-            Textarea::new(&self.feedback).text_size(aui_tokens::scaled(scale::FS_12)).into_any_element()
+            aui::data::field_frame("approval-feedback-field", &self.feedback, window, cx)
+                .w_full()
+                .child(
+                    Textarea::new(&self.feedback)
+                        .appearance(false)
+                        .bordered(false)
+                        .text_size(aui_tokens::scaled(scale::FS_12)),
+                )
+                .into_any_element()
         });
         let clarify_slot = self.clarify_open.is_some().then(|| {
-            Textarea::new(&self.clarify).text_size(aui_tokens::scaled(scale::FS_12)).into_any_element()
+            aui::data::field_frame("question-clarify-field", &self.clarify, window, cx)
+                .w_full()
+                .child(
+                    Textarea::new(&self.clarify)
+                        .appearance(false)
+                        .bordered(false)
+                        .text_size(aui_tokens::scaled(scale::FS_12)),
+                )
+                .into_any_element()
         });
         let feedback_text = self.feedback.read(cx).value().to_string();
-        let _ = window;
         Cards {
             choose: Rc::new(move |a, c, f, window, cx| choose(&(a, c, f), window, cx)),
             feedback_toggle: Rc::new(move |a, c, window, cx| feedback_toggle(&(a, c), window, cx)),

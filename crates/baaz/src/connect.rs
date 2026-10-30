@@ -295,6 +295,21 @@ pub fn connect_default(statuses: &[ProviderStatus], current: ProviderId) -> Opti
     connected.first().copied()
 }
 
+/// The "New sessions start in" picker over `statuses`: the shown default
+/// ([`connect_default`]) and the Connected choices; `None` when nothing is
+/// Connected. The connect footer and Settings › Providers draw the same one.
+pub fn default_picker_for(
+    statuses: &[ProviderStatus],
+    current: ProviderId,
+    open: bool,
+) -> Option<aui::screens::DefaultPicker> {
+    connect_default(statuses, current).map(|shown| aui::screens::DefaultPicker {
+        current: aui_provider(shown),
+        choices: connected_choices(statuses).into_iter().map(aui_provider).collect(),
+        open,
+    })
+}
+
 /// The Connected providers, in [`CONNECT_ORDER`]: what the footer picker
 /// lists.
 pub fn connected_choices(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
@@ -685,11 +700,7 @@ impl Harness {
         use gpui::prelude::*;
         let rows = build_rows(&self.connect_statuses, &self.codex_login);
         let current = ProviderId::parse(&self.new_provider);
-        let picker = connect_default(&self.connect_statuses, current).map(|shown| aui::screens::DefaultPicker {
-            current: aui_provider(shown),
-            choices: connected_choices(&self.connect_statuses).into_iter().map(aui_provider).collect(),
-            open: self.connect_menu_open,
-        });
+        let picker = default_picker_for(&self.connect_statuses, current, self.connect_menu_open);
         let weak = cx.entity().downgrade();
         let mark = crate::mascot::connect_mascot(window, cx);
         let screen = connect_providers("connect", rows)
@@ -779,6 +790,25 @@ impl Harness {
         self.muse_sheet = true;
     }
 
+    /// The "New sessions start in" picker's intents, wherever it is drawn
+    /// (the connect footer, Settings › Providers — never both on screen, so
+    /// they share `connect_menu_open`): open or close its menu, or set the
+    /// default and remember it in `provider.json`. Other intents are not
+    /// the picker's and do nothing here.
+    pub(crate) fn default_provider_intent(&mut self, intent: ConnectIntent) {
+        match intent {
+            ConnectIntent::ToggleDefaultMenu => self.connect_menu_open = !self.connect_menu_open,
+            ConnectIntent::CloseDefaultMenu => self.connect_menu_open = false,
+            ConnectIntent::SetDefault(provider) => {
+                self.connect_menu_open = false;
+                let id = ProviderId::from_icon(provider);
+                self.new_provider = id.as_str().to_owned();
+                crate::providers::write_last_provider(id);
+            }
+            _ => {}
+        }
+    }
+
     /// Leave the connect screen: Continue and Skip both set
     /// `onboarding_completed`, so this launch and the next open the shell.
     pub(crate) fn finish_connect(&mut self) {
@@ -824,14 +854,9 @@ impl Harness {
                 self.connect_menu_open = false;
                 self.connect_provider_action(ProviderId::parse(&id), action, window, cx);
             }
-            ConnectIntent::ToggleDefaultMenu => self.connect_menu_open = !self.connect_menu_open,
-            ConnectIntent::CloseDefaultMenu => self.connect_menu_open = false,
-            ConnectIntent::SetDefault(provider) => {
-                self.connect_menu_open = false;
-                let id = ProviderId::from_icon(provider);
-                self.new_provider = id.as_str().to_owned();
-                crate::providers::write_last_provider(id);
-            }
+            ConnectIntent::ToggleDefaultMenu
+            | ConnectIntent::CloseDefaultMenu
+            | ConnectIntent::SetDefault(_) => self.default_provider_intent(intent),
             ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
                 self.open_import_sheet(cx);
             }
@@ -1301,6 +1326,19 @@ mod tests {
         let muse = rows.iter().find(|row| row.id == "muse").expect("muse row");
         assert_eq!(muse.status, StatusLine::bad("Couldn’t check — the CLI timed out"));
         assert_eq!(muse.action, Some(ProviderActionDef::recheck()));
+    }
+
+    #[test]
+    fn the_settings_picker_is_the_footers_connected_only() {
+        use ProviderId as P;
+        let statuses = vec![signed_out(P::Muse), connected(P::ClaudeCode), connected(P::Codex)];
+        let picker = default_picker_for(&statuses, P::Codex, true).expect("something is Connected");
+        assert_eq!(picker.current, AuiProvider::Codex, "the stored Connected pick shows");
+        assert_eq!(picker.choices, vec![AuiProvider::Claude, AuiProvider::Codex], "Connected only, row order");
+        assert!(picker.open);
+        let picker = default_picker_for(&statuses, P::Muse, false).expect("something is Connected");
+        assert_eq!(picker.current, AuiProvider::Claude, "a signed-out pick shows the first Connected");
+        assert!(default_picker_for(&[signed_out(P::Muse)], P::Muse, false).is_none(), "nothing ready");
     }
 
     #[test]
