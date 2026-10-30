@@ -812,6 +812,11 @@ pub struct Harness {
     /// root, a provider open with nowhere current): unsent all the same,
     /// so no row until their first turn starts, which forgets them here.
     pub(crate) unsent: HashSet<String>,
+    /// Sessions whose turn this window admitted (a send landed as
+    /// `ProviderTurnAccepted`) since launch. Only their settles are live
+    /// activity that moves a row's time: every other settle is a reopen
+    /// replaying history, and opening a session never moves its row.
+    pub(crate) turns_admitted: HashSet<String>,
     /// A draft taken from another project's session, waiting for the picked
     /// project's draft session to exist so it can be moved in. Set by the
     /// project menu's retarget, consumed by `new_session_in`.
@@ -1625,6 +1630,7 @@ impl Harness {
             session_cache: Vec::new(),
             drafts: HashMap::new(),
             unsent: HashSet::new(),
+            turns_admitted: HashSet::new(),
             pending_draft: None,
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
