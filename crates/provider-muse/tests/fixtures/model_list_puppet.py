@@ -25,6 +25,13 @@ request named, and every `turn/start` is followed by `turn/started`, one
 `agentMessage` item echoing the prompt, and `turn/completed` for that
 session — so events for several sessions interleave on one pipe.
 
+`--turn-shape=approval|failed|open|crash` (the provider conformance suite,
+`crates/baaz/tests/conformance.rs`) replaces the echoed turn: one
+`approval/request` the turn waits on (a second decision is refused
+`approvalAlreadyResolved`), a turn completed `failed` with an error, a turn
+that runs until `turn/interrupt`, or a child that dies with stderr right
+after the turn starts. Hand-written from this file's shapes, never a capture.
+
 `--emit-bad-tap` makes the puppet send one malformed `approval/request`
 server request right after `initialize`: real enough to travel the reader
 thread, the event pump and the fold, malformed enough that the tap decode
@@ -228,6 +235,13 @@ def canned(method, params, granted=()):
 
 
 EMIT_TURN = False
+# The conformance suite's turn shapes (crates/baaz/tests/conformance.rs),
+# each instead of the echoed turn: "approval" (the turn waits on one
+# `approval/request` until it is decided), "failed" (the turn completes
+# `failed` with an error), "open" (the turn runs until `turn/interrupt`),
+# "crash" (the child dies with stderr right after the turn starts).
+TURN_SHAPE = None
+DECIDED = set()
 # The echoed reply per session, for `session/read` after an emitted turn.
 REPLIES = {}
 CURSOR = [0]
@@ -253,8 +267,51 @@ def emit_turn(params):
     note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 1})
 
 
+def shaped_turn(params):
+    """The conformance turn shapes (see TURN_SHAPE), after `turn/start`'s
+    answer. Hand-written from this file's own shapes: no wire capture."""
+    session_id = params.get("sessionId", "s-1")
+    turn_id = "t-" + params.get("commandId", "cmd-1")
+    note = lambda method, body: send({"jsonrpc": "2.0", "method": method,
+        "params": dict(body, sessionId=session_id, viewCursor=cursor())})
+    note("turn/started", {"turnId": turn_id})
+    if TURN_SHAPE == "crash":
+        for line in ("fake-muse: the model stream closed unexpectedly (simulated)",
+                     "fake-muse: exiting with status 1"):
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        import os
+        os._exit(1)
+    if TURN_SHAPE == "failed":
+        note("turn/completed", {"turnId": turn_id, "terminal": "failed", "durationMs": 1,
+            "error": {"kind": "modelError", "retryable": False,
+                      "message": "the provider closed the stream before the reply finished"}})
+    if TURN_SHAPE == "approval":
+        approval = fake_approval()
+        approval.update(sessionId=session_id, turnId=turn_id, approvalId="a-" + turn_id)
+        approval["currentRequirementId"] = {"approvalId": "a-" + turn_id, "sourceIndex": 3}
+        send({"jsonrpc": "2.0", "id": "srv-a-" + turn_id, "method": "approval/request",
+              "params": approval})
+        OPEN_TURNS[approval["approvalId"]] = (session_id, turn_id)
+        PENDING[approval["approvalId"]] = approval
+    if TURN_SHAPE == "open":
+        OPEN_TURNS[session_id] = (session_id, turn_id)
+
+
+OPEN_TURNS = {}
+# The shaped approvals still waiting, for `approval/listPending`.
+PENDING = {}
+
+
+def finish(session_id, turn_id, terminal):
+    send({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+        "sessionId": session_id, "viewCursor": cursor(), "turnId": turn_id,
+        "terminal": terminal, "durationMs": 1}})
+
+
 def main():
-    global EMIT_TURN
+    global EMIT_TURN, TURN_SHAPE
     record_path = None
     emit_bad_tap = False
     granted = []
@@ -269,6 +326,10 @@ def main():
             i += 1
         elif args[i] == "--emit-turn":
             EMIT_TURN = True
+            i += 1
+        elif args[i].startswith("--turn-shape="):
+            EMIT_TURN = True
+            TURN_SHAPE = args[i][len("--turn-shape="):]
             i += 1
         elif args[i] == "--emit-bad-tap":
             emit_bad_tap = True
@@ -308,13 +369,34 @@ def main():
         req_id = req.get("id")
         if req_id is None:
             continue  # A notification: recorded, never answered.
-        payload = canned(method, params if isinstance(params, dict) else {}, granted)
+        args_ = params if isinstance(params, dict) else {}
+        if TURN_SHAPE == "approval" and method == "approval/decide":
+            approval_id = args_.get("approvalId")
+            if approval_id in DECIDED or approval_id not in OPEN_TURNS:
+                send({"jsonrpc": "2.0", "id": req_id, "error": {
+                    "code": -32000, "message": "approval already resolved",
+                    "data": {"kind": "approvalAlreadyResolved", "retryable": False}}})
+                continue
+            DECIDED.add(approval_id)
+            PENDING.pop(approval_id, None)
+            result(req_id, {"approvalId": approval_id, "commandId": args_.get("commandId", "cmd-1"),
+                            "status": "accepted", "terminal": True})
+            finish(*OPEN_TURNS.pop(approval_id), terminal="completed")
+            continue
+        payload = canned(method, args_, granted)
+        if TURN_SHAPE == "approval" and method == "approval/listPending":
+            payload = {"approvals": list(PENDING.values()), "userInputs": []}
         if payload is None:
             failure(req_id, -32601, "fake server knows no method " + str(method))
         else:
             result(req_id, payload)
+        if TURN_SHAPE == "open" and method == "turn/interrupt" and args_.get("sessionId") in OPEN_TURNS:
+            finish(*OPEN_TURNS.pop(args_["sessionId"]), terminal="interrupted")
         if EMIT_TURN and method == "turn/start" and payload is not None:
-            emit_turn(params if isinstance(params, dict) else {})
+            if TURN_SHAPE is None:
+                emit_turn(args_)
+            else:
+                shaped_turn(args_)
         if method == "account/logout":
             # As muse does: the lane change follows as a notification.
             send({
