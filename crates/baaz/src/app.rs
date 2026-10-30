@@ -8661,6 +8661,39 @@ mod tests {
         restore_state(state);
     }
 
+    /// The Skills page's own header ("Skills · project · Search · Add
+    /// skill") sits below the sheet's title row and its fade, as the
+    /// Settings column does: at 16 px it drew dimmed and half under the
+    /// window's top bar (2026-10-30).
+    #[gpui::test]
+    fn the_skills_header_clears_the_top_bar_and_its_fade(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("skills-header-top");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.step_skills("page", window, cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        let header = vc.debug_bounds("skills-header").expect("the Skills header draws");
+        let clear = aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW;
+        assert!(
+            f32::from(header.origin.y) + crate::skills_page::SKILLS_HEADER_TOP >= clear,
+            "the header's content starts below the top bar's row and fade: {header:?}"
+        );
+        assert!(
+            crate::skills_page::SKILLS_HEADER_TOP >= clear,
+            "the header's inset clears the sheet row and its fade"
+        );
+        restore_state(state);
+    }
+
     /// B2a-H6: the Settings → Browser page draws — the dispatch lands on
     /// the new page with its Tabs, Search, Downloads and Chromium rows.
     #[gpui::test]
