@@ -378,6 +378,13 @@ pub fn failure_detail(message: &str, sentence: &str, stderr: &[String]) -> Optio
             text = rest.trim();
         }
     }
+    // "<method> errored: <what>" — the wire method that failed (an open's
+    // `model/list`, `thread/start`) is the adapter's, not the person's.
+    if let Some((method, rest)) = text.split_once(" errored: ") {
+        if !method.contains(' ') {
+            text = rest.trim();
+        }
+    }
     // "the agent process exited[ before answering][ (code)][: <its words>]":
     // the exit is the sentence's; only the child's words after the colon
     // can add anything.
@@ -3045,6 +3052,14 @@ mod tests {
             failure_detail("provider unavailable: timed out after 30s waiting for initialize", &sentence, &well)
                 .as_deref(),
             Some("timed out after 30s waiting for initialize")
+        );
+        // The wire method that failed is the adapter's: the exit under it
+        // is still the sentence's own fact (QA 2026-10-30, a first spawn
+        // that died: "model/list errored: the agent process exited before
+        // answering").
+        assert_eq!(
+            failure_detail("provider unavailable: model/list errored: the agent process exited before answering", &sentence, &well),
+            None
         );
         // A refusal whose reason is the sentence itself says it once.
         assert_eq!(failure_detail("Codex stopped before it could answer.", &sentence, &[]), None);

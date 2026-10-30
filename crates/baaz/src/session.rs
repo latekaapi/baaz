@@ -2372,6 +2372,13 @@ impl SessionView {
         self.composer.read(cx).value().to_string()
     }
 
+    /// The words the composer holds, or will hold on its next frame: a
+    /// send handed back (`restore_prompt`) waits for a frame to land in the
+    /// field, and a view closed before that frame must not lose it.
+    pub(crate) fn words_in_hand(&self, cx: &gpui::App) -> String {
+        self.pending_prompt.clone().unwrap_or_else(|| self.draft_text(cx))
+    }
+
     /// Put text in the composer. Only the scripted `--send` uses this; a person
     /// types.
     pub fn set_draft(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {

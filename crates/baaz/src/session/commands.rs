@@ -100,6 +100,16 @@ impl SessionView {
     }
 
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
+        // No session stands behind the view (its start failed): nothing may
+        // arm the busy state — it would never clear, and the send button
+        // stood as a stop square forever (QA 2026-10-30). The words go back.
+        if matches!(self.start, StartState::Failed) {
+            self.restore_prompt(text, cx);
+            if self.banner.is_none() {
+                self.set_banner("This session did not start — open a new one.", None, cx);
+            }
+            return;
+        }
         // A retired source session takes no sends: the work moved to the
         // destination. The draft goes back in the composer untouched.
         if let Some(notice) = self.handoff_readonly_notice() {

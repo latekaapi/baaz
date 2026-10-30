@@ -2556,7 +2556,7 @@ impl Harness {
         // What Retry re-runs when this fresh open fails: cloned up front,
         // because `work` below moves the originals into the background.
         let retry_new =
-            ProviderOpenRetry::OpenNew { project: project.clone(), workspace: workspace.clone() };
+            ProviderOpenRetry::OpenNew { project: project.clone(), workspace: workspace.clone(), draft: String::new() };
         // The thread id replaces this request id on the view once the lane
         // lands (Codex mints one server-side): carried into the finish below
         // so the relay keeps routing the bridge's `--session <request_id>`
@@ -2657,6 +2657,7 @@ impl Harness {
                 let retry = ProviderOpenRetry::OpenNew {
                     project: project.clone(),
                     workspace: workspace.clone(),
+                    draft: String::new(),
                 };
                 self.fail_provider_open(provider_id, scripted_failure(reason), retry, None, window, cx);
             }
@@ -2943,6 +2944,10 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
         let epoch = self.provider_open_epoch;
+        // Where Retry starts again when this open fails (the view is gone
+        // by then): cloned before `work` moves the originals.
+        let (retry_project, retry_workspace) = (project.clone(), workspace.clone());
+        let (timed_project, timed_workspace) = (project.clone(), workspace.clone());
         let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref());
         let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
@@ -2956,7 +2961,7 @@ impl Harness {
             }
             Err(error) => {
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
-                this.fail_provider_draft(&request_id, error.to_string(), cx);
+                this.fail_provider_draft(&request_id, provider_id, error, retry_project, retry_workspace, cx);
             }
         });
         // A child that never answers must not leave the view opening
@@ -2964,26 +2969,35 @@ impl Harness {
         // finds no opening view and is hung up (`land_provider_draft`).
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROVIDER_OPEN_TIMEOUT).await;
-            let _ = this.update(cx, |this, cx| this.expire_provider_open(&timed, provider_id, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.expire_provider_open(&timed, provider_id, timed_project, timed_workspace, cx)
+            });
         });
         self.wire_tasks().push(task);
     }
 
     /// A provider draft's open outlived [`PROVIDER_OPEN_TIMEOUT`]: fail
     /// its view the way a refused open does, when it is still opening.
-    pub(crate) fn expire_provider_open(&mut self, provisional: &str, provider_id: ProviderId, cx: &mut Context<Self>) {
+    pub(crate) fn expire_provider_open(
+        &mut self,
+        provisional: &str,
+        provider_id: ProviderId,
+        project: Option<String>,
+        workspace: String,
+        cx: &mut Context<Self>,
+    ) {
         let opening = self.find_view(provisional, cx).is_some_and(|view| view.read(cx).is_starting());
         if !opening || !self.starts_in_flight.contains(provisional) {
             return;
         }
         crate::baaz_log!("provider open timed out ({}) session={provisional}", provider_id.label());
+        let reason = format!("{} did not answer within {}s", provider_id.label(), PROVIDER_OPEN_TIMEOUT.as_secs());
         self.fail_provider_draft(
             provisional,
-            format!(
-                "{} did not answer within {}s; start a new session to try again",
-                provider_id.label(),
-                PROVIDER_OPEN_TIMEOUT.as_secs()
-            ),
+            provider_id,
+            crate::app::OpenFailed::from(provider::ProviderError::Unavailable { reason }),
+            project,
+            workspace,
             cx,
         );
     }
@@ -3058,17 +3072,56 @@ impl Harness {
         );
     }
 
-    /// A provider draft's open failed: the view stays, saying why, and the
-    /// sends that waited go back in its composer (`start_failed`). The next
-    /// "New session" starts fresh rather than reusing it.
-    fn fail_provider_draft(&mut self, provisional: &str, reason: String, cx: &mut Context<Self>) {
+    /// A provider draft's open failed (its child died on its first breath,
+    /// refused, or never answered). There is no session behind the draft,
+    /// so the window lands on the typed failure view a failed open gets
+    /// ([`LaunchFailure`]: the kind's sentence, the child's stderr, Retry,
+    /// the kind's action, Providers…) instead of the draft under a red
+    /// "did not start" banner with its send button stuck (QA 2026-10-30).
+    /// The draft's words — typed, or queued on the open — ride Retry back
+    /// into the new draft. A draft that is no longer the centre's (the
+    /// person moved on) keeps the old quiet contract: its view says why,
+    /// the sends go back in its composer. Either way the next "New
+    /// session" starts fresh.
+    fn fail_provider_draft(
+        &mut self,
+        provisional: &str,
+        provider_id: ProviderId,
+        failed: crate::app::OpenFailed,
+        project: Option<String>,
+        workspace: String,
+        cx: &mut Context<Self>,
+    ) {
         self.starts_in_flight.remove(provisional);
         self.drafts.retain(|_, id| id != provisional);
         self.unsent.remove(provisional);
-        if let Some(view) = self.find_view(provisional, cx) {
-            view.update(cx, |view, cx| view.start_failed(reason, cx));
-        }
         self.drop_pending_ask();
+        let reason = failed.error.to_string();
+        let Some(view) = self.find_view(provisional, cx) else {
+            cx.notify();
+            return;
+        };
+        // The queued sends go back in the composer first, so the words read
+        // from one place below.
+        view.update(cx, |view, cx| view.start_failed(reason.clone(), cx));
+        let centred = self.active.as_ref().is_some_and(|active| active.read(cx).session_id == provisional);
+        if !centred {
+            cx.notify();
+            return;
+        }
+        let draft = view.read(cx).words_in_hand(cx);
+        self.close_view(provisional, cx);
+        self.subscriptions.clear();
+        self.session_switch_pending = false;
+        let kind = crate::provider_status::FailureKind::classify(provider_id, Some(&failed.error));
+        self.provider_open_error = Some(LaunchFailure {
+            session_id: None,
+            provider: provider_id,
+            kind,
+            message: reason,
+            stderr_excerpt: failed.stderr,
+            retry: ProviderOpenRetry::OpenNew { project, workspace, draft },
+        });
         cx.notify();
     }
 
@@ -3387,7 +3440,16 @@ impl Harness {
         let Some(failure) = self.provider_open_error.clone() else { return };
         match failure.retry {
             ProviderOpenRetry::Reopen(record) => self.reopen_provider(*record, window, cx),
-            ProviderOpenRetry::OpenNew { project, workspace } => {
+            // A failed draft's words come back in the new draft, which
+            // opens on the click like any New session (the draft path).
+            ProviderOpenRetry::OpenNew { project, workspace, draft } if !draft.is_empty() => {
+                self.provider_open_error = None;
+                self.open_new_on_provider(failure.provider, project, workspace, None, window, cx);
+                if let Some(view) = self.active.clone().filter(|view| view.read(cx).is_starting()) {
+                    view.update(cx, |view, cx| view.set_draft(draft, window, cx));
+                }
+            }
+            ProviderOpenRetry::OpenNew { project, workspace, .. } => {
                 self.open_on_provider(failure.provider, project, workspace, window, cx)
             }
         }
@@ -8437,9 +8499,10 @@ done
         lane_restore(state);
     }
 
-    /// A start that fails leaves the early view up, draft and all, saying
-    /// why — and forgets it as the project's draft, so the next "New
-    /// session" starts fresh instead of reopening a session that is not.
+    /// A start that fails lands the typed failure view (QA 2026-10-30), not
+    /// the dead draft under a banner — and forgets it as the project's
+    /// draft, so the next "New session" starts fresh instead of reopening a
+    /// session that is not.
     #[gpui::test]
     fn a_failed_early_start_keeps_the_view_and_frees_the_draft(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -8461,9 +8524,10 @@ done
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the view stays");
-            assert_eq!(view.read(cx).session_id, minted);
-            assert!(!view.read(cx).is_starting(), "the start settled");
+            assert!(harness.active.is_none(), "no dead draft in the centre");
+            let failure = harness.provider_open_error.clone().expect("the typed failure view");
+            assert_eq!(failure.provider, ProviderId::Muse);
+            assert!(harness.find_view(&minted, cx).is_none(), "the dead draft is parked nowhere");
             assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
             assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
             assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
@@ -8577,11 +8641,13 @@ done
         lane_restore(state);
     }
 
-    /// An open that fails leaves the early provider view up, saying why,
-    /// with the send it captured back in the composer — and forgets it as
-    /// the project's draft, so the next "New session" starts fresh.
+    /// An open that fails (a child that dies on its first breath, QA
+    /// 2026-10-30 with the fake's `basic#die`) lands the typed failure view
+    /// a failed open gets — no draft under a red "did not start" banner, no
+    /// send button stuck as a stop square. The send it captured rides Retry
+    /// back into the new draft, and the next "New session" starts fresh.
     #[gpui::test]
-    fn a_failed_provider_open_keeps_the_draft_and_returns_the_send(cx: &mut gpui::TestAppContext) {
+    fn a_failed_provider_open_lands_the_typed_failure_and_retry_keeps_the_send(cx: &mut gpui::TestAppContext) {
         let state = lane_state("provider-early-fail");
         let (baaz, vc, project) = provider_draft_window(cx, &state.2, failing_factory("no codex here"));
         let provisional = vc.update(|window, cx| {
@@ -8594,22 +8660,55 @@ done
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the view stays");
-            assert_eq!(view.read(cx).session_id, provisional);
-            assert!(!view.read(cx).is_starting(), "the open settled as failed");
-            assert_eq!(view.read(cx).draft_text(cx), "hi", "the captured send is back in the composer");
-            let banner = view.read(cx).banner_text().unwrap_or_default().to_owned();
-            assert!(banner.contains("no codex here"), "the banner says why: {banner}");
+            assert!(harness.active.is_none(), "no dead draft in the centre");
+            assert!(harness.find_view(&provisional, cx).is_none(), "the dead draft is gone, parked nowhere");
+            let failure = harness.provider_open_error.clone().expect("the typed failure view");
+            assert_eq!(failure.provider, ProviderId::Codex);
+            assert_eq!(failure.session_id, None, "a session that never opened");
+            assert!(failure.message.contains("no codex here"), "the failure's words: {}", failure.message);
+            assert!(
+                matches!(&failure.retry, ProviderOpenRetry::OpenNew { draft, .. } if draft == "hi"),
+                "Retry carries the captured send"
+            );
             assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
             assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
             assert!(harness.provider_sessions.is_empty(), "no record for a session that never was");
             assert!(harness.overlays.read(cx).dialog.is_none(), "inline, not a dialog");
         });
-        // Enter on the failed view keeps the words where they are.
-        type_unparked(vc, &["enter"]);
+        // Retry on a child that answers: a new draft, the words back in it.
+        let (factory, _commands) = recording_resumable_factory();
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_factory = factory;
+                harness.retry_provider_open(window, cx);
+                assert!(harness.provider_open_error.is_none(), "the failure view leaves on Retry");
+                let view = harness.active.clone().expect("a new draft opens on the click");
+                assert_eq!(view.read(cx).draft_text(cx), "hi", "the words came back");
+                assert!(!view.read(cx).busy(), "nothing stands busy");
+            })
+        });
+        lane_restore(state);
+    }
+
+    /// A view whose start failed takes no send into a busy state: a send
+    /// that reached `submit` on it (the scripted `send:` verb does) armed
+    /// `submitting` with no lane to ever clear it — the stop square stood
+    /// forever. The words go back in the composer instead.
+    #[gpui::test]
+    fn a_send_on_a_failed_start_never_stands_busy(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("provider-failed-send");
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, failing_factory("no codex here"));
+        let view = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                harness.active.clone().expect("the draft is up")
+            })
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.start_failed("no codex here".into(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello".into(), cx)));
         vc.update(|_, cx| {
-            let view = baaz.read(cx).active.clone().expect("the view stays");
-            assert_eq!(view.read(cx).draft_text(cx), "hi", "a send with nowhere to go keeps its words");
+            assert!(!view.read(cx).busy(), "no stop square on a session that never started");
+            assert_eq!(view.read(cx).draft_text(cx), "hello", "the words are back");
         });
         lane_restore(state);
     }
@@ -8688,8 +8787,8 @@ done
         lane_restore(state);
     }
 
-    /// A child that never answers fails its view visibly past the open
-    /// timeout, the captured send back in the composer, and its names
+    /// A child that never answers fails visibly past the open timeout: the
+    /// typed failure view, the captured send riding its Retry, the names
     /// forgotten; an answer arriving after that is hung up, not attached.
     #[gpui::test]
     fn a_provider_open_past_its_timeout_fails_the_view(cx: &mut gpui::TestAppContext) {
@@ -8704,23 +8803,24 @@ done
         });
         type_unparked(vc, &["h", "i", "enter"]);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| harness.expire_provider_open(&provisional, ProviderId::Codex, cx));
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.expire_provider_open(&provisional, ProviderId::Codex, Some(project.clone()), workspace, cx)
+            });
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the view stays");
-            assert!(!view.read(cx).is_starting(), "the open settled as failed");
-            let banner = view.read(cx).banner_text().unwrap_or_default().to_owned();
-            assert!(banner.contains("did not answer"), "the banner says why: {banner}");
-            assert_eq!(view.read(cx).draft_text(cx), "hi", "the send is back in the composer");
+            assert!(harness.active.is_none(), "the dead draft left the centre");
+            let failure = harness.provider_open_error.clone().expect("the typed failure view");
+            assert!(failure.message.contains("did not answer"), "the failure says why: {}", failure.message);
+            assert!(matches!(&failure.retry, ProviderOpenRetry::OpenNew { draft, .. } if draft == "hi"));
             assert!(!harness.drafts.contains_key(&project));
             assert!(harness.starts_in_flight.is_empty());
         });
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the view stays");
-            assert_eq!(view.read(cx).session_id, provisional, "the late answer never attached");
+            assert!(harness.find_view(&provisional, cx).is_none(), "the late answer never attached");
             assert!(harness.provider_sessions.is_empty());
         });
         assert!(!commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::SubmitInput { .. })));
@@ -8930,21 +9030,17 @@ done
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the view stays");
-            assert_eq!(view.read(cx).session_id, minted);
-            assert!(!view.read(cx).is_starting(), "the start settled as failed");
-            assert!(!view.read(cx).busy(), "nothing reads as pending");
+            assert!(harness.active.is_none(), "no dead draft in the centre, nothing reads as pending");
+            assert!(harness.find_view(&minted, cx).is_none(), "the dead draft is parked nowhere");
+            let failure = harness.provider_open_error.clone().expect("the typed failure view");
+            // The waiting send rides Retry back into the next draft.
+            assert!(
+                matches!(&failure.retry, ProviderOpenRetry::OpenNew { draft, .. } if draft == "kept"),
+                "the waiting send is kept for Retry"
+            );
             assert!(harness.starts_in_flight.is_empty(), "scripted verbs are released");
             assert!(!harness.drafts.contains_key(&project), "the next New session starts fresh");
             assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
-        });
-        // The restored prompt lands on the next composer frame.
-        vc.update(|window, cx| {
-            let view = baaz.read(cx).active.clone().expect("view");
-            view.update(cx, |view, cx| {
-                view.render_composer_band(window, cx);
-                assert_eq!(view.draft_text(cx), "kept", "the waiting send went back in the composer");
-            });
         });
         let requests = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(!requests.contains("turn/start"), "nothing was sent to a session that never landed: {requests}");
@@ -9718,9 +9814,9 @@ done
     }
 
     /// Y2b: a switch's replacement is drawn on the click, so a failed open
-    /// fails on the replacement the way a failed New session does: it stays,
-    /// saying why, with the carried text back in its composer — never an
-    /// empty centre and never a locked one.
+    /// fails the way a failed New session does: the typed failure view for
+    /// the picked provider (QA 2026-10-30), with the carried text riding its
+    /// Retry — never a locked centre, never a dead draft under a banner.
     #[gpui::test]
     fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -9761,15 +9857,14 @@ done
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let view = harness.active.clone().expect("the replacement stays, failed");
-            assert_ne!(view.read(cx).session_id, old);
-            assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
-            assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "the text survives the failure");
-            assert!(!view.read(cx).is_input_locked());
+            assert!(harness.active.is_none(), "no dead replacement in the centre");
+            assert!(harness.find_view(&old, cx).is_none(), "the old draft closed");
+            let failure = harness.provider_open_error.clone().expect("the typed failure view");
+            assert_eq!(failure.provider, ProviderId::ClaudeCode, "it names the picked provider");
+            assert!(failure.message.contains("no child here"), "the reason shows: {}", failure.message);
             assert!(
-                view.read(cx).banner_text().is_some_and(|text| text.contains("no child here")),
-                "the reason shows: {:?}",
-                view.read(cx).banner_text()
+                matches!(&failure.retry, ProviderOpenRetry::OpenNew { draft, .. } if draft == "hello unsent"),
+                "the text survives the failure, on Retry"
             );
             assert!(harness.replacing.is_none(), "the marker is gone");
             assert!(!harness.session_switch_pending, "the verbs are released");

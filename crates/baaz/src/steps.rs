@@ -559,7 +559,7 @@ impl Harness {
                 "  caused by: unknown field `sample_key` at line 3, column 1".into(),
                 "the sample process exited with status 1".into(),
             ],
-            retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace() },
+            retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace(), draft: String::new() },
         });
         cx.notify();
     }
