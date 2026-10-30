@@ -60,14 +60,26 @@ skips imported records too. Tests pin both.
   `import-done`, `settings-card-import` against fixture homes (`BAAZ_IMPORT_OWNER_HOME`, like
   `BAAZ_MIGRATION_OWNER_HOME`), never the real home.
 
-## 4. Muse's Baaz-private home (docs/50 §6.2)
+## 4. Muse's Baaz-private home (docs/50 §6.2) — DEFERRED (decided 30 Oct)
 
-Muse sessions started by Baaz live under Baaz's state like `claude-home` / `codex-home`: `muse serve` gets
-`XDG_DATA_HOME` (and only what is needed of the config dir — **sign-in must still be the owner's**: Muse reads its
-auth from `$XDG_CONFIG_HOME/muse`, so the config dir is not moved) pointing at `<state>/muse-home`. Probe first,
-read-only, which env var moves Muse's session store and nothing else; if none does without moving sign-in, stop and
-report — it comes back to the owner rather than being forced. Existing Muse sessions keep resuming (Muse's list
-reads both, or the owner's store stays the one Muse reads: decide from the probe, write it down here).
+Probed read-only (muse 1.4.14): Muse keeps sessions, its session index (`session-index.db`), skills, plugins, the model
+catalog and runtime state together under `$XDG_DATA_HOME/muse` (`~/.local/share/muse`, 10 GB here); sign-in lives
+apart in `$XDG_CONFIG_HOME/muse`. There is no setting for the session store alone (`muse serve --help`, `settings.json`
+keys, `muse config`). The only lever, `XDG_DATA_HOME`, moves all of it — Baaz's Muse would lose the owner's skills,
+plugins and the 2,661 existing sessions, or need a second `muse serve` on the owner's store and two lists — and it is
+inherited by every shell the agent runs.
+
+The owner left the call to me ("decide what's best for a complete multi-provider harness"). **Deferred:** Muse keeps
+one store, shared with the muse CLI. Baaz is a harness over the providers the person already uses, not a fork of
+them; since S1 (docs/70) Baaz's own records say which Muse sessions are Baaz's, which is what the private home was
+for, and a Baaz Muse session showing in `muse resume` is the same two-way interop P7 gives Claude Code. Revisit if
+Muse grows a sessions-dir setting.
+
+**Probe facts for the engine:** every one of the owner's 95 Codex sessions is `originator: "codex_exec"`, `source:
+"exec"` — scripted. With "Skip scripted runs" ticked (the approved default) Codex offers none, and its card says so
+("95 Codex sessions on this Mac, all scripted runs (codex exec)") instead of an Import button that imports nothing.
+Counts on every surface exclude scripted runs unless the box is unticked. Claude: `entrypoint == "sdk-cli"` marks
+`claude -p` (31 here).
 
 ## 5. Done when
 
