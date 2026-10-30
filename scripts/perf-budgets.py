@@ -18,6 +18,11 @@ owner's state:
            next transcript render (stream-to-render), and the fold itself;
            then a generated 1,000-turn transcript, where the per-chunk
            render work must not grow with the session (docs/51 #6).
+  turn     `baaz --perf-turn`: headless on gpui's test platform, what one
+           streamed turn costs the render cache at 300 and 3,000 turns
+           (flat, docs/51 §10), what a finished Muse turn costs the UI
+           thread over 2,600 sidebar rows, and the per-chunk cost of a
+           120 KB answer streaming (refresh + its markdown blocks).
   idle     the signed-in shell with the 300-turn replay open, left alone:
            CPU used (cumulative `ps` time, not the decaying `%cpu`), root
            renders and frames asked for (aui-motion's per-call-site
@@ -43,7 +48,7 @@ SIDEBAR = "fixtures/sidebar/stress.json"
 # Why a metric reads what it reads, printed beside a miss (e.g. which call
 # sites asked for frames at rest).
 NOTES = {}
-GROUPS = ("store", "boot", "open", "switch", "stream", "idle")
+GROUPS = ("store", "turn", "boot", "open", "switch", "stream", "idle")
 
 
 class Unmeasured(Exception):
@@ -87,6 +92,19 @@ def measure_store(binary, state, reps):
         row = json.loads(stdout.strip().splitlines()[-1])
         for key, value in row.items():
             out.setdefault(f"store.{key}", []).append(value)
+    return {k: statistics.median(v) for k, v in out.items()}
+
+
+def measure_turn(binary, state, reps):
+    """`--perf-turn`, median of runs: one JSON line per run."""
+    out = {}
+    for _ in range(reps):
+        code, stdout, stderr = run(binary, ["--perf-turn"], state)
+        if code != 0:
+            raise Unmeasured(f"--perf-turn exited {code}: {stderr[-400:]}")
+        row = json.loads(stdout.strip().splitlines()[-1])
+        for key, value in row.items():
+            out.setdefault(f"turn.{key}", []).append(value)
     return {k: statistics.median(v) for k, v in out.items()}
 
 
@@ -256,6 +274,8 @@ def main():
             try:
                 if group == "store":
                     measured.update(measure_store(binary, state, max(1, a.reps // 2)))
+                elif group == "turn":
+                    measured.update(measure_turn(binary, state, 3))
                 elif group == "boot":
                     measured.update(measure_boot(binary, state, a.reps))
                 elif group in ("open", "switch"):

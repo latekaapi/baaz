@@ -72,6 +72,7 @@ mod newtab_ground;
 mod overlay;
 mod overlays;
 mod perf_budget;
+mod perf_turn;
 mod plan;
 mod project_menu;
 mod projects;
@@ -747,6 +748,12 @@ fn main() {
                 let dir =
                     argv.next().map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("baaz-perf-store"));
                 perf_budget::run(&dir);
+                return;
+            }
+            // `--perf-turn`: the per-turn UI-thread budgets (docs/51 §10),
+            // headless on gpui's test platform; one JSON line, then exit.
+            Some("--perf-turn") => {
+                perf_turn::run();
                 return;
             }
             // `--import-dry-run`: the P7 scan and plan over the owner's

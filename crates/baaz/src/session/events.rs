@@ -14,16 +14,25 @@ impl SessionView {
     ///
     /// "Files we created" is what the search palette means by it: the
     /// workspace-relative targets of this session's write/edit tool calls.
-    /// The scan over the in-memory fold is cheap; the sqlite insert runs on
-    /// the background executor.
+    /// The sqlite insert runs on the background executor. The first settle
+    /// this view sees sweeps the whole fold (history it opened with was
+    /// never recorded by this window); every later settle scans only the
+    /// turns from the one the previous settle ended on — a whole-session
+    /// sweep per finished turn was O(turns) on the UI thread, plus a
+    /// `realpath` per created file (speed S4). Recording is an upsert, so
+    /// the overlap of one turn is harmless.
     pub(super) fn record_created_files(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.store.session() else { return };
+        let from = self.created_files_through.map_or(0, |through| through.saturating_sub(1).min(session.turns.len()));
+        self.created_files_through = Some(session.turns.len());
+        let turns = &session.turns[from..];
         let mut records = Vec::new();
-        for block in session.turns.iter().flat_map(|turn| turn.blocks()) {
+        let mut workspace: Option<String> = None;
+        for block in turns.iter().flat_map(|turn| turn.blocks()) {
             let aui_protocol::Block::ToolCall { kind, target, .. } = block else { continue };
             let Some(verb) = search::created_target(kind, target) else { continue };
             let Some(path) = search::relativize(&self.workspace, target) else { continue };
-            let workspace = crate::projects::canonical_str(&self.workspace);
+            let workspace = workspace.get_or_insert_with(|| crate::projects::canonical_str(&self.workspace)).clone();
             records.push(search::FileRecord {
                 path,
                 session_id: self.session_id.clone(),

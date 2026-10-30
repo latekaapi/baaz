@@ -153,19 +153,46 @@ pub fn extension_for(media_type: &str) -> &'static str {
 /// each sent item goes to the first user turn after the previous match whose
 /// text is the same (trimmed). Turns sent before this store existed, or from
 /// another app, pair with nothing.
+#[cfg(test)]
 pub fn pair(turns: &[Rc<Turn>], items: &[SentItem]) -> HashMap<String, SentItem> {
     let mut out = HashMap::new();
-    let mut next = 0usize;
-    for turn in turns {
-        let Turn::User { id, text, .. } = turn.as_ref() else { continue };
-        let Some(offset) = items[next..].iter().position(|item| item.text.trim() == text.trim()) else { continue };
-        let item = &items[next + offset];
-        next += offset + 1;
-        if !item.attachments.is_empty() || item.annotations.is_some() {
-            out.insert(id.clone(), item.clone());
-        }
-    }
+    pair_from(turns, items, 0, &mut Vec::new(), &mut out);
     out
+}
+
+/// [`pair`] resumed at turn `from` (speed S4, docs/51 §10): `cursors[i]` is
+/// the item cursor before turn `i`, kept from the last call, so a streaming
+/// refresh pairs only the turns it rebuilt instead of the transcript. The
+/// caller has already removed `out`'s entries for turns `from..`; `cursors`
+/// is cut to `from + 1` here (to `[0]` when it is shorter, i.e. `from` is 0
+/// or nothing was kept) and extended over `turns[from..]`.
+pub fn pair_from(
+    turns: &[Rc<Turn>],
+    items: &[SentItem],
+    from: usize,
+    cursors: &mut Vec<usize>,
+    out: &mut HashMap<String, SentItem>,
+) {
+    let from = if cursors.len() > from { from } else { 0 };
+    if from == 0 {
+        cursors.clear();
+        cursors.push(0);
+    } else {
+        cursors.truncate(from + 1);
+    }
+    let mut next = cursors[from];
+    for turn in &turns[from.min(turns.len())..] {
+        if let Turn::User { id, text, .. } = turn.as_ref() {
+            if let Some(offset) = items[next..].iter().position(|item| item.text.trim() == text.trim()) {
+                let item = &items[next + offset];
+                next += offset + 1;
+                if !item.attachments.is_empty() || item.annotations.is_some() {
+                    out.insert(id.clone(), item.clone());
+                }
+            }
+        }
+        cursors.push(next);
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +220,25 @@ mod tests {
         assert_eq!(paired["u1"].attachments[0].name, "a.txt");
         assert_eq!(paired["u3"].attachments[0].name, "b.txt");
         assert!(!paired.contains_key("u2"));
+    }
+
+    /// Resuming at any turn pairs exactly what a whole pass pairs.
+    #[test]
+    fn pairing_resumed_from_any_turn_matches_the_whole_pass() {
+        let turns = vec![user("u1", "hello"), user("u2", "again"), user("u3", "hello"), user("u4", "again")];
+        let items = vec![sent("hello", "a.txt"), sent("again", "b.txt"), sent("hello", "c.txt")];
+        let whole = pair(&turns, &items);
+        for from in 0..=turns.len() {
+            let mut cursors = Vec::new();
+            let mut out = HashMap::new();
+            pair_from(&turns, &items, 0, &mut cursors, &mut out);
+            for turn in &turns[from..] {
+                out.remove(turn.id());
+            }
+            pair_from(&turns, &items, from, &mut cursors, &mut out);
+            assert_eq!(out, whole, "resumed at {from}");
+            assert_eq!(cursors.len(), turns.len() + 1);
+        }
     }
 
     /// A provider draft's sends while opening move to the id its child
