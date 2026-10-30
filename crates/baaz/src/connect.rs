@@ -695,7 +695,12 @@ impl Harness {
         let screen = connect_providers("connect", rows)
             .mark(mark)
             .default_picker(picker)
-            .assist(self.codex_assist())
+            .assist({
+                // Codex's sign-in owns the line while it runs; otherwise the
+                // P7 offer may stand there (first run only).
+                let codex = self.codex_assist();
+                if codex.is_empty() { self.import_connect_assist() } else { codex }
+            })
             .on_intent(move |intent, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.connect_intent(intent, window, cx);
@@ -707,6 +712,7 @@ impl Harness {
             stack = stack.child(self.muse_sheet_layer(window, cx));
         }
         stack = stack.children(self.render_setup_sheet(cx));
+        stack = stack.children(self.render_import_sheet(cx));
         stack.into_any_element()
     }
 
@@ -825,6 +831,9 @@ impl Harness {
                 let id = ProviderId::from_icon(provider);
                 self.new_provider = id.as_str().to_owned();
                 crate::providers::write_last_provider(id);
+            }
+            ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
+                self.open_import_sheet(cx);
             }
             ConnectIntent::Assist(key) => self.codex_assist_link(&key, cx),
         }

@@ -169,6 +169,10 @@
 //! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts record a step failure |
 //! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog records a step failure) — same warning |
 //! | `crumb:<n>` | press the n-th Settings breadcrumb (0-based); the current page's crumb, or a crumb that is no link, records a step failure, free |
+//! | `import-open` | open the P7 import sheet (docs/72) on a plan scanned now, synchronously, from the owner home (`BAAZ_IMPORT_OWNER_HOME` in captures); a capture with no fixture home scans nothing and records a step failure, free |
+//! | `import-toggle:<folder>` | flip one folder's box on the open import sheet, by its name or its full path; `scripted` flips "Skip scripted runs"; an unknown folder records a step failure, free |
+//! | `import-run:[<n>]` | press "Import N sessions"; with `n`, stop after `n` sessions so the progress state holds for a capture; writes records (never files), free |
+//! | `import-undo` | the import toast's Undo for the newest run: removes exactly the records it added, never a file; no run records a step failure, free |
 //! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
 //! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
@@ -433,6 +437,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
     WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },
+    // P7 import (docs/72): the sheet, a folder's box, the run, the Undo.
+    WindowVerb { verb: "import-open", run: |this, _, _, cx| this.step_import_open(cx) },
+    WindowVerb { verb: "import-toggle", run: |this, rest, _, cx| this.step_import_toggle(rest, cx) },
+    WindowVerb { verb: "import-run", run: |this, rest, _, cx| this.step_import_run(rest, cx) },
+    WindowVerb { verb: "import-undo", run: |this, _, _, cx| this.step_import_undo(cx) },
     WindowVerb {
         verb: "child-lost",
         run: |this, _, _, cx| {

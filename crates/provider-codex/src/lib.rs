@@ -1898,6 +1898,13 @@ for line in sys.stdin:
             !adapter.resume_env_for("some-other-thread").is_empty(),
             "the pin never leaks across sessions"
         );
+        // Pinned at another owner home (an imported thread from a fixture,
+        // docs/72): the child reads that home's `.codex`.
+        crate::home::pin_legacy_resume_at(&id, std::path::Path::new("/tmp/baaz-import-fixture-owner"));
+        assert_eq!(
+            adapter.resume_env_for(&id),
+            vec![("CODEX_HOME".to_owned(), "/tmp/baaz-import-fixture-owner/.codex".to_owned())],
+        );
         crate::home::clear_legacy_resume(&id);
         assert!(
             !adapter.resume_env_for(&id).is_empty(),

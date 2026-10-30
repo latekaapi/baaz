@@ -583,11 +583,13 @@ pub(crate) enum Wire {
 
 /// What one toast's Undo restores: one `/hide` is a batch of one, one
 /// "Clear empty" is a batch of everything it hid, and one archive confirm is
-/// a batch of one archived session.
+/// a batch of one archived session. An import run (docs/72) is a batch of
+/// the records it added, named by its journal run id.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum UndoBatch {
+pub(crate) enum UndoBatch {
     Hidden(Vec<String>),
     Archived(Vec<String>),
+    Imported(String),
 }
 
 /// What decides the search card's status line: whether the query is blank,
@@ -1148,6 +1150,9 @@ pub struct Harness {
     /// A plan recompute is in flight: renders keep the old cache (or
     /// nothing) instead of kicking another.
     pub(crate) migration_refresh_in_flight: bool,
+    /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
+    /// flight and the journal Undo reads ([`crate::import_ui`]).
+    pub(crate) import: crate::import_ui::ImportUi,
     /// Which provider each terminal bridge session answers for, by the id
     /// the bridge names (`--session`). A Codex open mints its thread id
     /// after the bridge is already registered under the request id, so
@@ -1452,7 +1457,7 @@ pub struct Harness {
     /// the toast's Undo. One `/hide` is a batch of one; one "Clear empty" is
     /// a batch of everything it hid; one archive confirm is a batch of one
     /// archived session. One Undo restores the whole batch.
-    undo_stack: Vec<UndoBatch>,
+    pub(crate) undo_stack: Vec<UndoBatch>,
     /// The title last given to the window, so it is only set when it changed.
     window_title: Option<String>,
     /// The `(list_epoch, active session id)` that title was built for, so the
@@ -1704,6 +1709,7 @@ impl Harness {
             migration_paths_expanded: false,
             migration_cache: None,
             migration_refresh_in_flight: false,
+            import: crate::import_ui::ImportUi::boot(),
             terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,
@@ -2003,6 +2009,12 @@ impl Harness {
         // window.
         this.show_connect = crate::connect::decide_launch(crate::provider_status::first_run_at_boot())
             == crate::connect::LaunchDecision::Connect;
+        // P7: the first-run connect screen offers the import once a
+        // provider is Connected; its counts come from a background scan.
+        this.import.first_run = this.show_connect;
+        if this.show_connect {
+            this.refresh_import_scan(cx);
+        }
         this.connect_statuses = crate::connect::initial_connect_statuses();
         this.connect_status_stamp = crate::connect::status_stamp();
         // Muse is one provider among three (docs/50 P1): it starts only when
@@ -6886,7 +6898,10 @@ impl Render for Harness {
         let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
-        let muse_sheet = self.render_muse_sheet(window, cx).or_else(|| self.render_setup_sheet(cx));
+        let muse_sheet = self
+            .render_muse_sheet(window, cx)
+            .or_else(|| self.render_setup_sheet(cx))
+            .or_else(|| self.render_import_sheet(cx));
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.

@@ -464,6 +464,10 @@ impl Harness {
         // the recompute lands.
         if target.split('/').next() == Some(crate::settings_providers::PROVIDERS_SECTION_ID) {
             self.refresh_migration_cache(cx);
+            // The import offer on the Claude Code / Codex cards (docs/72):
+            // the cached plan renders at once; a stale one recomputes
+            // behind it, never on the render path.
+            self.refresh_import_scan_if_stale(cx);
         }
         cx.notify();
     }
@@ -1525,6 +1529,24 @@ impl Harness {
             .on_intent(move |event, window, cx| intent(&event, window, cx))
             .on_assist(move |key, window, cx| assist(&key, window, cx))
             .into_any_element();
+        // The P7 offer sits under Details, inside the card's frame (the
+        // board). The library card has no footer slot, so the two share one
+        // frame here: the card's own edge draws the hairline between them.
+        let card = match self.import_card_line(id, cx) {
+            Some(line) => {
+                let p = cx.aui().colors;
+                v_flex()
+                    .w_full()
+                    .rounded(px(10.0))
+                    .bg(p.surface_2)
+                    .shadow(p.edge())
+                    .overflow_hidden()
+                    .child(card)
+                    .child(line)
+                    .into_any_element()
+            }
+            None => card,
+        };
         let mut page = v_flex().w_full().gap(px(scale::SP_4)).child(card);
         if crate::settings_providers::own_mcp_providers().contains(&id) {
             page = page.child(self.settings_group("Tools", vec![self.use_own_mcp_row(id, cx)], cx));
