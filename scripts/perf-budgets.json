@@ -103,6 +103,10 @@
           "budget": 100,
           "measured": 15,
           "unit": "us"
+        },
+        "turn.settle_ui_ms": {
+          "budget": 5,
+          "measured": 1.6
         }
       }
     },
@@ -208,6 +212,10 @@
           "budget": 100,
           "measured": 15,
           "unit": "us"
+        },
+        "turn.settle_ui_ms": {
+          "budget": 5,
+          "measured": 1.6
         }
       }
     }

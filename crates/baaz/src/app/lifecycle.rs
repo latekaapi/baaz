@@ -439,16 +439,18 @@ impl Harness {
     pub(super) fn load_index(&mut self, cx: &mut Context<Self>) {
         crate::log::boot_mark("index-read-sent");
         let first = !self.index_loaded;
-        let previous = self.index.clone();
+        // A refcount, not a copy: the index is shared (speed S4).
+        let previous = std::sync::Arc::clone(&self.index);
         self.wire_call(
             cx,
             move || {
                 let at = std::time::Instant::now();
                 crate::log::boot_mark("index-read-start");
                 let cache = index::cache_path();
-                let previous = if previous.is_empty() { index::load_cache(&cache) } else { previous };
+                let previous = if previous.is_empty() { std::sync::Arc::new(index::load_cache(&cache)) } else { previous };
                 let map = index::read_changed(&index::index_path(), &previous);
-                if map != previous {
+                let changed = (!first).then(|| index::changed_ids(&previous, &map)).flatten();
+                if changed.as_ref().is_none_or(|ids| !ids.is_empty()) && map != *previous {
                     index::save_cache(&cache, &map);
                 }
                 // The saved `session/list` too, on the first read: the boot
@@ -460,19 +462,20 @@ impl Harness {
                     None
                 };
                 crate::log::boot_mark(&format!(
-                    "index-read-done rows={} cached={} listed={} in={}ms",
+                    "index-read-done rows={} cached={} listed={} changed={} in={}ms",
                     map.len(),
                     previous.len(),
                     listed.as_ref().map_or(0, |l| l.sessions.len()),
+                    changed.as_ref().map_or_else(|| "all".to_owned(), |ids| ids.len().to_string()),
                     at.elapsed().as_millis()
                 ));
-                (map, listed)
+                (std::sync::Arc::new(map), changed, listed)
             },
-            move |this, (index, listed), cx| {
+            move |this, (index, changed, listed), cx| {
                 if this.saved_list.is_none() {
                     this.saved_list = listed;
                 }
-                this.apply_index(index, cx);
+                this.apply_index_delta(index, changed, cx);
                 if first {
                     this.reconcile_index(cx);
                 }
@@ -497,19 +500,53 @@ impl Harness {
                 map
             },
             |this, index, cx| {
-                if index != this.index && !index.is_empty() {
+                if index != *this.index && !index.is_empty() {
                     let cache = index::cache_path();
-                    let snapshot = index.clone();
+                    let index = std::sync::Arc::new(index);
+                    let snapshot = std::sync::Arc::clone(&index);
                     cx.background_spawn(async move { index::save_cache(&cache, &snapshot) }).detach();
-                    this.apply_index(index, cx);
+                    this.apply_index_delta(index, None, cx);
                 }
             },
         );
     }
 
+    /// Land an index read whose changed rows are known (`Some`, computed
+    /// off the UI thread by [`index::changed_ids`]): a finished turn moves
+    /// one row, so only that row rejoins and only its search row is
+    /// rebuilt (speed S4: the whole-list rejoin, search-row build and
+    /// visible-list rebuild were ~12 ms of UI thread per finished Muse
+    /// turn at 2,600 rows). `None` — the first read, a removal, a large
+    /// change — lands it whole through [`Self::apply_index`].
+    pub(crate) fn apply_index_delta(
+        &mut self,
+        index: std::sync::Arc<std::collections::HashMap<String, index::IndexEntry>>,
+        changed: Option<std::collections::HashSet<String>>,
+        cx: &mut Context<Self>,
+    ) {
+        match changed {
+            Some(ids) if self.sessions_loaded && self.index_loaded => {
+                self.index = index;
+                if ids.is_empty() {
+                    return;
+                }
+                crate::log::boot_mark(&format!("index-reply rows={} changed={}", self.index.len(), ids.len()));
+                self.rejoin_scoped(Some(&ids));
+                self.rebuild_search_index_for(&ids, cx);
+                let _ = self.sync_sidebar_pane(cx);
+                cx.notify();
+            }
+            _ => self.apply_index(index, cx),
+        }
+    }
+
     /// Land an index read: labels rejoin, provisional rows paint before the
     /// wire answers, and the search index syncs around whatever changed.
-    fn apply_index(&mut self, index: std::collections::HashMap<String, index::IndexEntry>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_index(
+        &mut self,
+        index: std::sync::Arc<std::collections::HashMap<String, index::IndexEntry>>,
+        cx: &mut Context<Self>,
+    ) {
         crate::log::boot_mark(&format!("index-reply rows={}", index.len()));
         // Settled, even on an empty read: row visibility comes from the
         // index, and the sidebar waits for it before debuting groups.
@@ -1303,7 +1340,7 @@ impl Harness {
                 rows.push(entry);
             }
         }
-        for (session_id, index) in &self.index {
+        for (session_id, index) in self.index.iter() {
             if present.contains(session_id) || joined.contains(session_id) {
                 continue;
             }
@@ -1343,6 +1380,7 @@ impl Harness {
         // list ladder in `rejoin`: the record only moves its counters — the
         // settled turn and its time — in place of the relist a settle used
         // to cost (2,661 rows joined, 64–144 ms).
+        let before = self.sessions[ix].clone();
         if self.sessions[ix].provider.lists_sessions() {
             let entry = &mut self.sessions[ix];
             let updated = chrono::DateTime::from_timestamp_millis(record.updated_ms)
@@ -1358,7 +1396,7 @@ impl Harness {
                 changed = true;
             }
             if changed {
-                self.invalidate_list();
+                self.invalidate_row(&before);
             }
             return;
         }
@@ -1377,7 +1415,7 @@ impl Harness {
         Harness::apply_title_flags(&self.titles_pending, &self.side_sessions, &mut row);
         if self.sessions[ix] != row {
             self.sessions[ix] = row;
-            self.invalidate_list();
+            self.invalidate_row(&before);
         }
         // A settled turn on a linked session re-derives its chain's head:
         // the one-row refresh above rebuilt member facts, and the view
@@ -1393,11 +1431,30 @@ impl Harness {
     ///
     /// The same precedence [`SessionEntry::join`] documents, in one place.
     pub(crate) fn rejoin(&mut self) {
-        self.invalidate_list();
+        self.rejoin_scoped(None);
+    }
+
+    /// [`Self::rejoin`] over the rows `only` names (`None`: every row).
+    /// A scoped rejoin invalidates the visible list only when a row it
+    /// touched actually changed, and resolves chains only when one of its
+    /// rows is linked (speed S4: a finished turn rejoins its own row).
+    pub(crate) fn rejoin_scoped(&mut self, only: Option<&std::collections::HashSet<String>>) {
+        let wanted = |id: &str| only.is_none_or(|ids| ids.contains(id));
+        let before: Vec<sidebar::SessionEntry> = match only {
+            None => {
+                self.invalidate_list();
+                Vec::new()
+            }
+            Some(_) => self.sessions.iter().filter(|entry| wanted(&entry.id)).cloned().collect(),
+        };
         // Provider-lane rows rejoin from their record, not from the wire
         // or the index: the generic ladder below knows neither.
-        let provider_ids: Vec<String> =
-            self.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).map(|entry| entry.id.clone()).collect();
+        let provider_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| !entry.provider.lists_sessions() && wanted(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect();
         for id in provider_ids {
             self.rejoin_provider_row(&id);
         }
@@ -1411,10 +1468,12 @@ impl Harness {
         let listed = self.saved_list.clone();
         let wire: HashMap<&str, &crate::list_cache::ListedRow> = listed
             .as_deref()
-            .map(|l| l.sessions.iter().map(|s| (s.session_id.as_str(), s)).collect())
+            .map(|l| {
+                l.sessions.iter().filter(|s| wanted(&s.session_id)).map(|s| (s.session_id.as_str(), s)).collect()
+            })
             .unwrap_or_default();
         for entry in &mut self.sessions {
-            if !entry.provider.lists_sessions() {
+            if !entry.provider.lists_sessions() || !wanted(&entry.id) {
                 continue;
             }
             // The adoption may have changed under the row: re-resolve every
@@ -1510,9 +1569,19 @@ impl Harness {
         let touched_link = self
             .sessions
             .iter()
+            .filter(|entry| wanted(&entry.id))
             .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
         if touched_link {
             self.collapse_handoff_chains();
+        }
+        if only.is_some() {
+            if touched_link {
+                self.invalidate_list();
+            } else {
+                for row in &before {
+                    self.invalidate_row(row);
+                }
+            }
         }
     }
 
@@ -3060,6 +3129,22 @@ impl Harness {
     /// on `list_epoch`: each rebuild, rejoin or override edit invalidates
     /// the list, which retires the index with it — so repeated frames and
     /// repeated rows never rebuild (Y2a3).
+    /// [`Self::chain_index`] borrowed rather than cloned: a reader that
+    /// asks about a few ids pays no copy of every row's head (speed S4).
+    pub(crate) fn with_chain_index<R>(&self, f: impl FnOnce(&sidebar::ChainIndex) -> R) -> R {
+        {
+            let cache = self.chain_index.borrow();
+            if let Some((epoch, index)) = cache.as_ref() {
+                if *epoch == self.list_epoch {
+                    return f(index);
+                }
+            }
+        }
+        let _ = self.chain_index();
+        let cache = self.chain_index.borrow();
+        f(&cache.as_ref().expect("built just above").1)
+    }
+
     pub(crate) fn chain_index(&self) -> sidebar::ChainIndex {
         let mut cache = self.chain_index.borrow_mut();
         if let Some((epoch, index)) = cache.as_ref() {
@@ -4593,7 +4678,8 @@ impl Harness {
                 // row on its fingerprint. A replayed settle counts nothing
                 // and syncs nothing.
                 if self.provider_sessions.get(&session_id).map(|record| record.turns) != counted_before {
-                    self.rebuild_search_index(cx);
+                    let ids: std::collections::HashSet<String> = std::iter::once(session_id.clone()).collect();
+                    self.rebuild_search_index_for(&ids, cx);
                 }
                 self.sync_row_live(&session_id, false, cx);
                 self.record_last_summary(cx);
@@ -6296,7 +6382,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 for id in ["s-plain", "s-set", "s-meta", "s-marker"] {
-                    harness.index.insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                    std::sync::Arc::make_mut(&mut harness.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
                 }
                 harness.side_sessions.insert("s-set".into());
                 harness.overrides.insert(
@@ -6339,7 +6425,7 @@ mod tests {
         .expect("a list row");
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                harness.index.insert(
+                std::sync::Arc::make_mut(&mut harness.index).insert(
                     "s-chain".into(),
                     IndexEntry { title: "Index title".into(), updated_at_us: Some(1), ..Default::default() },
                 );
@@ -6376,7 +6462,7 @@ mod tests {
                 assert_eq!(rejoined, boot, "a rejoin reads the same ladder as the join");
                 // A label past 80 characters is cut the same way on both paths.
                 let long = "word ".repeat(40);
-                harness.index.get_mut("s-chain").expect("indexed").title = long.clone();
+                std::sync::Arc::make_mut(&mut harness.index).get_mut("s-chain").expect("indexed").title = long.clone();
                 let mut untitled = wire.clone();
                 untitled.title = None;
                 harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
@@ -6407,7 +6493,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 for id in ["s-a", "s-b", "s-c"] {
-                    harness.index.insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                    std::sync::Arc::make_mut(&mut harness.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
                 }
                 harness.install_provisional_rows();
                 let ids = |h: &Harness| {
@@ -6417,7 +6503,7 @@ mod tests {
                 };
                 assert_eq!(ids(harness), ["s-a", "s-b", "s-c"]);
                 // The reconcile brings one more row.
-                harness.index.insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() });
+                std::sync::Arc::make_mut(&mut harness.index).insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() });
                 harness.install_provisional_rows();
                 assert_eq!(ids(harness), ["s-a", "s-b", "s-c", "s-d"], "nothing drops, the new row joins");
             });
@@ -6440,7 +6526,7 @@ mod tests {
                 assert!(harness.sidebar_loading(), "nothing has landed");
                 harness.index_loaded = true;
                 assert!(harness.sidebar_loading(), "the index landed empty: still nothing to paint");
-                harness.index.insert("s-a".into(), IndexEntry { title: "A".into(), ..Default::default() });
+                std::sync::Arc::make_mut(&mut harness.index).insert("s-a".into(), IndexEntry { title: "A".into(), ..Default::default() });
                 harness.install_provisional_rows();
                 assert!(!harness.sessions_loaded, "the wire has not answered");
                 assert!(!harness.sidebar_loading(), "boot rows paint without waiting for the list");
@@ -6511,6 +6597,141 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Speed S4 #2 (docs/51 §10): the UI-thread work one finished Muse turn
+    /// costs the window at the owner's size — the index re-read's snapshot,
+    /// the reply's `apply_index` (rejoin + search rows) and the next
+    /// frame's `visible_sessions` rebuild. Prints each part.
+    #[gpui::test]
+    #[ignore = "bench: run with --ignored --nocapture"]
+    fn bench_turn_settle(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("bench-turn-settle");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let (sessions, index) = crate::perf_turn::sidebar_fixture();
+                harness.sessions = sessions;
+                harness.index = std::sync::Arc::new(index);
+                harness.sessions_loaded = true;
+                harness.index_loaded = true;
+                harness.rejoin();
+                let _ = harness.visible_sessions(cx).len();
+                let report = crate::perf_turn::time_settles(harness, 40, cx);
+                eprintln!("bench_turn_settle {report}");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Speed S4: a row whose time, turns or words moved is patched into the
+    /// cached list in place — and the list it leaves is exactly the one a
+    /// whole rebuild sorts. A row that changes what the list filters on
+    /// still rebuilds.
+    #[gpui::test]
+    fn a_patched_row_leaves_the_list_a_rebuild_would(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("patched-row");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let (sessions, index) = crate::perf_turn::sidebar_fixture();
+                harness.sessions = sessions;
+                harness.index = std::sync::Arc::new(index);
+                harness.sessions_loaded = true;
+                harness.index_loaded = true;
+                harness.rejoin();
+                let _ = harness.visible_sessions(cx);
+                for (k, id) in ["s-01000", "s-00001", "s-02500"].iter().enumerate() {
+                    let ix = harness.sessions.iter().position(|entry| entry.id == *id).expect("fixture row");
+                    let before = harness.sessions[ix].clone();
+                    let epoch = harness.list_epoch;
+                    harness.sessions[ix].turns += 1;
+                    harness.sessions[ix].running = k == 1;
+                    harness.sessions[ix].description = format!("moved {k}");
+                    harness.sessions[ix].updated = crate::clock::now_local() + chrono::Duration::minutes(k as i64 + 1);
+                    harness.invalidate_row(&before);
+                    assert_eq!(harness.list_epoch, epoch, "a time-and-words move patches, never rebuilds");
+                    let patched = harness.visible_sessions(cx).as_ref().clone();
+                    assert_eq!(patched[0].id, *id, "the moved row leads");
+                    harness.invalidate_list();
+                    let rebuilt = harness.visible_sessions(cx).as_ref().clone();
+                    assert_eq!(patched, rebuilt, "row {id}");
+                }
+                let ix = harness.sessions.iter().position(|entry| entry.id == "s-00005").expect("fixture row");
+                let before = harness.sessions[ix].clone();
+                harness.sessions[ix].hidden = !before.hidden;
+                let epoch = harness.list_epoch;
+                harness.invalidate_row(&before);
+                assert_ne!(harness.list_epoch, epoch, "a filtered field rebuilds");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Speed S4: one session's search row, built alone, is the row the
+    /// whole build makes for it; a chained or unknown id cannot stand alone.
+    #[gpui::test]
+    fn a_scoped_search_row_is_the_whole_build_s_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("scoped-search-row");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let (sessions, index) = crate::perf_turn::sidebar_fixture();
+                harness.sessions = sessions;
+                harness.index = std::sync::Arc::new(index);
+                harness.sessions_loaded = true;
+                harness.index_loaded = true;
+                harness.rejoin();
+                let full = harness.search_sync_rows();
+                for id in ["s-00042", "s-01999"] {
+                    let ids: std::collections::HashSet<String> = std::iter::once(id.to_owned()).collect();
+                    let scoped = harness.search_rows_scoped(Some(&ids)).expect("a plain row stands alone");
+                    let whole = full.iter().find(|(row, _, _)| row.session_id == id).expect("in the whole build");
+                    assert_eq!(scoped.len(), 1);
+                    let words = |(row, body_ids, fingerprint): &(crate::search::SessionRow, Vec<String>, i64)| {
+                        (
+                            row.session_id.clone(),
+                            row.label.clone(),
+                            row.title.clone(),
+                            row.first_prompt.clone(),
+                            row.body.clone(),
+                            row.project.clone(),
+                            row.workspace.clone(),
+                            body_ids.clone(),
+                            *fingerprint,
+                        )
+                    };
+                    assert_eq!(words(&scoped[0]), words(whole), "{id}");
+                }
+                let unknown: std::collections::HashSet<String> = std::iter::once("s-nowhere".to_owned()).collect();
+                assert!(harness.search_rows_scoped(Some(&unknown)).is_none(), "an id in neither store rebuilds everything");
+            });
+        });
+        // A finished turn's index reply and one session's override edit
+        // each sync that session's search row alone.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let mut next = (*harness.index).clone();
+                next.get_mut("s-00042").expect("fixture row").search_text.push_str(" freshword");
+                let next = std::sync::Arc::new(next);
+                let changed = crate::index::changed_ids(&harness.index, &next);
+                assert_eq!(changed.as_ref().map(|ids| ids.len()), Some(1), "one row moved");
+                Harness::reset_search_rebuild_count();
+                harness.apply_index_delta(next, changed, cx);
+                assert_eq!(Harness::search_rebuild_count(), 1);
+                assert_eq!(Harness::search_scoped_rebuild_count(), 1, "the index reply syncs one row");
+                Harness::reset_search_rebuild_count();
+                harness.set_override("s-00043", |meta| meta.last_ask = Some("what changed?".into()), cx);
+                assert_eq!(Harness::search_scoped_rebuild_count(), 1, "one session's override syncs one row");
+            });
+        });
+        lane_restore(state);
+    }
+
     /// Perf P1: an override edit that changes nothing settles nothing. A
     /// provider reopen re-states the project its session already has, and
     /// that used to rejoin the list and rebuild the search rows — 75 ms of
@@ -6524,7 +6745,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 // Indexed, so the edit is not the inert new-session case.
-                harness.index.insert("s-known".into(), IndexEntry { title: "Known".into(), ..Default::default() });
+                std::sync::Arc::make_mut(&mut harness.index).insert("s-known".into(), IndexEntry { title: "Known".into(), ..Default::default() });
                 Harness::reset_search_rebuild_count();
                 harness.set_override("s-known", |meta| meta.project = Some("p-1".into()), cx);
                 assert_eq!(Harness::search_rebuild_count(), 1, "a real change settles");
@@ -11736,7 +11957,7 @@ done
                         ..Default::default()
                     },
                 );
-                harness.index.insert(
+                std::sync::Arc::make_mut(&mut harness.index).insert(
                     "search-old".into(),
                     IndexEntry {
                         title: "Greyport ferries".into(),
@@ -11745,7 +11966,7 @@ done
                         ..Default::default()
                     },
                 );
-                harness.index.insert(
+                std::sync::Arc::make_mut(&mut harness.index).insert(
                     "search-new".into(),
                     IndexEntry {
                         title: "Later words".into(),
@@ -11825,7 +12046,7 @@ done
                 );
                 crate::provider_sessions::upsert_open(&mut harness.provider_sessions, "codex", codex_id, root, None, None);
                 crate::provider_sessions::note_first_prompt(&mut harness.provider_sessions, codex_id, "why is the tamarisk build slow");
-                harness.index.insert(
+                std::sync::Arc::make_mut(&mut harness.index).insert(
                     "muse-search-1".into(),
                     IndexEntry {
                         title: "Harbour ledger".into(),
@@ -12922,7 +13143,7 @@ done
                 let mut row = chain_muse_entry("s-muse-old", "Chart the ferry routes", 3);
                 row.workspace = Some(workspace);
                 harness.sessions.push(row);
-                harness.index.insert(
+                std::sync::Arc::make_mut(&mut harness.index).insert(
                     "s-muse-old".into(),
                     IndexEntry {
                         title: "Ferry routes".into(),
@@ -13005,7 +13226,7 @@ done
                 forgotten.extend(harness.active.take());
                 forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
                 harness.sessions.clear();
-                harness.index.clear();
+                std::sync::Arc::make_mut(&mut harness.index).clear();
                 harness.provider_sessions = crate::provider_sessions::read();
                 harness.merge_provider_rows();
                 assert!(harness.sessions.is_empty(), "a Muse record never builds a row: the list owns it");

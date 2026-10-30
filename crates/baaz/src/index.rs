@@ -176,6 +176,32 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
 ///
 /// A change Muse makes without bumping `updated_at_us` is missed until the
 /// next full [`read`]; the app runs one in the background after boot.
+/// The ids whose entry differs between two reads, when the change is a
+/// handful of edited or new rows (speed S4: a finished turn moves one).
+/// `None` when a row left or more than [`DELTA_LIMIT`] moved: the caller
+/// lands the read whole.
+pub fn changed_ids(
+    previous: &HashMap<String, IndexEntry>,
+    next: &HashMap<String, IndexEntry>,
+) -> Option<std::collections::HashSet<String>> {
+    if previous.keys().any(|id| !next.contains_key(id)) {
+        return None;
+    }
+    let mut changed = std::collections::HashSet::new();
+    for (id, entry) in next {
+        if previous.get(id) != Some(entry) {
+            changed.insert(id.clone());
+            if changed.len() > DELTA_LIMIT {
+                return None;
+            }
+        }
+    }
+    Some(changed)
+}
+
+/// More changed rows than this lands an index read whole.
+pub const DELTA_LIMIT: usize = 64;
+
 pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntry>) -> HashMap<String, IndexEntry> {
     let Ok(connection) = Connection::open_with_flags(
         path,
