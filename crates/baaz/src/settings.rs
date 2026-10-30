@@ -80,6 +80,18 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
 /// settings surface, shown in a Browse person tab.
 pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
 
+/// The Settings column's widest measure, centred in the surface; the
+/// Skills page takes the same column (owner 2026-10-31: full width "looks
+/// too wide").
+pub(crate) const SETTINGS_COLUMN_MAX: f32 = 680.0;
+/// The Settings column's side padding.
+pub(crate) const SETTINGS_COLUMN_PAD_X: f32 = scale::SP_5;
+
+/// Where the Settings nav's Back row starts inside the sidebar column: past
+/// the fade the shell lays over the column's top ([`aui::shell::LIST_FADE`]),
+/// the Skills header's and the Settings column's rule for the same cover.
+pub(crate) const SETTINGS_NAV_TOP: f32 = aui::shell::LIST_FADE;
+
 /// The page's sections, in list order (a muted divider before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
@@ -451,6 +463,8 @@ impl Harness {
         let active = self.settings_active_id(cx);
         self.settings_page.open(target, active);
         self.focus_settings = true;
+        // The "New sessions start in" menu never outlives its page.
+        self.connect_menu_open = false;
         if self.skills.open {
             self.skills.open = false;
         }
@@ -785,11 +799,16 @@ impl Harness {
             .child(
                 h_flex()
                     .id("settings-back")
+                    .debug_selector(|| "settings-back".into())
                     .flex_none()
                     .items_center()
                     .gap(px(scale::SP_2))
                     .mx(px(scale::SP_2))
-                    .mt(px(scale::SP_2))
+                    // Below the column's top fade: the shell starts this
+                    // column under its chrome row and lays LIST_FADE of
+                    // fade over its top, so an 8 px margin left Back half
+                    // dimmed under the bar (owner, 2026-10-31).
+                    .mt(px(SETTINGS_NAV_TOP))
                     .mb(px(scale::SP_2))
                     .px(px(scale::SP_2))
                     .py(px(scale::SP_2))
@@ -1001,14 +1020,14 @@ impl Harness {
                     .id("settings-column")
                     .flex_1()
                     .min_w(px(0.0))
-                    .max_w(px(680.0))
+                    .max_w(px(SETTINGS_COLUMN_MAX))
                     .h_full()
                     .overflow_y_scroll()
                     // Below the sheet's title row and its fade, so the page
                     // heading sits on clear ground at rest (the fade dimmed
                     // it when this was the row's 32).
                     .pt(px(aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW))
-                    .px(px(scale::SP_5))
+                    .px(px(SETTINGS_COLUMN_PAD_X))
                     .pb(px(scale::SP_5))
                     .gap(px(scale::SP_4))
                     .child(
@@ -1477,6 +1496,7 @@ impl Harness {
             .w_full()
             .gap(px(scale::SP_4))
             .child(self.settings_group("Providers", rows, cx))
+            .child(self.settings_default_provider_group(&statuses, cx))
             // The one-time move of Baaz's older sessions into its own
             // homes, while any remain (B4M).
             .children(self.migration_row(cx))
@@ -1500,6 +1520,54 @@ impl Harness {
                     ),
             )
             .into_any_element()
+    }
+
+    /// "New sessions": the connect footer's own picker — "New sessions
+    /// start in [mark Name ⌄]", Connected providers only, the current one
+    /// checked — writing the same default (`provider.json`). With nothing
+    /// Connected the row says so instead. Under the Providers group, so the
+    /// menu, which hangs above its chip, opens over the rows and never
+    /// under the page's top edge.
+    fn settings_default_provider_group(
+        &self,
+        statuses: &[crate::provider_status::ProviderStatus],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        let current = ProviderId::parse(&self.new_provider);
+        let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.connect_menu_open) {
+            Some(picker) => {
+                let weak = cx.entity().downgrade();
+                let control = aui::screens::default_provider_picker(
+                    "settings-default-provider",
+                    picker,
+                    move |intent, _window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.default_provider_intent(intent);
+                            cx.notify();
+                        });
+                    },
+                    cx,
+                );
+                h_flex()
+                    .id("settings-default-provider-row")
+                    .w_full()
+                    .items_center()
+                    .py(px(scale::SP_2))
+                    .role(gpui::Role::Group)
+                    .aria_label("Default provider for new sessions")
+                    .child(control)
+                    .into_any_element()
+            }
+            None => div()
+                .w_full()
+                .py(px(scale::SP_2))
+                .ui(scale::FS_13)
+                .text_color(p.ink_3)
+                .child("No provider is connected yet. New sessions start in the first one you connect.")
+                .into_any_element(),
+        };
+        self.settings_group("New sessions", vec![row], cx)
     }
 
     /// One provider sub-page: the Account group (today's card) plus the
@@ -1571,16 +1639,9 @@ impl Harness {
         let mut column = v_flex().w_full().gap(px(scale::SP_4));
         let mut header_row = h_flex().w_full().flex_none().items_center().gap(px(scale::SP_3));
         header_row = header_row.child(
-            div()
-                .id("settings-shortcut-search")
+            aui::data::field_frame("settings-shortcut-search", &self.settings_search, window, cx)
                 .flex_none()
                 .w(px(280.0))
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(scale::R_SM))
-                .border_1()
-                .border_color(p.line)
-                .bg(p.surface_1)
                 .role(gpui::Role::SearchInput)
                 .aria_label("Search shortcuts")
                 .child(

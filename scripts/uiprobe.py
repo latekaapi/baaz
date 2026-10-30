@@ -604,6 +604,10 @@ ENTRIES.update({
                                    D5_CLAUDE_CONNECTED, login="signed-in"),
     "settings-card-api-key":   _d5("settings:providers/claude-code;details:claude-code",
                                    D5_API_KEY, login="signed-in"),
+    # Settings › Providers' "New sessions start in" picker with its menu
+    # open (the connect footer's own control; `connect-menu` sets the one
+    # menu flag both share). Two Connected, so the menu lists two.
+    "settings-default-menu":   _d5("settings:providers;connect-menu", D5_TWO_CONNECTED, login="signed-in"),
     # B5 · the signed-out banner above the composer
     "signed-out-banner":       _d5("new;signed-out", login="signed-in"),
 })

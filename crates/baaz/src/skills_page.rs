@@ -48,6 +48,22 @@ pub(crate) const SKILLS_CONTEXT: &str = "HarnessSkills";
 /// · Search · Add skill" dimmed and half under the bar (2026-10-30).
 pub(crate) const SKILLS_HEADER_TOP: f32 = aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW;
 
+/// The Skills page's rows inset their text 12 px from the column (the
+/// header, the filter row, every list row).
+const SKILLS_ROW_INSET: f32 = 12.0;
+/// The detail pane beside the list.
+const SKILLS_DETAIL_W: f32 = 460.0;
+
+/// The Skills page's centred column: the Settings column's measure (plus
+/// the detail pane while one is open), its padding less the rows' own
+/// inset, so the page's text lands where a Settings page's does. Pure, so
+/// the placement test reads it without a window.
+pub(crate) fn skills_column(detail_open: bool) -> (f32, f32) {
+    let max = crate::settings::SETTINGS_COLUMN_MAX + if detail_open { SKILLS_DETAIL_W } else { 0.0 };
+    let pad = (crate::settings::SETTINGS_COLUMN_PAD_X - SKILLS_ROW_INSET).max(0.0);
+    (max, pad)
+}
+
 /// The header row's own height (the search field and the Add button), so
 /// the Add menu opens just under it.
 const SKILLS_HEADER_ROW_H: f32 = 36.0;
@@ -1537,15 +1553,9 @@ impl Harness {
             .child(div().flex_1())
             .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Search"))
             .child(
-                div()
+                aui::data::field_frame("skills-search-field", &self.skills_query, window, cx)
                     .flex_none()
                     .w(px(220.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(scale::R_SM))
-                    .border_1()
-                    .border_color(p.line)
-                    .bg(p.surface_1)
                     .child(
                         Textarea::new(&self.skills_query)
                             .appearance(false)
@@ -1742,13 +1752,36 @@ impl Harness {
                     .overflow_y_scroll()
                     .child(list),
             );
-        if let Some(detail) = self.render_skill_detail(window, cx) {
+        let detail = self.render_skill_detail(window, cx);
+        let (column_max, column_pad) = skills_column(detail.is_some());
+        if let Some(detail) = detail {
+            // At a narrow window the pane gives way before the list does:
+            // it shrinks to half the column, never past it.
             body = body.child(
-                div().flex_none().w(px(460.0)).h_full().border_l_1().border_color(p.line).child(detail),
+                div()
+                    .flex_shrink(1.0)
+                    .w(px(SKILLS_DETAIL_W))
+                    .max_w(gpui::relative(0.5))
+                    .h_full()
+                    .border_l_1()
+                    .border_color(p.line)
+                    .child(detail),
             );
         }
 
         column = column.child(body);
+        // The page's column: Settings' measure, centred, so at a wide
+        // window the names and the toggles stay within one reach instead
+        // of the window's two edges (owner 2026-10-31). The header, the
+        // meter, the filter row and the list all ride in it.
+        let column = h_flex().id("skills-centre").size_full().justify_center().child(
+            column
+                .debug_selector(|| "skills-column".into())
+                .flex_1()
+                .min_w(px(0.0))
+                .max_w(px(column_max))
+                .px(px(column_pad)),
+        );
 
         // The popover layer stands above the page: the Add menu, then the
         // modal layer centred on a scrim. Neither joins the column, so
@@ -1760,11 +1793,13 @@ impl Harness {
         // centre cell and pushed the dock below the fold (Y3a).
         // `overflow_hidden` keeps the absolute popover/dialog layer —
         // seated at this relative root — clipped to the page.
-        let mut root = div().flex_1().min_h(px(0.0)).w_full().overflow_hidden().relative().child(column);
+        // `min_w(0)` too: a row's unwrapped text otherwise sets the page's
+        // min-content width, and the page ran ~480 px past the centre cell.
+        let mut root = div().flex_1().min_h(px(0.0)).min_w(px(0.0)).w_full().overflow_hidden().relative().child(column);
         // The test hook the feedback-mode layout test measures.
         root = root.debug_selector(|| "skills-page".into());
         if self.skills.add_menu_open {
-            root = root.child(self.render_add_menu(cx));
+            root = root.child(self.render_add_menu(column_max, column_pad, cx));
         }
         if let Some(overlay) = overlay {
             root = root.child(overlay);
@@ -1785,7 +1820,7 @@ impl Harness {
     /// popover layer, right-aligned under the header — never in the page
     /// column, so opening it cannot move the page's layout. Every row
     /// carries its menu role and label from the library component.
-    fn render_add_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_add_menu(&self, column_max: f32, column_pad: f32, cx: &mut Context<Self>) -> AnyElement {
         // One listener per row: the rows share nothing, so no handler
         // moves twice.
         let new = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.open_new_dialog(window, cx));
@@ -1889,7 +1924,19 @@ impl Harness {
                         .aria_label("Dismiss menu")
                         .on_click(dismiss),
                 )
-                .child(div().absolute().top(px(SKILLS_HEADER_TOP + SKILLS_HEADER_ROW_H)).right(px(12.0)).child(card)),
+                // Seated in the page's centred column, under its Add
+                // button (the column's right edge less the rows' inset).
+                .child(
+                    h_flex().absolute().inset_0().justify_center().child(
+                        div().relative().flex_1().min_w(px(0.0)).max_w(px(column_max)).h_full().child(
+                            div()
+                                .absolute()
+                                .top(px(SKILLS_HEADER_TOP + SKILLS_HEADER_ROW_H))
+                                .right(px(column_pad + SKILLS_ROW_INSET))
+                                .child(card),
+                        ),
+                    ),
+                ),
         )
         .into_any_element()
     }
@@ -1975,14 +2022,9 @@ impl Harness {
                     .gap(px(4.0))
                     .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Name"))
                     .child(
-                        div()
+                        aui::data::field_frame("skills-new-name-field", &self.skills_new_name, window, cx)
                             .flex_none()
                             .w_full()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(scale::R_SM))
-                            .border_1()
-                            .border_color(p.line)
                             .bg(p.surface_2)
                             .child(
                                 Textarea::new(&self.skills_new_name)
@@ -2009,14 +2051,9 @@ impl Harness {
                     .gap(px(4.0))
                     .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Description"))
                     .child(
-                        div()
+                        aui::data::field_frame("skills-new-desc-field", &self.skills_new_desc, window, cx)
                             .flex_none()
                             .w_full()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(scale::R_SM))
-                            .border_1()
-                            .border_color(p.line)
                             .bg(p.surface_2)
                             .child(
                                 Textarea::new(&self.skills_new_desc)
