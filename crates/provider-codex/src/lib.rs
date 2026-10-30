@@ -223,7 +223,11 @@ impl CodexAdapter {
     /// routing without spawning.
     fn resume_env_for(&self, session_id: &str) -> Vec<(String, String)> {
         if crate::home::is_legacy_resume(session_id) {
-            Vec::new()
+            // A pin at another owner home (a fixture, docs/72) points the
+            // child at that home's `.codex`; the real `HOME` needs none.
+            crate::home::legacy_owner_home(session_id)
+                .map(|owner| crate::home::child_env(&crate::home::owner_home_dir(&owner)))
+                .unwrap_or_default()
         } else {
             self.child_env()
         }

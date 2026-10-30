@@ -41,7 +41,9 @@ impl Homes {
     /// The homes this run's children write to, then the owner's.
     pub fn for_app() -> Self {
         let state = provider::child_env::state_dir();
-        let owner = std::env::var_os("HOME").map(PathBuf::from);
+        // The owner's homes as the import reads them (docs/72): the real
+        // `HOME`, or the probe's fixture under `BAAZ_IMPORT_OWNER_HOME`.
+        let owner = Some(crate::import::owner_home());
         let mut claude = vec![state.join("claude-home")];
         let mut codex = vec![provider_codex::home::home_dir(&state)];
         if let Some(owner) = owner {

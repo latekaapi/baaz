@@ -89,6 +89,10 @@
         "stream.long_1000_to_render_p99_ms": {
           "budget": 8,
           "measured": 0.84
+        },
+        "store.import_scan_ms": {
+          "budget": 250,
+          "measured": 74
         }
       }
     },
@@ -180,6 +184,10 @@
         "stream.long_1000_to_render_p99_ms": {
           "budget": 8,
           "measured": 0.86
+        },
+        "store.import_scan_ms": {
+          "budget": 250,
+          "measured": 69
         }
       }
     }

@@ -3460,7 +3460,7 @@ impl Harness {
                 &record.session_id,
             ) {
                 crate::session_migration::ResumeGate::LegacyOwner => {
-                    crate::session_migration::pin_legacy_resume(&record.provider, &record.session_id);
+                    crate::session_migration::pin_legacy_resume_for(&record);
                 }
                 crate::session_migration::ResumeGate::LazyMove => {
                     let moved = crate::session_migration::ensure_session_moved(
@@ -3570,7 +3570,7 @@ impl Harness {
                 &record.session_id,
             ) {
                 crate::session_migration::ResumeGate::LegacyOwner => {
-                    crate::session_migration::pin_legacy_resume(&record.provider, &record.session_id);
+                    crate::session_migration::pin_legacy_resume_for(&record);
                     0
                 }
                 crate::session_migration::ResumeGate::LazyMove => {
@@ -6954,6 +6954,7 @@ mod tests {
                 handoff_from_provider: None,
                 handoff_title: None,
                 display_texts: HashMap::new(),
+                origin: None,
             },
         );
         harness.merge_provider_rows();
@@ -7630,6 +7631,7 @@ mod tests {
                         handoff_from_provider: None,
                         handoff_title: None,
                         display_texts: std::collections::HashMap::new(),
+                        origin: None,
                     },
                 );
                 harness.merge_provider_rows();
@@ -10491,6 +10493,7 @@ done
                 handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
             handoff_title: None,
                 display_texts: HashMap::new(),
+                origin: None,
             }
         };
         harness.provider_sessions.insert(
@@ -11557,6 +11560,7 @@ done
                         handoff_from_provider: None,
                         handoff_title: None,
                         display_texts: HashMap::new(),
+                        origin: None,
                     },
                 );
                 let prompt = "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)";
@@ -11921,6 +11925,7 @@ done
                             handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
             handoff_title: None,
                             display_texts: HashMap::new(),
+                            origin: None,
                         }
                     };
                 harness.provider_sessions.insert(

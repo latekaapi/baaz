@@ -852,7 +852,10 @@ impl ClaudeCodeAdapter {
     /// Baaz home.
     fn config_dir_for(&self, session_id: &str) -> PathBuf {
         if crate::home::is_legacy_resume(session_id) {
-            self.owner_config_dir()
+            match crate::home::legacy_owner_home(session_id) {
+                Some(owner) => crate::home::owner_config_dir(&owner),
+                None => self.owner_config_dir(),
+            }
         } else {
             self.resolved_config_dir()
         }
@@ -865,7 +868,10 @@ impl ClaudeCodeAdapter {
     /// drive the routing without spawning.
     fn home_env_for(&self, session_id: &str) -> Option<Vec<(String, String)>> {
         if crate::home::is_legacy_resume(session_id) {
-            None
+            // A pin at another owner home (a fixture, docs/72) points the
+            // child at that home's config dir; the real `HOME` needs none.
+            crate::home::legacy_owner_home(session_id)
+                .map(|owner| crate::home::child_env(&crate::home::owner_config_dir(&owner)))
         } else {
             Some(crate::home::child_env(&self.resolved_config_dir()))
         }

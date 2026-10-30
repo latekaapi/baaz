@@ -7659,6 +7659,7 @@ mod tests {
                         handoff_from_provider: None,
             handoff_title: None,
                         display_texts: std::collections::HashMap::new(),
+                        origin: None,
                     },
                 );
                 // … while the bridge map names the pre-ack request id.

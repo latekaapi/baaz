@@ -57,6 +57,7 @@ mod full_output;
 mod handoff;
 mod handoff_snapshot;
 mod history;
+mod import;
 mod images;
 mod index;
 mod keymap;
@@ -740,10 +741,21 @@ fn main() {
     // headless and offline; prints one JSON line and exits.
     {
         let mut argv = std::env::args().skip(1);
-        if argv.next().as_deref() == Some("--perf-store") {
-            let dir = argv.next().map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("baaz-perf-store"));
-            perf_budget::run(&dir);
-            return;
+        match argv.next().as_deref() {
+            Some("--perf-store") => {
+                let dir =
+                    argv.next().map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("baaz-perf-store"));
+                perf_budget::run(&dir);
+                return;
+            }
+            // `--import-dry-run`: the P7 scan and plan over the owner's
+            // homes (or `BAAZ_IMPORT_OWNER_HOME`), read-only — nothing is
+            // written, not even Baaz's state dir. One JSON object on stdout.
+            Some("--import-dry-run") => {
+                import::print_dry_run();
+                return;
+            }
+            _ => {}
         }
     }
     // The product renamed (harness → Baaz) with its state directory: move the
