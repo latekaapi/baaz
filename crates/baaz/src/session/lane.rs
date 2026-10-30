@@ -4946,7 +4946,11 @@ mod tests {
         vc.simulate_keystrokes("enter");
         vc.run_until_parked();
         assert_eq!(decisions(&handle), [("accept".to_owned(), None)], "⏎ on the empty composer answers the card");
-        assert_eq!(inline_approvals(&view, vc), [ApprovalState::Denied], "the unknown card settles locally");
+        assert_eq!(
+            inline_approvals(&view, vc),
+            [ApprovalState::Cancelled { reason: Some("Claude Code withdrew it".to_owned()) }],
+            "the unknown card settles locally as not run, never as the person's denial"
+        );
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert!(view.external_approvals.get("ap-1").is_none(), "the parked tap is gone");

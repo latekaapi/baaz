@@ -1256,18 +1256,25 @@ impl ProviderAdapter for CodexAdapter {
                     return Err(ProviderError::unknown_approval(&approval, "it may have resolved"));
                 };
                 let answer = Self::decide(kind, &choice)?;
+                // Remembered before the answer goes out, so the completing
+                // item — which can race the bookkeeping — settles the card
+                // from what the person chose (a decline reads Denied, never
+                // "Not run"), not from the error text the wire reports back.
+                // Taken back if the answer never reached the child.
+                self.fold.lock().expect("fold mutex").record_decision(&approval, &choice);
                 let answered = self
-                    .with_child(|running| running.answer_approval(&approval, &answer))?
-                    .map_err(|error| ProviderError::Unavailable {
-                        reason: format!("the session child is unreachable: {error}"),
-                    })?;
-                if !answered {
+                    .with_child(|running| running.answer_approval(&approval, &answer))
+                    .and_then(|answered| {
+                        answered.map_err(|error| ProviderError::Unavailable {
+                            reason: format!("the session child is unreachable: {error}"),
+                        })
+                    });
+                if !matches!(answered, Ok(true)) {
+                    self.fold.lock().expect("fold mutex").forget_decision(&approval);
+                }
+                if !answered? {
                     return Err(ProviderError::unknown_approval(&approval, "it may have resolved"));
                 }
-                // The press is on the wire: remember it so the completing
-                // item settles the card from what the person chose, not
-                // from the error text the wire reports back.
-                self.fold.lock().expect("fold mutex").record_decision(&approval, &choice);
                 Ok(Ack::Accepted)
             }
             Command::ListPending { session_id } => {

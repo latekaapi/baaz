@@ -3999,9 +3999,10 @@ mod tests {
         assert!(
             deltas.iter().any(|delta| matches!(
                 delta,
-                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Cancelled { reason: Some(reason) }, .. }, .. }
+                    if reason == "Claude Code stopped"
             )),
-            "the unanswerable approval card settles: {deltas:?}"
+            "the unanswerable approval card settles not-run, never as the person's denial: {deltas:?}"
         );
         assert!(
             adapter.fold.lock().expect("fold mutex").pending_approvals().is_empty(),
