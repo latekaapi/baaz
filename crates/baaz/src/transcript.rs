@@ -2210,7 +2210,7 @@ fn question_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         return div().into_any_element();
     };
     if let Some(answer) = answer {
-        return settled_row(id, options, answer);
+        return settled_row(id, header, prompt, options, answer);
     }
     let mut card = question_card(id, prompt.clone(), options)
         .header(header.clone())
@@ -2529,7 +2529,17 @@ pub fn unfold_key(key: &str) -> String {
 /// MSP settles a prompt six ways and only one of them is an answer, so the row
 /// says which: an empty `Answer` after a cancel would otherwise read as
 /// "Answered:" with nothing after it.
-fn settled_row(id: ElementId, options: &[aui_protocol::QuestionOption], answer: &Answer) -> AnyElement {
+///
+/// It reads the question too (owner 2026-10-31: "show the question as well
+/// as the answer"): "Language — What is your favorite…" over "✓ Answered
+/// `Python`".
+fn settled_row(
+    id: ElementId,
+    header: &str,
+    prompt: &str,
+    options: &[aui_protocol::QuestionOption],
+    answer: &Answer,
+) -> AnyElement {
     let chips: Vec<SharedString> = answer
         .selected
         .iter()
@@ -2545,7 +2555,10 @@ fn settled_row(id: ElementId, options: &[aui_protocol::QuestionOption], answer: 
     };
     let mut chips = chips;
     chips.extend(answer.other.clone().filter(|_| outcome == QuestionOutcome::Answered).map(SharedString::from));
-    answered_row(id, chips).outcome(outcome).into_any_element()
+    answered_row(id, chips)
+        .outcome(outcome)
+        .question(aui::transcript::settled_question_text(header, prompt))
+        .into_any_element()
 }
 
 /// A hairline marker row, tinted only where the marker carries a warning.
