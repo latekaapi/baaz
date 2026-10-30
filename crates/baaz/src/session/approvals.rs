@@ -185,6 +185,10 @@ impl SessionView {
     /// One place that writes the banner, so its message and its action can never
     /// disagree.
     pub(super) fn set_banner(&mut self, message: &str, action: Option<BannerAction>, cx: &mut Context<Self>) {
+        // Another banner replaces a grown lost one: its failure goes too.
+        if action != Some(BannerAction::RetryNow) {
+            self.child_failure = None;
+        }
         self.banner = Some(message.to_owned());
         self.banner_action = action;
         self.banner_is_mode_fallback = false;

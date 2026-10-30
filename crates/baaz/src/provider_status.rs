@@ -342,6 +342,49 @@ impl FailureKind {
     }
 }
 
+/// The failure's own words, when they say something the view's sentence
+/// and the stderr well do not (docs/71 §3, owner 2026-10-30: "Codex
+/// stopped before it could answer." over "provider unavailable: the agent
+/// process exited before answering" said the same fact twice). The seam's
+/// generic prefixes go; a bare "the process exited" is what the sentence
+/// already says; the resume hint is what Retry already does; and words
+/// the child printed itself are in the well. `None` when nothing is left.
+pub fn failure_detail(message: &str, sentence: &str, stderr: &[String]) -> Option<String> {
+    const PREFIXES: [&str; 2] = ["provider unavailable:", "provider refused the command:"];
+    const EXITS: [&str; 2] = ["the agent process exited", "the Claude Code process exited"];
+    const HINTS: [&str; 1] = ["; send again to resume the session"];
+    let mut text = message.trim();
+    for prefix in PREFIXES {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim();
+        }
+    }
+    for hint in HINTS {
+        if let Some(rest) = text.strip_suffix(hint) {
+            text = rest.trim();
+        }
+    }
+    // "the agent process exited[ before answering][ (code)][: <its words>]":
+    // the exit is the sentence's; only the child's words after the colon
+    // can add anything.
+    for exit in EXITS {
+        if let Some(rest) = text.strip_prefix(exit) {
+            text = rest.split_once(':').map(|(_, said)| said.trim()).unwrap_or("");
+            break;
+        }
+    }
+    let said = text.trim_end_matches('.').trim();
+    if said.is_empty() || said.eq_ignore_ascii_case(sentence.trim().trim_end_matches('.')) {
+        return None;
+    }
+    // Its words are already in the well, verbatim (the adapters name the
+    // last stderr line in their reason).
+    if stderr.iter().any(|line| line.contains(said)) || stderr.join(" ").contains(said) {
+        return None;
+    }
+    Some(said.to_owned())
+}
+
 /// The typed way out a failure view offers beside Retry, each reusing the
 /// D5 flow of the same name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2951,6 +2994,46 @@ mod tests {
         crate::projects::write(&stored);
         assert!(!is_first_run(), "a stored project ends first run");
         let _ = env;
+    }
+
+    /// docs/71 §3: the failure's raw words show only when they add to the
+    /// kind's sentence and the stderr well.
+    #[test]
+    fn a_failure_never_says_the_same_fact_twice() {
+        let sentence = FailureKind::Crashed.sentence("Codex");
+        let well: Vec<String> = vec![
+            "Error: failed to load config: ~/.config/sample/config.toml".into(),
+            "the sample process exited with status 1".into(),
+        ];
+        // The generic exit is the sentence's own fact: dropped, with or
+        // without the seam's prefix, the "before answering" tail, a well.
+        for generic in [
+            "provider unavailable: the agent process exited before answering",
+            "the agent process exited",
+            "the agent process exited before answering",
+            "the Claude Code process exited before the turn finished; send again to resume the session",
+        ] {
+            assert_eq!(failure_detail(generic, &sentence, &well), None, "{generic}");
+            assert_eq!(failure_detail(generic, &sentence, &[]), None, "{generic} with no well");
+        }
+        // The child's words after the exit: dropped when the well has them…
+        assert_eq!(
+            failure_detail("the agent process exited: the sample process exited with status 1", &sentence, &well),
+            None
+        );
+        // …and kept, without the generic part, when it does not.
+        assert_eq!(
+            failure_detail("the agent process exited: auth.json is unreadable", &sentence, &well).as_deref(),
+            Some("auth.json is unreadable")
+        );
+        // Anything else that adds information stands, without the prefix.
+        assert_eq!(
+            failure_detail("provider unavailable: timed out after 30s waiting for initialize", &sentence, &well)
+                .as_deref(),
+            Some("timed out after 30s waiting for initialize")
+        );
+        // A refusal whose reason is the sentence itself says it once.
+        assert_eq!(failure_detail("Codex stopped before it could answer.", &sentence, &[]), None);
     }
 
     /// docs/71 §3: a failed open's kind comes from the refusal's hint

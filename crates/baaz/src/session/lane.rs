@@ -608,35 +608,40 @@ impl SessionView {
                 if self.banner_action == Some(super::BannerAction::RetryNow) {
                     self.banner = None;
                     self.banner_action = None;
+                    self.child_failure = None;
                     cx.notify();
                 }
             }
-            provider::ProviderEvent::ConnectionLost { reason } => {
-                // No finish will ever land, so settle the send state here:
-                // drop every optimistic bubble, stop reading Working, and
-                // drop every approval or question the dead child asked —
-                // the adapter already settled them (docs/71 §2), and nothing
-                // is left to answer them — or each sticks with no turn
-                // behind it ("Finishing up…" forever, 2026-10-15).
-                self.submitting = false;
-                for optimistic in std::mem::take(&mut self.pending_optimistic) {
-                    self.remove_optimistic_turn(&optimistic.id);
-                }
-                self.clear_running();
-                self.external_approvals.clear();
-                self.external_questions.clear();
-                // Every surface that read the waiting approval (the row,
-                // the header, the badge) re-reads it now.
-                cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
-                // A Muse session wears the window's own reconnect banner
-                // (its one child is the window's connection, and the hub
-                // brings it back); every other lane speaks for itself.
-                if self.provider_kind().shares_one_child() {
-                    cx.notify();
-                } else {
-                    self.note_child_lost(&reason, cx);
-                }
-            }
+            provider::ProviderEvent::ConnectionLost { reason } => self.lose_child(&reason, None, cx),
+        }
+    }
+
+    /// The lane's child is gone (`ConnectionLost`, or the `child-lost`
+    /// step with its sample stderr): settle what it left, then the banner.
+    fn lose_child(&mut self, reason: &str, stderr: Option<Vec<String>>, cx: &mut Context<Self>) {
+        // No finish will ever land, so settle the send state here:
+        // drop every optimistic bubble, stop reading Working, and
+        // drop every approval or question the dead child asked —
+        // the adapter already settled them (docs/71 §2), and nothing
+        // is left to answer them — or each sticks with no turn
+        // behind it ("Finishing up…" forever, 2026-10-15).
+        self.submitting = false;
+        for optimistic in std::mem::take(&mut self.pending_optimistic) {
+            self.remove_optimistic_turn(&optimistic.id);
+        }
+        self.clear_running();
+        self.external_approvals.clear();
+        self.external_questions.clear();
+        // Every surface that read the waiting approval (the row,
+        // the header, the badge) re-reads it now.
+        cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
+        // A Muse session wears the window's own reconnect banner
+        // (its one child is the window's connection, and the hub
+        // brings it back); every other lane speaks for itself.
+        if self.provider_kind().shares_one_child() {
+            cx.notify();
+        } else {
+            self.note_child_lost(reason, stderr, cx);
         }
     }
 
@@ -644,18 +649,25 @@ impl SessionView {
     /// quiet banner with Retry now — the session stays, and the next send
     /// revives it — unless it is the second death within
     /// [`super::LOST_TWICE_WINDOW`] with no turn finished between, which
-    /// stops it coming back on its own and hands the window the typed
-    /// failure view instead (docs/71 §2).
-    fn note_child_lost(&mut self, reason: &str, cx: &mut Context<Self>) {
+    /// stops it coming back on its own: the banner grows in place into the
+    /// typed failure (docs/71 §2–§3), the transcript and the composer
+    /// still there.
+    fn note_child_lost(&mut self, reason: &str, stderr: Option<Vec<String>>, cx: &mut Context<Self>) {
         let now = crate::clock::now_instant();
         let twice = self.lost_at.is_some_and(|at| now.saturating_duration_since(at) < super::LOST_TWICE_WINDOW);
         self.lost_at = Some(now);
         if twice {
-            let stderr_excerpt = self
-                .lane_provider()
-                .and_then(|provider| provider.lock().ok().map(|provider| provider.stderr_tail()))
-                .unwrap_or_default();
+            let stderr_excerpt = stderr.unwrap_or_else(|| {
+                self.lane_provider()
+                    .and_then(|provider| provider.lock().ok().map(|provider| provider.stderr_tail()))
+                    .unwrap_or_default()
+            });
             self.set_banner(&lost_banner(self.provider_kind()), Some(super::BannerAction::RetryNow), cx);
+            self.child_failure = Some(super::ChildFailure {
+                kind: crate::provider_status::FailureKind::classify(self.provider_kind(), None),
+                message: reason.to_owned(),
+                stderr_excerpt: stderr_excerpt.clone(),
+            });
             cx.emit(super::SessionEvent::ChildFailed { message: reason.to_owned(), stderr_excerpt });
             // A handoff destination that never acknowledged its pack fails
             // its run here, as a closed one did before revival.
@@ -680,6 +692,7 @@ impl SessionView {
                         this.banner = None;
                         this.banner_action = None;
                     }
+                    this.child_failure = None;
                     cx.notify();
                 }
                 Err(error) => {
@@ -697,7 +710,7 @@ impl SessionView {
             return false;
         }
         if matches!(error, provider::ProviderError::Unavailable { .. }) {
-            self.note_child_lost(&error.to_string(), cx);
+            self.note_child_lost(&error.to_string(), None, cx);
         } else {
             self.report_provider_error(error, cx);
         }
@@ -708,15 +721,26 @@ impl SessionView {
     /// death starts the count afresh.
     pub(super) fn note_turn_finished_live(&mut self) {
         self.lost_at = None;
+        self.child_failure = None;
+    }
+
+    /// The grown lost banner's failure, when the lane died twice.
+    #[cfg(test)]
+    pub(crate) fn child_failure(&self) -> Option<&super::ChildFailure> {
+        self.child_failure.as_ref()
     }
 
     /// `child-lost` (captures, live checks): fold the loss the adapter
-    /// would report, with no child behind it.
+    /// would report, with no child behind it — and, since there is no
+    /// child to have said anything, sample stderr lines for the failure's
+    /// well, as `launch-failed:` shows (the scripted lane has none).
     pub(crate) fn step_child_lost(&mut self, cx: &mut Context<Self>) {
-        self.on_provider_event(
-            provider::ProviderEvent::ConnectionLost { reason: "the agent process exited".into() },
-            cx,
-        );
+        let sample = vec![
+            "Error: failed to load config: ~/.config/sample/config.toml".to_owned(),
+            "  caused by: unknown field `sample_key` at line 3, column 1".to_owned(),
+            "the sample process exited with status 1".to_owned(),
+        ];
+        self.lose_child("the agent process exited", Some(sample), cx);
     }
 
     /// The lane's provider, for tests driving the gate directly.

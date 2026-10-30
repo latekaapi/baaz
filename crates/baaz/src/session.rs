@@ -356,8 +356,9 @@ pub enum SessionEvent {
     /// The child exited; the application owns the reconnect.
     Closed,
     /// The lane's child died twice within [`LOST_TWICE_WINDOW`] without
-    /// finishing a turn (docs/71 §2): the application lands the typed
-    /// failure view on this session, and Retry revives it.
+    /// finishing a turn (docs/71 §2): the view grows its lost banner into
+    /// the typed failure (its Retry revives the child); the application
+    /// notes it in the log.
     ChildFailed {
         /// The last loss, in the adapter's words.
         message: String,
@@ -448,6 +449,10 @@ pub enum SessionEvent {
         /// The turn's final counters, carrying the adapter-reported cost.
         meta: aui_protocol::TurnMeta,
     },
+    /// The grown lost banner's typed action (Install / Sign in / Update,
+    /// docs/71 §3): the application runs the D5 flow of that name for
+    /// this session's provider.
+    FailureAction(crate::provider_status::FailureAction),
     /// `/logout`.
     Logout,
     /// "Enable" on a disabled-provider banner: the application owns the
@@ -951,6 +956,13 @@ pub struct SessionView {
     /// second death inside [`LOST_TWICE_WINDOW`] turns the banner into the
     /// failure view. A finished turn clears it.
     lost_at: Option<std::time::Instant>,
+    /// The lane's child died twice within [`LOST_TWICE_WINDOW`] (docs/71
+    /// §2): the lost banner grows in place into the typed failure — the
+    /// kind's sentence, the child's last stderr lines, Retry and the kind's
+    /// action — under the transcript, which stays (owner 2026-10-30: the
+    /// old full-centre view hid the conversation and the composer). A
+    /// restored connection or a finished turn takes it down.
+    child_failure: Option<ChildFailure>,
     /// The billing guard's banner, and whether it is refusing turns.
     tier_banner: Option<TierBanner>,
     /// A live Muse draft opened while Muse itself is still starting (it
@@ -1357,6 +1369,7 @@ impl SessionView {
             banner: None,
             banner_is_mode_fallback: false,
             lost_at: None,
+            child_failure: None,
             banner_action: None,
             tier_banner: None,
             muse_starting: false,
@@ -2516,6 +2529,19 @@ impl SessionView {
     pub(crate) fn display_provider(&self) -> ProviderId {
         self.switching_to.unwrap_or_else(|| self.provider_kind())
     }
+}
+
+/// A lane whose child died twice in a row, typed (docs/71 §2–§3): what the
+/// grown lost banner says and offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChildFailure {
+    /// What went wrong, typed: the sentence and the action follow it.
+    pub kind: crate::provider_status::FailureKind,
+    /// The last loss, in the adapter's words.
+    pub message: String,
+    /// The child's last stderr lines (at most
+    /// [`provider::STDERR_TAIL_LINES`]), oldest first.
+    pub stderr_excerpt: Vec<String>,
 }
 
 /// What the inline banner's action does, when the failure is one the person can

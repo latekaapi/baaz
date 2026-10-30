@@ -163,8 +163,8 @@
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
-//! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old\|lost>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would (`lost`: as a child dead twice would); no child, no turn; unknown parts record a step failure, free |
-//! | `child-lost` | the open lane hears its child die (`ConnectionLost`), as its adapter would report it: the quiet banner with Retry now; twice in a row lands the failure view. No child, no turn; no session records a step failure, free |
+//! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would; no child, no turn; unknown parts record a step failure, free |
+//! | `child-lost` | the open lane hears its child die (`ConnectionLost`), as its adapter would report it: the quiet banner with Retry now; twice in a row grows it into the typed failure (sample stderr well) under the transcript. No child, no turn; no session records a step failure, free |
 //! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session records a step failure, free |
 //! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts record a step failure |
 //! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog records a step failure) — same warning |
@@ -538,21 +538,19 @@ impl Harness {
             record_step_failure(&format!("launch-failed:{rest}"));
             return;
         };
-        let (kind, retry) = match kind {
-            "crashed" => (FailureKind::Crashed, None),
-            "not-installed" => (FailureKind::NotInstalled, None),
-            "signed-out" => (FailureKind::SignedOut, None),
-            "too-old" => (FailureKind::TooOld, None),
-            "lost" => (FailureKind::Crashed, Some(crate::app::ProviderOpenRetry::Revive)),
+        let kind = match kind {
+            "crashed" => FailureKind::Crashed,
+            "not-installed" => FailureKind::NotInstalled,
+            "signed-out" => FailureKind::SignedOut,
+            "too-old" => FailureKind::TooOld,
             _ => {
                 record_step_failure(&format!("launch-failed:{rest}"));
                 return;
             }
         };
-        let revive = retry.is_some();
         self.active = None;
         self.provider_open_error = Some(crate::app::LaunchFailure {
-            session_id: revive.then(|| "s-launch-failed".to_owned()),
+            session_id: None,
             provider,
             kind,
             message: "provider unavailable: the agent process exited before answering".into(),
@@ -561,10 +559,7 @@ impl Harness {
                 "  caused by: unknown field `sample_key` at line 3, column 1".into(),
                 "the sample process exited with status 1".into(),
             ],
-            retry: retry.unwrap_or(crate::app::ProviderOpenRetry::OpenNew {
-                project: None,
-                workspace: self.workspace(),
-            }),
+            retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace() },
         });
         cx.notify();
     }
