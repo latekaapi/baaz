@@ -118,6 +118,9 @@ pub(crate) fn with_busy(mut data: ProviderCardData, busy: Option<ProviderBusy>) 
     }
 }
 
+/// How long a settled press's toast stays before it leaves by itself.
+const SETTLED_TOAST_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The toast a settled press ends in: what the person asked, and what the
 /// re-probe found. `(title, body)`.
 pub(crate) fn settled_toast(status: &ProviderStatus, after_sign_out: bool) -> (String, String) {
@@ -801,9 +804,18 @@ impl Harness {
             self.provider_busy.remove(&id);
             if let Some(status) = statuses.iter().find(|status| status.provider == id) {
                 let (title, body) = settled_toast(status, after_sign_out);
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast(title, body);
-                });
+                let toast = self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
+                // A press's answer, not news: it leaves by itself (QA,
+                // 2026-10-30: it sat on screen through several more steps).
+                // A failed sign-out's toast is not this one and stays.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SETTLED_TOAST_FOR).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
         }
         cx.notify();
