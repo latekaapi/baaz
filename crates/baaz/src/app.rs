@@ -762,7 +762,9 @@ pub struct Harness {
     /// How many chain indexes this run built: the once-per-change proof
     /// the Y2a3 tests read.
     chain_index_builds: std::cell::Cell<u64>,
-    pub(crate) index: HashMap<String, IndexEntry>,
+    /// Muse's index, shared: the per-turn re-read snapshots it with a
+    /// refcount instead of a 2,600-row clone on the UI thread (speed S4).
+    pub(crate) index: std::sync::Arc<HashMap<String, IndexEntry>>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// The session the UI is pointed at: the sidebar click's target, set the
     /// moment `resume` runs. The centre swaps synchronously, so this usually
@@ -1615,7 +1617,7 @@ impl Harness {
             list_cache: RefCell::new(ListCache::default()),
             chain_index: RefCell::new(None),
             chain_index_builds: std::cell::Cell::new(0),
-            index: HashMap::new(),
+            index: std::sync::Arc::new(HashMap::new()),
             active: None,
             pending_id: None,
             reveal: None,

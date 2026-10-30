@@ -285,6 +285,26 @@ pub fn sync_sessions(
     rows: &[SyncRow<'_>],
     bodies: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
 ) -> Result<SyncStats, rusqlite::Error> {
+    sync_sessions_inner(connection, rows, bodies, true)
+}
+
+/// [`sync_sessions`] for a few rows (speed S4: a finished turn's one
+/// session): writes the rows whose fingerprint moved and removes nothing —
+/// rows not named here are simply not this sync's business.
+pub fn upsert_sessions(
+    connection: &mut Connection,
+    rows: &[SyncRow<'_>],
+    bodies: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
+) -> Result<SyncStats, rusqlite::Error> {
+    sync_sessions_inner(connection, rows, bodies, false)
+}
+
+fn sync_sessions_inner(
+    connection: &mut Connection,
+    rows: &[SyncRow<'_>],
+    bodies: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
+    prune: bool,
+) -> Result<SyncStats, rusqlite::Error> {
     use std::collections::{HashMap, HashSet};
     let mut state: HashMap<String, (i64, i64)> = HashMap::new();
     {
@@ -308,7 +328,7 @@ pub fn sync_sessions(
     let wanted: HashSet<&str> = rows.iter().map(|sync| sync.row.session_id.as_str()).collect();
     let gone: Vec<(String, i64)> = state
         .iter()
-        .filter(|(id, _)| !wanted.contains(id.as_str()))
+        .filter(|(id, _)| prune && !wanted.contains(id.as_str()))
         .map(|(id, (rowid, _))| (id.clone(), *rowid))
         .collect();
     let mut fetch: Vec<String> = changed.iter().flat_map(|sync| sync.body_ids.iter().cloned()).collect();
@@ -318,7 +338,7 @@ pub fn sync_sessions(
     let transaction = connection.transaction()?;
     // A store written before `sessions_state` existed has rows nobody can
     // address by rowid: clear them once, and this sync writes every row.
-    if state.is_empty() {
+    if state.is_empty() && prune {
         transaction.execute("DELETE FROM sessions_fts", [])?;
     }
     {

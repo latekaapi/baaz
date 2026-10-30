@@ -306,6 +306,47 @@ pub struct Args {
     pub terminal_socket_dir: Option<PathBuf>,
 }
 
+impl Args {
+    /// An offline, scripted window's arguments for the headless
+    /// `--perf-turn` measurements: no provider, no project, the given
+    /// workspace and a short private terminal socket dir.
+    pub(crate) fn perf(workspace: PathBuf) -> Args {
+        let socket = PathBuf::from(format!("/tmp/bp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&socket);
+        Args {
+            workspace,
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: ThemeKind::Dark,
+            screenshot: None,
+            delay: SHOT_DELAY,
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: Duration::from_millis(4),
+            bench_scroll: bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: true,
+            terminal_socket_dir: Some(socket),
+        }
+    }
+}
+
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut out = Args {

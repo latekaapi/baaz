@@ -69,7 +69,11 @@ impl Harness {
             cx.notify();
             return;
         }
-        self.settle_overrides(cx);
+        // One session's override: its row rejoins and its search row
+        // re-syncs, not the whole list (speed S4 — the byline and the
+        // generated title land here after every finished turn).
+        let ids: std::collections::HashSet<String> = std::iter::once(session_id.to_owned()).collect();
+        self.settle_overrides_scoped(Some(&ids), cx);
     }
 
     /// The same edit applied to a batch of sessions, settled once.
@@ -103,9 +107,15 @@ impl Harness {
     /// write generation keeps a late write from landing over a newer one,
     /// and the quit flush writes synchronously while one is in flight.
     fn settle_overrides(&mut self, cx: &mut Context<Self>) {
+        self.settle_overrides_scoped(None, cx);
+    }
+
+    /// [`Self::settle_overrides`] for the sessions `only` names (`None`:
+    /// every row): the rejoin and the search sync are scoped alike.
+    fn settle_overrides_scoped(&mut self, only: Option<&std::collections::HashSet<String>>, cx: &mut Context<Self>) {
         self.right_save_epoch += 1;
         self.right_save_pending = false;
-        self.rejoin();
+        self.rejoin_scoped(only);
         let generation = sessions::next_write_generation();
         let snapshot = self.overrides.clone();
         self.overrides_writes_in_flight += 1;
@@ -116,7 +126,10 @@ impl Harness {
             });
         })
         .detach();
-        self.rebuild_search_index(cx);
+        match only {
+            Some(ids) => self.rebuild_search_index_for(ids, cx),
+            None => self.rebuild_search_index(cx),
+        }
         cx.notify();
     }
 
@@ -429,6 +442,7 @@ impl Harness {
         let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) else {
             return;
         };
+        let before = entry.clone();
         let mut changed = false;
         // The open view applies its lane's events before the row syncs:
         // when it declined a re-delivered start for a turn it
@@ -484,7 +498,7 @@ impl Harness {
             }
         }
         if changed {
-            self.invalidate_list();
+            self.invalidate_row(&before);
         }
     }
 
@@ -862,6 +876,62 @@ impl Harness {
     /// go through), the three view toggles, and the replay's single row.
     pub(crate) fn invalidate_list(&mut self) {
         self.list_epoch = self.list_epoch.wrapping_add(1);
+    }
+
+    /// One row changed from `before` (speed S4): when nothing the list
+    /// filters, groups or collapses on moved — only its words, live state
+    /// or time — the cached visible list is patched in place (the row
+    /// replaced, or moved to its new place when its time moved) and only
+    /// the grouping is rebuilt. Anything else invalidates the whole list,
+    /// as before. A finished turn used to rebuild 2,600 rows here.
+    pub(crate) fn invalidate_row(&mut self, before: &SessionEntry) {
+        let Some(after) = self.sessions.iter().find(|entry| entry.id == before.id).cloned() else {
+            self.invalidate_list();
+            return;
+        };
+        if after == *before {
+            return;
+        }
+        let structural = before.hidden != after.hidden
+            || before.archived != after.archived
+            || before.pinned != after.pinned
+            || before.is_empty()
+            || after.is_empty()
+            || before.turns_unknown != after.turns_unknown
+            || before.provisional != after.provisional
+            || before.side_marker != after.side_marker
+            || before.project != after.project
+            || before.project_name != after.project_name
+            || before.workspace != after.workspace
+            || before.branch != after.branch
+            || sidebar::needs_collapse(&after.id, &self.provider_sessions, &self.overrides);
+        if structural {
+            self.invalidate_list();
+            return;
+        }
+        let mut cache = self.list_cache.borrow_mut();
+        // A stale cache rebuilds on its next read anyway.
+        if !cache.key.as_ref().is_some_and(|key| key.0 == self.list_epoch) {
+            return;
+        }
+        let visible = Rc::make_mut(&mut cache.visible);
+        let Some(at) = visible.iter().position(|entry| entry.id == after.id) else {
+            drop(cache);
+            self.invalidate_list();
+            return;
+        };
+        let mut row = after;
+        row.terminals_running = visible[at].terminals_running;
+        if row.updated == visible[at].updated {
+            visible[at] = row;
+        } else {
+            // Newest first, after any row with the same time — the place
+            // the stable sort gives a row that was already there.
+            visible.remove(at);
+            let to = visible.partition_point(|entry| entry.updated >= row.updated);
+            visible.insert(to, row);
+        }
+        cache.grouping = None;
     }
 
     /// F10. A session with no title anywhere: read its head and take the first

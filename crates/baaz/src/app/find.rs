@@ -8,6 +8,13 @@ use super::*;
 
 #[cfg(test)]
 static SEARCH_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Scoped search syncs (one session's rows), for the speed S4 tests.
+#[cfg(test)]
+static SEARCH_SCOPED_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// One search sync at a time: two overlapping ones fought over the
+/// database lock (8 s and 20 s at boot), and the second now finds the
+/// first's fingerprint and writes nothing.
+static SEARCH_REBUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Harness {
     /// Open the full-text search palette and put the keyboard in its query.
@@ -110,7 +117,20 @@ impl Harness {
     /// each body source's `updated_at_us`. No body text is read or cloned
     /// here: this runs on the UI thread.
     pub(crate) fn search_sync_rows(&self) -> Vec<(crate::search::SessionRow, Vec<String>, i64)> {
+        self.search_rows_scoped(None).unwrap_or_default()
+    }
+
+    /// [`Self::search_sync_rows`] for the sessions `only` names (`None`:
+    /// all). A scoped build answers `None` when it cannot stand alone —
+    /// a named id is in a chain (its row is the head's, built from every
+    /// member) or in neither store (its row may have to go) — and the
+    /// caller rebuilds everything.
+    pub(crate) fn search_rows_scoped(
+        &self,
+        only: Option<&std::collections::HashSet<String>>,
+    ) -> Option<Vec<(crate::search::SessionRow, Vec<String>, i64)>> {
         use std::collections::HashMap;
+        let wanted = |id: &str| only.is_none_or(|ids| ids.contains(id));
         // One cache over the whole build: each distinct index root is
         // canonicalized once, not once per row.
         let mut canon = crate::projects::CanonicalCache::default();
@@ -118,15 +138,23 @@ impl Harness {
         // per indexed session that was O(n²) — ~7 M id compares and ~30 ms
         // of UI thread per rebuild on 2,600 sessions (perf P1). The marked
         // ids are collected once instead.
-        let marked: std::collections::HashSet<&str> =
-            self.sessions.iter().filter(|entry| entry.side_marker).map(|entry| entry.id.as_str()).collect();
+        let marked: std::collections::HashSet<&str> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.side_marker && wanted(&entry.id))
+            .map(|entry| entry.id.as_str())
+            .collect();
         let is_side = |id: &str| {
             self.side_sessions.contains(id)
                 || self.overrides.get(id).is_some_and(|meta| meta.side_session)
                 || marked.contains(id)
         };
         let mut per_session: HashMap<String, crate::search::SessionRow> = HashMap::new();
-        for (session_id, entry) in self.index.iter() {
+        let indexed: Vec<(&String, &crate::index::IndexEntry)> = match only {
+            Some(ids) => ids.iter().filter_map(|id| self.index.get_key_value(id)).collect(),
+            None => self.index.iter().collect(),
+        };
+        for (session_id, entry) in indexed {
             // Title side sessions never reach the search palette: their
             // only transcript is the title prompt itself.
             if is_side(session_id) {
@@ -170,7 +198,7 @@ impl Harness {
         // ([`crate::provider_search`]) when the row is written. A session
         // both stores know (never expected) keeps its index row.
         for (session_id, record) in &self.provider_sessions {
-            if per_session.contains_key(session_id) || is_side(session_id) {
+            if !wanted(session_id) || per_session.contains_key(session_id) || is_side(session_id) {
                 continue;
             }
             let meta = self.overrides.get(session_id);
@@ -209,14 +237,34 @@ impl Harness {
         // nothing changes there.
         // One cached index build serves every head lookup below, never
         // a walk per indexed session (Y2a3).
-        let chain_index = self.chain_index();
+        let chain_index = match only {
+            Some(ids) => {
+                // Standing alone: every named id rowed, none in a chain —
+                // each is its own singleton head below.
+                let alone = self.with_chain_index(|chains| {
+                    ids.iter().all(|id| {
+                        per_session.contains_key(id) && chains.head(id) == *id && chains.members(id).len() == 1
+                    })
+                });
+                if !alone {
+                    return None;
+                }
+                None
+            }
+            None => Some(self.chain_index()),
+        };
+        let head_of = |id: &str| chain_index.as_ref().map_or_else(|| id.to_owned(), |chains| chains.head(id));
         // The sidebar's labels by id: one pass, not a scan of the list per
         // head (2,600 heads × 2,600 rows).
-        let labels: HashMap<&str, &String> =
-            self.sessions.iter().map(|entry| (entry.id.as_str(), &entry.label)).collect();
+        let labels: HashMap<&str, &String> = self
+            .sessions
+            .iter()
+            .filter(|entry| wanted(&entry.id))
+            .map(|entry| (entry.id.as_str(), &entry.label))
+            .collect();
         let mut by_head: HashMap<String, Vec<String>> = HashMap::new();
         for id in per_session.keys() {
-            let head = chain_index.head(id);
+            let head = head_of(id);
             by_head.entry(head).or_default().push(id.clone());
         }
         let mut heads: Vec<String> = by_head.keys().cloned().collect();
@@ -293,7 +341,7 @@ impl Harness {
             let fingerprint = self.search_fingerprint(&base, &body_ids);
             out.push((base, body_ids, fingerprint));
         }
-        out
+        Some(out)
     }
 
     /// A stable hash of what a search row would write: its words and each
@@ -334,6 +382,13 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn reset_search_rebuild_count() {
         SEARCH_REBUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+        SEARCH_SCOPED_REBUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Scoped (one-session) search syncs since the last reset (tests).
+    #[cfg(test)]
+    pub(crate) fn search_scoped_rebuild_count() -> usize {
+        SEARCH_SCOPED_REBUILDS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Rebuild the session half of `search.db` off the UI thread.
@@ -347,6 +402,40 @@ impl Harness {
     /// expand/collapse/select, browser navigations): that state is not
     /// searchable, so those paths persist through the cheap debounced write
     /// instead (see [`Self::schedule_overrides_write`]).
+    /// The search sync for a few sessions (speed S4): their rows only,
+    /// upserted, when they stand alone; anything else falls back to
+    /// [`Self::rebuild_search_index`].
+    pub(crate) fn rebuild_search_index_for(&mut self, ids: &std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let Some(rows) = self.search_rows_scoped(Some(ids)) else {
+            self.rebuild_search_index(cx);
+            return;
+        };
+        #[cfg(test)]
+        {
+            SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            SEARCH_SCOPED_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let index_path = crate::index::index_path();
+        let provider_of = self.search_body_owners();
+        let work = move || {
+            let _turn = SEARCH_REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Ok(mut connection) = crate::search::open() else { return };
+            let synced: Vec<crate::search::SyncRow<'_>> = rows
+                .iter()
+                .map(|(row, body_ids, fingerprint)| crate::search::SyncRow { row, body_ids, fingerprint: *fingerprint })
+                .collect();
+            let _ = crate::search::upsert_sessions(&mut connection, &synced, &|ids| {
+                search_bodies(&index_path, &provider_of, ids)
+            });
+        };
+        self.wire_call(cx, work, |this: &mut Self, (), cx| {
+            this.refresh_search(cx);
+        });
+    }
+
     pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
         SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -359,8 +448,7 @@ impl Harness {
             // One rebuild at a time: two overlapping ones fought over the
             // database lock (8 s and 20 s at boot), and the second now finds
             // the first's fingerprint and writes nothing.
-            static REBUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let _turn = REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _turn = SEARCH_REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let at = std::time::Instant::now();
             let mut connection = match crate::search::open() {
                 Ok(connection) => connection,
