@@ -5944,7 +5944,7 @@ impl Harness {
         let sentence = failure.kind.sentence(label);
         // The raw failure only when it adds to the sentence and the well
         // (owner 2026-10-30: never the same fact twice).
-        let detail = crate::provider_status::failure_detail(&failure.message, &sentence, &failure.stderr_excerpt);
+        let detail = failure.kind.detail(&failure.message, &sentence, &failure.stderr_excerpt);
         let mut actions = h_flex().gap(px(scale::SP_2)).mt(px(scale::SP_2)).child(
             div()
                 .id("reopen-failed-retry")

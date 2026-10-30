@@ -302,6 +302,21 @@ impl CodexAdapter {
         ProviderError::Unavailable { reason: error.reason }
     }
 
+    /// A failed `thread/resume`: the app-server's "no rollout found" means
+    /// the thread's history is not on this machine any more — a resume can
+    /// never succeed, so it is refused typed (`HistoryMissing`) for the
+    /// host's plain sentence. Anything else stays `Unavailable`.
+    fn resume_failure(error: child::RequestError) -> ProviderError {
+        if error.reason.contains("no rollout found") {
+            return ProviderError::launch_refusal(
+                provider::RefusalHint::HistoryMissing,
+                "Session history missing",
+                error.reason,
+            );
+        }
+        Self::unavailable(error)
+    }
+
     /// Run the opening sequence over a fresh child: `initialize`, the
     /// `initialized` notification, `model/list` to resolve the model, then
     /// `thread/start` with that explicit model. The server mints the thread
@@ -581,7 +596,7 @@ impl CodexAdapter {
         let running = self.spawn_handshaken(&extra, &env)?;
         let answer = running
             .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
-            .map_err(Self::unavailable)?;
+            .map_err(Self::resume_failure)?;
         let (thread_id, resumed_session, model) =
             child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
                 reason: "thread/resume answered without thread ids".into(),
@@ -712,7 +727,7 @@ impl CodexAdapter {
         let mode = self.fold.lock().expect("fold mutex").permission_mode();
         let answer = running
             .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
-            .map_err(Self::unavailable)?;
+            .map_err(Self::resume_failure)?;
         let (thread_id, _, _) = child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
             reason: "thread/resume answered without thread ids".into(),
         })?;
@@ -1512,6 +1527,8 @@ for line in sys.stdin:
     method = frame.get("method")
     if "id" in frame and method:
         answer = {"id": frame["id"], "result": result_for(method)}
+        if method == "thread/resume" and os.environ.get("FAKE_CODEX_RESUME_ERROR"):
+            answer = {"id": frame["id"], "error": {"code": -32600, "message": os.environ["FAKE_CODEX_RESUME_ERROR"]}}
         # The account read is a network round trip in the real server; a
         # delay here answers it late without holding up later requests.
         delay = rate_delay if method == "account/rateLimits/read" else (
@@ -1533,6 +1550,39 @@ for line in sys.stdin:
     fn resume_then_default_turns(model: &str, resume_effort: &str) -> (Vec<serde_json::Value>, Vec<Option<String>>) {
         let (frames, told, _) = resume_then_default_turns_timed(model, resume_effort, None);
         (frames, told)
+    }
+
+    /// A resume whose rollout is gone ("no rollout found for thread id …",
+    /// the real app-server's words) is refused typed `HistoryMissing`, so
+    /// the host says the history is not on this Mac any more instead of
+    /// "Codex stopped before it could answer" (QA 2026-10-30).
+    #[test]
+    fn a_resume_with_no_rollout_is_refused_as_missing_history() {
+        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
+        let (script, log) = scripted_effort_server();
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        std::env::set_var("FAKE_CODEX_MODEL", "gpt-test");
+        std::env::set_var("FAKE_CODEX_RESUME_EFFORT", "medium");
+        std::env::set_var("FAKE_CODEX_RESUME_ERROR", "no rollout found for thread id 01a1490e-a2b6-7b03-b824-2647504326ee");
+        let scratch = script.parent().expect("temp dir").join("homes");
+        let owner_home = scratch.join("owner-home");
+        std::fs::create_dir_all(owner_home.join(".codex")).expect("temp owner home");
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home);
+        adapter.set_state_dir(scratch.join("state"));
+        adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        let error = adapter
+            .dispatch(Command::ResumeSession {
+                request_id: "r-resume".into(),
+                session_id: "01a1490e-a2b6-7b03-b824-2647504326ee".into(),
+                cursor: None,
+                metadata_only: false,
+                mode: None,
+            })
+            .expect_err("a resume with no rollout is refused");
+        std::env::remove_var("FAKE_CODEX_RESUME_ERROR");
+        assert_eq!(error.hint(), provider::RefusalHint::HistoryMissing, "typed: {error:?}");
+        adapter.shutdown();
     }
 
     /// [`resume_then_default_turns`] plus how long the resume's ack took.

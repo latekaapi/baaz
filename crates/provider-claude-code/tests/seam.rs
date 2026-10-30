@@ -334,3 +334,35 @@ fn read_account_reports_the_live_meter_label() {
         other => panic!("expected account, got {other:?}"),
     }
 }
+
+/// A resume whose transcript is on no slug directory of the config dir
+/// can never succeed: `--resume` dies on it. It is refused typed
+/// (`HistoryMissing`) before any child spawns, so the host lands its
+/// failure view instead of a lost-child banner promising to pick up where
+/// it left off over an empty transcript (QA 2026-10-30).
+#[test]
+fn a_resume_with_no_transcript_is_refused_typed_before_any_spawn() {
+    let root = std::env::temp_dir().join(format!("cc-seam-test-no-transcript-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cwd = root.join("work");
+    let home = root.join("home");
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    std::fs::create_dir_all(home.join(".claude").join("projects")).expect("projects");
+    // `/usr/bin/true` would "spawn" fine: only the up-front check refuses.
+    let adapter = ClaudeCodeAdapter::new("/usr/bin/true").with_home(home).with_workspace(cwd);
+    let error = adapter
+        .dispatch(Command::ResumeSession {
+            request_id: "r-1".into(),
+            session_id: "0b4d1d4e-0000-4000-8000-00000000dead".into(),
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+        })
+        .expect_err("a resume with no stored transcript is refused");
+    assert_eq!(error.hint(), provider::RefusalHint::HistoryMissing, "typed, not a child loss: {error:?}");
+    assert!(
+        adapter.events().try_iter().all(|event| !matches!(event, ProviderEvent::ConnectionLost { .. })),
+        "no child ran, so nothing was lost"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

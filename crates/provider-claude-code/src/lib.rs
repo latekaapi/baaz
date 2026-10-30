@@ -1311,6 +1311,23 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Whether any `<id>.jsonl` exists for `session_id` under the session's
+    /// config dir: the session's own slug directory, or any other (two
+    /// matches still count — the CLI may resolve them; only none at all
+    /// means the history is gone).
+    fn transcript_exists_anywhere(&self, session_id: &str) -> bool {
+        if self.find_stored(session_id).is_some() {
+            return true;
+        }
+        if session_id.is_empty() || session_id.contains('/') {
+            return false;
+        }
+        let projects = self.config_dir_for(session_id).join("projects");
+        let Ok(entries) = std::fs::read_dir(&projects) else { return false };
+        let file_name = format!("{session_id}.jsonl");
+        entries.filter_map(|entry| entry.ok()).any(|entry| entry.path().join(&file_name).is_file())
+    }
+
     /// The stored transcript for `session_id` by exact filename, over
     /// every slug directory under `<config>/projects`. `Some` only on
     /// exactly one match: none — or two files claiming one id — refuses.
@@ -1527,6 +1544,18 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
             Command::ResumeSession { session_id, mode, .. } => {
+                // No transcript anywhere under the config dir: `--resume`
+                // can only die on it ("No conversation found"), which read
+                // as a lost child and promised to "pick up where it left
+                // off" over an empty view (QA 2026-10-30). Refused typed
+                // instead, before any spawn.
+                if !self.transcript_exists_anywhere(&session_id) {
+                    return Err(ProviderError::launch_refusal(
+                        provider::RefusalHint::HistoryMissing,
+                        "Session history missing",
+                        format!("no stored transcript for session {session_id} on this Mac"),
+                    ));
+                }
                 let launch = argv::with_permission_mode(self.launch_for_resume(&session_id)?, mode);
                 let ack = self.spawn_launch(&launch)?;
                 // Best-effort resume seeding (see `seed_history_echoes`):

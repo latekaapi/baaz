@@ -2034,9 +2034,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 .child(button("child-failed-providers-button", "Providers…").size(aui::data::ButtonSize::Xs).on_click(providers)),
         );
         let mut body = v_flex().w_full().gap(px(scale::SP_2));
-        if let Some(detail) =
-            crate::provider_status::failure_detail(&failure.message, &sentence, &failure.stderr_excerpt)
-        {
+        if let Some(detail) = failure.kind.detail(&failure.message, &sentence, &failure.stderr_excerpt) {
             body = body.child(div().ui(scale::FS_12).text_color(p.ink_3).child(detail));
         }
         if !failure.stderr_excerpt.is_empty() {
