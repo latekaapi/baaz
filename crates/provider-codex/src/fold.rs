@@ -943,6 +943,14 @@ fn codex_choices() -> Vec<ApprovalChoice> {
 /// ([`CodexFold::abandon_live_turn`]): an error block naming the exit.
 pub const CHILD_EXITED_CARD: &str = "codex-child-exited";
 
+/// Why an approval card the dead child raised reads "Not run — …".
+const CODEX_STOPPED: &str = "Codex stopped";
+/// Why a card whose item Codex declined with no press from the person reads
+/// "Not run — …".
+const CODEX_WITHDREW: &str = "Codex withdrew it";
+/// Why an unanswered card of a stopped turn reads "Not run — …".
+const TURN_STOPPED: &str = "Turn stopped";
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: turn id → started turn (many
@@ -1020,6 +1028,13 @@ pub struct CodexFold {
     /// no press was recorded. Consumed on settle and bounded, so a gate
     /// that never completes cannot grow it.
     decisions: HashMap<String, PersonDecision>,
+    /// Approval id → the person's press for every other (command, file)
+    /// approval: those settle from their item's own completion, and this
+    /// only tells a person's decline from an ask nobody answered — a card
+    /// the turn or the child abandoned reads `Cancelled` ("Not run — …"),
+    /// never `Denied`. Kept apart from `decisions` so it can never crowd
+    /// out an elicitation; consumed when the card settles, bounded.
+    pressed: HashMap<String, PersonDecision>,
     /// The session workspace (`thread/start` cwd): what an MCP
     /// elicitation approval names as its cwd, since the gated tool runs
     /// there and the request itself names none.
@@ -1057,14 +1072,16 @@ impl CodexFold {
     }
 
     /// The child died (docs/71 §2): settle every approval card it raised as
-    /// refused — nothing will ever answer them — and close the turn it was
+    /// cancelled ("Not run — Codex stopped"; `Denied` only where the person
+    /// pressed decline) — nothing will ever answer them — and close the turn it was
     /// running with a [`CHILD_EXITED_CARD`] naming `reason`, the way an
     /// interrupted `turn/completed` would. Nothing open folds to nothing.
     pub fn abandon_live_turn(&mut self, reason: &str) -> Vec<Delta> {
         let mut deltas = Vec::new();
         let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
         for item_id in carded {
-            self.resolve_approval(&item_id, ApprovalState::Denied, &mut deltas);
+            let state = self.abandoned_state(&item_id, CODEX_STOPPED);
+            self.resolve_approval(&item_id, state, &mut deltas);
         }
         self.elicitation_sites.clear();
         let Some(turn_id) = self.live_turn.take() else { return deltas };
@@ -1109,13 +1126,36 @@ impl CodexFold {
         // other approval settles through its own completion, and keeping
         // their presses would fill the bounded map until it refused the
         // elicitations it exists for.
-        if approval_id.is_empty() || !approval_id.starts_with(MCP_ELICITATION_ID_PREFIX) {
+        if approval_id.is_empty() {
+            return;
+        }
+        if !approval_id.starts_with(MCP_ELICITATION_ID_PREFIX) {
+            if self.pressed.len() < 64 || self.pressed.contains_key(approval_id) {
+                self.pressed.insert(approval_id.to_owned(), PersonDecision::from_choice(choice));
+            }
             return;
         }
         if self.decisions.len() >= 64 && !self.decisions.contains_key(approval_id) {
             return;
         }
         self.decisions.insert(approval_id.to_owned(), PersonDecision::from_choice(choice));
+    }
+
+    /// Take back a press recorded by [`Self::record_decision`] whose answer
+    /// never reached the child (the write failed): nobody decided it.
+    pub fn forget_decision(&mut self, approval_id: &str) {
+        self.pressed.remove(approval_id);
+        self.decisions.remove(approval_id);
+    }
+
+    /// How a card nobody can answer any more settles: `Denied` only when
+    /// the person pressed decline (or deny-and-stop) on it; otherwise
+    /// `Cancelled` with `reason` — the ask was abandoned, not refused.
+    fn abandoned_state(&self, approval_id: &str, reason: &str) -> ApprovalState {
+        match self.pressed.get(approval_id) {
+            Some(PersonDecision::Decline) | Some(PersonDecision::Cancel) => ApprovalState::Denied,
+            _ => ApprovalState::Cancelled { reason: Some(reason.to_owned()) },
+        }
     }
 
     /// Remember the bubble text for a submit carrying `display_text`.
@@ -1272,6 +1312,7 @@ impl CodexFold {
     /// ever moves the card after the press. A repeat resolution for an
     /// already-settled item is a no-op.
     fn resolve_approval(&mut self, item_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
+        self.pressed.remove(item_id);
         let Some(site) = self.approval_sites.remove(item_id) else { return };
         let mut card = site.card;
         if let Block::Approval { state: slot, .. } = &mut card {
@@ -1961,7 +2002,9 @@ impl CodexFold {
                 if !matches!(status, ToolStatus::Running) {
                     self.running_commands.remove(item.id());
                     let state = match status {
-                        ToolStatus::Cancelled => ApprovalState::Denied,
+                        // Declined on the wire: the person's decline when
+                        // they pressed one, else an ask Codex dropped.
+                        ToolStatus::Cancelled => self.abandoned_state(item.id(), CODEX_WITHDREW),
                         // B12: the approved run's own duration when the
                         // wire reported one — the card reads what the
                         // command took, never a frozen zero beside it.
@@ -2033,7 +2076,7 @@ impl CodexFold {
                 if !matches!(status, ToolStatus::Running) {
                     self.file_changes.remove(item.id());
                     let state = match status {
-                        ToolStatus::Cancelled => ApprovalState::Denied,
+                        ToolStatus::Cancelled => self.abandoned_state(item.id(), CODEX_WITHDREW),
                         _ => ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 },
                     };
                     self.resolve_approval(item.id(), state, &mut deltas);
@@ -2173,10 +2216,15 @@ impl CodexFold {
                 block_index: site.block_index,
                 block: card,
             });
-            // The gate settles with the run: denied when the turn was
-            // stopped, failed-marked (never a clean zero) otherwise.
-            let state = match end {
-                ToolStatus::Cancelled => ApprovalState::Denied,
+            // The gate settles with the run: a stopped turn leaves an
+            // approved run stopped (failed-marked), a declined one denied and
+            // an unanswered one cancelled ("Not run — turn stopped");
+            // failed-marked (never a clean zero) otherwise.
+            let state = match (end, self.pressed.get(&item_id)) {
+                (ToolStatus::Cancelled, Some(PersonDecision::Accept | PersonDecision::AcceptForSession)) => {
+                    ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 }
+                }
+                (ToolStatus::Cancelled, _) => self.abandoned_state(&item_id, TURN_STOPPED),
                 _ => ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 },
             };
             self.resolve_approval(&item_id, state, deltas);
@@ -2353,12 +2401,23 @@ mod tests {
             step_line(&mut fold, line, &mut |event| events.push(event));
         }
         let deltas = fold.abandon_live_turn("the agent process exited");
+        // Nobody answered it: not run, never the person's denial (S4).
         assert!(deltas.iter().any(|delta| matches!(delta,
-            Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. })), "{deltas:?}");
+            Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Cancelled { reason: Some(reason) }, .. }, .. }
+                if reason == CODEX_STOPPED)), "{deltas:?}");
         assert!(deltas.iter().any(|delta| matches!(delta,
             Delta::BlockAdded { block: Block::Generic { kind, .. }, .. } if kind == CHILD_EXITED_CARD)));
         assert!(matches!(deltas.last(), Some(Delta::TurnFinished { turn_id, .. }) if turn_id == "turn-1"));
         assert!(fold.abandon_live_turn("again").is_empty(), "nothing open twice");
+        // A card the person declined before the child died stays Denied.
+        let mut fold = CodexFold::new();
+        for line in lines {
+            step_line(&mut fold, line, &mut |_| {});
+        }
+        fold.record_decision("exec-1", "decline");
+        let deltas = fold.abandon_live_turn("the agent process exited");
+        assert!(deltas.iter().any(|delta| matches!(delta,
+            Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. })), "{deltas:?}");
     }
 
     /// docs/71 §6: a `turn/completed` that failed settles `Failed` with the
@@ -3686,10 +3745,11 @@ mod tests {
             )),
             "the finish settles the card to allowed"
         );
-        // Declined: denied verb and card, no run.
+        // Declined by the person: denied verb and card, no run.
         let mut fold = CodexFold::new();
         let frame = crate::frame::decode_line(&request("exec-2")).expect("ask decodes");
         let mut deltas = fold.apply(&frame);
+        fold.record_decision("exec-2", "decline");
         deltas.extend(fold.apply(&completed("exec-2", "declined")));
         assert!(
             deltas.iter().any(|delta| matches!(
@@ -3707,6 +3767,20 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the decline settles the card to denied"
+        );
+        // Declined with no press from the person (S4): an ask Codex
+        // dropped reads not-run, never a denial nobody made.
+        let mut fold = CodexFold::new();
+        let frame = crate::frame::decode_line(&request("exec-3")).expect("ask decodes");
+        let mut deltas = fold.apply(&frame);
+        deltas.extend(fold.apply(&completed("exec-3", "declined")));
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Cancelled { reason: Some(reason) }, .. }, .. }
+                    if reason == CODEX_WITHDREW
+            )),
+            "an unanswered decline settles not-run: {deltas:?}"
         );
     }
 

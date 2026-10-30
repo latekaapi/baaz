@@ -378,8 +378,10 @@ impl SessionView {
     /// request carries that id there any more (answered already, expired,
     /// or its child is gone), so no notification will ever settle it. It
     /// leaves here too — the parked tap, a field open on it, and the
-    /// inline card, which settles the way muse's `approvalNotFound` does
-    /// (`Denied`, nobody's name on it) — so it can never hold a key again.
+    /// inline card, which settles the way muse's `approvalNotFound` does:
+    /// `Cancelled` ("Not run — <Provider> withdrew it"), never `Denied`,
+    /// which would tell the person they refused it — so it can never hold
+    /// a key again.
     pub(super) fn drop_gone_approval(&mut self, approval_id: &str, cx: &mut Context<Self>) {
         use aui_protocol::{ApprovalState, Block, Delta};
         crate::baaz_log!("provider approval {approval_id}: the provider holds nothing under that id; dropping the card");
@@ -395,7 +397,7 @@ impl SessionView {
         });
         if let Some((turn_id, block_index, mut block)) = pending {
             if let Block::Approval { state, .. } = &mut block {
-                *state = ApprovalState::Denied;
+                *state = ApprovalState::Cancelled { reason: Some(format!("{} withdrew it", self.provider_kind().label())) };
             }
             self.store.apply_deltas(vec![Delta::BlockUpdated { turn_id, block_index, block }]);
         }

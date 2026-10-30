@@ -1672,7 +1672,8 @@ impl ClaudeFold {
 
     /// Close every live turn the child left open when its stream ended:
     /// the child is gone, so no `result` will ever settle them. Each open
-    /// approval card settles to denied and leaves the answerable queue —
+    /// approval card settles cancelled ("Not run — Claude Code stopped";
+    /// denied only when the person denied it) and leaves the answerable queue —
     /// nothing is left to answer it — and the newest open turn carries one
     /// [`CHILD_EXITED_CARD`] error block naming `reason`, then every open
     /// turn finishes. Nothing open means nothing to say: an idle child
@@ -1692,9 +1693,17 @@ impl ClaudeFold {
         }
         self.resolve_open_thinking(None, &mut deltas);
         self.flush_agents(&mut deltas);
+        // Nobody can answer them now: a card the person denied reads
+        // Denied, any other reads "Not run — Claude Code stopped" — never a
+        // refusal the person did not make.
         let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
         for request_id in carded {
-            self.resolve_approval_card(&request_id, ApprovalState::Denied, &mut deltas);
+            let state = if self.denied.contains(&request_id) {
+                ApprovalState::Denied
+            } else {
+                ApprovalState::Cancelled { reason: Some("Claude Code stopped".to_owned()) }
+            };
+            self.resolve_approval_card(&request_id, state, &mut deltas);
         }
         self.pending.clear();
         self.pending_unknown.clear();
