@@ -120,10 +120,6 @@ const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_m
 /// arrives at all (a failed fork, a send that never lands).
 pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 
-/// How far below the list's top an unmeasured reveal target must be before
-/// [`steer_to_row`] jumps to it by index: past about two screens of rows.
-const FAR_REVEAL_ROWS: usize = 48;
-
 /// Steer the sidebar list toward row `ix`; returns whether it jumped.
 ///
 /// `ensure_row_visible` (gpui's `scroll_to_reveal_item`) steers by the
@@ -132,14 +128,15 @@ const FAR_REVEAL_ROWS: usize = 48;
 /// out", so the reveal stalled with the row out of sight (an imported
 /// session near the bottom of a 2,400-row Unfiled, QA 2026-10-30). Such a
 /// target is placed at the top of the viewport by index instead, which
-/// needs no measurement; the next frame measures it. A target within
-/// [`FAR_REVEAL_ROWS`] of the top keeps the measured steer, which converges
-/// in a few frames and leaves the rows above it (a group's own header) in
-/// view — a jump there would put the row at the very top.
+/// needs no measurement; the next frame measures it. Only once the list
+/// has measured its top: before the first layout nothing is measured, and a
+/// jump then put even a near row at the very top, hiding the rows above it
+/// (its group header) — the measured steer handles that row next frame.
 fn steer_to_row(list: &gpui::ListState, ix: usize) -> bool {
     let top = list.logical_scroll_top();
     let laid_out = list.viewport_bounds().size.height > px(0.0);
-    if laid_out && ix > top.item_ix + FAR_REVEAL_ROWS && list.bounds_for_item(ix).is_none() {
+    let measured_top = list.bounds_for_item(top.item_ix).is_some();
+    if laid_out && measured_top && ix > top.item_ix && list.bounds_for_item(ix).is_none() {
         list.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
         return true;
     }
@@ -3179,7 +3176,11 @@ mod tests {
         // it at the very top and hide the rows above it (its group header).
         state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
         draw_b3c_list(vc, &g, &state);
-        assert!(!steer_to_row(&state, 6), "a near row is steered to, not jumped to");
+        assert!(!steer_to_row(&state, 2), "a near row is steered to, not jumped to");
+        // Nor before the first layout measured anything: a fresh list's
+        // first reveal steers, it does not jump.
+        let fresh = gpui::ListState::new(2000, gpui::ListAlignment::Top, px(100.0));
+        assert!(!steer_to_row(&fresh, 1), "nothing measured yet: no jump");
         b3c_teardown(&dir, guard, old);
     }
 
