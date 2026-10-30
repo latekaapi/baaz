@@ -1,7 +1,7 @@
 //! `--perf-turn`: what one streamed turn and one finished turn cost the UI
 //! thread at the owner's sizes (docs/51 §10, speed S4), headless.
 //!
-//! Two measurements, each the code a live window runs, driven in-process
+//! Three measurements, each the code a live window runs, driven in-process
 //! on gpui's test platform (no window on screen, no display, no child, no
 //! model, a throwaway state dir):
 //!
@@ -15,6 +15,11 @@
 //!   rows) with one row's index entry moved, the row's counter and time
 //!   moving to the top, and the next frame's visible list and grouping.
 //!   Median.
+//! - **`long_answer_chunk_p99_us`**: a 120 KB markdown answer streamed in
+//!   200-byte chunks through the same fold, each chunk followed by the
+//!   refresh and the markdown blocks the transcript draws
+//!   (`aui::transcript::parsed_markdown`, the renderer's own memoised
+//!   entry point). p99 over the chunks past 60 KB.
 //!
 //! Prints one JSON object on stdout; `scripts/perf-budgets.py` reads it as
 //! the `turn.*` metrics.
@@ -61,6 +66,14 @@ fn renamed(lines: &[String], from: &str, n: usize, j0: usize) -> Vec<String> {
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     values.get(values.len() / 2).copied().unwrap_or(0.0)
+}
+
+fn percentile(mut values: Vec<f64>, q: f64) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if values.is_empty() {
+        return 0.0;
+    }
+    values[((q * values.len() as f64) as usize).min(values.len() - 1)]
 }
 
 /// The sidebar at the owner's size: 2,600 Muse rows and their index
@@ -246,6 +259,88 @@ fn time_render_turns(
     median(per_turn)
 }
 
+/// The long answer: 120 KB of markdown in 200-byte chunks, the per-chunk
+/// transcript cost past 60 KB (refresh + the drawn markdown blocks).
+fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64) {
+    const PARAGRAPH: &str = "Address validation now branches per country, with the CA and GB rules covered by focused tests. The checkout form keeps its layout: the toolbar stays above the turn and never shifts it.";
+    let mut text = String::new();
+    let mut k = 0;
+    while text.len() < 120 * 1024 {
+        k += 1;
+        text.push_str(&format!("## Section {k}\n\n{PARAGRAPH} Section {k} carries **bold**, `code` and a [link](https://example.com/{k}).\n\n"));
+        for j in 0..4 {
+            text.push_str(&format!("- item {k}.{j}: {PARAGRAPH}\n"));
+        }
+        text.push_str("\n```rust\n");
+        for j in 0..4 {
+            text.push_str(&format!("fn step_{k}_{j}() -> u32 {{ {j} }}\n"));
+        }
+        text.push_str("```\n\n");
+    }
+    let sid = "synthetic-stress-300";
+    let frame = |method: &str, params: serde_json::Value| {
+        serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string()
+    };
+    let mut folder = provider_muse::replay::Folder::new();
+    let view = stress_view(window, cx);
+    let mut seq = 0usize;
+    let mut cursor = || {
+        seq += 1;
+        format!("v:long:{seq}")
+    };
+    let opening = vec![
+        frame("session/started", serde_json::json!({"viewCursor": cursor(), "session": {
+            "sessionId": sid, "workspaceRoot": "/tmp/perf-turn", "modelId": "muse-spark-1.3", "status": "idle",
+            "createdAt": "2026-09-10T00:00:00Z", "updatedAt": "2026-09-10T00:00:00Z", "turnCount": 0,
+            "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/perf-turn/session.jsonl",
+            "activeTurnId": null}})),
+        frame("turn/started", serde_json::json!({"viewCursor": cursor(), "sessionId": sid, "turnId": "t-long"})),
+        frame("item/completed", serde_json::json!({"viewCursor": cursor(), "sessionId": sid, "item": {
+            "itemId": "i-long-user", "kind": "userMessage", "turnId": "t-long", "revision": 1,
+            "status": "completed", "text": "Write the long report."}})),
+        frame("item/started", serde_json::json!({"viewCursor": cursor(), "sessionId": sid, "item": {
+            "itemId": "i-long", "kind": "agentMessage", "turnId": "t-long", "revision": 1,
+            "status": "inProgress", "text": ""}})),
+    ];
+    view.update(cx, |view, cx| {
+        for body in &opening {
+            view.fold_provider_events(folder.fold_line(body), cx);
+        }
+        view.refresh_render_cache();
+    });
+    let style = aui::transcript::ProseStyle {
+        ink: gpui::black(),
+        code_ink: gpui::black(),
+        code_bg: gpui::white(),
+        size: 13.0,
+        line_height: 1.5,
+        paragraph_gap: 10.0,
+    };
+    let mut samples = Vec::new();
+    let mut at_len = 0usize;
+    for start in (0..text.len()).step_by(200) {
+        let end = (start + 200).min(text.len());
+        let body = frame("item/delta", serde_json::json!({"viewCursor": cursor(), "sessionId": sid,
+            "itemId": "i-long", "field": "text", "delta": &text[start..end]}));
+        let events = folder.fold_line(&body);
+        let at = Instant::now();
+        let drawn = view.update(cx, |view, cx| {
+            view.fold_provider_events(events, cx);
+            view.refresh_render_cache();
+            view.last_answer_text()
+        });
+        let blocks = aui::transcript::parsed_markdown(&drawn, &style);
+        let elapsed = at.elapsed();
+        at_len = drawn.len();
+        assert!(!blocks.is_empty() || drawn.is_empty());
+        if start >= 60 * 1024 {
+            samples.push(elapsed.as_secs_f64() * 1e6);
+        }
+    }
+    assert!(at_len >= 100 * 1024, "the long answer streamed whole: {at_len} bytes");
+    (percentile(samples.clone(), 0.99), median(samples))
+}
+
 /// Run every measurement, print one JSON object, return it.
 pub fn run() -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("baaz-perf-turn-{}", std::process::id()));
@@ -265,6 +360,9 @@ pub fn run() -> serde_json::Value {
         let at_3000 = time_render_turns(&capture, &last_turn, 2_700, 200, window, cx);
         out.insert("render_turn_at_300_us".into(), serde_json::json!(at_300));
         out.insert("render_turn_at_3000_us".into(), serde_json::json!(at_3000));
+        let (p99, p50) = time_long_answer(window, cx);
+        out.insert("long_answer_chunk_p99_us".into(), serde_json::json!(p99));
+        out.insert("long_answer_chunk_p50_us".into(), serde_json::json!(p50));
         let args = crate::Args::perf(dir.clone());
         let harness = cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
         harness.update(cx, |harness, cx| {
