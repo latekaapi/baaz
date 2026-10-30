@@ -866,14 +866,61 @@ impl ClaudeCodeAdapter {
     /// scrub still applies), else the Baaz home's `CLAUDE_CONFIG_DIR`
     /// pair. Pure over the pin set plus the resolved home, so tests
     /// drive the routing without spawning.
+    #[cfg(test)]
     fn home_env_for(&self, session_id: &str) -> Option<Vec<(String, String)>> {
+        self.spawn_config_for(session_id).map(|config| crate::home::child_env(&config))
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` one spawn for `session_id` carries: `None`
+    /// for a legacy pin at the real `HOME` (no override), the pinned owner
+    /// home's `.claude` for a pin at another home (an imported session
+    /// from a fixture, docs/72), else the Baaz home. The ONE answer both
+    /// [`Self::home_env_for`] and the spawns read — the spawns once took
+    /// the Baaz home for every override, so an imported session's child
+    /// looked for its transcript in the wrong config dir and died "No
+    /// conversation found" (docs/72 §6).
+    fn spawn_config_for(&self, session_id: &str) -> Option<PathBuf> {
         if crate::home::is_legacy_resume(session_id) {
-            // A pin at another owner home (a fixture, docs/72) points the
-            // child at that home's config dir; the real `HOME` needs none.
-            crate::home::legacy_owner_home(session_id)
-                .map(|owner| crate::home::child_env(&crate::home::owner_config_dir(&owner)))
+            crate::home::legacy_owner_home(session_id).map(|owner| crate::home::owner_config_dir(&owner))
         } else {
-            Some(crate::home::child_env(&self.resolved_config_dir()))
+            Some(self.resolved_config_dir())
+        }
+    }
+
+    /// Spawn `launch` under its session's home ([`Self::spawn_config_for`]):
+    /// a legacy child at the real `HOME` keeps it (no override, the scrub
+    /// still applies); every other child names its config dir.
+    fn spawn_child(&self, launch: &SessionLaunch) -> std::io::Result<RunningChild> {
+        let config = self.spawn_config_for(&launch.session_id);
+        self.prepare_home(crate::home::is_legacy_resume(&launch.session_id));
+        match config {
+            None => RunningChild::spawn_legacy(&self.program, launch, &self.hub),
+            Some(config) => RunningChild::spawn(&self.program, launch, &self.hub, &config),
+        }
+    }
+
+    /// A resume launch run in its session's own folder: the cwd the
+    /// launch states, else the workspace this adapter knows, else the cwd
+    /// the stored transcript records (what P7 import read into the
+    /// record's workspace). A folder that no longer exists is dropped —
+    /// the child inherits the host's cwd as before (Claude Code still
+    /// finds the transcript by id) rather than failing the spawn as a
+    /// missing program.
+    fn with_resume_cwd(&self, launch: SessionLaunch) -> SessionLaunch {
+        if launch.cwd.is_some() {
+            return launch;
+        }
+        let known = self.workspace.lock().expect("workspace mutex").as_ref().map(|path| path.to_string_lossy().into_owned());
+        let cwd = known.or_else(|| self.stored_anywhere(&launch.session_id).and_then(|path| history::transcript_cwd(&path)));
+        match cwd {
+            Some(cwd) if std::path::Path::new(&cwd).is_dir() => SessionLaunch { cwd: Some(cwd), ..launch },
+            Some(cwd) => {
+                if crate::child::trace_enabled() {
+                    eprintln!("baaz: claude resume: folder {cwd} is gone; resuming from the host's cwd");
+                }
+                launch
+            }
+            None => launch,
         }
     }
 
@@ -887,19 +934,11 @@ impl ClaudeCodeAdapter {
                     .into(),
             });
         }
-        // A pre-consent legacy resume spawns under the owner's real home
-        // (no override, scrub kept) so `--resume` finds the transcript
-        // where it still lives; everything else spawns Baaz-homed.
-        let home_env = self.home_env_for(&launch.session_id);
-        self.prepare_home(home_env.is_none());
-        let running = match home_env {
-            None => RunningChild::spawn_legacy(&self.program, launch, &self.hub),
-            Some(_) => {
-                let config = self.resolved_config_dir();
-                RunningChild::spawn(&self.program, launch, &self.hub, &config)
-            }
-        }
-        .map_err(|error| match error.kind() {
+        // A pre-consent legacy resume spawns under the owner's home (no
+        // override at the real `HOME`, scrub kept) so `--resume` finds the
+        // transcript where it still lives; everything else spawns
+        // Baaz-homed.
+        let running = self.spawn_child(launch).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => ProviderError::launch_refusal(
                 provider::RefusalHint::NotInstalled,
                 "Claude Code isn't installed",
@@ -1176,16 +1215,7 @@ impl ClaudeCodeAdapter {
         let (launch, fallback) = self.relaunch_launch(launch)?;
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
-        let home_env = self.home_env_for(&launch.session_id);
-        self.prepare_home(home_env.is_none());
-        let running = match home_env {
-            None => RunningChild::spawn_legacy(&self.program, &launch, &self.hub),
-            Some(_) => {
-                let config = self.resolved_config_dir();
-                RunningChild::spawn(&self.program, &launch, &self.hub, &config)
-            }
-        }
-        .map_err(|error| {
+        let running = self.spawn_child(&launch).map_err(|error| {
             ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
         })?;
         *self.child.lock().expect("child mutex") = Some(running);
@@ -1316,16 +1346,22 @@ impl ClaudeCodeAdapter {
     /// matches still count — the CLI may resolve them; only none at all
     /// means the history is gone).
     fn transcript_exists_anywhere(&self, session_id: &str) -> bool {
-        if self.find_stored(session_id).is_some() {
-            return true;
+        self.stored_anywhere(session_id).is_some()
+    }
+
+    /// The session's own stored transcript ([`Self::find_stored`]), else
+    /// the first `<id>.jsonl` under any slug directory of its config dir.
+    fn stored_anywhere(&self, session_id: &str) -> Option<PathBuf> {
+        if let Some(found) = self.find_stored(session_id) {
+            return Some(found);
         }
         if session_id.is_empty() || session_id.contains('/') {
-            return false;
+            return None;
         }
         let projects = self.config_dir_for(session_id).join("projects");
-        let Ok(entries) = std::fs::read_dir(&projects) else { return false };
+        let entries = std::fs::read_dir(&projects).ok()?;
         let file_name = format!("{session_id}.jsonl");
-        entries.filter_map(|entry| entry.ok()).any(|entry| entry.path().join(&file_name).is_file())
+        entries.filter_map(|entry| entry.ok()).map(|entry| entry.path().join(&file_name)).find(|path| path.is_file())
     }
 
     /// The stored transcript for `session_id` by exact filename, over
@@ -1557,6 +1593,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     ));
                 }
                 let launch = argv::with_permission_mode(self.launch_for_resume(&session_id)?, mode);
+                let launch = self.with_resume_cwd(launch);
                 let ack = self.spawn_launch(&launch)?;
                 // Best-effort resume seeding (see `seed_history_echoes`):
                 // history already shown must not bubble again off the
@@ -2577,6 +2614,123 @@ mod tests {
         assert_eq!(adapter.config_dir_for(&id), fixture.join(".claude"), "history reads it too");
         crate::home::clear_legacy_resume(&id);
         assert!(adapter.home_env_for(&id).is_some(), "a cleared pin resumes Baaz-homed");
+    }
+
+    /// A stand-in `claude` that records where and under which config dir
+    /// it was started, then idles on stdin until hung up. Never a real CLI.
+    fn recording_claude(tag: &str) -> (PathBuf, PathBuf) {
+        let (dir, _) = seed_executable(tag, "unused", "");
+        let out = dir.join("seen");
+        std::fs::create_dir_all(&out).expect("record dir");
+        let body = format!(
+            "#!/bin/sh\npwd -P > '{out}/cwd.tmp'; mv '{out}/cwd.tmp' '{out}/cwd'\n\
+             printf '%s' \"$CLAUDE_CONFIG_DIR\" > '{out}/config.tmp'; mv '{out}/config.tmp' '{out}/config'\n\
+             exec cat >/dev/null\n",
+            out = out.display()
+        );
+        let script = dir.join("fake-claude");
+        std::fs::write(&script, body).expect("fake writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        (script, out)
+    }
+
+    /// What [`recording_claude`] saw: its cwd and its `CLAUDE_CONFIG_DIR`.
+    fn seen_by(out: &std::path::Path) -> (String, String) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(out.join("cwd").is_file() && out.join("config").is_file()) {
+            assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let read = |name: &str| std::fs::read_to_string(out.join(name)).expect("recorded").trim().to_owned();
+        (read("cwd"), read("config"))
+    }
+
+    /// THE 2026-10-30 IMPORT REOPEN. An imported session (docs/72) is
+    /// pinned on its owner home; its resume must start the child IN the
+    /// session's own folder (the cwd its transcript records — the record's
+    /// workspace) with `CLAUDE_CONFIG_DIR` = that home's `.claude`. The
+    /// spawn took the Baaz home for every override and no cwd at all, so
+    /// the child looked in the wrong config dir and died "No conversation
+    /// found". A Baaz-started session keeps the Baaz home and gains its
+    /// folder; a session whose folder is gone still resumes.
+    #[test]
+    fn an_imported_resume_spawns_in_its_folder_under_the_owner_home() {
+        let root = scratch_dir("import-resume");
+        let (owner, baaz, work) = (root.join("owner"), root.join("baaz-home"), root.join("cockpit"));
+        std::fs::create_dir_all(&work).expect("workspace");
+        std::fs::create_dir_all(&baaz).expect("baaz home");
+        let id = format!("imp-{}", std::process::id());
+        let transcript = |config: &std::path::Path, session: &str, cwd: &std::path::Path| {
+            let slug = config.join("projects").join(history::slug_for_cwd(cwd));
+            std::fs::create_dir_all(&slug).expect("slug dir");
+            let head = format!(
+                "{{\"type\":\"queue-operation\"}}\n{{\"type\":\"user\",\"cwd\":\"{}\",\"sessionId\":\"{session}\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n",
+                cwd.display()
+            );
+            std::fs::write(slug.join(format!("{session}.jsonl")), head).expect("transcript");
+        };
+        let resume = |adapter: &ClaudeCodeAdapter, session: &str| {
+            adapter.dispatch(Command::ResumeSession {
+                request_id: "r-resume".into(),
+                session_id: session.into(),
+                cursor: None,
+                metadata_only: false,
+                mode: None,
+            })
+        };
+
+        // Imported: the transcript lives only under the owner home.
+        transcript(&owner.join(".claude"), &id, &work);
+        let (script, out) = recording_claude("import-resume");
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(baaz.clone());
+        crate::home::pin_legacy_resume_at(&id, &owner);
+        let ack = resume(&adapter, &id);
+        let (cwd, config) = seen_by(&out);
+        drop(adapter);
+        crate::home::clear_legacy_resume(&id);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
+        assert_eq!(cwd, work.to_string_lossy(), "the child runs in the session's own folder");
+        assert_eq!(config, owner.join(".claude").to_string_lossy(), "and reads the owner home's config dir");
+
+        // Baaz-started: the Baaz home, and its folder too.
+        let own = format!("own-{}", std::process::id());
+        transcript(&baaz, &own, &work);
+        let (script, out) = recording_claude("own-resume");
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(baaz.clone());
+        let ack = resume(&adapter, &own);
+        let (cwd, config) = seen_by(&out);
+        drop(adapter);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
+        assert_eq!(cwd, work.to_string_lossy());
+        assert_eq!(config, baaz.to_string_lossy(), "a Baaz session stays Baaz-homed");
+
+        // The folder is gone: the resume still spawns (from the host's
+        // cwd — the CLI finds the transcript by id), never a refusal
+        // dressed as a missing program.
+        let gone_id = format!("gone-{}", std::process::id());
+        transcript(&owner.join(".claude"), &gone_id, &root.join("deleted-folder"));
+        let (script, out) = recording_claude("gone-resume");
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(baaz.clone());
+        crate::home::pin_legacy_resume_at(&gone_id, &owner);
+        let ack = resume(&adapter, &gone_id);
+        let (_, config) = seen_by(&out);
+        drop(adapter);
+        crate::home::clear_legacy_resume(&gone_id);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "a missing folder still resumes: {ack:?}");
+        assert_eq!(config, owner.join(".claude").to_string_lossy());
+
+        // No transcript anywhere: refused typed before any spawn.
+        let missing = format!("missing-{}", std::process::id());
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(baaz.clone());
+        crate::home::pin_legacy_resume_at(&missing, &owner);
+        let error = resume(&adapter, &missing).expect_err("nothing to resume");
+        crate::home::clear_legacy_resume(&missing);
+        assert_eq!(error.hint(), provider::RefusalHint::HistoryMissing, "typed: {error:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

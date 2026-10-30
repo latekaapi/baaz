@@ -83,6 +83,28 @@ pub fn stored_transcript_path(
     transcript_path_for_config(cwd, session_id, &config_dir(&home))
 }
 
+/// The cwd a stored transcript says its session ran in: the first line
+/// (of at most [`TRANSCRIPT_CWD_LINES`]) carrying a non-empty `cwd` — the
+/// same field P7 import reads into a record's workspace. `None` when the
+/// file is unreadable or names none. A resume runs its child there, so
+/// tools act in the session's own folder (docs/72 §6).
+pub fn transcript_cwd(transcript: &Path) -> Option<String> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(transcript).ok()?;
+    std::io::BufReader::new(file)
+        .lines()
+        .take(TRANSCRIPT_CWD_LINES)
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"cwd\""))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .find_map(|value| value.get("cwd").and_then(|cwd| cwd.as_str()).filter(|cwd| !cwd.is_empty()).map(str::to_owned))
+}
+
+/// Lines [`transcript_cwd`] reads before giving up: Claude Code stamps
+/// `cwd` on the first user line, after at most a handful of bookkeeping
+/// lines.
+pub const TRANSCRIPT_CWD_LINES: usize = 200;
+
 /// Session ids with stored transcripts under one slug directory (file stems
 /// of `*.jsonl`), newest first when metadata allows. Absent directory →
 /// empty, honestly.

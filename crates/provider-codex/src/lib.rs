@@ -1497,6 +1497,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "--version":
     print("codex-cli 0.200.0")
     sys.exit(0)
 log = open(os.environ["FAKE_CODEX_LOG"], "a", buffering=1)
+if os.environ.get("FAKE_CODEX_ENV_LOG"):
+    with open(os.environ["FAKE_CODEX_ENV_LOG"], "w") as seen:
+        seen.write(json.dumps({"codexHome": os.environ.get("CODEX_HOME"), "cwd": os.getcwd()}))
 out = threading.Lock()
 def write(answer):
     with out:
@@ -1925,6 +1928,60 @@ for line in sys.stdin:
             vec![("CODEX_HOME".to_owned(), "/tmp/baaz-state/codex-home".to_owned())],
             "the child writes to the Baaz home, nothing else"
         );
+    }
+
+    /// THE 2026-10-30 IMPORT REOPEN, Codex's side: an imported thread
+    /// pinned on its owner home (docs/72) starts its app-server — a real
+    /// spawn, of the fake — with `CODEX_HOME` = that home's `.codex`, and
+    /// `thread/resume` names the thread alone: no `cwd` override, so the
+    /// thread runs in the folder its rollout records (probed:
+    /// `fixtures/codex/resume.jsonl` answers the stored cwd).
+    #[test]
+    fn an_imported_resume_spawns_under_the_owner_codex_home() {
+        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
+        std::env::remove_var("FAKE_CODEX_RESUME_ERROR");
+        let (script, log) = scripted_effort_server();
+        let seen = log.with_file_name("env.json");
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        std::env::set_var("FAKE_CODEX_ENV_LOG", &seen);
+        std::env::set_var("FAKE_CODEX_MODEL", "gpt-test");
+        std::env::set_var("FAKE_CODEX_RESUME_EFFORT", "medium");
+        let scratch = script.parent().expect("temp dir").join("homes");
+        let fixture = scratch.join("fixture-owner");
+        std::fs::create_dir_all(fixture.join(".codex")).expect("fixture owner home");
+        let id = format!("imported-thread-{}", std::process::id());
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(scratch.join("owner-home"));
+        adapter.set_state_dir(scratch.join("state"));
+        adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        crate::home::pin_legacy_resume_at(&id, &fixture);
+        let ack = adapter.dispatch(Command::ResumeSession {
+            request_id: "r-resume".into(),
+            session_id: id.clone(),
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+        });
+        crate::home::clear_legacy_resume(&id);
+        std::env::remove_var("FAKE_CODEX_ENV_LOG");
+        drop(adapter);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
+        let env: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).expect("the fake recorded its env")).expect("json");
+        assert_eq!(
+            env["codexHome"].as_str(),
+            Some(fixture.join(".codex").to_string_lossy().as_ref()),
+            "the app-server reads the owner home's rollouts"
+        );
+        let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let resumed = method_frames(&frames, "thread/resume");
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0]["params"]["threadId"].as_str(), Some(id.as_str()));
+        assert!(resumed[0]["params"].get("cwd").is_none(), "the thread keeps its own folder: {}", resumed[0]);
     }
 
     #[test]

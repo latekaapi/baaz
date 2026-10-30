@@ -109,7 +109,7 @@ impl StdinWriter {
 
 /// Whether `BAAZ_TRACE=1` is set: the child's argv and stderr are echoed
 /// to Baaz's own stderr. Read once.
-fn trace_enabled() -> bool {
+pub(crate) fn trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("BAAZ_TRACE").is_ok_and(|v| v == "1"))
 }
@@ -256,7 +256,12 @@ impl RunningChild {
             command.current_dir(cwd);
         }
         if trace_enabled() {
-            eprintln!("baaz: claude spawn: {program} {} (cwd {:?})", launch.argv.join(" "), launch.cwd);
+            eprintln!(
+                "baaz: claude spawn: {program} {} (cwd {:?}, CLAUDE_CONFIG_DIR {})",
+                launch.argv.join(" "),
+                launch.cwd,
+                claude_home.map_or_else(|| "inherited".to_owned(), |home| home.display().to_string())
+            );
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");

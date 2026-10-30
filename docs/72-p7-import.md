@@ -127,6 +127,7 @@ Baaz's home).
 pin at another home (the probe's fixture) makes Claude Code read history from `<home>/.claude` and start the child
 with that `CLAUDE_CONFIG_DIR`, and Codex start its child with `CODEX_HOME=<home>/.codex`. This is what lets a live
 check reopen an imported session from a fixture home without touching the owner's.
+**Fixed 30 Oct: the imported reopen died "No conversation found".** Claude Code's spawns took the Baaz home for every `CLAUDE_CONFIG_DIR` override (ignoring the pinned home) and a resume ran with no cwd; now one `spawn_config_for` names the pinned home's `.claude` for both env and spawn, and a resume runs in the cwd its transcript records (the record's workspace; a folder that is gone falls back to the host cwd, a missing transcript stays the typed HistoryMissing). Codex was already right (`CODEX_HOME` = pinned `.codex`, `thread/resume` keeps the rollout's cwd). Tests: `an_imported_resume_spawns_in_its_folder_under_the_owner_home`, `an_imported_resume_spawns_under_the_owner_codex_home`.
 
 **Wiring (`crates/baaz/src/import_ui.rs`).** `Harness.import: ImportUi { cache, scanning, rescan_owed, sheet,
 journal, run, first_run }`. The scan + plan run on the background executor (`refresh_import_scan`); renders read the
