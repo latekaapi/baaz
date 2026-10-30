@@ -163,6 +163,8 @@
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
+//! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old\|lost>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would (`lost`: as a child dead twice would); no child, no turn; unknown parts record a step failure, free |
+//! | `child-lost` | the open lane hears its child die (`ConnectionLost`), as its adapter would report it: the quiet banner with Retry now; twice in a row lands the failure view. No child, no turn; no session records a step failure, free |
 //! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session records a step failure, free |
 //! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts record a step failure |
 //! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog records a step failure) — same warning |
@@ -430,6 +432,19 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
+    WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },
+    WindowVerb {
+        verb: "child-lost",
+        run: |this, _, _, cx| {
+            // The open lane hears its child die, as its adapter would say
+            // it (docs/71 §2): no child, no turn. No session records a
+            // step failure.
+            match this.active.clone() {
+                Some(view) => view.update(cx, |view, cx| view.step_child_lost(cx)),
+                None => record_step_failure("child-lost"),
+            }
+        },
+    },
     WindowVerb {
         verb: "signed-out",
         run: |this, _, _, cx| {
@@ -505,6 +520,46 @@ impl Harness {
     /// `provider-action:<provider>:<recheck|signin|signout>`: the Settings
     /// card's button, through the same intent handler its click reaches.
     /// An unknown provider or action records a step failure.
+    /// `launch-failed:<provider>[:<kind>]`: the typed failure view with
+    /// sample words — what a capture of docs/71 §3 needs without a child.
+    pub(crate) fn step_launch_failed(&mut self, rest: &str, cx: &mut Context<Self>) {
+        use crate::provider_status::FailureKind;
+        let (wire, kind) = rest.split_once(':').unwrap_or((rest, "crashed"));
+        let Some(provider) = crate::providers::ProviderId::parse_known(wire) else {
+            record_step_failure(&format!("launch-failed:{rest}"));
+            return;
+        };
+        let (kind, retry) = match kind {
+            "crashed" => (FailureKind::Crashed, None),
+            "not-installed" => (FailureKind::NotInstalled, None),
+            "signed-out" => (FailureKind::SignedOut, None),
+            "too-old" => (FailureKind::TooOld, None),
+            "lost" => (FailureKind::Crashed, Some(crate::app::ProviderOpenRetry::Revive)),
+            _ => {
+                record_step_failure(&format!("launch-failed:{rest}"));
+                return;
+            }
+        };
+        let revive = retry.is_some();
+        self.active = None;
+        self.provider_open_error = Some(crate::app::LaunchFailure {
+            session_id: revive.then(|| "s-launch-failed".to_owned()),
+            provider,
+            kind,
+            message: "provider unavailable: the agent process exited before answering".into(),
+            stderr_excerpt: vec![
+                "Error: failed to load config: ~/.config/sample/config.toml".into(),
+                "  caused by: unknown field `sample_key` at line 3, column 1".into(),
+                "the sample process exited with status 1".into(),
+            ],
+            retry: retry.unwrap_or(crate::app::ProviderOpenRetry::OpenNew {
+                project: None,
+                workspace: self.workspace(),
+            }),
+        });
+        cx.notify();
+    }
+
     pub(crate) fn step_provider_action(&mut self, rest: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         use aui::screens::{ProviderAction, ProviderIntent};
         let Some((wire, action)) = rest.split_once(':') else {

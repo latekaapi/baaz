@@ -73,6 +73,11 @@ pub enum RefusalHint {
     TurnOver,
     /// The cut point is not one the session can branch at.
     BadBoundary,
+    /// The agent's program is not on this machine: offer the install.
+    NotInstalled,
+    /// The agent's program is older than the seam supports: offer the
+    /// update.
+    TooOld,
 }
 
 /// How loudly a refusal is shown.
@@ -138,6 +143,19 @@ impl ProviderError {
             Self::Refused(refusal) => refusal.hint,
             _ => RefusalHint::None,
         }
+    }
+
+    /// The typed refusal an open gets when the agent's program is missing
+    /// (`hint` [`RefusalHint::NotInstalled`]) or below the floor
+    /// ([`RefusalHint::TooOld`]): connection-level, shown inline.
+    pub fn launch_refusal(hint: RefusalHint, title: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Refused(Refusal {
+            hint,
+            title: title.into(),
+            reason: reason.into(),
+            severity: Severity::Banner,
+            session_scoped: false,
+        })
     }
 
     /// The refusal's title, or a generic one by shape.

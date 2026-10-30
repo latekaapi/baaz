@@ -98,7 +98,7 @@ fn provider_open_work(
     workspace: String,
     epoch: u64,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<ProviderOpen, provider::ProviderError> {
+) -> Result<ProviderOpen, crate::app::OpenFailed> {
     let provider = factory(provider_id)?;
     let OpenExtras { model_provider, mode } = extras;
     #[cfg(not(test))]
@@ -107,13 +107,17 @@ fn provider_open_work(
     // `claude` settings, the last reported model) never reaches
     // the child — no `--model` flag without a pick — so the CLI
     // resolves its own default exactly as before.
-    let ack = provider.send(provider::Command::OpenSession {
-        request_id,
-        workspace: Some(workspace_bg),
-        model: None,
-        model_provider,
-        mode,
-    })?;
+    let ack = provider
+        .send(provider::Command::OpenSession {
+            request_id,
+            workspace: Some(workspace_bg),
+            model: None,
+            model_provider,
+            mode,
+        })
+        // The child is about to go with the provider: its stderr travels
+        // with the refusal, for the failure view's well (docs/71 §3).
+        .map_err(|error| crate::app::OpenFailed { error, stderr: provider.stderr_tail() })?;
     // Tests drain after the send, synchronously on the test
     // executor: no forwarding thread ever wakes the lane task.
     #[cfg(test)]
@@ -124,7 +128,7 @@ fn provider_open_work(
     // outlive every view, so it is hung up here, on this thread.
     if cancelled.is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::SeqCst)) {
         provider.shutdown();
-        return Err(provider::ProviderError::Unavailable { reason: "Baaz is quitting".into() });
+        return Err(provider::ProviderError::Unavailable { reason: "Baaz is quitting".into() }.into());
     }
     match ack {
         provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
@@ -140,8 +144,15 @@ fn provider_open_work(
         }),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("OpenSession answered {other:?} instead of a session"),
-        }),
+        }
+        .into()),
     }
+}
+
+/// A scripted stand-in's open failure (already in words): typed from the
+/// provider's status alone, with no stderr — there is no child.
+fn scripted_failure(reason: String) -> crate::app::OpenFailed {
+    crate::app::OpenFailed { error: provider::ProviderError::Rejected { reason }, stderr: Vec::new() }
 }
 
 /// What one `OpenSession` carries beyond its workspace, per the provider's
@@ -2506,7 +2517,7 @@ impl Harness {
                 // No switch is coming: release the session verbs waiting on
                 // it, like the failed `session/start` arm does.
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
-                this.fail_provider_open(provider_id, error.to_string(), retry_new, None, window, cx);
+                this.fail_provider_open(provider_id, error, retry_new, None, window, cx);
             }
         });
     }
@@ -2578,7 +2589,7 @@ impl Harness {
                     project: project.clone(),
                     workspace: workspace.clone(),
                 };
-                self.fail_provider_open(provider_id, reason, retry, None, window, cx);
+                self.fail_provider_open(provider_id, scripted_failure(reason), retry, None, window, cx);
             }
         }
     }
@@ -3242,12 +3253,15 @@ impl Harness {
     fn fail_provider_open(
         &mut self,
         provider: ProviderId,
-        reason: String,
+        failed: crate::app::OpenFailed,
         retry: ProviderOpenRetry,
         session_id: Option<String>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let kind = crate::provider_status::FailureKind::classify(provider, Some(&failed.error));
+        let reason = failed.error.to_string();
+        let stderr_excerpt = failed.stderr;
         if self.replacing.is_some() {
             self.session_switch_pending = false;
             self.abort_replacing(cx);
@@ -3276,7 +3290,41 @@ impl Harness {
             self.restore_right_for_session(&id, cx);
         }
         self.provider_open_error =
-            Some(ProviderOpenError { session_id, provider, error: reason, retry });
+            Some(LaunchFailure { session_id, provider, kind, message: reason, stderr_excerpt, retry });
+        cx.notify();
+    }
+
+    /// A lane's child died twice within [`crate::session::LOST_TWICE_WINDOW`]
+    /// without finishing a turn (docs/71 §2): it stops coming back on its
+    /// own, and the window lands on the typed failure view for it — the
+    /// view parks with its transcript and its attached lane, so Retry
+    /// brings it back and revives the child. A lane that is not the open
+    /// one keeps its banner instead.
+    pub(crate) fn fail_lost_lane(
+        &mut self,
+        view: &Entity<SessionView>,
+        message: String,
+        stderr_excerpt: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active.as_ref().is_some_and(|active| active == view) {
+            return;
+        }
+        let (session_id, provider) = {
+            let view = view.read(cx);
+            (view.session_id.clone(), view.provider_kind())
+        };
+        self.park_active(cx);
+        self.subscriptions.clear();
+        self.pending_id = Some(session_id.clone());
+        self.provider_open_error = Some(LaunchFailure {
+            session_id: Some(session_id),
+            provider,
+            kind: crate::provider_status::FailureKind::Crashed,
+            message,
+            stderr_excerpt,
+            retry: ProviderOpenRetry::Revive,
+        });
         cx.notify();
     }
 
@@ -3290,6 +3338,20 @@ impl Harness {
             ProviderOpenRetry::Reopen(record) => self.reopen_provider(*record, window, cx),
             ProviderOpenRetry::OpenNew { project, workspace } => {
                 self.open_on_provider(failure.provider, project, workspace, window, cx)
+            }
+            ProviderOpenRetry::Revive => {
+                let Some(session_id) = failure.session_id else { return };
+                let Some(at) = self.session_cache.iter().position(|(id, _)| *id == session_id) else {
+                    // The parked lane went (evicted, deleted): nothing to
+                    // revive in place, so the session reopens from its record.
+                    if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
+                        self.reopen_provider(record, window, cx);
+                    }
+                    return;
+                };
+                let (_, view) = self.session_cache.remove(at);
+                self.activate(view.clone(), false, window, cx);
+                view.update(cx, |view, cx| view.retry_lost_child(cx));
             }
         }
     }
@@ -3461,7 +3523,7 @@ impl Harness {
                     crate::baaz_log!("scripted provider resume failed ({}): {reason}", provider_id.label());
                     let session_id = record.session_id.clone();
                     let retry = ProviderOpenRetry::Reopen(Box::new(record.clone()));
-                    self.fail_provider_open(provider_id, reason, retry, Some(session_id), window, cx);
+                    self.fail_provider_open(provider_id, scripted_failure(reason), retry, Some(session_id), window, cx);
                 }
             }
             return;
@@ -3490,7 +3552,7 @@ impl Harness {
         // for the same reason.
         let registry = self.provider_sessions.clone();
         let mode = self.provider_open_mode(Some(&workspace), record.project.as_deref());
-        let work = move || -> (Result<ProviderOpen, provider::ProviderError>, usize) {
+        let work = move || -> (Result<ProviderOpen, crate::app::OpenFailed>, usize) {
             // The consent gate, on the background executor: before the
             // person's Move click an old session resumes from its
             // original location — the one child pinned on the owner's
@@ -3532,7 +3594,7 @@ impl Harness {
                 crate::baaz_log!("provider reopen: lazy-moved {moved} file(s) for {}", record.session_id);
             }
             crate::log::trace_mark("reopen gate done");
-            let result = (|| -> Result<ProviderOpen, provider::ProviderError> {
+            let result = (|| -> Result<ProviderOpen, crate::app::OpenFailed> {
                 let provider = factory(provider_id)?;
                 crate::log::trace_mark("reopen adapter connected");
                 #[cfg(not(test))]
@@ -3553,7 +3615,9 @@ impl Harness {
                             crate::baaz_log!("resume of {} rejected ({error}); lease notice on the view", record.session_id);
                             (record.session_id.clone(), true)
                         }
-                        Err(error) => return Err(error),
+                        // The child goes with the provider: its stderr
+                        // travels with the refusal (docs/71 §3).
+                        Err(error) => return Err(crate::app::OpenFailed { error, stderr: provider.stderr_tail() }),
                     };
                 crate::log::trace_mark("reopen resume acked");
                 // Tests drain after the resume, synchronously on the test
@@ -3603,7 +3667,7 @@ impl Harness {
                 crate::baaz_log!("provider resume failed ({}): {error}", provider_id.label());
                 this.fail_provider_open(
                     provider_id,
-                    error.to_string(),
+                    error,
                     retry_reopen,
                     Some(retry_id),
                     window,
@@ -4326,6 +4390,17 @@ impl Harness {
             // A destination that errors out before it acknowledged the pack
             // never sends `HandoffPackFailed`: fail its still-Prepared run
             // here, so the links roll back instead of lingering with it.
+            // The lane's child died twice in a row (docs/71 §2): the
+            // typed failure view takes the centre, and Retry revives it.
+            SessionEvent::ChildFailed { message, stderr_excerpt } => {
+                self.fail_lost_lane(&view, message.clone(), stderr_excerpt.clone(), cx);
+            }
+            // A lane's turn ended: its row's "Failed" follows the outcome,
+            // for every provider (docs/71 §6).
+            SessionEvent::ProviderTurnOutcome { session_id, failed, error } => {
+                let (session_id, failed, error) = (session_id.clone(), *failed, error.clone());
+                self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
+            }
             SessionEvent::Closed => {
                 let closed_id = view.read(cx).session_id.clone();
                 self.fail_handoff_for_lost_destination(
@@ -6561,6 +6636,142 @@ mod tests {
         lane_restore(state);
     }
 
+    /// docs/71 §2–§3: a lane whose child dies twice in a row lands the
+    /// typed failure view (kind Crashed, Retry revives) with the view
+    /// parked, not closed; Retry brings the same view back.
+    #[gpui::test]
+    fn a_lane_lost_twice_lands_the_failure_view_and_retry_brings_it_back(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("lost-twice");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.provider_open_error.is_none(), "one loss keeps the session on screen");
+            assert!(harness.active.as_ref() == Some(&view), "the lane stays open");
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
+        vc.run_until_parked();
+        let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let failure = harness.provider_open_error.clone().expect("the second loss lands the failure view");
+            assert_eq!(failure.provider, ProviderId::Codex);
+            assert_eq!(failure.kind, crate::provider_status::FailureKind::Crashed);
+            assert_eq!(failure.session_id.as_deref(), Some(session_id.as_str()));
+            assert!(matches!(failure.retry, ProviderOpenRetry::Revive));
+            assert!(harness.active.is_none(), "the failure view takes the centre");
+            assert!(
+                harness.session_cache.iter().any(|(id, parked)| *id == session_id && *parked == view),
+                "the view is parked with its lane, not closed"
+            );
+        });
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.retry_provider_open(window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.provider_open_error.is_none(), "Retry stands the failure down");
+            assert!(harness.active.as_ref() == Some(&view), "the same view comes back");
+        });
+        lane_restore(state);
+    }
+
+    /// docs/71 §6: a Claude Code or Codex turn's outcome reaches the row's
+    /// "Failed" through the lane (`ProviderTurnOutcome`), and a later
+    /// success stands it down.
+    #[gpui::test]
+    fn a_lane_turn_outcome_moves_the_rows_failed_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("turn-outcome");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
+        let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
+        let outcome = |failed: bool, error: Option<&str>| crate::session::SessionEvent::ProviderTurnOutcome {
+            session_id: session_id.clone(),
+            failed,
+            error: error.map(str::to_owned),
+        };
+        let failed = outcome(true, Some("stream disconnected"));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &failed, cx)));
+        vc.update(|_, cx| {
+            let error = baaz.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+            assert_eq!(error.as_deref(), Some("stream disconnected"), "the failure is recorded");
+        });
+        let ok = outcome(false, None);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &ok, cx)));
+        vc.update(|_, cx| {
+            let error = baaz.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+            assert!(error.is_none(), "a later success stands it down");
+        });
+        lane_restore(state);
+    }
+
+    /// docs/71 §3: a failed open is typed from the refusal's own hint, and
+    /// the kind decides the extra action (Install for a missing CLI).
+    #[gpui::test]
+    fn a_missing_cli_fails_the_open_typed_not_installed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("not-installed");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = std::sync::Arc::new(|id: ProviderId| {
+                    Err(provider::ProviderError::launch_refusal(
+                        provider::RefusalHint::NotInstalled,
+                        format!("{} isn't installed", id.label()),
+                        "codex was not found on PATH",
+                    ))
+                });
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let failure = baaz.read(cx).provider_open_error.clone().expect("the open failed inline");
+            assert_eq!(failure.kind, crate::provider_status::FailureKind::NotInstalled);
+            assert_eq!(failure.kind.action(), Some(crate::provider_status::FailureAction::Install));
+            assert!(failure.message.contains("not found on PATH"), "{}", failure.message);
+        });
+        lane_restore(state);
+    }
+
     #[gpui::test]
     fn a_failed_provider_connect_surfaces_an_error_and_opens_no_view(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -6591,7 +6802,7 @@ mod tests {
             let failure = harness.provider_open_error.clone().expect("the inline failure stands");
             assert!(failure.session_id.is_none(), "a fresh open never earned an id");
             assert_eq!(failure.provider, ProviderId::ClaudeCode);
-            assert!(failure.error.contains("no child here"), "the reason survives: {}", failure.error);
+            assert!(failure.message.contains("no child here"), "the reason survives: {}", failure.message);
         });
         lane_restore(state);
     }
@@ -6827,9 +7038,9 @@ mod tests {
                 assert_eq!(failure.session_id.as_deref(), Some("s-codex-old"));
                 assert_eq!(failure.provider, ProviderId::Codex);
                 assert!(
-                    failure.error.contains("no child here"),
+                    failure.message.contains("no child here"),
                     "the failure carries the error text: {}",
-                    failure.error
+                    failure.message
                 );
                 assert!(!harness.session_switch_pending, "the verbs waiting on the switch are released");
                 // The header names the clicked session, like the selected

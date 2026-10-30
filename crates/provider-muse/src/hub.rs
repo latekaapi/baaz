@@ -1015,6 +1015,15 @@ impl ProviderAdapter for MuseLane {
     fn read_usage(&self) -> Option<provider::UsageReport> {
         self.core.usage.lock().expect("usage mutex").clone()
     }
+
+    /// The shared child's last stderr lines (`muse serve`'s, for every
+    /// lane on the hub).
+    fn stderr_tail(&self) -> Vec<String> {
+        let tail = self.hub().stderr_tail();
+        let lines: Vec<String> = tail.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect();
+        let start = lines.len().saturating_sub(provider::STDERR_TAIL_LINES);
+        lines[start..].to_vec()
+    }
 }
 
 impl Drop for MuseLane {

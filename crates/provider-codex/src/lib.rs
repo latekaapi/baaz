@@ -114,6 +114,12 @@ pub struct CodexAdapter {
     /// Stand-in owner `$HOME` for home upkeep (tests): the dir whose
     /// `.codex` is linked from. Production reads the real `HOME`.
     home_override: Option<std::path::PathBuf>,
+    /// The current child's stderr, shared by every child this adapter
+    /// spawns: what the failure view quotes (docs/71 §3).
+    stderr: provider::StderrTail,
+    /// A revive took the dead child out and has not yet put a live one
+    /// back (its spawn or handshake failed): the session is still lost.
+    revive_owed: std::sync::atomic::AtomicBool,
 }
 
 /// Where the terminal relay lives: the bridge to spawn and the socket to
@@ -153,6 +159,8 @@ impl CodexAdapter {
             use_own_mcp: Mutex::new(false),
             state_override: Mutex::new(None),
             home_override: None,
+            stderr: provider::StderrTail::new(),
+            revive_owed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -316,19 +324,7 @@ impl CodexAdapter {
         let extra = self.spawn_args_for(open_id);
         self.prepare_home();
         let env = self.child_env();
-        let running =
-            RunningChild::spawn_with_env(&self.program, &extra, &env, Arc::clone(&self.fold), self.tx.clone())
-                .map_err(|error| ProviderError::Unavailable {
-                    reason: format!("could not spawn codex: {error}"),
-                })?;
-        running
-            .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
-            .map_err(Self::unavailable)?;
-        running
-            .send_notification("initialized", initialized_notification()["params"].clone())
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("the session child is unreachable: {error}"),
-            })?;
+        let running = self.spawn_handshaken(&extra, &env)?;
         let rows = Self::fetch_catalog(&running).map_err(Self::unavailable)?;
         self.remember_defaults(Self::defaults_of(&rows));
         // A requested model is taken as named even when the catalog does not
@@ -578,19 +574,7 @@ impl CodexAdapter {
         if !env.is_empty() {
             self.prepare_home();
         }
-        let running =
-            RunningChild::spawn_with_env(&self.program, &extra, &env, Arc::clone(&self.fold), self.tx.clone())
-                .map_err(|error| ProviderError::Unavailable {
-                    reason: format!("could not spawn codex: {error}"),
-                })?;
-        running
-            .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
-            .map_err(Self::unavailable)?;
-        running
-            .send_notification("initialized", initialized_notification()["params"].clone())
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("the session child is unreachable: {error}"),
-            })?;
+        let running = self.spawn_handshaken(&extra, &env)?;
         let answer = running
             .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
             .map_err(Self::unavailable)?;
@@ -651,6 +635,93 @@ impl CodexAdapter {
         Ok(Ack::Session { session_id: resumed_session, title: None })
     }
 
+    /// Spawn a session child with `extra` args and `env`, draining its
+    /// stderr into the adapter's ring, and shake hands: `initialize`, then
+    /// the `initialized` notification.
+    fn spawn_handshaken(&self, extra: &[String], env: &[(String, String)]) -> Result<RunningChild, ProviderError> {
+        let running = RunningChild::spawn_session(
+            &self.program,
+            extra,
+            env,
+            Arc::clone(&self.fold),
+            self.tx.clone(),
+            self.stderr.clone(),
+        )
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProviderError::launch_refusal(
+                provider::RefusalHint::NotInstalled,
+                "Codex isn't installed",
+                format!("could not spawn codex: {error}"),
+            ),
+            _ => ProviderError::Unavailable { reason: format!("could not spawn codex: {error}") },
+        })?;
+        let shaken = running
+            .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
+            .map_err(Self::unavailable)
+            .and_then(|_| {
+                running
+                    .send_notification("initialized", initialized_notification()["params"].clone())
+                    .map_err(|error| ProviderError::Unavailable {
+                        reason: format!("the session child is unreachable: {error}"),
+                    })
+            });
+        if let Err(error) = shaken {
+            // The child died on its first breath: let its stderr land, so
+            // the failure view quotes what it said.
+            let _ = self.stderr.settled(Duration::from_millis(400));
+            return Err(error);
+        }
+        Ok(running)
+    }
+
+    /// Whether the held child died under the session (its stdout ended on
+    /// its own): the next send, or a `FollowSession`, revives it.
+    fn child_lost(&self) -> bool {
+        match self.child.lock().expect("child mutex").as_ref() {
+            Some(running) => running.is_lost(),
+            None => self.revive_owed.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// Bring a lost child back (docs/71 §2): a fresh `codex app-server`,
+    /// the handshake, and `thread/resume` of the held thread — the path a
+    /// reopen takes, minus the history replay (the view already holds the
+    /// transcript, and folding it twice would echo every turn). Then the
+    /// connection is restored. `Ok(false)` when nothing was lost.
+    fn revive(&self, session_id: &str) -> Result<bool, ProviderError> {
+        self.check_session(session_id)?;
+        if !self.child_lost() {
+            return Ok(false);
+        }
+        // The dead child goes first: its pump already settled what it
+        // asked, and its retirement keeps a late end of stream quiet.
+        if let Some(mut dead) = self.child.lock().expect("child mutex").take() {
+            dead.shutdown();
+        }
+        self.revive_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let extra = self.spawn_args_for(session_id);
+        let env = self.resume_env_for(session_id);
+        if !env.is_empty() {
+            self.prepare_home();
+        }
+        let running = self.spawn_handshaken(&extra, &env)?;
+        let mode = self.fold.lock().expect("fold mutex").permission_mode();
+        let answer = running
+            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
+            .map_err(Self::unavailable)?;
+        let (thread_id, _, _) = child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
+            reason: "thread/resume answered without thread ids".into(),
+        })?;
+        *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
+        // A new child knows no catalog yet: a Default reset reads it again.
+        *self.model_defaults.lock().expect("defaults mutex") = None;
+        self.refresh_rate_limits(&running);
+        *self.child.lock().expect("child mutex") = Some(running);
+        self.revive_owed.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.tx.send(ProviderEvent::ConnectionRestored);
+        Ok(true)
+    }
+
     /// Announce the mode `session_id` runs under, when it moved: what the
     /// server's answer reports, else what the open asked for. Neither
     /// known announces nothing — the chip is never told a guess.
@@ -699,6 +770,9 @@ impl CodexAdapter {
         display_text: Option<&str>,
     ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
+        // The child died under the session: this turn resumes the thread
+        // on a fresh one rather than failing against a dead pipe.
+        self.revive(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
         // A turn sent before a resume's effort lookup landed reads the
         // level it settles, never a half-known one.
@@ -1003,11 +1077,11 @@ impl ProviderAdapter for CodexAdapter {
             });
         }
         if !codex_version_supported(&version) {
-            return Err(ProviderError::Rejected {
-                reason: format!(
-                    "codex {version} is below the floor {CODEX_VERSION_FLOOR}; refusing"
-                ),
-            });
+            return Err(ProviderError::launch_refusal(
+                provider::RefusalHint::TooOld,
+                "Codex needs an update",
+                format!("codex {version} is below the floor {CODEX_VERSION_FLOOR}; refusing"),
+            ));
         }
         *self.connected.lock().expect("connected mutex") = true;
         *self.version.lock().expect("version mutex") = Some(version.clone());
@@ -1225,8 +1299,11 @@ impl ProviderAdapter for CodexAdapter {
             Command::PageTranscript { .. } => Err(ProviderError::Rejected {
                 reason: "thread/read was never captured; follow the live session instead".into(),
             }),
-            Command::FollowSession { .. } => {
-                self.require_child()?;
+            // "Retry now" on a lost child: revive it here, without a turn.
+            Command::FollowSession { session_id, .. } => {
+                if !self.revive(&session_id)? {
+                    self.require_child()?;
+                }
                 Ok(Ack::Accepted)
             }
             Command::UnfollowSession { .. } => Ok(Ack::Accepted),
@@ -1276,6 +1353,10 @@ impl ProviderAdapter for CodexAdapter {
     /// refresh never blocks on a streaming turn.
     fn read_usage(&self) -> Option<provider::UsageReport> {
         self.fold.try_lock().ok()?.account().usage_report()
+    }
+
+    fn stderr_tail(&self) -> Vec<String> {
+        self.stderr.lines()
     }
 
     fn shutdown(&mut self) {

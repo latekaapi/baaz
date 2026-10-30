@@ -833,7 +833,7 @@ impl Harness {
     /// One row action. Terminal work (prefills) and the Codex login only
     /// park flags here — `on_frame` runs them with the window and the
     /// entity context; everything else applies at once.
-    fn connect_provider_action(
+    pub(crate) fn connect_provider_action(
         &mut self,
         id: ProviderId,
         action: ProviderAction,
@@ -1084,7 +1084,7 @@ impl Harness {
 
     /// The provider banner's Sign in: Muse opens the sheet, Codex starts
     /// (or cancels) its flow, Claude types its sign-in into the terminal.
-    fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         // The person is acting on it: from here the status decides when the
         // banner goes (the next probe that reads Connected).
         self.typed_signed_out.remove(&id);

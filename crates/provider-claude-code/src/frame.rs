@@ -980,6 +980,33 @@ fn decode_result_model(value: &Value) -> Option<String> {
     best_main.or(best).map(|(id, _)| id.clone())
 }
 
+/// The failure a `result` frame reports, when it is one: `is_error`, or an
+/// `error_*` subtype (`error_during_execution`, `error_max_turns`). The
+/// words are the frame's own — its `result` text, else its `errors[]`,
+/// else the subtype — never invented. `None` for a successful result and
+/// for any other frame.
+pub fn result_failure(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("result") {
+        return None;
+    }
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
+    let is_error = value.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+    if !is_error && !subtype.starts_with("error") {
+        return None;
+    }
+    let text = value.get("result").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
+    let errors = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
+        .filter(|joined| !joined.is_empty());
+    Some(
+        text.map(str::to_owned)
+            .or(errors)
+            .unwrap_or_else(|| if subtype.is_empty() { "the turn failed".into() } else { subtype.replace('_', " ") }),
+    )
+}
+
 fn decode_turn_result(value: &Value) -> Frame {
     let usage = value.get("usage");
     let uint = |key: &str| usage.and_then(|usage| usage.get(key)).and_then(Value::as_u64);
@@ -1190,6 +1217,22 @@ fn decode_mcp_servers(inner: &Value) -> Option<Vec<crate::argv::McpServerStatus>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/71 §6: an error `result` is a failure in its own words; a
+    /// successful one, or any other frame, is not.
+    #[test]
+    fn an_error_result_reads_as_a_failure_in_its_own_words() {
+        let failed = serde_json::json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+            "errors": ["API Error: overloaded"]});
+        assert_eq!(result_failure(&failed).as_deref(), Some("API Error: overloaded"));
+        let said = serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "result": "Prompt is too long"});
+        assert_eq!(result_failure(&said).as_deref(), Some("Prompt is too long"));
+        let bare = serde_json::json!({"type": "result", "subtype": "error_max_turns"});
+        assert_eq!(result_failure(&bare).as_deref(), Some("error max turns"));
+        let ok = serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": "done"});
+        assert_eq!(result_failure(&ok), None);
+        assert_eq!(result_failure(&serde_json::json!({"type": "assistant", "is_error": true})), None);
+    }
 
     fn fixture(name: &str) -> Vec<String> {
         let path = format!(

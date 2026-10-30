@@ -82,6 +82,11 @@ const COUNTDOWN_TICK: Duration = Duration::from_secs(1);
 /// `overloaded` or `backpressured`. The wire carries no `retryAfter`, so this is
 /// a client-side choice and a deliberately unhurried one.
 const RETRY_BACKOFF: Duration = Duration::from_secs(3);
+
+/// A lane whose child dies twice within this long without finishing a turn
+/// stops coming back on its own: the banner gives way to the typed failure
+/// view (docs/71 §2), never a restart loop.
+pub(crate) const LOST_TWICE_WINDOW: Duration = Duration::from_secs(30);
 /// `view/page` takes 1–1000; the transport uses the ceiling and so does the
 /// history backfill.
 const PAGE_LIMIT: u32 = 1000;
@@ -350,6 +355,26 @@ pub enum SessionEvent {
     SignedOut,
     /// The child exited; the application owns the reconnect.
     Closed,
+    /// The lane's child died twice within [`LOST_TWICE_WINDOW`] without
+    /// finishing a turn (docs/71 §2): the application lands the typed
+    /// failure view on this session, and Retry revives it.
+    ChildFailed {
+        /// The last loss, in the adapter's words.
+        message: String,
+        /// The child's last stderr lines.
+        stderr_excerpt: Vec<String>,
+    },
+    /// A lane's turn ended, and whether it failed (with the provider's
+    /// words when it did): the row's "Failed" stands on this for every
+    /// provider (docs/71 §6, closing the gap docs/70 §7 item 4 left).
+    ProviderTurnOutcome {
+        /// The lane session.
+        session_id: String,
+        /// The turn failed.
+        failed: bool,
+        /// The provider's message for a failure.
+        error: Option<String>,
+    },
     /// A window-level slash command typed in the composer or picked from its
     /// `/` menu. The session cannot act on the window, so it hands the command
     /// up to `Harness::run_window_command` — the same dispatch the ⌘K palette
@@ -922,6 +947,10 @@ pub struct SessionView {
     /// The banner shows the Auto-fallback notice (a model pick left Auto
     /// for Ask), which a later mode pick takes down.
     banner_is_mode_fallback: bool,
+    /// When the lane's child last died with no turn finished since: a
+    /// second death inside [`LOST_TWICE_WINDOW`] turns the banner into the
+    /// failure view. A finished turn clears it.
+    lost_at: Option<std::time::Instant>,
     /// The billing guard's banner, and whether it is refusing turns.
     tier_banner: Option<TierBanner>,
     /// A live Muse draft opened while Muse itself is still starting (it
@@ -1310,6 +1339,7 @@ impl SessionView {
             lease_notice: None,
             banner: None,
             banner_is_mode_fallback: false,
+            lost_at: None,
             banner_action: None,
             tier_banner: None,
             muse_starting: false,
@@ -2476,6 +2506,9 @@ pub enum BannerAction {
     RetryShell(String),
     /// Open Settings → Providers (a session on a disabled provider).
     OpenProviders,
+    /// Revive a lane whose child died, now, without sending a turn
+    /// ("Retry now", docs/71 §2).
+    RetryNow,
 }
 
 

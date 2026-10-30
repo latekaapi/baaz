@@ -1848,22 +1848,32 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let message = self.banner.clone()?;
         let label = match self.banner_action {
             Some(crate::session::BannerAction::OpenProviders) => "Enable",
+            Some(crate::session::BannerAction::RetryNow) => "Retry now",
             Some(_) => "Retry",
             None => "Dismiss",
         };
+        // A lost child is not an error the person made: the quiet banner
+        // (docs/71 §2), with its way back.
+        let lost = self.banner_action == Some(crate::session::BannerAction::RetryNow);
+        let kind = if lost { BannerKind::Info } else { BannerKind::Error };
         let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.run_banner_action(cx));
-        Some(
+        let row = banner("session-banner", kind, vec![BannerRun::Text(message.clone().into())])
+            .action(label, BannerActionStyle::Ghost)
+            .on_action(move |window, cx| press(&(), window, cx));
+        // The banner's button is the library's and takes no role of its
+        // own: the lost-child banner names itself and its action here, so
+        // a screen reader (and relay) can find "Retry now".
+        let row = if lost {
             div()
-                .w_full()
-                .px(px(TRANSCRIPT_PAD_X))
-                .pb(px(scale::SP_3))
-                .child(centred(
-                    banner("session-banner", BannerKind::Error, vec![BannerRun::Text(message.into())])
-                        .action(label, BannerActionStyle::Ghost)
-                        .on_action(move |window, cx| press(&(), window, cx)),
-                ))
-                .into_any_element(),
-        )
+                .id("session-banner-lost")
+                .role(gpui::Role::Status)
+                .aria_label(format!("{message} Retry now"))
+                .child(row)
+                .into_any_element()
+        } else {
+            row.into_any_element()
+        };
+        Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element())
     }
 
     /// The billing guard's banner, directly over the composer

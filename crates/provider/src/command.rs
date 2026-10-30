@@ -330,6 +330,12 @@ pub enum Command {
     /// Follow a session's live transcript. With `after`, the provider
     /// replays `(after, head]` before any live event — one gapless sequence.
     /// Absent means from now: no replay.
+    ///
+    /// On a session whose child was lost ([`crate::ProviderEvent::ConnectionLost`])
+    /// this is also the "Retry now" press: an adapter that revives its
+    /// own child does so here, without sending a turn, and reports
+    /// [`crate::ProviderEvent::ConnectionRestored`] once the session is
+    /// attached again.
     FollowSession {
         /// The session to follow.
         session_id: String,

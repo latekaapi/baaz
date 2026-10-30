@@ -197,6 +197,14 @@ pub enum ProviderEvent {
     ConnectionRestored,
     /// The provider is gone: child exited, socket down, heartbeat lost.
     /// Reconnect, then resume from the last observed position.
+    ///
+    /// The seam's contract (docs/71 §2): by the time this arrives the
+    /// adapter has closed the turn the child was running (its deltas came
+    /// first), settled every approval and question the child raised as
+    /// cancelled — so no later decision can reach a new child under a
+    /// stale id, and [`crate::Command::ListPending`] lists none of them —
+    /// and keeps the session: the next send (or a
+    /// [`crate::Command::FollowSession`]) revives it.
     ConnectionLost {
         /// What went wrong.
         reason: String,

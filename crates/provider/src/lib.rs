@@ -47,6 +47,7 @@ mod error;
 mod event;
 pub mod facts;
 pub mod scripted;
+pub mod stderr_tail;
 mod traits;
 pub mod usage;
 pub mod version;
@@ -58,7 +59,8 @@ pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
 pub use crossbeam_channel::Receiver;
 pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
-pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter};
+pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter, STDERR_TAIL_LINES};
+pub use stderr_tail::StderrTail;
 pub use usage::{window_label, UsageReport, UsageWindow};
 pub use version::{compare_versions, parse_version, version_at_least};
 

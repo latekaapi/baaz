@@ -1684,6 +1684,10 @@ impl ClaudeFold {
         self.forget_submissions();
         let mut deltas = Vec::new();
         if self.open.is_empty() {
+            // No turn to card, but nothing the dead child asked survives
+            // it either: a late decision must find nothing to answer.
+            self.pending.clear();
+            self.pending_unknown.clear();
             return deltas;
         }
         self.resolve_open_thinking(None, &mut deltas);
@@ -3063,8 +3067,28 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
             emit(ProviderEvent::TurnIdentified { session_id: session_id.clone(), accepted, turn_id });
         }
     }
+    // A `result` that is an error (`is_error`, or an `error_*` subtype)
+    // ended the turn failed: the row's "Failed" stands on this (docs/71
+    // §6), after the deltas that closed the turn.
+    let failed = (line.contains("\"result\"") && line.contains("error"))
+        .then(|| serde_json::from_str::<serde_json::Value>(line).ok())
+        .flatten()
+        .and_then(|value| crate::frame::result_failure(&value));
+    let failed_turn = failed.as_ref().and_then(|_| {
+        deltas.iter().rev().find_map(|delta| match delta {
+            Delta::TurnFinished { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        })
+    });
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
+    }
+    if let (Some(message), Some(turn_id), Some(session_id)) = (failed, failed_turn, session_id.clone()) {
+        emit(ProviderEvent::TurnSettled {
+            session_id,
+            turn_id,
+            outcome: provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false },
+        });
     }
     if let Some(tap) = tap {
         emit(tap);

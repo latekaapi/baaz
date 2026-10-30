@@ -261,6 +261,111 @@ pub enum Headline {
     Connected,
 }
 
+// ------------------------------------------------- a launch that failed
+
+/// Why a provider could not start, typed from the status/advisory model
+/// above and the open's own refusal (docs/71 §3): what the "Couldn't start"
+/// view says in one sentence and which action it offers beside Retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The CLI is not on this machine: Install.
+    NotInstalled,
+    /// The login is gone: Sign in.
+    SignedOut,
+    /// The CLI is older than the floor: Update.
+    TooOld,
+    /// It started and died (or never answered): the stderr says why.
+    Crashed,
+    /// The provider refused the open, with its typed hint.
+    Refused(provider::RefusalHint),
+}
+
+impl FailureKind {
+    /// Type a failed open: the refusal's own hint first (the adapter
+    /// decides it, never parsed from text), then what the latest status
+    /// says about the provider, else a crash.
+    pub fn classify(id: ProviderId, error: Option<&provider::ProviderError>) -> Self {
+        use provider::RefusalHint as H;
+        match error.map(provider::ProviderError::hint) {
+            Some(H::NotInstalled) => return FailureKind::NotInstalled,
+            Some(H::TooOld) => return FailureKind::TooOld,
+            Some(H::SignedOut) => return FailureKind::SignedOut,
+            Some(H::None) | None => {}
+            Some(hint) => return FailureKind::Refused(hint),
+        }
+        let status = live_statuses().into_iter().find(|status| status.provider == id);
+        Self::from_status(status.as_ref())
+    }
+
+    /// What a status (when there is one) says a failure is: not installed,
+    /// too old, signed out — else a crash.
+    pub fn from_status(status: Option<&ProviderStatus>) -> Self {
+        let Some(status) = status else { return FailureKind::Crashed };
+        if status.checked_at.is_some() && status.installed == Installed::No {
+            return FailureKind::NotInstalled;
+        }
+        if matches!(status.advisory, Advisory::TooOld { .. }) {
+            return FailureKind::TooOld;
+        }
+        if status.auth == Auth::SignedOut {
+            return FailureKind::SignedOut;
+        }
+        FailureKind::Crashed
+    }
+
+    /// The view's one sentence for this kind, naming the provider.
+    pub fn sentence(self, label: &str) -> String {
+        match self {
+            FailureKind::NotInstalled => format!("{label} isn't installed on this Mac."),
+            FailureKind::SignedOut => format!("{label} is signed out. Sign in, then try again."),
+            FailureKind::TooOld => format!("This {label} is older than Baaz supports. Update it, then try again."),
+            FailureKind::Crashed => format!("{label} stopped before it could answer."),
+            FailureKind::Refused(provider::RefusalHint::HeldElsewhere) => {
+                format!("{label} says this session is open somewhere else.")
+            }
+            FailureKind::Refused(provider::RefusalHint::SessionGone) => {
+                format!("{label} no longer has this session.")
+            }
+            FailureKind::Refused(provider::RefusalHint::RetryLater) => format!("{label} is busy. Try again in a moment."),
+            FailureKind::Refused(_) => format!("{label} refused to start this session."),
+        }
+    }
+
+    /// The action this kind implies beside Retry, when there is one.
+    pub fn action(self) -> Option<FailureAction> {
+        match self {
+            FailureKind::NotInstalled => Some(FailureAction::Install),
+            FailureKind::SignedOut => Some(FailureAction::SignIn),
+            FailureKind::TooOld => Some(FailureAction::Update),
+            FailureKind::Crashed | FailureKind::Refused(_) => None,
+        }
+    }
+}
+
+/// The typed way out a failure view offers beside Retry, each reusing the
+/// D5 flow of the same name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureAction {
+    /// The setup sheet with the install command typed.
+    Install,
+    /// The provider's own sign-in (Muse's sheet, Codex's row, Claude's
+    /// terminal).
+    SignIn,
+    /// The setup sheet with the update command typed.
+    Update,
+}
+
+impl FailureAction {
+    /// The button's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            FailureAction::Install => "Install",
+            FailureAction::SignIn => "Sign in",
+            FailureAction::Update => "Update",
+        }
+    }
+}
+
 // ------------------------------------------------------------- the cache
 
 /// `<state dir>/provider-status.json`: every status, written atomically
@@ -2846,5 +2951,38 @@ mod tests {
         crate::projects::write(&stored);
         assert!(!is_first_run(), "a stored project ends first run");
         let _ = env;
+    }
+
+    /// docs/71 §3: a failed open's kind comes from the refusal's hint
+    /// first, then the status, else a crash — and the kind decides the
+    /// action beside Retry.
+    #[test]
+    fn a_launch_failure_is_typed_from_its_hint_then_the_status() {
+        let typed = |hint| provider::ProviderError::launch_refusal(hint, "t", "r");
+        let id = ProviderId::Codex;
+        assert_eq!(FailureKind::classify(id, Some(&typed(provider::RefusalHint::NotInstalled))), FailureKind::NotInstalled);
+        assert_eq!(FailureKind::classify(id, Some(&typed(provider::RefusalHint::TooOld))), FailureKind::TooOld);
+        assert_eq!(FailureKind::classify(id, Some(&typed(provider::RefusalHint::SignedOut))), FailureKind::SignedOut);
+        assert_eq!(
+            FailureKind::classify(id, Some(&typed(provider::RefusalHint::HeldElsewhere))),
+            FailureKind::Refused(provider::RefusalHint::HeldElsewhere)
+        );
+        let mut status = ProviderStatus::checking(id);
+        assert_eq!(FailureKind::from_status(Some(&status)), FailureKind::Crashed, "nothing known is a crash");
+        status.checked_at = Some(1);
+        status.installed = Installed::No;
+        assert_eq!(FailureKind::from_status(Some(&status)), FailureKind::NotInstalled);
+        status.installed = Installed::yes("codex-cli 0.1.0", "/bin/codex");
+        status.advisory = Advisory::TooOld { need: "0.144.6".into() };
+        assert_eq!(FailureKind::from_status(Some(&status)), FailureKind::TooOld);
+        status.advisory = Advisory::None;
+        status.auth = Auth::SignedOut;
+        assert_eq!(FailureKind::from_status(Some(&status)), FailureKind::SignedOut);
+        assert_eq!(FailureKind::from_status(None), FailureKind::Crashed);
+        assert_eq!(FailureKind::NotInstalled.action(), Some(FailureAction::Install));
+        assert_eq!(FailureKind::SignedOut.action(), Some(FailureAction::SignIn));
+        assert_eq!(FailureKind::TooOld.action(), Some(FailureAction::Update));
+        assert_eq!(FailureKind::Crashed.action(), None);
+        assert!(FailureKind::Crashed.sentence("Codex").starts_with("Codex"));
     }
 }

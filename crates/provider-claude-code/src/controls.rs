@@ -255,6 +255,9 @@ pub struct ControlHub {
     /// refusal, a failed write, a lost child): what a held Read-only turn
     /// waits on.
     mcp_settled: Condvar,
+    /// The current child's stderr, shared by every child this adapter
+    /// spawns (see [`provider::StderrTail`]): what the failure view quotes.
+    pub(crate) stderr: provider::StderrTail,
 }
 
 impl ControlHub {
@@ -284,6 +287,7 @@ impl ControlHub {
             mcp_seq: AtomicU64::new(0),
             mcp: Mutex::new(McpLayer::default()),
             mcp_settled: Condvar::new(),
+            stderr: provider::StderrTail::new(),
         }
     }
 

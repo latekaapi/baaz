@@ -266,7 +266,11 @@ impl SessionView {
                 // the person keeps their words. An `Unsupported` refusal
                 // shows its reason, never silence.
                 self.remove_optimistic_turn(&optimistic_id);
-                self.report_provider_retryable(&error, BannerAction::RetryTurn(text.clone()), cx);
+                // A lost lane whose revive failed: the child died again,
+                // which the lost-child rule owns (docs/71 §2).
+                if !self.revive_failed(&error, cx) {
+                    self.report_provider_retryable(&error, BannerAction::RetryTurn(text.clone()), cx);
+                }
                 self.restore_prompt(text, cx);
             }
         }
