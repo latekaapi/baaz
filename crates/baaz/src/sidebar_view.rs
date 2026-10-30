@@ -120,6 +120,26 @@ const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_m
 /// arrives at all (a failed fork, a send that never lands).
 pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 
+/// Steer the sidebar list toward row `ix`; returns whether it jumped.
+///
+/// `ensure_row_visible` (gpui's `scroll_to_reveal_item`) steers by the
+/// heights the list has measured: a target far below everything measured
+/// moved the top a few rows per frame, and the target itself read "not laid
+/// out", so the reveal stalled with the row out of sight (an imported
+/// session near the bottom of a 2,400-row Unfiled, QA 2026-10-30). Such a
+/// target is placed at the top of the viewport by index instead, which
+/// needs no measurement; the next frame measures it.
+fn steer_to_row(list: &gpui::ListState, ix: usize) -> bool {
+    let top = list.logical_scroll_top();
+    let laid_out = list.viewport_bounds().size.height > px(0.0);
+    if laid_out && ix > top.item_ix && list.bounds_for_item(ix).is_none() {
+        list.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+        return true;
+    }
+    ensure_row_visible(list, ix);
+    false
+}
+
 /// The bookkeeping [`Harness::reveal_sidebar_row`] does for an unknown
 /// reveal id, pulled out pure so it is unit-testable without a window
 ///: a miss for the *same* id the
@@ -1621,7 +1641,7 @@ impl Harness {
             let target = row_index_for_session(rows, grouping, &wanted)
                 .or_else(|| self.reveal_head_row(rows, grouping, &reveal_id));
             if let Some(ix) = target {
-                ensure_row_visible(&self.sidebar_list, ix);
+                steer_to_row(&self.sidebar_list, ix);
                 return;
             }
             // No row (yet): the wait itself must not move the list, nor let
@@ -1800,7 +1820,7 @@ impl Harness {
         if steers {
             self.dismiss_group_menu(cx);
         }
-        ensure_row_visible(&self.sidebar_list, ix);
+        let jumped = steer_to_row(&self.sidebar_list, ix);
         let above = self.sidebar_list.item_is_above_viewport(ix);
         let below = self.sidebar_list.item_is_below_viewport(ix);
         if above == Some(false) && below == Some(false) {
@@ -1812,7 +1832,7 @@ impl Harness {
             if self.sessions_loaded {
                 self.reveal = None;
             }
-        } else if above.is_none() || below.is_none() {
+        } else if (above.is_none() || below.is_none()) && !jumped {
             // The list has not laid out yet: a degenerate zero-height sidebar rect would otherwise
             // have every pane render spawn another pane-notify task, which
             // renders, which pokes again, forever — `bench-idle` never
@@ -3090,6 +3110,64 @@ mod tests {
                 assert_eq!(h.reveal, None, "the settled reveal completes once its row is visible");
             })
         });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// A reveal for a row far below anything the list has measured (an
+    /// imported session near the bottom of a 2,400-row Unfiled, QA
+    /// 2026-10-30) lands in a few frames. `scroll_to_reveal_item` steers by
+    /// measured heights only, so each frame crept a few rows and the
+    /// unmeasured target read "not laid out" — the reveal stalled with the
+    /// row out of sight, and opening the session or "Show in sidebar"
+    /// never showed it.
+    #[gpui::test]
+    fn a_reveal_for_a_far_unmeasured_row_lands_in_a_few_frames(cx: &mut TestAppContext) {
+        use aui::nav::StatusGroup;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("far");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let rows: Vec<aui::nav::SessionSummary> = (0..2000).map(|i| b3c_summary(&format!("s-{i}"), false)).collect();
+        let g = Grouping::Status(vec![StatusGroup::new("g", "G", "2000", rows)]);
+        let flat = flatten_sidebar(&g, false);
+        let g = Rc::new(g);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sessions_loaded = true;
+                h.sync_sidebar_list(&flat, &g);
+            })
+        });
+        let state = vc.update(|_, cx| baaz.read(cx).sidebar_list.clone());
+        draw_b3c_list(vc, &g, &state);
+        let target = row_index_for_session(&flat, &g, &"s-1950".into()).expect("the far row has an index");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.reveal = Some("s-1950".to_owned());
+                h.reveal_unknown = None;
+                h.sidebar_user_scrolled = false;
+            })
+        });
+        let mut settled = false;
+        for _ in 0..6 {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    if let Some(id) = h.reveal.clone() {
+                        h.reveal_sidebar_row(&flat, &g, &id, cx);
+                    }
+                })
+            });
+            draw_b3c_list(vc, &g, &state);
+            settled = vc.update(|_, cx| {
+                baaz.read(cx).sidebar_list.item_is_above_viewport(target) == Some(false)
+                    && baaz.read(cx).sidebar_list.item_is_below_viewport(target) == Some(false)
+            });
+            if settled {
+                break;
+            }
+        }
+        let top = vc.update(|_, cx| baaz.read(cx).sidebar_list_top());
+        assert!(settled, "the far row is on screen within a few frames (top {top:?}, target {target})");
         b3c_teardown(&dir, guard, old);
     }
 
