@@ -3795,6 +3795,7 @@ mod tests {
             handoff_from_provider: None,
             handoff_title: None,
             display_texts: std::collections::HashMap::new(),
+            origin: None,
         }
     }
 
@@ -3897,6 +3898,7 @@ mod tests {
             handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
             handoff_title: None,
             display_texts: std::collections::HashMap::new(),
+            origin: None,
         }
     }
 

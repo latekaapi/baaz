@@ -146,20 +146,45 @@ pub fn child_env(home: &Path) -> Vec<(String, String)> {
 /// `--resume` relaunch of the same session must see the same home — so
 /// the host clears each entry when the consented lazy move lands it (and
 /// all of them when consent itself lands).
-static LEGACY_RESUME: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+///
+/// Each pin may carry the owner home it resumes from (P7 import:
+/// [`pin_legacy_resume_at`]); a bare pin means the real `HOME`.
+#[allow(clippy::type_complexity)]
+static LEGACY_RESUME: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Pin `session_id` to resume from the owner's home: the host's consent
 /// gate calls this for the one child it admitted, before the spawn.
 pub fn pin_legacy_resume(session_id: &str) {
     if let Ok(mut pinned) = LEGACY_RESUME.lock() {
-        pinned.insert(session_id.to_owned());
+        pinned.insert(session_id.to_owned(), None);
     }
+}
+
+/// Pin `session_id` to resume from `owner_home` (an imported session,
+/// docs/72 §1): the same pin as [`pin_legacy_resume`], naming the home
+/// explicitly — the real `HOME` in production, a fixture owner home in a
+/// probe. The adapter resumes from the real `HOME`'s files unchanged and
+/// points the child at any other home's config dir.
+pub fn pin_legacy_resume_at(session_id: &str, owner_home: &Path) {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.insert(session_id.to_owned(), Some(owner_home.to_path_buf()));
+    }
+}
+
+/// The owner home `session_id`'s pin names, when it named one other than
+/// the real `HOME` (see [`pin_legacy_resume_at`]); `None` for a bare pin,
+/// for a pin at the real `HOME`, and for an unpinned session.
+pub fn legacy_owner_home(session_id: &str) -> Option<PathBuf> {
+    let home = LEGACY_RESUME.lock().ok()?.get(session_id).cloned().flatten()?;
+    let real = std::env::var_os("HOME").map(PathBuf::from);
+    (real.as_deref() != Some(home.as_path())).then_some(home)
 }
 
 /// Whether `session_id` resumes from the owner's home right now.
 pub fn is_legacy_resume(session_id: &str) -> bool {
-    LEGACY_RESUME.lock().is_ok_and(|pinned| pinned.contains(session_id))
+    LEGACY_RESUME.lock().is_ok_and(|pinned| pinned.contains_key(session_id))
 }
 
 /// Drop one legacy pin: what the host calls after the consented lazy
@@ -431,6 +456,18 @@ mod tests {
         assert!(!is_legacy_resume("some-other-session"), "pins never leak across sessions");
         clear_legacy_resume(&id);
         assert!(!is_legacy_resume(&id), "a landed move clears its pin");
+        // An imported session's pin may name its owner home (docs/72): a
+        // fixture home is reported, a bare pin names none.
+        let fixture = std::env::temp_dir().join("baaz-import-fixture-owner");
+        pin_legacy_resume_at(&id, &fixture);
+        assert!(is_legacy_resume(&id), "a pin at a home is a legacy resume");
+        assert_eq!(legacy_owner_home(&id), Some(fixture.clone()));
+        pin_legacy_resume(&id);
+        assert_eq!(legacy_owner_home(&id), None, "a bare pin names the real HOME");
+        if let Some(real) = std::env::var_os("HOME").map(PathBuf::from) {
+            pin_legacy_resume_at(&id, &real);
+            assert_eq!(legacy_owner_home(&id), None, "a pin at the real HOME changes nothing");
+        }
         pin_legacy_resume(&id);
         clear_legacy_resumes();
         assert!(!is_legacy_resume(&id), "consent clears every pin");

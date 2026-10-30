@@ -130,6 +130,11 @@ pub fn plan_migration(
     PLAN_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut moves = Vec::new();
     for record in registry.values() {
+        // An imported session lives in the owner's home by design (docs/72
+        // §1): its CLI keeps using it, so the migration never plans it.
+        if record.is_imported() {
+            continue;
+        }
         moves.extend(plan_one(owner_home, state_dir, &record.provider, &record.session_id));
     }
     moves.sort_by(|a, b| {
@@ -865,6 +870,13 @@ pub fn gate_resume(
     provider: &str,
     session_id: &str,
 ) -> ResumeGate {
+    // An imported session resumes where its CLI wrote it, whatever the
+    // consent: pinned on the owner's home every time, never moved (docs/72
+    // §1). Without this the owner's consent turned its first resume into a
+    // lazy move of the CLI's own files.
+    if registry.get(session_id).is_some_and(|record| record.provider == provider && record.is_imported()) {
+        return ResumeGate::LegacyOwner;
+    }
     if legacy_resume_dir(owner_home, state_dir, registry, provider, session_id).is_some() {
         ResumeGate::LegacyOwner
     } else if is_consented(state_dir) {
@@ -881,6 +893,22 @@ pub fn pin_legacy_resume(provider: &str, session_id: &str) {
         provider_claude_code::home::pin_legacy_resume(session_id);
     } else if provider == CODEX_PROVIDER {
         provider_codex::home::pin_legacy_resume(session_id);
+    }
+}
+
+/// Pin one admitted child for `record`'s resume: an imported session on
+/// the owner home it was imported from ([`crate::import::owner_home`]),
+/// any other legacy session on the real `HOME` ([`pin_legacy_resume`]).
+pub fn pin_legacy_resume_for(record: &crate::provider_sessions::ProviderSessionRecord) {
+    if !record.is_imported() {
+        pin_legacy_resume(&record.provider, &record.session_id);
+        return;
+    }
+    let owner = crate::import::owner_home();
+    if record.provider == CLAUDE_PROVIDER {
+        provider_claude_code::home::pin_legacy_resume_at(&record.session_id, &owner);
+    } else if record.provider == CODEX_PROVIDER {
+        provider_codex::home::pin_legacy_resume_at(&record.session_id, &owner);
     }
 }
 
@@ -1470,6 +1498,67 @@ mod tests {
             ResumeGate::BaazHome,
             "unknown providers move nothing"
         );
+    }
+
+    /// docs/72 §1, the trap P7 closes: the owner's store has consent, so an
+    /// imported record (its files owner-side by design) would gate
+    /// `LazyMove` and its first resume would MOVE the CLI's own files into
+    /// Baaz's home. An imported record gates `LegacyOwner` whatever the
+    /// consent, the planner never lists it, and running the gate's arm
+    /// moves nothing.
+    #[test]
+    fn an_imported_session_resumes_legacy_under_consent_and_never_moves() {
+        let _guard = serial();
+        let homes = TempHomes::make("imported");
+        homes.seed_claude("-work", "sess-imp", true);
+        homes.seed_codex("thread-imp");
+        homes.seed_claude("-work", "sess-own", false);
+        let mut registry = registry_with(&["sess-imp", "sess-own"], &["thread-imp"]);
+        for id in ["sess-imp", "thread-imp"] {
+            registry.get_mut(id).expect("record").origin =
+                Some(crate::provider_sessions::ORIGIN_IMPORTED.to_owned());
+        }
+        record_consent(&homes.state);
+        assert!(is_consented(&homes.state), "the owner's state: consent recorded");
+        for (provider, id) in [(CLAUDE_PROVIDER, "sess-imp"), (CODEX_PROVIDER, "thread-imp")] {
+            assert_eq!(
+                gate_resume(&homes.owner, &homes.state, &registry, provider, id),
+                ResumeGate::LegacyOwner,
+                "an imported {provider} session is pinned on the owner's home under consent"
+            );
+        }
+        // A Baaz session's record still lazy-moves after consent (the
+        // B4M rule is unchanged for what Baaz itself started).
+        assert_eq!(
+            gate_resume(&homes.owner, &homes.state, &registry, CLAUDE_PROVIDER, "sess-own"),
+            ResumeGate::LazyMove,
+        );
+        // The planner skips imported records, so neither the prompt nor
+        // the Providers row ever offers to move them.
+        let plan = plan_migration(&homes.owner, &homes.state, &registry);
+        assert!(plan.iter().all(|m| m.session_id == "sess-own"), "only Baaz's own session plans: {plan:?}");
+        // The arm the reopen paths run for LegacyOwner is a pin, never a
+        // move: every owner-side file is still where the CLI wrote it.
+        pin_legacy_resume_for(registry.get("sess-imp").expect("record"));
+        pin_legacy_resume_for(registry.get("thread-imp").expect("record"));
+        assert!(provider_claude_code::home::is_legacy_resume("sess-imp"));
+        assert!(provider_codex::home::is_legacy_resume("thread-imp"));
+        let claude = homes.owner.join(".claude").join("projects").join("-work");
+        assert!(claude.join("sess-imp.jsonl").exists(), "the transcript stays in the owner's home");
+        assert!(claude.join("sess-imp").is_dir(), "the companion dir stays too");
+        assert!(
+            !provider_claude_code::home::baaz_target(&homes.state, Path::new("projects/-work/sess-imp.jsonl")).exists(),
+            "nothing landed in Baaz's home"
+        );
+        assert!(
+            homes
+                .owner
+                .join(".codex/sessions/2026/10/02/rollout-2026-10-02-x-thread-imp.jsonl")
+                .exists(),
+            "the rollout stays in the owner's home"
+        );
+        provider_claude_code::home::clear_legacy_resume("sess-imp");
+        provider_codex::home::clear_legacy_resume("thread-imp");
     }
 
     #[test]

@@ -78,6 +78,24 @@ pub struct ProviderSessionRecord {
     /// when a resumed view folds replayed turns the provider echoes whole.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub display_texts: HashMap<String, String>,
+    /// Where the record came from when Baaz did not start the session:
+    /// [`ORIGIN_IMPORTED`] for a Claude Code / Codex session imported from
+    /// the owner's own homes (docs/72). An imported session's transcript
+    /// stays where its CLI wrote it, so it always resumes pinned on the
+    /// owner's home and is never moved (`session_migration::gate_resume`,
+    /// `plan_migration`). `None` for every session Baaz started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// [`ProviderSessionRecord::origin`] of an imported session.
+pub const ORIGIN_IMPORTED: &str = "imported";
+
+impl ProviderSessionRecord {
+    /// Whether this record was imported from the owner's homes (docs/72).
+    pub fn is_imported(&self) -> bool {
+        self.origin.as_deref() == Some(ORIGIN_IMPORTED)
+    }
 }
 
 /// Every provider session this window knows, keyed by session id.
@@ -216,6 +234,7 @@ pub fn upsert_listed(
                     handoff_from_provider: None,
                     handoff_title: None,
                     display_texts: HashMap::new(),
+                    origin: None,
                 },
             );
             true
@@ -265,6 +284,7 @@ pub fn upsert_open(
             handoff_from_provider: None,
             handoff_title: None,
             display_texts: HashMap::new(),
+            origin: None,
         });
 }
 

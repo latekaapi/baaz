@@ -2323,6 +2323,7 @@ mod tests {
                 handoff_from_provider: None,
                 handoff_title: None,
                 display_texts: HashMap::new(),
+                origin: None,
             },
         );
         assert_eq!(

@@ -46,6 +46,10 @@ const BODY_BYTES: usize = 16 * 1024;
 /// sessions searched beside Muse's (docs/50 P3). The owner had 91.
 pub const PROVIDER_SESSIONS: usize = 120;
 
+/// Stored Claude Code / Codex sessions in the import scan's fixture home
+/// (docs/72): the owner's 1,991 on 2026-10-30, rounded up.
+pub const IMPORT_SESSIONS: usize = 2_000;
+
 /// One deterministic body: words that vary by session so FTS has real
 /// postings, padded to [`BODY_BYTES`].
 fn body_for(index: usize) -> String {
@@ -227,6 +231,16 @@ pub fn run(dir: &Path) -> serde_json::Value {
     // Baaz's own share: reading the copy and merging the newer rows in. The
     // page count is the guard: a listing that falls back to every page reads
     // 13 here and fails its budget of 1.
+    // P7 (docs/72): the import scan over a fixture owner home the size of
+    // the owner's (1,991 sessions on 30 Oct), heads and tails only — the
+    // scan must never cost what reading every transcript would.
+    let import_home = dir.join("import-home");
+    crate::import::write_fixture_home(&import_home, IMPORT_SESSIONS, 37, 16 * 1024);
+    let at = Instant::now();
+    let scan = crate::import::scan_home(&import_home);
+    put("import_scan_ms", ms(at));
+    assert_eq!(scan.sessions.len(), IMPORT_SESSIONS, "every fixture session scans");
+
     let list_path = dir.join("session-list-cache.json");
     let mut server = ListServer { rows: (0..SESSIONS).map(list_row).collect(), pages: 0 };
     let full = crate::list_cache::list(None, "perf", 0, &mut |ask| server.page(ask), &mut |_, _, _| {})
