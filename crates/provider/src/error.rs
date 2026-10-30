@@ -78,6 +78,11 @@ pub enum RefusalHint {
     /// The agent's program is older than the seam supports: offer the
     /// update.
     TooOld,
+    /// The session's stored history (a Claude Code transcript, a Codex
+    /// rollout) is not on this machine any more: a resume can never
+    /// succeed, so it is refused up front instead of spawning a child that
+    /// dies on it.
+    HistoryMissing,
 }
 
 /// How loudly a refusal is shown.

@@ -327,8 +327,22 @@ impl FailureKind {
                 format!("{label} no longer has this session.")
             }
             FailureKind::Refused(provider::RefusalHint::RetryLater) => format!("{label} is busy. Try again in a moment."),
+            FailureKind::Refused(provider::RefusalHint::HistoryMissing) => {
+                format!("This session's history is not on this Mac any more, so {label} can't reopen it.")
+            }
             FailureKind::Refused(_) => format!("{label} refused to start this session."),
         }
+    }
+
+    /// The failure's own words under this kind's sentence, when they add
+    /// to it ([`failure_detail`]). A missing history's sentence is the
+    /// whole story: its raw line ("thread/resume errored: no rollout found
+    /// for thread id …") would only repeat it with an id.
+    pub fn detail(self, message: &str, sentence: &str, stderr: &[String]) -> Option<String> {
+        if self == FailureKind::Refused(provider::RefusalHint::HistoryMissing) {
+            return None;
+        }
+        failure_detail(message, sentence, stderr)
     }
 
     /// The action this kind implies beside Retry, when there is one.
@@ -3067,5 +3081,34 @@ mod tests {
         assert_eq!(FailureKind::TooOld.action(), Some(FailureAction::Update));
         assert_eq!(FailureKind::Crashed.action(), None);
         assert!(FailureKind::Crashed.sentence("Codex").starts_with("Codex"));
+    }
+
+    /// A reopen whose stored history is gone (a transcript or rollout no
+    /// longer on this Mac) says so in a plain sentence, with no raw
+    /// "no rollout found for thread id …" line under it, and offers no
+    /// install/sign-in action — Retry and Providers… only (QA 2026-10-30).
+    #[test]
+    fn a_missing_history_says_so_plainly() {
+        let kind = FailureKind::classify(
+            ProviderId::ClaudeCode,
+            Some(&provider::ProviderError::launch_refusal(provider::RefusalHint::HistoryMissing, "t", "r")),
+        );
+        assert_eq!(kind, FailureKind::Refused(provider::RefusalHint::HistoryMissing));
+        assert_eq!(
+            kind.sentence("Claude Code"),
+            "This session's history is not on this Mac any more, so Claude Code can't reopen it."
+        );
+        assert_eq!(kind.action(), None);
+        let sentence = kind.sentence("Codex");
+        assert_eq!(
+            kind.detail("thread/resume errored: no rollout found for thread id 01a1490e", &sentence, &[]),
+            None,
+            "the sentence says it; the raw line adds only an id"
+        );
+        assert_eq!(
+            FailureKind::Crashed.detail("timed out after 30s waiting for initialize", &sentence, &[]).as_deref(),
+            Some("timed out after 30s waiting for initialize"),
+            "other kinds keep their detail"
+        );
     }
 }
