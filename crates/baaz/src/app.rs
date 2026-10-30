@@ -603,7 +603,10 @@ pub(crate) enum ProviderOpenRetry {
     /// Reopen the stored session: a failed sidebar-click reopen.
     Reopen(Box<crate::provider_sessions::ProviderSessionRecord>),
     /// Start a fresh session on the provider: a failed new-session open.
-    OpenNew { project: Option<String>, workspace: String },
+    /// `draft` is what the failed draft's composer held (its sends that
+    /// waited on the open included): Retry puts it back in the new draft,
+    /// so a child that dies on its first breath loses no words.
+    OpenNew { project: Option<String>, workspace: String, draft: String },
 }
 
 /// A provider that could not start, typed (docs/71 §3): a failed open —
