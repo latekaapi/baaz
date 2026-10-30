@@ -390,6 +390,9 @@ impl SessionView {
                 if !landed.is_empty() {
                     self.follow = true;
                     self.note_provider_deltas(&landed, cx);
+                    // A block that opens after the reply (a tool call the
+                    // model went on to compose) takes the tail back.
+                    self.note_reply_progress(false, cx);
                     cx.notify();
                 }
             }
@@ -496,7 +499,14 @@ impl SessionView {
                 if session_id != self.session_id {
                     return;
                 }
+                // A token reading that moved is a model call that ended:
+                // over a whole reply, the reply was the call's last word.
+                let usage_landed = self.store.side().totals != side.totals;
+                // A tail send's queue row is drawn as its bubble; once the
+                // row leaves the queue the strip has nothing to hide.
+                self.tail_queued.retain(|turn_id, _| side.queued.iter().any(|q| &q.turn_id == turn_id));
                 self.store.set_side(side);
+                self.note_reply_progress(usage_landed, cx);
                 self.sync_mode_menu_check(cx);
                 self.observe_clocks(cx);
                 cx.notify();
@@ -563,6 +573,13 @@ impl SessionView {
             provider::ProviderEvent::PromptRestored { session_id, turn_id, text } => {
                 if session_id != self.session_id {
                     return;
+                }
+                // Words that come back are not queued any more: a tail
+                // send's bubble for them goes (the composer has them).
+                if let Some(at) = self.pending_optimistic.iter().position(|pending| !text.is_empty() && pending.text == text) {
+                    let id = self.pending_optimistic[at].id.clone();
+                    self.tail_queued.retain(|_, bubble| *bubble != id);
+                    self.remove_optimistic_turn(&id);
                 }
                 match turn_id.and_then(|turn_id| self.unqueueing.remove(&turn_id)) {
                     // Routed by the intent captured when the row's button
@@ -1884,6 +1901,13 @@ mod tests {
         /// is refused as unknown, the way a live adapter refuses it once
         /// its pending request is gone.
         decided: std::collections::HashSet<String>,
+        /// Queue a submit behind an open turn, as Muse does, instead of
+        /// starting it at once.
+        queue_while_open: bool,
+        /// The turn the double last started and has not finished.
+        open_turn: Option<String>,
+        /// Submits queued behind it: (queued turn id, request id, text).
+        queued: Vec<(String, String, String)>,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -1909,6 +1933,68 @@ mod tests {
 
         fn received(&self) -> Vec<provider::Command> {
             self.inner.state.lock().expect("recording mutex").received.clone()
+        }
+
+        /// Queue submits behind an open turn from now on, the way Muse
+        /// acks `queued: true` while a turn runs.
+        fn queue_while_open(&self) {
+            self.inner.state.lock().expect("recording mutex").queue_while_open = true;
+        }
+
+        /// The open turn's `turn/completed`: its finish and settle, then
+        /// the first queued submit starts (its queue row leaves, its user
+        /// echo and reply turn land) — what Muse does at the end of a
+        /// reminder tail.
+        fn complete_open_turn(&self) {
+            let (finished, next) = {
+                let mut state = self.inner.state.lock().expect("recording mutex");
+                let finished = state.open_turn.take();
+                let next = (!state.queued.is_empty()).then(|| state.queued.remove(0));
+                if let Some((turn_id, _, _)) = &next {
+                    state.open_turn = Some(turn_id.clone());
+                }
+                (finished, next)
+            };
+            let emit = |event| {
+                let _ = self.inner.tx.send(event);
+            };
+            if let Some(turn_id) = finished {
+                emit(provider::ProviderEvent::Deltas {
+                    session_id: Some("s-1".into()),
+                    deltas: vec![aui_protocol::Delta::TurnFinished { turn_id: turn_id.clone(), meta: aui_protocol::TurnMeta::default() }],
+                });
+                emit(provider::ProviderEvent::TurnSettled {
+                    session_id: "s-1".into(),
+                    turn_id,
+                    outcome: provider::facts::TurnOutcome::Completed,
+                });
+            }
+            if let Some((turn_id, _, text)) = next {
+                emit(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side: Default::default() });
+                emit(provider::ProviderEvent::Deltas {
+                    session_id: Some("s-1".into()),
+                    deltas: vec![
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::User {
+                                id: format!("u-{turn_id}"),
+                                text,
+                                attachments: Vec::new(),
+                                mentions: Vec::new(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: turn_id.clone(),
+                                blocks: Vec::new(),
+                                meta: aui_protocol::TurnMeta::default(),
+                                timestamp: None,
+                            },
+                        },
+                    ],
+                });
+                emit(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id });
+            }
         }
 
         fn commands_of(&self, capability: &str) -> Vec<provider::Command> {
@@ -1983,6 +2069,9 @@ mod tests {
                     fail_interrupt: false,
                     usage: None,
                     decided: std::collections::HashSet::new(),
+                    queue_while_open: false,
+                    open_turn: None,
+                    queued: Vec::new(),
                 }),
                 tx,
                 rx,
@@ -2053,7 +2142,7 @@ mod tests {
                 provider::Command::OpenSession { .. } => {
                     Ok(provider::Ack::Session { session_id: "s-1".into(), title: None })
                 }
-                provider::Command::SubmitInput { session_id, parts, .. } => {
+                provider::Command::SubmitInput { session_id, parts, request_id, .. } => {
                     // An open turn, deliberately never finished here: the
                     // test finishes it when it wants the stop button down.
                     if self.inner.state.lock().expect("recording mutex").fail_submit {
@@ -2069,6 +2158,27 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                         .join("");
+                    // Behind an open turn, Muse-style: queued, a queue row
+                    // in the facts, nothing in the transcript yet.
+                    let queued_side = {
+                        let mut state = self.inner.state.lock().expect("recording mutex");
+                        if state.queue_while_open && state.open_turn.is_some() {
+                            state.queued.push((turn_id.clone(), request_id.clone(), text.clone()));
+                            let queued = state
+                                .queued
+                                .iter()
+                                .map(|(turn_id, request_id, _)| provider::facts::QueuedTurn { turn_id: turn_id.clone(), request_id: request_id.clone() })
+                                .collect();
+                            Some(provider::facts::SessionSide { queued, ..Default::default() })
+                        } else {
+                            state.open_turn = Some(turn_id.clone());
+                            None
+                        }
+                    };
+                    if let Some(side) = queued_side {
+                        self.emit(provider::ProviderEvent::SessionFacts { session_id, side });
+                        return Ok(provider::Ack::TurnAccepted { turn_id, queued: true });
+                    }
                     let n = turn_id.clone();
                     self.emit(provider::ProviderEvent::Deltas {
                         session_id: Some(session_id),
@@ -5018,6 +5128,160 @@ mod tests {
             assert!(view.busy(), "the turn is still open");
             assert!(view.reply_complete_for_running_turn(), "the reply arrived whole");
             assert!(!view.on_reminder_tail(), "only Muse reports a reminder tail");
+        });
+        // Even after a token reading lands, a Codex turn open past its reply
+        // keeps reading as working: the stop button stays, the row too.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side: usage_side(40) })
+                .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.saving_memories(), "no tail on Codex");
+            assert!(view.working(), "Codex still reads working");
+        });
+    }
+
+    /// Facts carrying a token reading of `total` tokens: a model call ended.
+    fn usage_side(total: u64) -> provider::facts::SessionSide {
+        provider::facts::SessionSide {
+            totals: provider::facts::TokenTotals { prompt_tokens: total / 2, output_tokens: total / 2, total_tokens: total },
+            ..Default::default()
+        }
+    }
+
+    /// A Muse lane with one turn open and its reply whole: `work` sent,
+    /// a finished text block on its reply turn. Returns the turn id.
+    fn muse_reply_whole(
+        vc: &mut gpui::VisualTestContext,
+        view: &Entity<SessionView>,
+        tx: &futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>,
+    ) -> String {
+        use aui_protocol::{Block, Delta};
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.run_until_parked();
+        drain_recording(view, tx, vc);
+        // Muse reports its turns' lifecycle: `turn/started` arms the row.
+        let opened = vc.update(|_, cx| {
+            view.read(cx).store.session().and_then(|s| s.turns.last().map(|t| t.id().to_owned())).expect("the reply turn")
+        });
+        tx.unbounded_send(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: opened })
+            .expect("the lane channel is open");
+        vc.run_until_parked();
+        let turn_id = vc.update(|_, cx| view.read(cx).running.as_ref().expect("a running turn").turn_id.clone());
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![Delta::BlockAdded {
+                    turn_id: turn_id.clone(),
+                    block: Block::Text { text: "done".to_owned(), streaming: false },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        turn_id
+    }
+
+    /// Owner 2026-10-30: a Muse reply that is whole reads as a finished
+    /// turn while Muse saves memories before `turn/completed` — no working
+    /// row, a sendable composer, a quiet note — and the row re-reads.
+    /// A whole reply alone is not enough: until a token reading says the
+    /// model call ended, the model may still be composing a tool call.
+    #[gpui::test]
+    fn a_muse_reply_done_reads_finished_while_the_turn_stays_open(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "muse", adapter);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let seen_in = seen.clone();
+        let _sub = vc.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+                if matches!(event, super::super::SessionEvent::ReplyComplete { .. }) {
+                    seen_in.set(seen_in.get() + 1);
+                }
+            })
+        });
+        muse_reply_whole(vc, &view, &tx);
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.saving_memories(), "no token reading yet: the call may still be composing a tool call");
+            assert!(view.working());
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side: usage_side(40) })
+                .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.busy(), "the turn itself is still open");
+            assert!(view.saving_memories(), "Muse is saving memories");
+            assert!(!view.working(), "the reply reads as a finished turn: send, not stop");
+            assert!(view.inline_progress().is_none(), "no working row in the transcript");
+            assert!(view.render_status().is_some(), "the quiet note stands by the composer");
+        });
+        assert_eq!(seen.get(), 1, "the row is told once, on the edge");
+    }
+
+    /// A send during the tail is queued by Muse, reads as the person's
+    /// bubble at once (no queue-strip row), and starts when Muse completes
+    /// the turn — submitted exactly once, one bubble.
+    #[gpui::test]
+    fn a_send_during_the_muse_tail_queues_and_goes_out_on_settle_once(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::Turn;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        handle.queue_while_open();
+        let (view, tx) = open_recording_view(vc, "s-1", "muse", adapter);
+        let first = muse_reply_whole(vc, &view, &tx);
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side: usage_side(40) })
+                .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| view.read(cx).saving_memories()));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("next".to_owned(), cx)));
+        vc.run_until_parked();
+        drain_recording(&view, &tx, vc);
+        let user_bubbles = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                view.read(cx)
+                    .store
+                    .session()
+                    .map(|s| s.turns.iter().filter(|t| matches!(t, Turn::User { text, .. } if text == "next")).count())
+                    .unwrap_or(0)
+            })
+        };
+        assert_eq!(submitted_texts(&handle), ["work", "next"]);
+        assert_eq!(user_bubbles(vc), 1, "the queued words read as the person's bubble at once");
+        assert!(
+            vc.update(|_, cx| view.update(cx, |view, cx| view.render_queue(cx).is_none())),
+            "no queue-strip row: the bubble stands for it"
+        );
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.store.side().queued.len(), 1, "Muse holds it in its queue");
+            assert!(!view.working(), "still the finished turn, still sendable");
+            assert_eq!(view.running.as_ref().map(|r| r.turn_id.clone()), Some(first.clone()));
+        });
+        // Muse completes the turn: the queued submit starts.
+        handle.complete_open_turn();
+        drain_recording(&view, &tx, vc);
+        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        assert_eq!(submitted_texts(&handle), ["work", "next"], "submitted exactly once");
+        assert_eq!(user_bubbles(vc), 1, "the echo replaced the bubble in place");
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            let running = view.running.as_ref().map(|r| r.turn_id.clone());
+            assert!(running.is_some() && running != Some(first.clone()), "the queued turn runs now");
+            assert!(view.working(), "and reads as working");
+            assert!(!view.saving_memories());
+            assert!(view.pending_optimistic.is_empty(), "no bubble left waiting");
         });
     }
 }

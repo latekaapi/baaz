@@ -375,6 +375,14 @@ ENTRIES = {
                                       "--steps", "new;model"]},
     "composer-effort":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;effort"]},
+    # The model menu opened upward from the bottom composer with a row's
+    # reasoning-effort submenu open (owner 2026-10-30: the submenu ran past
+    # the window's bottom edge). `fixture-models` fills a fixed Muse-shaped
+    # catalog offline, `submenu` opens the highlighted row's levels as →
+    # does. Its own state dir, so no other entry's provider pick leaks in.
+    "composer-model-submenu": {"shot": ["--no-connect", "--login", "signed-in",
+                                        "--steps", "new;wait:300;fixture-models;model;submenu"],
+                               "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-submenu-state-")}},
     # One composer per non-muse lane, reached by the scripted provider
     # pick. `setprovider:` is a setter through the picker's own path —
     # not a toggle — so both runs land on the lane's composer and

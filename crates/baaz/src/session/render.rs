@@ -354,7 +354,7 @@ impl SessionView {
         // B12: a settle flips the last turn from live rows to the fold
         // without adding a turn, so a busy flip rebuilds the row mapping
         // too — otherwise the settled mapping would draw on live rows.
-        let busy = self.busy();
+        let busy = self.working();
         if expected != self.cached_turns.len() || self.follow || busy != self.synced_busy {
             self.synced_busy = busy;
             self.refresh_render_cache();
@@ -832,7 +832,7 @@ impl SessionView {
         let rows = self.rows.clone();
         // Read before the `'static` row closure below: replayed history
         // draws settled while nothing is live (see the `settled` flag).
-        let idle = !self.busy();
+        let idle = !self.working();
         let folds = Rc::new(folds);
         let width_report = cx.entity().downgrade();
         // The wrapper is a flex column so the virtual list's own
@@ -1161,7 +1161,7 @@ impl SessionView {
             self.row_counts.iter().map(|(_, n)| n).sum()
         };
         let last_turn = self.cached_turns.len().saturating_sub(1);
-        let live_tail = self.busy() && !crate::clock::deterministic();
+        let live_tail = self.working() && !crate::clock::deterministic();
         self.row_counts.truncate(from);
         let rows = Rc::make_mut(&mut self.rows);
         rows.truncate(offset);
@@ -1780,11 +1780,7 @@ impl SessionView {
                 }
             }
         }
-        if self.on_reminder_tail() {
-            "Finishing up…".to_owned()
-        } else {
-            "Working…".to_owned()
-        }
+        "Working…".to_owned()
     }
 
     /// The live status line: history loading, or a running turn with its
@@ -1804,6 +1800,11 @@ impl SessionView {
         }
         let row = if self.loading_history {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
+        } else if self.saving_memories() {
+            // The reply is done and the provider is saving memories before
+            // it closes the turn (owner 2026-10-30): one quiet line by the
+            // composer — no spinner, no timer — gone at `turn/completed`.
+            status_row("status", format!("{} is saving memories\u{2026}", self.provider_kind().label()))
         } else {
             // A running turn reports inline, in the transcript
             // ([`Self::inline_progress`]); nothing stands over the composer.
@@ -1826,7 +1827,7 @@ impl SessionView {
     /// fold (`Thinking…`, `Waiting for approval…`, `Finishing up…`,
     /// `Working…`), the turn's elapsed time and what is queued.
     pub(super) fn inline_progress(&self) -> Option<InlineProgress> {
-        if self.loading_history || !self.busy() || self.retry_countdown().is_some() {
+        if self.loading_history || !self.working() || self.retry_countdown().is_some() {
             return None;
         }
         let phase = self.status_phase();
@@ -1835,21 +1836,11 @@ impl SessionView {
         }
         {
             let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
-            // The reply arrived whole but the turn is still open: Muse is on
-            // the `reminderChild` tail (memory reminders), not stuck.
-            let finishing = self.on_reminder_tail();
+            // The reminder tail never reaches here: it reads as a finished
+            // turn (`working` is false), with its quiet note by the composer.
             let elapsed = (elapsed > 0).then(|| transcript::elapsed(elapsed));
             let queued = self.store.side().queued.len();
-            // Blocked on the person, the tail is not memory reminders: the
-            // turn waits for an approval or an answer, and saying otherwise
-            // misnames the wait on the approval's own screen.
-            let waiting = self.waiting_on_you().is_some_and(|(approvals, questions)| approvals + questions > 0);
-            let note = match (finishing && !waiting, queued) {
-                (true, 0) => Some("memory reminders".to_owned()),
-                (true, queued) => Some(format!("memory reminders · {queued} queued")),
-                (false, 0) => None,
-                (false, queued) => Some(format!("{queued} queued")),
-            };
+            let note = (queued > 0).then(|| format!("{queued} queued"));
             Some(InlineProgress { phase, elapsed, note })
         }
     }
@@ -2150,13 +2141,15 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// order.
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let side = self.store.side();
-        if side.queued.is_empty() {
+        // A tail send's row is drawn as its bubble instead.
+        if side.queued.iter().all(|q| self.tail_queued.contains_key(&q.turn_id)) {
             return None;
         }
         let editing = self.unqueueing.clone();
         let rows: Vec<QueueStripRow> = side
             .queued
             .iter()
+            .filter(|q| !self.tail_queued.contains_key(&q.turn_id))
             .map(|q| {
                 let row = QueueStripRow::new(
                     q.turn_id.clone(),
@@ -2524,7 +2517,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     })
                     .collect(),
             )
-            .streaming(self.busy())
+            .streaming(self.working())
             // Blocked context is the server refusing to take more, so the
             // composer refuses too and the meter offers the way out.
             // The draft's emptiness is a maintained flag, not a copy of the

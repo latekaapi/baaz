@@ -1,9 +1,11 @@
 # synthetic-finishing.jsonl — HAND-WRITTEN, not a wire capture.
 #
 # `synthetic-reminderchild.jsonl` cut just before its final `turn/completed`:
-# the `agentMessage` is complete and two `reminderChild` items have run, but
-# the turn is still open. Replaying it must show "Finishing up…" (memory
-# reminders) rather than "Working…". Every `<-- ` line below is synthetic.
+# the `agentMessage` is complete, its model call's `session/tokenUsage` has
+# landed and two `reminderChild` items have run, but the turn is still open.
+# Replaying it must read as a finished turn — no working row, a sendable
+# composer, the quiet "Muse is saving memories…" note (owner 2026-10-30).
+# Every `<-- ` line below is synthetic.
 # Paths and ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing
 # here names a real user, workspace or session.
 #
@@ -15,3 +17,4 @@
 <-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-rem-1", "kind": "reminderChild", "turnId": "t-syn-1", "revision": 1, "status": "completed", "childSessionId": "synthetic-child-1", "childSessionLogPath": "/tmp/synthetic/synthetic-reminderchild/child-1.jsonl", "generationId": 2, "reminderAgentId": "reminder-agent-1", "taskId": "task-1", "fallbackText": "Reminder from the child session."}}}
 <-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-rem-2", "kind": "reminderChild", "turnId": "t-syn-1", "revision": 1, "status": "completed", "childSessionId": "synthetic-child-2", "childSessionLogPath": "/tmp/synthetic/synthetic-reminderchild/child-2.jsonl", "generationId": 3, "reminderAgentId": "reminder-agent-1", "taskId": "task-1", "fallbackText": "Reminder from the child session."}}}
 <-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Nothing to show."}}}
+<-- {"jsonrpc": "2.0", "method": "session/tokenUsage", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-reminderchild", "turnId": "t-syn-1", "modelId": "muse-spark-test", "usage": {"inputTokens": 120, "outputTokens": 8}, "promptTokens": 120, "totalTokens": 128, "finishReason": "stop", "cumulative": {"promptTokens": 120, "outputTokens": 8, "totalTokens": 128}}}
