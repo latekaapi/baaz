@@ -108,6 +108,7 @@ mod tier;
 mod titles;
 mod transcript;
 mod usage;
+mod watchdog;
 mod wire;
 
 use std::path::PathBuf;
@@ -810,6 +811,10 @@ fn main() {
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();
+    // Every `baaz_log!` line also lands in `<state dir>/logs/baaz.log`: a
+    // Finder launch has no stderr anyone reads (the 2026-10-31 hang left
+    // nothing behind).
+    crate::log::init_file_log(&crate::store::support_dir());
     // The Chromium page engine, when the bundle carries it (docs/25 §2):
     // mapped before anything else allocates in earnest, initialised lazily on
     // the first page. Without it the browser pane stays on WKWebView.
@@ -896,6 +901,12 @@ fn main() {
         // foreground executor, which needs the running app.
         crate::external_urls::note_shell_app(cx.to_async());
         crate::log::boot_mark("window-shown");
+        // The stall watchdog (writes to `logs/` when the UI thread goes
+        // quiet past 500 ms). Not for deterministic captures: their shots
+        // never need it and a capture's own startup would only add noise.
+        if !crate::clock::deterministic() {
+            crate::watchdog::start(crate::store::support_dir().join("logs"), cx);
+        }
         // The frame that actually reached the screen, not the request for it.
         if let Some(window) = cx.windows().first() {
             let _ = window.update(cx, |_, window, _| {

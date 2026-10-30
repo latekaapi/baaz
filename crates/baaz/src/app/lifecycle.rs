@@ -456,11 +456,24 @@ impl Harness {
                 // The saved `session/list` too, on the first read: the boot
                 // rows join it exactly as the list reply will, so nothing
                 // (labels, search rows) changes when the reply lands.
-                let listed = if first {
+                let listed: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>> = if first {
                     crate::list_cache::load(&crate::list_cache::cache_path()).map(std::sync::Arc::new)
                 } else {
                     None
                 };
+                // Warm the run's canonical-root memo here, off the UI
+                // thread: the provisional rows join on the UI thread and
+                // asked the disk once per distinct root, cold — ~2,100
+                // `realpath`s, 236–330 ms of UI thread at boot on the
+                // owner's store (2026-10-31).
+                if let Some(listed) = &listed {
+                    let mut seen = std::collections::HashSet::new();
+                    for root in listed.sessions.iter().filter_map(|s| s.workspace_root.as_deref()) {
+                        if seen.insert(root) {
+                            let _ = crate::projects::canonical_cached(root);
+                        }
+                    }
+                }
                 crate::log::boot_mark(&format!(
                     "index-read-done rows={} cached={} listed={} changed={} in={}ms",
                     map.len(),

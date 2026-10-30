@@ -321,6 +321,17 @@ fn resolved(root: &str) -> String {
     canonical_str(root)
 }
 
+/// [`canonical_str`] through the run's memo (see `resolved`): the spelling
+/// every UI-thread pass over many rows should use. One `realpath` per
+/// distinct root per run (per [`UNRESOLVED_TTL`] for a root that did not
+/// resolve), instead of one per row per call: the side-session test and
+/// the provider rows used to ask the disk ~3 times per row on every
+/// rejoin (2026-10-31, 51 ms of `getattrlist` on the UI thread in one
+/// Settings walk over the owner's 2,692 rows).
+pub fn canonical_cached(root: &str) -> String {
+    resolved(root)
+}
+
 /// [`canonical_path`] for a string root, which is what the wire hands over.
 pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
@@ -523,8 +534,8 @@ impl Projects {
             }
         }
         let root = workspace_root.filter(|s| !s.is_empty())?;
-        let canonical = canonical_path(Path::new(root));
-        self.projects.iter().find(|p| canonical_path(&p.root) == canonical)
+        let canonical = resolved(root);
+        self.projects.iter().find(|p| resolved(p.root.to_string_lossy().as_ref()) == canonical)
     }
 
     /// The sidebar order: pinned projects
@@ -634,11 +645,11 @@ impl Projects {
             }
         }
         let root = workspace_root.filter(|s| !s.is_empty())?;
-        let canonical = canonical_path(Path::new(root));
+        let canonical = resolved(root);
         self.projects
             .iter()
             .filter(|project| self.is_available(&project.id))
-            .find(|project| canonical_path(&project.root) == canonical)
+            .find(|project| resolved(project.root.to_string_lossy().as_ref()) == canonical)
     }
 
     /// [`Self::resolve_available`], reading every root through `cache` so a

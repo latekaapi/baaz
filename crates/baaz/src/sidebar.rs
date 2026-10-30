@@ -481,7 +481,7 @@ impl SessionEntry {
         let updated = DateTime::from_timestamp_millis(record.updated_ms)
             .map(|t| t.with_timezone(&Local))
             .unwrap_or_else(crate::clock::now_local);
-        let workspace = record.workspace.as_deref().map(crate::projects::canonical_str);
+        let workspace = record.workspace.as_deref().map(crate::projects::canonical_cached);
         let stored_project = meta.and_then(|m| m.project.as_deref()).or(record.project.as_deref());
         let resolved = projects.resolve_available(record.workspace.as_deref(), stored_project);
         let project = resolved.as_ref().map(|p| p.id.clone());
