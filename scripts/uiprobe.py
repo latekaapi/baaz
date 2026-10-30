@@ -116,9 +116,34 @@ def _usage_script():
             "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
     ]
 
-# The P6 entries' throwaway state dir (see them below): made once at
-# import, never the real store.
-_P6_STATE = tempfile.mkdtemp(prefix="uiprobe-p6-state-")
+# The P6 entries' representative fixture state (see them below). Each
+# entry gets its own throwaway state dir, made once at import — never the
+# real store, and never another entry's (a scripted send lands a row and a
+# provider pick there). On it: the scripted sidebar the README captures use
+# (`--sidebar-fixture`, rows instead of skeleton bars — allowed offline) and
+# scripted statuses for the footer account and the Providers rows, so the
+# capture reads like a signed-in window instead of "Checking providers...".
+P6_SIDEBAR = ["--sidebar-fixture", "fixtures/sidebar/projects.json"]
+
+
+def _p6_statuses(claude_auth):
+    return json.dumps([
+        {"provider": "muse", "installed": {"Yes": {"version": "1.4.13", "path": "/Users/ada/.local/bin/muse"}},
+         "auth": {"SignedIn": {"email": "ada@example.com", "plan": "Pro", "method": "account"}},
+         "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+        {"provider": "claude-code", "installed": {"Yes": {"version": "2.1.276", "path": "/Users/ada/.local/bin/claude"}},
+         "auth": claude_auth, "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+        {"provider": "codex", "installed": {"Yes": {"version": "codex-cli 0.144.6", "path": "/opt/homebrew/bin/codex"}},
+         "auth": {"SignedIn": {"email": "ada@example.com", "plan": "ChatGPT Pro", "method": "chatgpt"}},
+         "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+    ])
+
+
+def _p6_entry(steps, claude_auth=None):
+    claude_auth = claude_auth or {"SignedIn": {"email": "ada@example.com", "plan": "Claude Max", "method": "claude.ai"}}
+    return {"shot": ["--no-connect", "--login", "signed-in"] + P6_SIDEBAR + ["--steps", steps],
+            "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-p6-state-"),
+                    "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(claude_auth)}}
 
 ENTRIES = {
     "login-choose":         {"shot": ["--no-connect", "--login", "choose"]},
@@ -355,26 +380,17 @@ ENTRIES = {
     # (Muse), Signed out (Claude Code) and Not installed (Codex):
     # offline, deterministic, no baseline yet — generate on main after
     # merge, never to silence a finding. Capture and look.
-    # P6 (docs/71): the typed "Couldn't start" view — a crash with the
-    # child's stderr well, and a signed-out open with its Sign in — then a
-    # scripted Codex lane whose child dies once (the quiet banner with
-    # Retry now) and twice (the failure view for the lost lane). Offline,
-    # no child, no turn. Each runs on its own throwaway state dir: the
-    # provider pick and the scripted send would otherwise land in the real
-    # store (the last provider, the prompt history) and move other
-    # entries' captures. No baselines yet — generate on main after merge.
-    "launch-failure":       {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "launch-failed:codex:crashed"],
-                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
-    "launch-failure-signed-out": {"shot": ["--no-connect", "--login", "signed-in",
-                                           "--steps", "launch-failed:claude-code:signed-out"],
-                                  "env": {"BAAZ_STATE_DIR": _P6_STATE}},
-    "child-lost-banner":    {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "new;setprovider:codex;send:hello lost probe;wait:3000;child-lost"],
-                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
-    "child-lost-twice":     {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "new;setprovider:codex;send:hello lost probe;wait:3000;child-lost;child-lost"],
-                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
+    # P6 (docs/71): the typed "Couldn't start" view of a session that
+    # never opened — a crash with the child's stderr well, and a
+    # signed-out open with its Sign in — then a scripted Codex lane whose
+    # child dies once (the quiet banner with Retry now) and twice (the
+    # banner grown into the typed failure, under the transcript). Offline,
+    # no child, no turn, on the representative fixture state above (rows,
+    # a footer account), each on its own throwaway state dir.
+    "launch-failure":       _p6_entry("launch-failed:codex:crashed"),
+    "launch-failure-signed-out": _p6_entry("launch-failed:claude-code:signed-out", "SignedOut"),
+    "child-lost-banner":    _p6_entry("new;setprovider:codex;send:hello lost probe;wait:3000;child-lost"),
+    "child-lost-twice":     _p6_entry("new;setprovider:codex;send:hello lost probe;wait:3000;child-lost;child-lost"),
     "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:providers"],
                              "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":
