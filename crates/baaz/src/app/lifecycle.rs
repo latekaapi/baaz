@@ -4641,24 +4641,35 @@ impl Harness {
                     self.persist_provider_sessions(cx);
                 }
                 self.rejoin_provider_row(&session_id);
+                // A replayed settle — a reopen folding history the record
+                // already counted — counted nothing. It is not new work, so
+                // it starts no model work either (an imported session has
+                // no stored byline, and its reopen fired a paid rewrite on
+                // its own provider, 2026-10-30).
+                let counted = self.provider_sessions.get(&session_id).map(|record| record.turns) != counted_before;
                 // A new exchange is new searchable words (docs/50 P3): the
                 // sync re-reads this one transcript and skips every other
                 // row on its fingerprint. A replayed settle counts nothing
                 // and syncs nothing.
-                if self.provider_sessions.get(&session_id).map(|record| record.turns) != counted_before {
+                if counted {
                     let ids: std::collections::HashSet<String> = std::iter::once(session_id.clone()).collect();
                     self.rebuild_search_index_for(&ids, cx);
                 }
                 self.sync_row_live(&session_id, false, cx);
+                // The free excerpt may land on any settle: it is the
+                // transcript's own words, no call.
                 self.record_last_summary(cx);
-                self.title_from_transcript(cx);
                 // A settled pack turn fails its handoff here, with its
                 // reason on the card and the row — never a silent Active.
                 self.reconcile_pack_turns(cx);
-                // The free excerpt just landed; a poor one may earn one
-                // debounced rewrite — idle sessions only, never a running
-                // turn — through the same side session as a title.
-                self.maybe_rewrite_byline(cx);
+                if counted {
+                    self.title_from_transcript(cx);
+                    // The free excerpt just landed; a poor one may earn one
+                    // debounced rewrite — idle sessions only, never a
+                    // running turn — through the same side session as a
+                    // title.
+                    self.maybe_rewrite_byline(cx);
+                }
                 // The lane settled: repaint on this path even if the
                 // view's own notify raced the event delivery (W8c).
                 cx.notify();
@@ -10355,12 +10366,25 @@ done
         crate::providers::ProviderFactory,
         std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
     ) {
+        recording_resumable_factory_replying(Some("The header is restored"))
+    }
+
+    /// [`recording_resumable_factory`] whose replayed assistant turn says
+    /// `reply`, or nothing at all (a turn of tool calls only, as far as the
+    /// byline can tell) when `None`.
+    fn recording_resumable_factory_replying(
+        reply: Option<&'static str>,
+    ) -> (
+        crate::providers::ProviderFactory,
+        std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
+    ) {
         use provider::ProviderAdapter as _;
         struct RecordingResumable {
             tx: crossbeam_channel::Sender<provider::ProviderEvent>,
             rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
             connected: bool,
             commands: std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
+            reply: Option<&'static str>,
         }
         impl provider::ProviderAdapter for RecordingResumable {
             fn id(&self) -> provider::ProviderId {
@@ -10411,34 +10435,36 @@ done
                     provider::Command::ResumeSession { session_id, .. } => {
                         // The backend's stored transcript, replayed as
                         // deltas the way a real resume replays them.
+                        let mut deltas = vec![
+                            aui_protocol::Delta::TurnStarted {
+                                turn: aui_protocol::Turn::User {
+                                    id: "u-old".into(),
+                                    text: "Restore the header".into(),
+                                    attachments: Vec::new(),
+                                    mentions: Vec::new(),
+                                    timestamp: None,
+                                },
+                            },
+                            aui_protocol::Delta::TurnStarted {
+                                turn: aui_protocol::Turn::Assistant {
+                                    id: "a-old".into(),
+                                    blocks: Vec::new(),
+                                    meta: aui_protocol::TurnMeta::default(),
+                                    timestamp: None,
+                                },
+                            },
+                        ];
+                        if let Some(reply) = self.reply {
+                            deltas.push(aui_protocol::Delta::BlockAdded {
+                                turn_id: "a-old".into(),
+                                block: aui_protocol::Block::Text { text: reply.into(), streaming: false },
+                            });
+                        }
                         let _ = self.tx.send(provider::ProviderEvent::Deltas {
                             session_id: Some(session_id.clone()),
-                            deltas: vec![
-                                aui_protocol::Delta::TurnStarted {
-                                    turn: aui_protocol::Turn::User {
-                                        id: "u-old".into(),
-                                        text: "Restore the header".into(),
-                                        attachments: Vec::new(),
-                                        mentions: Vec::new(),
-                                        timestamp: None,
-                                    },
-                                },
-                                aui_protocol::Delta::TurnStarted {
-                                    turn: aui_protocol::Turn::Assistant {
-                                        id: "a-old".into(),
-                                        blocks: Vec::new(),
-                                        meta: aui_protocol::TurnMeta::default(),
-                                        timestamp: None,
-                                    },
-                                },
-                                aui_protocol::Delta::BlockAdded {
-                                    turn_id: "a-old".into(),
-                                    block: aui_protocol::Block::Text {
-                                        text: "The header is restored".into(),
-                                        streaming: false,
-                                    },
-                                },
-                                aui_protocol::Delta::TurnFinished {
+                            deltas: deltas
+                                .into_iter()
+                                .chain([aui_protocol::Delta::TurnFinished {
                                     turn_id: "a-old".into(),
                                     meta: aui_protocol::TurnMeta {
                                         model: "codex-mini".into(),
@@ -10447,8 +10473,8 @@ done
                                         cost_usd: 0.04,
                                         ..Default::default()
                                     },
-                                },
-                            ],
+                                }])
+                                .collect(),
                         });
                         Ok(provider::Ack::Session { session_id, title: None })
                     }
@@ -10478,11 +10504,89 @@ done
                 rx,
                 connected: false,
                 commands: factory_commands.clone(),
+                reply,
             };
             adapter.connect(&conn::connect_info())?;
             Ok(provider::Provider::new(adapter))
         });
         (factory, commands)
+    }
+
+    /// A reopen replays settled history, and a replayed settle counted
+    /// nothing, so it starts no model work: no byline rewrite and no title
+    /// on the session's provider (2026-10-30 — an imported session, with
+    /// no byline of its own, could fire a paid rewrite just by being
+    /// opened). The replay here ends on an assistant turn with no text
+    /// under a stored rewritten byline: exactly the poor, changed pair the
+    /// rewrite fires on for a live turn. The free excerpt still lands.
+    #[gpui::test]
+    fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("replay-no-model");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(ProviderId, String)>::new()));
+        {
+            let asked = asked.clone();
+            crate::utility::set_test_completer(move |provider, prompt| {
+                asked.borrow_mut().push((provider, prompt.to_owned()));
+                Ok("ASK: a\nRESULT: b".into())
+            });
+        }
+        let (factory, commands) = recording_resumable_factory_replying(None);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_factory = factory;
+                mark_muse_up(harness);
+                z4_seed_stored_codex(harness, cx);
+                // The record already counted the one exchange the replay
+                // folds, as an import or an earlier session counted it.
+                if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 1;
+                    record.title = None;
+                }
+                harness.layout.auto_summary = true;
+                harness.layout.auto_title = true;
+                harness.set_override(
+                    "s-codex-old",
+                    |meta| {
+                        meta.last_ask = Some("Rewritten ask".into());
+                        meta.last_summary = Some("Rewritten result".into());
+                    },
+                    cx,
+                );
+                assert!(
+                    harness.utility_available(ProviderId::Codex),
+                    "the completer is reachable, so only the gate keeps it quiet"
+                );
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the reopened lane is open");
+            assert_eq!(view.read(cx).session_id, "s-codex-old");
+            assert!(
+                commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::ResumeSession { .. })),
+                "the reopen resumed and replayed"
+            );
+            assert_eq!(
+                harness.provider_sessions.get("s-codex-old").map(|record| record.turns),
+                Some(1),
+                "the replay counted nothing"
+            );
+            assert!(asked.borrow().is_empty(), "a replayed reopen asks no model: {:?}", asked.borrow());
+            assert!(!harness.byline_live.contains("s-codex-old"), "no rewrite started");
+            assert_eq!(
+                harness.overrides.get("s-codex-old").and_then(|meta| meta.last_ask.clone()).as_deref(),
+                Some("Restore the header"),
+                "the free excerpt still lands"
+            );
+        });
+        lane_restore(state);
     }
 
     /// The W5 reopen arm, end to end at the seam: a provider session
