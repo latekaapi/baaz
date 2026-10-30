@@ -3157,16 +3157,22 @@ impl Harness {
         // an override yet — synthesise its row from the local stores so
         // the chain shows with the right title before `session/list`
         // arrives (Y2a). Named by the chain title, so the empty filter
-        // keeps it.
+        // keeps it. Only an id whose own override carries the destination
+        // half (`handoff_from`) is one: an id merely *named* by another
+        // session's link is a Claude Code / Codex member whose record is
+        // its row — with the record missing (a state dir copied without
+        // `provider-sessions.json`) it was drawn as a "New session · now"
+        // ghost once any record existed (live check of 7ff7f92).
         {
             let missing: Vec<String> = self
                 .overrides
-                .keys()
-                .filter(|id| {
-                    !self.sessions.iter().any(|e| e.id == **id)
+                .iter()
+                .filter(|(id, meta)| {
+                    meta.handoff_from.as_deref().map(str::trim).is_some_and(|from| !from.is_empty())
+                        && !self.sessions.iter().any(|e| e.id == **id)
                         && sidebar::needs_collapse(id, &self.provider_sessions, &self.overrides)
                 })
-                .cloned()
+                .map(|(id, _)| id.clone())
                 .collect();
             if !missing.is_empty() {
                 let now = crate::clock::now_local();
@@ -12967,6 +12973,74 @@ done
             });
         });
         vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// Live check of 7ff7f92: a state dir holding a Muse record but not
+    /// the Claude Code / Codex records drew every chain member those
+    /// records anchor as a "New session · now" row — `merge_provider_rows`
+    /// synthesised a row for any override id a handoff link names, once
+    /// any record existed (before P4-B only a Claude/Codex record did
+    /// that). Only a destination's own override (it carries
+    /// `handoff_from`) may stand in for its row.
+    #[gpui::test]
+    fn a_record_never_conjures_rows_for_chain_members_it_does_not_hold(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-ghost-rows");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.sessions.clear();
+                harness.overrides.clear();
+                // The trigger: one Muse record (a reopened session).
+                crate::provider_sessions::upsert_listed(
+                    &mut harness.provider_sessions,
+                    "muse",
+                    "s-muse-opened",
+                    None,
+                    None,
+                    Some("Opened".into()),
+                    None,
+                    2,
+                    1,
+                    1,
+                );
+                harness.sessions.push(chain_muse_entry("s-muse-opened", "Opened", 2));
+                // A Muse source handed off to a Claude Code session whose
+                // record this state dir does not hold…
+                harness.overrides.insert(
+                    "s-muse-src".into(),
+                    crate::sessions::SessionMeta { handoff_to: Some("s-claude-missing".into()), ..Default::default() },
+                );
+                harness.sessions.push(chain_muse_entry("s-muse-src", "Source", 1));
+                // Both members keep overrides of their own (a project, a
+                // derived title), as the owner's do.
+                for id in ["s-claude-missing", "s-codex-missing"] {
+                    harness.overrides.insert(
+                        id.into(),
+                        crate::sessions::SessionMeta { project: Some("p-harness".into()), ..Default::default() },
+                    );
+                }
+                // …and a Muse destination of a Codex source with no record:
+                // the destination stands in for itself, the source does not.
+                harness.overrides.insert(
+                    "s-muse-dest".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_from: Some("s-codex-missing".into()),
+                        handoff_from_provider: Some("codex".into()),
+                        handoff_title: Some("Chain title".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.merge_provider_rows();
+                let ids: Vec<&str> = harness.sessions.iter().map(|e| e.id.as_str()).collect();
+                assert!(!ids.contains(&"s-claude-missing"), "no ghost for a member named by a link: {ids:?}");
+                assert!(!ids.contains(&"s-codex-missing"), "no ghost for a source named by a link: {ids:?}");
+                let dest = harness.sessions.iter().find(|e| e.id == "s-muse-dest").expect("the destination's row");
+                assert_eq!(dest.label, "Chain title");
+            });
+        });
         lane_restore(state);
     }
 
