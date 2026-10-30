@@ -26,6 +26,13 @@
 # place got the owner's Baaz killed mid-session, no crash report). Quit and
 # reopen to run the new build. It never touches the repo's sources. Costs
 # nothing: no server, no turn.
+#
+# Never swap under a running Baaz (2026-10-31): a running app launches every
+# new Chromium helper by path, so after a swap its fresh helpers came from the
+# new build while its own engine was the old one — "observer_list reentrancy"
+# failures in Browser/cef.log and an app that stopped responding. While a Baaz
+# runs from OUT, the new build is parked at NEXT and swapped in by the next run
+# (or `scripts/bundle.sh --swap`) once that Baaz has quit.
 set -eu
 
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
@@ -35,6 +42,33 @@ SRC="$ROOT/assets/icon-1024.png"
 OUT="$ROOT/target/bundle/Baaz.app"
 # Assembled here, on the same volume, then renamed over OUT in one step.
 STAGE="$ROOT/target/bundle/.Baaz.app.new"
+# A finished build parked while a Baaz was running from OUT.
+NEXT="$ROOT/target/bundle/next/Baaz.app"
+
+running() { pgrep -f "$OUT/Contents/MacOS/Baaz" >/dev/null 2>&1; }
+
+swap_in() {
+    OLD="$OUT.old.$$"
+    if [ -e "$OUT" ]; then
+        mv "$OUT" "$OLD"
+    fi
+    mv "$1" "$OUT"
+    rm -rf "$OLD"
+}
+
+if [ "${1:-}" = "--swap" ]; then
+    if [ ! -d "$NEXT" ]; then
+        echo "bundle: nothing parked at $NEXT"
+        exit 0
+    fi
+    if running; then
+        echo "bundle: a Baaz is still running from $OUT — quit it first" >&2
+        exit 1
+    fi
+    swap_in "$NEXT"
+    echo "bundle: $OUT"
+    exit 0
+fi
 CONTENTS="$STAGE/Contents"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 
@@ -196,17 +230,18 @@ EOF
 # Ad-hoc sign so Gatekeeper lets `open` launch it on this machine.
 codesign --force --deep --sign - "$STAGE" >/dev/null 2>&1 || true
 
-# Swap: the old app moves aside and is removed; a running Baaz keeps its
-# open files (unlinked, not overwritten) until it quits.
-OLD="$OUT.old.$$"
-if [ -e "$OUT" ]; then
-    mv "$OUT" "$OLD"
+# Swap — unless a Baaz runs from OUT: then park the build at NEXT and leave
+# the running app's files (and the helpers it launches by path) alone.
+if running; then
+    rm -rf "$NEXT"
+    mkdir -p "$(dirname "$NEXT")"
+    mv "$STAGE" "$NEXT"
+    echo "bundle: a Baaz is running from $OUT, so the new build is parked at $NEXT"
+    echo "bundle: quit Baaz, then run: scripts/bundle.sh --swap   (or launch $NEXT directly)"
+    exit 0
 fi
-mv "$STAGE" "$OUT"
-rm -rf "$OLD"
-if pgrep -f "$OUT/Contents/MacOS/Baaz" >/dev/null 2>&1; then
-    echo "bundle: a Baaz is running from the previous build — quit and reopen it to run this one"
-fi
+rm -rf "$NEXT"
+swap_in "$STAGE"
 
 echo "bundle: $OUT"
 echo "bundle: launch with: open \"$OUT\""
