@@ -2937,6 +2937,38 @@ mod tests {
         restore_harness_dir(state);
     }
 
+    /// Owner 2026-10-31: the code preview soft-wraps by default; the Wrap
+    /// button and ⌥Z flip it for every file and keep it in the layout.
+    #[gpui::test]
+    fn the_code_preview_wraps_and_alt_z_flips_it(cx: &mut TestAppContext) {
+        let state = hermetic_harness_dir("files-wrap");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(harness_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        std::fs::write(state.2.join("long.py"), format!("x = {}\n", "1 + ".repeat(200))).unwrap();
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx)));
+        vc.run_until_parked();
+        let root = vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root)).expect("the hermetic workspace is adopted at boot");
+        vc.update(|window, cx| {
+            files_handler(baaz.downgrade(), root.clone())(&FileTreeAction::Select(SharedString::from("long.py")), window, cx);
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).code_preview_open()), "a .py file previews as code");
+        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "wrapping is on by default");
+        // ⌥Z is the preview body's key (VS Code's Toggle Word Wrap); the
+        // Wrap button and the key both land in `toggle_code_wrap`.
+        assert!(crate::right_files::is_wrap_key(&gpui::Keystroke::parse("alt-z").unwrap()));
+        assert!(!crate::right_files::is_wrap_key(&gpui::Keystroke::parse("cmd-alt-z").unwrap()));
+        assert!(!crate::right_files::is_wrap_key(&gpui::Keystroke::parse("z").unwrap()));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "the toggle turns wrapping off");
+        assert!(!vc.update(|_, cx| baaz.read(cx).layout.code_wrap), "the choice goes into the layout");
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "the Wrap button turns it back on");
+        restore_harness_dir(state);
+    }
+
     /// Z7a: the Browser pane's nav actions belong to the webview now, not to
     /// [`inert`] — Back/Forward/Reload/Screenshot/Console/annotate reach the
     /// session's [`WebviewState`](aui_webview::WebviewState) through the

@@ -457,6 +457,12 @@ pub struct Layout {
     /// backend at startup and on change.
     #[serde(rename = "downloadDir", default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<PathBuf>,
+    /// Whether the Files preview soft-wraps long lines (owner 2026-10-31:
+    /// "some max width and some wrapping"). ON by default, as in an
+    /// editor; the preview's Wrap button and ⌥Z flip it, and the choice
+    /// holds for every file and across launches.
+    #[serde(rename = "codeWrap", default = "default_true")]
+    pub code_wrap: bool,
 }
 
 /// The folder downloads land in when nothing was ever chosen:
@@ -526,6 +532,7 @@ impl Default for Layout {
             mode_memory: ModeSlots::default(),
             search_engine: crate::browser::toolbar::SearchEngine::Google,
             download_dir: None,
+            code_wrap: true,
         }
     }
 }
@@ -713,6 +720,7 @@ mod tests {
             },
             search_engine: crate::browser::toolbar::SearchEngine::Kagi,
             download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
+            code_wrap: false,
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -787,6 +795,13 @@ mod tests {
         assert!(old.auto_summary);
         assert!(old.handoff_model_summary);
         assert!(old.fold_finished_turns);
+        // The Files preview wraps long lines, old files included; off
+        // survives a round trip.
+        assert!(Layout::default().code_wrap);
+        assert!(old.code_wrap);
+        let off = Layout { code_wrap: false, ..Layout::default() };
+        let back: Layout = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.code_wrap);
         // The dock starts closed at its default height, old files included.
         assert!(!Layout::default().terminal_open);
         assert_eq!(Layout::default().terminal_height, None);
