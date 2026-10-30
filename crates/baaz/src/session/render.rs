@@ -1022,6 +1022,28 @@ impl SessionView {
         self.refresh_render_full(dirty);
     }
 
+    /// How many turns the render cache holds (`--perf-turn`).
+    pub(crate) fn cached_turn_count(&self) -> usize {
+        self.cached_turns.len()
+    }
+
+    /// The newest assistant turn's last text block as the render cache
+    /// holds it: the markdown the transcript draws for a streaming answer
+    /// (`--perf-turn`).
+    pub(crate) fn last_answer_text(&self) -> String {
+        self.cached_turns
+            .iter()
+            .rev()
+            .find_map(|turn| match &**turn {
+                Turn::Assistant { blocks, .. } => blocks.iter().rev().find_map(|block| match block {
+                    Block::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// The whole-transcript refresh: every turn reconsidered, every row
     /// counted. What a fresh session, a handoff view, a removed turn or a
     /// toggle takes; streaming takes [`Self::refresh_render_suffix`].
@@ -1092,11 +1114,14 @@ impl SessionView {
                 .collect();
             self.cached_turns = Rc::new(turns);
             // D4: what each user turn was sent with, paired by text.
-            self.sent_pairs = Rc::new(crate::sent::pair(&self.cached_turns, &self.sent_items));
+            let mut pairs = HashMap::new();
+            crate::sent::pair_from(&self.cached_turns, &self.sent_items, 0, &mut self.sent_cursors, &mut pairs);
+            self.sent_pairs = Rc::new(pairs);
+            self.sent_cursor_items = self.sent_items.len();
             // Q1b: first-seen wall times for tool calls, on the frame's
             // own clock — the live run rows tick from these, never from
             // summed durations.
-            let now_ms = transcript::transcript_now_ms(&self.cached_turns);
+            let now_ms = self.frame_clock_ms(0);
             transcript::refresh_tool_starts(&self.cached_turns, &mut self.tool_first_seen, now_ms);
         }
         // The list's rows, one per block, and the per-turn counts the next
@@ -1111,7 +1136,7 @@ impl SessionView {
         Rc::make_mut(&mut self.rows).clear();
         self.rebuild_rows_from(0);
         self.suffix_inputs = Some((self.toggled_gen, self.fold_finished_turns));
-        self.refresh_card_state();
+        self.refresh_card_state(0);
     }
 
     /// Bring `rows` and `row_counts` up to date from turn `from` on, keeping
@@ -1123,7 +1148,18 @@ impl SessionView {
     /// (`TAIL_SPACER_H`) in `transcript_list`. Each turn's count is
     /// memoised against its snapshot `Rc` (see `row_memo`).
     fn rebuild_rows_from(&mut self, from: usize) {
-        let offset: usize = self.row_counts.iter().take(from).map(|(_, n)| n).sum();
+        // Everything above `from` keeps its rows: the offset is what is left
+        // once the tail's rows (and the spacer) come off — summed over the
+        // tail, never the prefix, so a chunk at 3,000 turns adds 3 counts,
+        // not 3,000 (speed S4).
+        let offset: usize = if from == 0 {
+            0
+        } else if self.row_counts.len() >= from {
+            let tail: usize = self.row_counts[from..].iter().map(|(_, n)| n).sum();
+            self.rows.len().saturating_sub(tail)
+        } else {
+            self.row_counts.iter().map(|(_, n)| n).sum()
+        };
         let last_turn = self.cached_turns.len().saturating_sub(1);
         let live_tail = self.busy() && !crate::clock::deterministic();
         self.row_counts.truncate(from);
@@ -1208,12 +1244,15 @@ impl SessionView {
         if from > 0 && own[from - 1].id() != self.cached_turns[from - 1].id() {
             return false;
         }
-        let tail_old: Vec<Rc<Turn>> = self.cached_turns[from..].to_vec();
-        let mut turns: Vec<Rc<Turn>> = Vec::with_capacity(own.len());
-        turns.extend(self.cached_turns[..from].iter().cloned());
+        // Keep the prefix in place: only the tail is cut and rebuilt (a
+        // shared snapshot is cloned once by `make_mut`, as before; an
+        // unshared one costs the suffix alone).
+        let cached = Rc::make_mut(&mut self.cached_turns);
+        let tail_old: Vec<Rc<Turn>> = cached.split_off(from);
+        cached.reserve(own.len() - from);
         for turn in &own[from..] {
             let previous = tail_old.iter().find(|old| old.id() == turn.id());
-            turns.push(match previous {
+            cached.push(match previous {
                 Some(previous) if !dirty.contains(turn.id()) => {
                     debug_assert!(**previous == *turn, "turn {} changed but the fold did not mark it", turn.id());
                     Rc::clone(previous)
@@ -1222,23 +1261,84 @@ impl SessionView {
                 _ => Rc::new(turn.clone()),
             });
         }
-        self.cached_turns = Rc::new(turns);
-        self.sent_pairs = Rc::new(crate::sent::pair(&self.cached_turns, &self.sent_items));
-        let now_ms = transcript::transcript_now_ms(&self.cached_turns);
+        // D4 pairs: re-paired from `from` only, unless what was sent moved
+        // (a new item can pair an older turn), which re-pairs everything.
+        if self.sent_cursor_items == self.sent_items.len() && self.sent_cursors.len() > from {
+            let pairs = Rc::make_mut(&mut self.sent_pairs);
+            for turn in &tail_old {
+                pairs.remove(turn.id());
+            }
+            crate::sent::pair_from(&self.cached_turns, &self.sent_items, from, &mut self.sent_cursors, pairs);
+        } else {
+            let mut pairs = HashMap::new();
+            crate::sent::pair_from(&self.cached_turns, &self.sent_items, 0, &mut self.sent_cursors, &mut pairs);
+            self.sent_pairs = Rc::new(pairs);
+            self.sent_cursor_items = self.sent_items.len();
+        }
+        let now_ms = self.frame_clock_ms(from);
         transcript::note_tool_starts(&self.cached_turns[from..], &mut self.tool_first_seen, now_ms);
         self.rebuild_rows_from(from);
-        self.refresh_card_state();
+        self.refresh_card_state(from);
         true
     }
 
-    /// The per-refresh card facts every block walk feeds: the newest
-    /// pending approval, which open card fields still wait, and each shell
-    /// call's full-output state.
-    fn refresh_card_state(&mut self) {
+    /// [`transcript::transcript_now_ms`] over the cached turns, resumed at
+    /// turn `from`: under the deterministic flag the clock is the newest
+    /// turn timestamp, kept as a prefix maximum so a streaming refresh
+    /// walks only the turns it rebuilt (speed S4); otherwise wall time.
+    fn frame_clock_ms(&mut self, from: usize) -> u64 {
+        if !crate::clock::deterministic() {
+            return transcript::transcript_now_ms(&self.cached_turns);
+        }
+        let from = if self.ts_prefix.len() > from { from } else { 0 };
+        self.ts_prefix.truncate(from + 1);
+        if self.ts_prefix.is_empty() {
+            self.ts_prefix.push(0);
+        }
+        let mut newest = self.ts_prefix[from];
+        for turn in self.cached_turns.iter().skip(from) {
+            newest = newest.max(turn.timestamp().unwrap_or(0));
+            self.ts_prefix.push(newest);
+        }
+        if newest == 0 {
+            transcript::transcript_now_ms(&[])
+        } else {
+            newest
+        }
+    }
+
+    /// The per-refresh card facts: the newest pending approval, which open
+    /// card fields still wait, and each shell call's full-output state.
+    ///
+    /// The block walk covers turns `from..` only and keeps the
+    /// [`CardSite`]s above it (speed S4: the whole-transcript walk was
+    /// 0.79 ms a chunk at 3,000 turns, more than everything else a chunk
+    /// costs); the summary then reads the sites, which are the few turns
+    /// holding a pending card, an open question or a shell call.
+    fn refresh_card_state(&mut self, from: usize) {
+        let keep = self.card_sites.partition_point(|site| site.turn_ix < from);
+        self.card_sites.truncate(keep);
+        for (turn_ix, turn) in self.cached_turns.iter().enumerate().skip(from) {
+            let mut site = CardSite { turn_ix, turn_id: turn.id().to_owned(), ..CardSite::default() };
+            for block in turn.blocks() {
+                match block {
+                    Block::Approval { id, state: aui_protocol::ApprovalState::Pending, choices, .. } => {
+                        site.pending.push((id.clone(), choices.clone()));
+                    }
+                    Block::Question { id, answer: None, .. } => site.questions.push(id.clone()),
+                    Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } => {
+                        site.shells.push(id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if !site.pending.is_empty() || !site.questions.is_empty() || !site.shells.is_empty() {
+                self.card_sites.push(site);
+            }
+        }
         let mut full_output = HashMap::new();
-        // The newest pending approval falls out of the same walk (finding
-        // `performance-2`): forward order, keeping the last hit, is the same
-        // block the old per-frame reverse scan found first.
+        // The newest pending approval: forward order, keeping the last hit,
+        // is the block the old per-frame reverse scan found first.
         let mut pending: Option<(String, Vec<aui_protocol::ApprovalChoice>)> = None;
         // An open card field stays open only while its card still waits:
         // a field whose approval settled (or whose question was answered)
@@ -1247,32 +1347,30 @@ impl SessionView {
         // (live 2026-10-17). The same walk finds whether each still waits.
         let mut feedback_live = false;
         let mut clarify_live = false;
-        for turn in self.cached_turns.iter() {
+        let stored = &self.store.side().stored_outputs;
+        for site in &self.card_sites {
             // A turn that is over settles its cards for key purposes, as it
             // does for the row (`row_pending`): nothing can answer them.
-            let over = self.turn_over(turn.id());
-            for block in turn.blocks() {
-                if let Block::Approval { id, state, choices, .. } = block {
-                    if *state == aui_protocol::ApprovalState::Pending && !over {
-                        pending = Some((id.clone(), choices.clone()));
-                        feedback_live |= self.feedback_open.as_ref().is_some_and(|(open, _)| open == id);
-                    }
+            let over = self.turn_over(&site.turn_id);
+            if !over {
+                for (id, choices) in &site.pending {
+                    pending = Some((id.clone(), choices.clone()));
+                    feedback_live |= self.feedback_open.as_ref().is_some_and(|(open, _)| open == id);
                 }
-                if let Block::Question { id, answer: None, .. } = block {
-                    clarify_live |= !over && self.clarify_open.as_ref() == Some(id);
+                for id in &site.questions {
+                    clarify_live |= self.clarify_open.as_ref() == Some(id);
                 }
-                if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } = block
-                {
-                    if self.store.side().stored_outputs.contains_key(id.as_str()) {
-                        let state = match self.full_outputs.get(id) {
-                            Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
-                            Some(full_output::Fetch::Ready { lines, capped }) => {
-                                FullOutputState::Ready { lines: lines.clone(), capped: *capped }
-                            }
-                            None => FullOutputState::Idle,
-                        };
-                        full_output.insert(id.clone(), FullOutput { fetchable: true, state });
-                    }
+            }
+            for id in &site.shells {
+                if stored.contains_key(id.as_str()) {
+                    let state = match self.full_outputs.get(id) {
+                        Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
+                        Some(full_output::Fetch::Ready { lines, capped }) => {
+                            FullOutputState::Ready { lines: lines.clone(), capped: *capped }
+                        }
+                        None => FullOutputState::Idle,
+                    };
+                    full_output.insert(id.clone(), FullOutput { fetchable: true, state });
                 }
             }
         }
@@ -2936,6 +3034,66 @@ impl InlineProgress {
 mod tests {
     use super::*;
 
+    /// Speed S4: a streamed refresh — the resumed pairing, the resumed
+    /// clock, the row offset and the card sites kept above the rebuilt
+    /// turn — leaves exactly what a whole-transcript refresh builds.
+    #[gpui::test]
+    fn a_streamed_refresh_matches_a_full_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        use super::super::events::bench_support::{capture_events, last_turn_lines, renamed_turn};
+        let (mut folder, events) = capture_events("synthetic-stress-300.jsonl");
+        let last_turn = last_turn_lines("synthetic-stress-300.jsonl", "t-stress-300");
+        let vc = cx.add_empty_window();
+        vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "meta".to_owned(),
+                workspace: "/tmp/streamed-refresh".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            let view = cx.new(|cx| crate::session::SessionView::new("synthetic-stress-300".to_owned(), host, window, cx));
+            view.update(cx, |view, cx| {
+                view.fold_provider_events(events, cx);
+                view.refresh_render_cache();
+                // Something sent with an attachment pairs with a user turn.
+                let text = match view.cached_turns.iter().find(|turn| matches!(&***turn, Turn::User { .. })).map(|t| &**t) {
+                    Some(Turn::User { text, .. }) => text.clone(),
+                    _ => panic!("the capture has a user turn"),
+                };
+                view.sent_items.push(crate::sent::SentItem { text, annotations: Some(Default::default()), ..Default::default() });
+                view.refresh_render_full(None);
+                for n in 0..5 {
+                    for event in renamed_turn(&mut folder, &last_turn, 900 + n) {
+                        view.fold_provider_events(vec![event], cx);
+                        view.refresh_render_cache();
+                    }
+                }
+                let streamed = (
+                    view.rows.as_ref().clone(),
+                    view.row_counts.clone(),
+                    view.cached_pending_approval.clone(),
+                    view.sent_pairs.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                    view.cached_full_output.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                    view.card_sites.iter().map(|site| (site.turn_ix, site.turn_id.clone(), site.shells.clone())).collect::<Vec<_>>(),
+                    view.cached_turns.len(),
+                );
+                assert!(!streamed.3.is_empty(), "the sent item paired");
+                view.refresh_render_full(None);
+                let full = (
+                    view.rows.as_ref().clone(),
+                    view.row_counts.clone(),
+                    view.cached_pending_approval.clone(),
+                    view.sent_pairs.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                    view.cached_full_output.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                    view.card_sites.iter().map(|site| (site.turn_ix, site.turn_id.clone(), site.shells.clone())).collect::<Vec<_>>(),
+                    view.cached_turns.len(),
+                );
+                assert_eq!(streamed, full);
+            });
+        });
+    }
+
     /// The render cache (docs/51 #6, P2): one streamed turn's events at the
     /// end of a 300-turn-and-growing session — apply plus
     /// `refresh_render_cache` per event, the work streaming costs before
@@ -4259,6 +4417,21 @@ impl SessionView {
 }
 
 /// One turn's memoised row count (see `SessionView::row_memo`).
+/// One cached turn's card facts (speed S4): what [`SessionView`]'s card
+/// state reads, kept per turn so a refresh re-walks only the turns it
+/// rebuilt.
+#[derive(Default)]
+pub(crate) struct CardSite {
+    turn_ix: usize,
+    turn_id: String,
+    /// Pending approvals, in block order, with their choices.
+    pending: Vec<(String, Vec<aui_protocol::ApprovalChoice>)>,
+    /// Unanswered questions.
+    questions: Vec<String>,
+    /// Shell tool calls (the full-output fetch keys).
+    shells: Vec<String>,
+}
+
 pub(crate) struct RowMemo {
     /// The snapshot the count was computed from; held, so its address
     /// stays this turn's while memoised.

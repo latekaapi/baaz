@@ -1084,6 +1084,23 @@ pub struct SessionView {
     /// [`Self::sent_items`] paired with the transcript's user turns, by turn
     /// id: refreshed with the render cache.
     sent_pairs: Rc<HashMap<String, crate::sent::SentItem>>,
+    /// `pair_from`'s item cursor before each cached turn, and the
+    /// `sent_items` length it was paired against: a streaming refresh
+    /// re-pairs only the turns it rebuilt (speed S4).
+    sent_cursors: Vec<usize>,
+    sent_cursor_items: usize,
+    /// The cached turns that hold card facts — a pending approval, an open
+    /// question or a shell call — in turn order, so the per-refresh card
+    /// state walks these, not every block of the transcript (speed S4:
+    /// 0.79 ms a chunk at 3,000 turns).
+    card_sites: Vec<render::CardSite>,
+    /// `ts_prefix[i]`: the newest turn timestamp over cached turns `..i`
+    /// (0 = none), so the deterministic clock a refresh reads is resumed
+    /// at the rebuilt turn instead of re-walking the transcript.
+    ts_prefix: Vec<u64>,
+    /// The turn count when created files were last recorded: the next
+    /// settle scans from there (`None`: never, so it sweeps everything).
+    created_files_through: Option<usize>,
     /// A drag is over the window, so the drop overlay is up.
     dragging: bool,
     /// The `+` menu.
@@ -1384,6 +1401,11 @@ impl SessionView {
             annotation_draft: None,
             sent_items,
             sent_pairs: Rc::new(HashMap::new()),
+            sent_cursors: Vec::new(),
+            sent_cursor_items: 0,
+            card_sites: Vec::new(),
+            ts_prefix: Vec::new(),
+            created_files_through: None,
             dragging: false,
             plus_open: false,
             draft_empty: true,

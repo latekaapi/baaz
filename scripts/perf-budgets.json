@@ -93,6 +93,16 @@
         "store.import_scan_ms": {
           "budget": 250,
           "measured": 74
+        },
+        "turn.render_turn_at_300_us": {
+          "budget": 100,
+          "measured": 15,
+          "unit": "us"
+        },
+        "turn.render_turn_at_3000_us": {
+          "budget": 100,
+          "measured": 15,
+          "unit": "us"
         }
       }
     },
@@ -188,6 +198,16 @@
         "store.import_scan_ms": {
           "budget": 250,
           "measured": 69
+        },
+        "turn.render_turn_at_300_us": {
+          "budget": 100,
+          "measured": 15,
+          "unit": "us"
+        },
+        "turn.render_turn_at_3000_us": {
+          "budget": 100,
+          "measured": 15,
+          "unit": "us"
         }
       }
     }
