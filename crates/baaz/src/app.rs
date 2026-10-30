@@ -5658,7 +5658,11 @@ impl Harness {
         // in the corner window.
         let in_band = !self.skills.open && pending_dest.is_none() && self.mode != layout::Mode::Browse && self.active.is_some();
         let body = match (in_band || self.corner_in_overlay()).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
-            Some(stack) => div().relative().flex_1().min_h_0().w_full().child(body).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
+            // A flex column, never a block: the Skills page's root is
+            // `flex_1`, and in a block parent it took no height — feedback
+            // mode's slot put every page in this wrapper and Skills drew a
+            // blank body (QA 2026-10-30).
+            Some(stack) => v_flex().relative().flex_1().min_h_0().w_full().child(body).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
             None => body,
         };
         let dock = self.render_terminal_dock(window, cx);
@@ -8691,6 +8695,35 @@ mod tests {
             crate::skills_page::SKILLS_HEADER_TOP >= clear,
             "the header's inset clears the sheet row and its fade"
         );
+        restore_state(state);
+    }
+
+    /// Feedback mode on (the owner's real layout) puts the feedback slot in
+    /// the corner stack, which wraps the centre's body. The wrapper was a
+    /// block `div`, and the Skills page's root is `flex_1` — it took no
+    /// height there, so the page drew a blank body (QA 2026-10-30).
+    #[gpui::test]
+    fn the_skills_page_fills_the_centre_with_feedback_mode_on(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("skills-feedback-mode");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.layout.feedback_mode = true;
+                h.step_skills("page", window, cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        assert!(vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some())), "the slot shows");
+        let list = vc.debug_bounds("skills-header").expect("the Skills header draws");
+        assert!(f32::from(list.size.height) > 0.0, "the header has height: {list:?}");
+        let page = vc.debug_bounds("skills-page").expect("the Skills page draws");
+        assert!(f32::from(page.size.height) > 200.0, "the page fills the centre, not a zero-height strip: {page:?}");
         restore_state(state);
     }
 
