@@ -1793,6 +1793,23 @@ fn generic_card(key: &str, id: ElementId, kind: &str, status: &str, text: &str, 
         .into_any_element()
 }
 
+/// A generic card's header, in words a person reads. The adapters close a
+/// turn their dead child left open with a card whose kind is an internal
+/// identifier (`codex-child-exited` / `claude-child-exited`, status
+/// `error`): it showed verbatim as "✕ codex-child-exited error" (QA
+/// 2026-10-30). Those read as the lost banner reads — "Codex stopped
+/// unexpectedly" — with no raw status beside them; every other card keeps
+/// its provider's own kind and status.
+pub(crate) fn generic_header<'a>(kind: &'a str, status: &'a str) -> (&'a str, &'a str) {
+    if kind == provider_codex::fold::CHILD_EXITED_CARD {
+        ("Codex stopped unexpectedly", "")
+    } else if kind == provider_claude_code::CHILD_EXITED_CARD {
+        ("Claude Code stopped unexpectedly", "")
+    } else {
+        (kind, status)
+    }
+}
+
 /// One block of an assistant turn.
 ///
 /// `last` and `meta` exist for one reason: the per-turn token footer belongs
@@ -1860,7 +1877,10 @@ fn block(
         Block::Generic { kind, status, text } if kind == "Artifact" => {
             generic_card(key, id, kind, status, &artifact_summary_text(text), folds)
         }
-        Block::Generic { kind, status, text } => generic_card(key, id, kind, status, text, folds),
+        Block::Generic { kind, status, text } => {
+            let (kind, status) = generic_header(kind, status);
+            generic_card(key, id, kind, status, text, folds)
+        }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
         Block::Handoff { .. } => handoff_block_card(id, block, folds),
     }
@@ -3449,6 +3469,20 @@ mod tests {
 
     /// B12: generic cards start collapsed — the chevron has something to
     /// open — and open when the person toggles them.
+    #[test]
+    fn a_dead_childs_card_reads_in_words_not_identifiers() {
+        assert_eq!(
+            generic_header(provider_codex::fold::CHILD_EXITED_CARD, "error"),
+            ("Codex stopped unexpectedly", ""),
+            "no codex-child-exited / error in the transcript"
+        );
+        assert_eq!(
+            generic_header(provider_claude_code::CHILD_EXITED_CARD, "error"),
+            ("Claude Code stopped unexpectedly", "")
+        );
+        assert_eq!(generic_header("webSearch", "completed"), ("webSearch", "completed"), "other cards keep theirs");
+    }
+
     #[test]
     fn generic_cards_start_collapsed_with_a_working_toggle() {
         let folds = quiet_folds();
