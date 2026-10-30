@@ -1760,14 +1760,9 @@ impl Harness {
         // centre cell and pushed the dock below the fold (Y3a).
         // `overflow_hidden` keeps the absolute popover/dialog layer —
         // seated at this relative root — clipped to the page.
-        let mut root = div()
-            .debug_selector(|| "skills-page".into())
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            .overflow_hidden()
-            .relative()
-            .child(column);
+        let mut root = div().flex_1().min_h(px(0.0)).w_full().overflow_hidden().relative().child(column);
+        // The test hook the feedback-mode layout test measures.
+        root = root.debug_selector(|| "skills-page".into());
         if self.skills.add_menu_open {
             root = root.child(self.render_add_menu(cx));
         }
