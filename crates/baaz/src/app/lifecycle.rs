@@ -4505,6 +4505,7 @@ impl Harness {
                 // draft any more, whether it already had a row or not.
                 self.drafts.retain(|_, named| named != &session_id);
                 self.unsent.remove(&session_id);
+                self.turns_admitted.insert(session_id.clone());
                 let handoff_dest =
                     sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
                 // A handoff destination's first words are the pack, then the
@@ -4633,10 +4634,14 @@ impl Harness {
                     })
                     .unwrap_or(0);
                 let counted_before = self.provider_sessions.get(&session_id).map(|record| record.turns);
+                // Only a turn this window admitted is activity: a reopen's
+                // replay may correct the count, never the row's time.
+                let live = self.turns_admitted.contains(&session_id);
                 if crate::provider_sessions::note_settled_turn_counted(
                     &mut self.provider_sessions,
                     &session_id,
                     exchanges,
+                    live,
                 ) {
                     self.persist_provider_sessions(cx);
                 }
@@ -10589,6 +10594,53 @@ done
         lane_restore(state);
     }
 
+    /// Opening a session is never activity, whatever its record counted:
+    /// a reopen whose replay folds more exchanges than the record holds (an
+    /// imported count, a Muse list's `turnCount`, a record synthesised from
+    /// its row) raised the count AND stamped the record now, so the row
+    /// read "now" and jumped to the top of its group (QA 2026-10-30, a Muse
+    /// session last active 22 Oct). The count may rise; the time may not.
+    #[gpui::test]
+    fn a_reopen_that_replays_more_than_the_record_counted_keeps_the_rows_time(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("replay-keeps-time");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_factory = factory;
+                mark_muse_up(harness);
+                z4_seed_stored_codex(harness, cx);
+                if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 0;
+                }
+                harness.merge_provider_rows();
+            });
+        });
+        let row_time = |harness: &Harness| {
+            harness.sessions.iter().find(|entry| entry.id == "s-codex-old").map(|entry| entry.updated.timestamp_millis())
+        };
+        let before = vc.update(|_, cx| row_time(baaz.read(cx)));
+        assert_eq!(before, Some(1_700_000_000_000), "the row reads its record's time");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(
+                harness.active.clone().expect("the reopened lane is open").read(cx).session_id,
+                "s-codex-old"
+            );
+            let record = harness.provider_sessions.get("s-codex-old").expect("the record");
+            assert_eq!(record.turns, 1, "the replay may correct the count");
+            assert_eq!(record.updated_ms, 1_700_000_000_000, "opening is not activity: the record keeps its time");
+            assert_eq!(row_time(harness), before, "the row keeps its time, so it keeps its place");
+        });
+        lane_restore(state);
+    }
+
     /// The W5 reopen arm, end to end at the seam: a provider session
     /// opened, abandoned (its views dropped like a restart drops them),
     /// reinstalled from the record and clicked — travels as
@@ -10626,6 +10678,7 @@ done
                     &mut harness.provider_sessions,
                     &open_id,
                     1,
+                    true,
                 );
                 crate::provider_sessions::write(&harness.provider_sessions);
             });
@@ -12177,7 +12230,7 @@ done
                 assert!(find("marram").is_empty(), "injected context is not searchable");
 
                 // One Claude exchange settles: only its row is rewritten.
-                crate::provider_sessions::note_settled_turn_counted(&mut harness.provider_sessions, "cc-search-1", 1);
+                crate::provider_sessions::note_settled_turn_counted(&mut harness.provider_sessions, "cc-search-1", 1, true);
                 let after = harness.search_sync_rows();
                 let stats = sync(&mut connection, &after);
                 assert_eq!((stats.written, stats.unchanged), (1, 2), "{stats:?}");

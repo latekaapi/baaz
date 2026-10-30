@@ -304,10 +304,17 @@ pub fn touch(store: &mut ProviderSessionStore, session_id: &str) -> bool {
 /// exchange — the fold's own count is idempotent across the replay.
 /// Returns whether the record exists — a turn for an unknown session
 /// names nothing, so the caller records nothing.
+///
+/// `live` is whether this settle ends a turn the window admitted. A replay
+/// (a reopen folding history) may raise the count — the record's own may
+/// be short: an import counts lines, a Muse list counts its own way — but
+/// never moves the time: opening a session is not activity (QA
+/// 2026-10-30, a 22 Oct row read "now" after an open).
 pub fn note_settled_turn_counted(
     store: &mut ProviderSessionStore,
     session_id: &str,
     exchanges: u64,
+    live: bool,
 ) -> bool {
     let Some(record) = store.get_mut(session_id) else { return false };
     // Only a turn the record has not counted yet is new activity: the
@@ -315,7 +322,9 @@ pub fn note_settled_turn_counted(
     // moved a merely-opened row to the top of the sidebar.
     if exchanges > record.turns {
         record.turns = exchanges;
-        record.updated_ms = crate::usage::now_ms();
+        if live {
+            record.updated_ms = crate::usage::now_ms();
+        }
     }
     true
 }
@@ -544,7 +553,7 @@ mod tests {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
         let before = store["s-1"].updated_ms;
-        assert!(note_settled_turn_counted(&mut store, "s-1", 1));
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1, true));
         assert_eq!(store["s-1"].turns, 1);
         assert!(store["s-1"].updated_ms >= before);
         write(&store);
@@ -554,7 +563,7 @@ mod tests {
     #[test]
     fn a_turn_for_an_unknown_session_records_nothing() {
         let mut store = ProviderSessionStore::new();
-        assert!(!note_settled_turn_counted(&mut store, "s-gone", 1));
+        assert!(!note_settled_turn_counted(&mut store, "s-gone", 1, true));
         assert!(store.is_empty());
     }
 
@@ -564,11 +573,11 @@ mod tests {
         // on reopen: the row must read 1 turn, not 2.
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
-        assert!(note_settled_turn_counted(&mut store, "s-1", 1));
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1, true));
         assert_eq!(store["s-1"].turns, 1);
-        assert!(note_settled_turn_counted(&mut store, "s-1", 1), "the replayed settle");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1, false), "the replayed settle");
         assert_eq!(store["s-1"].turns, 1, "a replay never double-counts");
-        assert!(note_settled_turn_counted(&mut store, "s-1", 2), "a second live exchange");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 2, true), "a second live exchange");
         assert_eq!(store["s-1"].turns, 2);
     }
 
@@ -693,18 +702,21 @@ mod tests {
     fn reopening_keeps_the_row_and_its_recency() {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
-        note_settled_turn_counted(&mut store, "s-1", 1);
+        note_settled_turn_counted(&mut store, "s-1", 1, true);
         let created = store["s-1"].created_ms;
         // An old row: a reopen and the resume's replayed settle must leave
         // it where it sorts, not stamp it "now" and move it to the top.
         store.get_mut("s-1").unwrap().updated_ms = 1_000;
         upsert_open(&mut store, "claude-code", "s-1", None, None, None);
-        assert!(note_settled_turn_counted(&mut store, "s-1", 1), "the replayed settle");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1, false), "the replayed settle");
         assert_eq!(store["s-1"].updated_ms, 1_000, "opening a session is not activity");
-        assert!(note_settled_turn_counted(&mut store, "s-1", 2), "a new live exchange");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 3, false), "a replay that folds more than was counted");
+        assert_eq!(store["s-1"].turns, 3, "the replay corrects the count");
+        assert_eq!(store["s-1"].updated_ms, 1_000, "but a replay never moves the time");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 4, true), "a new live exchange");
         assert!(store["s-1"].updated_ms > 1_000, "a new turn is activity");
         assert_eq!(store["s-1"].created_ms, created, "a reopen is not a new session");
-        assert_eq!(store["s-1"].turns, 2, "its history survives");
+        assert_eq!(store["s-1"].turns, 4, "its history survives");
         assert_eq!(store["s-1"].workspace.as_deref(), Some("/w/shop"), "unset stays, not blanked");
     }
 
