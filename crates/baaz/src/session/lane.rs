@@ -224,24 +224,6 @@ impl SessionView {
         this
     }
 
-    /// An existing session's view drawn on the click while its lane
-    /// re-attaches: no provider yet, sends and picks waiting in the start
-    /// queue, history loading. [`Self::attach_provider`] takes the lane
-    /// once the resume answers.
-    pub fn new_lane_reopen(
-        session_id: String,
-        mode: aui_protocol::PermissionMode,
-        host: SessionHost,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut this = Self::new_unowned(session_id, host, window, cx);
-        this.lane = Lane::Opening(OpeningLane { mode });
-        this.begin_start();
-        this.loading_history = true;
-        this
-    }
-
     /// The opening view's child answered: take the session's real id (the
     /// provisional one renames here and nowhere else in the view), then
     /// the provider and its event stream, exactly once. A second attach —
@@ -310,7 +292,7 @@ impl SessionView {
         // draining past a lost connection.
         // A Muse lane rides the shared child, which the hub respawns and
         // re-attaches: it keeps draining too.
-        let revives = matches!(self.provider_kind(), ProviderId::ClaudeCode | ProviderId::Muse);
+        let revives = self.provider_kind().lane_survives_lost_child();
         self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
@@ -423,17 +405,7 @@ impl SessionView {
                 // tool-call elicitation parks under the pump's prefixed
                 // id, so the tap takes the elicitation kind without a new
                 // event shape — the prefix IS the kind tag.
-                let kind = match self.provider_kind() {
-                    ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
-                    ProviderId::Muse => ExternalApprovalKind::MuseApproval,
-                    _ if approval_id.starts_with(
-                        provider_codex::child::MCP_ELICITATION_ID_PREFIX,
-                    ) =>
-                    {
-                        ExternalApprovalKind::CodexMcpElicitation
-                    }
-                    _ => ExternalApprovalKind::CodexCommand,
-                };
+                let kind = self.provider_kind().external_approval_kind(&approval_id);
                 self.inject_external_approval(
                     ExternalApproval {
                         id: approval_id,
@@ -632,7 +604,7 @@ impl SessionView {
                 // Hang up the lane's provider: it will never deliver again —
                 // unless its connection is shared and comes back (Muse),
                 // where hanging up would only unbind this session.
-                if let (Lane::Provider(lane), false) = (&self.lane, self.provider_kind() == ProviderId::Muse) {
+                if let (Lane::Provider(lane), false) = (&self.lane, self.provider_kind().shares_one_child()) {
                     if let Ok(mut provider) = lane.provider.lock() {
                         provider.shutdown();
                     }
@@ -652,13 +624,13 @@ impl SessionView {
                 // A child that will not come back closes the session for the
                 // window (a handoff destination that never acknowledged its
                 // pack fails its run); a shared one (Muse) comes back.
-                if !matches!(self.provider_kind(), ProviderId::ClaudeCode | ProviderId::Muse) {
+                if !self.provider_kind().lane_survives_lost_child() {
                     cx.emit(super::SessionEvent::Closed);
                 }
                 // A Muse session wears the window's own reconnect banner
                 // (its one child is the window's connection); any other
                 // lane says it here.
-                if self.provider_kind() != ProviderId::Muse {
+                if !self.provider_kind().shares_one_child() {
                     self.set_banner(&format!("{CONNECTION_LOST}{reason}"), None, cx);
                 }
             }

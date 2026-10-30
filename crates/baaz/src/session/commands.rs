@@ -647,7 +647,7 @@ impl SessionView {
             .filter(|row| !row.unavailable_modes.is_empty())
             .map(|row| (row.id.clone(), row.unavailable_modes.clone()))
             .collect();
-        let muse = self.provider_kind() == ProviderId::Muse;
+        let muse = self.provider_kind().catalog_rows_carry_efforts();
         self.models = rows
             .into_iter()
             .map(|row| ModelCatalogEntry {
@@ -839,6 +839,20 @@ impl SessionView {
     /// quiet apart from that row: it never banners (see
     /// `request_provider_models`).
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
+        // A provider whose one catalog is shared across its sessions lists
+        // over its own connection, whatever the view holds.
+        if self.provider_kind().catalog_flags_session_model() {
+            // The catalog is the session's: an open picker fills when
+            // the start lands rather than staying silently empty.
+            if let Some(queue) = self.start_queue() {
+                queue.models = true;
+                self.models_error = Some("Models list once the session has started…".to_owned());
+                cx.notify();
+                return;
+            }
+            self.request_provider_models(cx);
+            return;
+        }
         match self.provider_kind() {
             ProviderId::ClaudeCode => {
                 // An opening lane lists Baaz's supplied aliases (below)
@@ -852,7 +866,7 @@ impl SessionView {
                 let provider = self.provider_id.clone();
                 self.apply_model_catalog(rows, &provider, cx);
             }
-            ProviderId::Codex => {
+            _ => {
                 if self.lane_live() {
                     self.request_provider_models(cx);
                     return;
@@ -870,17 +884,6 @@ impl SessionView {
                         .to_owned(),
                 );
                 cx.notify();
-            }
-            ProviderId::Muse => {
-                // The catalog is the session's: an open picker fills when
-                // the start lands rather than staying silently empty.
-                if let Some(queue) = self.start_queue() {
-                    queue.models = true;
-                    self.models_error = Some("Models list once the session has started…".to_owned());
-                    cx.notify();
-                    return;
-                }
-                self.request_provider_models(cx);
             }
         }
     }
@@ -1022,31 +1025,6 @@ impl SessionView {
         });
         let text = sent.or(said)?;
         crate::byline::excerpt_line(&text)
-    }
-
-    /// The prompt behind the newest submission, first line only: the
-    /// sidebar's local row is titled from this on `turn/started`, before the
-    /// wire lists the session.
-    ///
-    /// The newest recorded submission first — at `turn/started` the server
-    /// has not echoed the `userMessage` yet, but `submit` already recorded
-    /// its text under a time-ordered (UUIDv7) command id — then the newest
-    /// folded user turn, which covers replays and restarts that recorded
-    /// nothing.
-    pub fn first_prompt_text(&self) -> Option<String> {
-        let sent = self.store.last_command_text().map(str::to_owned);
-        let said = self.session()?.turns.iter().rev().find_map(|turn| match turn {
-            Turn::User { text, .. } => Some(text.clone()),
-            _ => None,
-        });
-        let text = sent.or(said)?;
-        let first = text.lines().next()?.trim();
-        if first.is_empty() {
-            return None;
-        }
-        // One row-line, cut where the row would truncate it anyway: a pasted
-        // brief that is one long paragraph never becomes the whole title.
-        Some(crate::sidebar::one_line(first))
     }
 
     /// The text of the newest assistant text block, which is the plan reply.

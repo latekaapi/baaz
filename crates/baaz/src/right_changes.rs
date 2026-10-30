@@ -236,7 +236,7 @@ impl Harness {
         ui.drafted_for = Some(key);
         let prompt = commit_prompt(title.as_deref(), &tree.files);
         if !crate::utility::supports(provider) {
-            if provider == crate::providers::ProviderId::Muse {
+            if provider.completes_in_side_session() {
                 self.changes_ui(root).drafting = true;
                 self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
             }
@@ -479,7 +479,7 @@ impl Harness {
             let r = root_buf.clone();
             let (commits, stat) = cx.background_executor().spawn(async move { git_ops::branch_summary(&r, &base_for_summary) }).await;
             let prompt = pr_prompt(label.as_deref(), &commits, &stat, &files);
-            if provider == Some(crate::providers::ProviderId::Muse) {
+            if provider.is_some_and(|provider| provider.completes_in_side_session()) {
                 let (r, muse_prompt) = (root_buf.clone(), prompt.clone());
                 let _ = this.update(cx, |this: &mut Self, cx| this.draft_on_muse(&r, DraftKind::PrBody, muse_prompt, cx));
             }

@@ -95,6 +95,14 @@ impl ProviderId {
         }
     }
 
+    /// Parse a wire id strictly: `None` for an id no registry entry owns.
+    /// What a stored record's provider is read with — a record naming a
+    /// provider this build does not know is refused as unknown, never
+    /// reopened on [`ProviderId::parse`]'s Muse fallback.
+    pub fn parse_known(raw: &str) -> Option<ProviderId> {
+        ProviderId::all().into_iter().find(|id| id.as_str() == raw)
+    }
+
     /// The key this provider's per-project model/effort defaults live under
     /// in [`crate::projects::ProjectDefaults`]: the canonical wire id, so
     /// every spelling of one backend reads the one stored default and a
@@ -264,6 +272,79 @@ impl ProviderId {
     /// down to Ask.
     pub fn models_limit_modes(self) -> bool {
         !matches!(self, ProviderId::Muse)
+    }
+
+    /// Its sessions are lanes on one child the window starts and keeps
+    /// (Muse's `muse serve` hub), not a child per session: an open or a
+    /// reopen asks the window to start it first, a lost connection comes
+    /// back for every lane (so a lane never hangs it up), the window's own
+    /// reconnect banner speaks for its sessions, and the resume's terminal
+    /// bridge can be refused once per run (the hub's memo).
+    pub fn shares_one_child(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// A lane outlives a lost connection: Claude Code's adapter resumes the
+    /// session (`--resume`) on the next send, and a shared child is
+    /// respawned and re-attached. Any other lane's child is gone for good,
+    /// so its session closes for the window.
+    pub fn lane_survives_lost_child(self) -> bool {
+        matches!(self, ProviderId::ClaudeCode | ProviderId::Muse)
+    }
+
+    /// In scripted chrome (`--no-connect` / `--replay`) its new session is
+    /// a local view rather than a scripted lane: the capture baselines were
+    /// drawn with Muse's local draft, like [`Self::row_mark`]'s.
+    pub fn scripted_draft_is_local(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// A session with no project starts in Baaz's default workspace (which
+    /// is not a project, so it files as unfiled), not in the window's
+    /// workspace: Muse works inside a folder.
+    pub fn unfiled_starts_in_default_workspace(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The open names the model vendor its requests route to
+    /// (`OpenSession.model_provider`: `meta`, or `echo` in a scripted run)
+    /// and carries the approval mode only when one was picked — with no
+    /// pick the host's default posture stands. The others always carry the
+    /// mode the chip stands on and route nothing.
+    pub fn open_routes_model_vendor(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// Utility completions (titles, bylines, commit and PR drafts) run as
+    /// a hidden side session on the provider's shared connection, never
+    /// through the one-shot CLI completer ([`crate::utility::supports`]).
+    pub fn completes_in_side_session(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The catalog rows carry the provider's own effort tiers, default and
+    /// notes, and the effort menu reads them off the row.
+    pub fn catalog_rows_carry_efforts(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// The provider has a `/create-skill` command: "Ask Muse to write one"
+    /// opens a session on it with that draft.
+    pub fn writes_skills_by_prompt(self) -> bool {
+        matches!(self, ProviderId::Muse)
+    }
+
+    /// Which kind an approval this provider raised is, by its id: the
+    /// decision travels back on the provider's own wire shape.
+    pub fn external_approval_kind(self, approval_id: &str) -> ExternalApprovalKind {
+        match self {
+            ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
+            ProviderId::Muse => ExternalApprovalKind::MuseApproval,
+            ProviderId::Codex if approval_id.starts_with(provider_codex::child::MCP_ELICITATION_ID_PREFIX) => {
+                ExternalApprovalKind::CodexMcpElicitation
+            }
+            ProviderId::Codex => ExternalApprovalKind::CodexCommand,
+        }
     }
 }
 

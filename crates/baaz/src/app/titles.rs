@@ -171,7 +171,7 @@ impl Harness {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> Option<crate::utility::MuseSide> {
-        if provider != crate::providers::ProviderId::Muse {
+        if !provider.completes_in_side_session() {
             return None;
         }
         let hub = self.muse_slot.hub()?;
@@ -192,14 +192,12 @@ impl Harness {
     /// Whether `provider` can write a title, byline or summary now: Muse
     /// through its connection, the others through their CLIs while enabled.
     pub(crate) fn utility_available(&self, provider: crate::providers::ProviderId) -> bool {
-        match provider {
-            crate::providers::ProviderId::Muse => self.muse_slot.is_ready(),
-            other => {
-                !self.scripted_chrome()
-                    && crate::utility::supports(other)
-                    && crate::provider_status::provider_enabled(other)
-            }
+        if provider.completes_in_side_session() {
+            return self.muse_slot.is_ready();
         }
+        !self.scripted_chrome()
+            && crate::utility::supports(provider)
+            && crate::provider_status::provider_enabled(provider)
     }
 
     /// The model a one-shot completion for `session_id` runs on: the live

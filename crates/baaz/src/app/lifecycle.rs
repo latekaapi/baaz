@@ -77,6 +77,10 @@ struct ProviderOpen {
     /// lands only the newest ask, so a late-finishing earlier open never
     /// steals focus or the send.
     epoch: u64,
+    /// The resume was refused because another window holds the session
+    /// ([`provider::RefusalHint::HeldElsewhere`]): the lane still lands,
+    /// read-only under the lease notice.
+    lease_held: bool,
 }
 
 /// The background half of every fresh provider open: spawn the child
@@ -89,21 +93,14 @@ fn provider_open_work(
     provider_id: ProviderId,
     request_id: String,
     workspace_bg: String,
-    mode: aui_protocol::PermissionMode,
+    extras: OpenExtras,
     project: Option<String>,
     workspace: String,
     epoch: u64,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    muse: Option<MuseOpen>,
 ) -> Result<ProviderOpen, provider::ProviderError> {
     let provider = factory(provider_id)?;
-    // Muse routes the model vendor through the open and starts in the
-    // host's default posture unless a mode was picked; the others always
-    // carry the mode the chip stands on.
-    let (model_provider, mode) = match muse {
-        Some(MuseOpen { model_provider, mode }) => (Some(model_provider), mode),
-        None => (None, Some(mode)),
-    };
+    let OpenExtras { model_provider, mode } = extras;
     #[cfg(not(test))]
     let (provider, events) = conn::gate(provider);
     // `model: None` on purpose: the chip's display seed (env,
@@ -139,6 +136,7 @@ fn provider_open_work(
             workspace,
             title,
             epoch,
+            lease_held: false,
         }),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("OpenSession answered {other:?} instead of a session"),
@@ -146,21 +144,12 @@ fn provider_open_work(
     }
 }
 
-/// A Muse reopen's lane, its events and how the resume went: the lane is
-/// kept even when the resume was refused for a reason the view still
-/// opens under (another window holds it; a stale history).
-type MuseReopen = (
-    provider::Provider,
-    futures::channel::mpsc::UnboundedReceiver<provider::ProviderEvent>,
-    Result<(), provider::ProviderError>,
-);
-
-/// What a Muse open carries beyond the others': the model vendor its
-/// requests route to (`meta`, or `echo` in a scripted run), and the mode
-/// only when one was picked — no pick, and the host's default posture
-/// stands.
-pub(crate) struct MuseOpen {
-    model_provider: String,
+/// What one `OpenSession` carries beyond its workspace, per the provider's
+/// registry properties ([`Harness::open_extras`]): the model vendor its
+/// requests route to, and the approval mode it starts in — `None` when
+/// the host's default posture should stand.
+pub(crate) struct OpenExtras {
+    model_provider: Option<String>,
     mode: Option<aui_protocol::PermissionMode>,
 }
 
@@ -1339,6 +1328,29 @@ impl Harness {
     pub(crate) fn rejoin_provider_row(&mut self, session_id: &str) {
         let Some(record) = self.provider_sessions.get(session_id).cloned() else { return };
         let Some(ix) = self.sessions.iter().position(|entry| entry.id == session_id) else { return };
+        // A row its provider lists (Muse's) is the list's, labelled by the
+        // list ladder in `rejoin`: the record only moves its counters — the
+        // settled turn and its time — in place of the relist a settle used
+        // to cost (2,661 rows joined, 64–144 ms).
+        if self.sessions[ix].provider.lists_sessions() {
+            let entry = &mut self.sessions[ix];
+            let updated = chrono::DateTime::from_timestamp_millis(record.updated_ms)
+                .map(|at| at.with_timezone(&chrono::Local));
+            let mut changed = false;
+            if record.turns > entry.turns {
+                entry.turns = record.turns;
+                entry.turns_unknown = false;
+                changed = true;
+            }
+            if let Some(updated) = updated.filter(|at| *at > entry.updated) {
+                entry.updated = updated;
+                changed = true;
+            }
+            if changed {
+                self.invalidate_list();
+            }
+            return;
+        }
         let mut row = sidebar::SessionEntry::provider_row(
             &record,
             self.overrides.get(session_id),
@@ -1639,21 +1651,21 @@ impl Harness {
         // Every provider opens on its lane; Muse too, live — its lane rides
         // the shared child, which the open waits for while it starts. Only
         // scripted chrome keeps Muse's local draft.
-        if wanted != ProviderId::Muse || !self.scripted_chrome() {
+        if !(wanted.scripted_draft_is_local() && self.scripted_chrome()) {
             let root = current
                 .as_deref()
                 .and_then(|id| self.projects.find_available(id))
                 .map(|project| project.root.to_string_lossy().into_owned());
             // A Muse session with no project goes to the default workspace,
             // which is not a project, so it files as unfiled.
-            let workspace = match (root, wanted) {
-                (Some(root), _) => root,
-                (None, ProviderId::Muse) => projects::default_workspace().to_string_lossy().into_owned(),
-                (None, _) => self.workspace(),
+            let workspace = match root {
+                Some(root) => root,
+                None if wanted.unfiled_starts_in_default_workspace() => {
+                    projects::default_workspace().to_string_lossy().into_owned()
+                }
+                None => self.workspace(),
             };
-            if wanted == ProviderId::Muse {
-                self.ensure_muse_started(cx);
-            }
+            self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
@@ -1704,10 +1716,8 @@ impl Harness {
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
         let wanted = ProviderId::parse(&self.new_provider);
-        if wanted != ProviderId::Muse || !self.scripted_chrome() {
-            if wanted == ProviderId::Muse {
-                self.ensure_muse_started(cx);
-            }
+        if !(wanted.scripted_draft_is_local() && self.scripted_chrome()) {
+            self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
         }
@@ -1999,10 +2009,30 @@ impl Harness {
             // it.
             self.sidebar_user_scrolled = false;
         }
-        // A provider-lane session: a parked view just activates — the
-        // click switches to the live session — and otherwise the stored
-        // record reopens over `ResumeSession`, with its history replayed.
-        // muse sessions continue below.
+        // Live, a session its provider lists (Muse) speaks through its
+        // newest list row first: the first open in Baaz of a session made
+        // elsewhere writes its record from that row, and every later one
+        // refreshes the record's turns and title (docs/70 §3). Scripted
+        // chrome has no child to resume from and keeps its local view below.
+        if !self.args.offline && self.args.replay.is_none() {
+            // A parked view with no record (a provider draft still opening
+            // under its request id) just activates: it is no listed
+            // session, and nothing must write a record for it.
+            if !self.provider_sessions.contains_key(&session_id) {
+                if let Some(view) = self.cache_take(&session_id) {
+                    crate::log::trace_reset();
+                    crate::log::trace_mark("cache-hit");
+                    self.activate(view, quiet, window, cx);
+                    crate::log::trace_arm_first_frame();
+                    return;
+                }
+            }
+            self.adopt_listed_record(&session_id, cx);
+        }
+        // Every session with a record: a parked view just activates — the
+        // click switches to the live session (its lane kept following) —
+        // and otherwise the stored record reopens over `ResumeSession`,
+        // with its history replayed or paged in.
         if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
             // Traced like a Muse switch: `HistoryReady` marks the stored
             // history painted into the reopened lane.
@@ -2014,22 +2044,8 @@ impl Harness {
                 self.activate(view, quiet, window, cx);
                 return;
             }
+            crate::log::trace_mark("cache-miss");
             self.reopen_provider(record, window, cx);
-            return;
-        }
-        // A Muse session, live: a parked view just activates (its lane kept
-        // following), anything else reopens on a lane of the shared child.
-        if !self.args.offline && self.args.replay.is_none() {
-            crate::log::trace_reset();
-            crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
-            if let Some(view) = self.cache_take(&session_id) {
-                crate::log::trace_mark("cache-hit");
-                self.activate(view, quiet, window, cx);
-                crate::log::trace_mark("swap");
-                crate::log::trace_arm_first_frame();
-                return;
-            }
-            self.reopen_muse(session_id, quiet, window, cx);
             return;
         }
         // Scripted chrome (`--no-connect` / `--replay`) has no child to
@@ -2054,7 +2070,7 @@ impl Harness {
                 crate::log::trace_mark("cache-hit");
                 self.activate(view, quiet, window, cx);
             } else {
-                self.open(session_id.clone(), None, quiet, window, cx);
+                self.open(session_id.clone(), quiet, window, cx);
                 // An existing session opens loading, never the hero —
                 // even with no client behind it.
                 if let Some(view) = self.active.clone() {
@@ -2065,111 +2081,88 @@ impl Harness {
         }
     }
 
-    /// Reopen a Muse session on a lane of the shared child. The view opens
-    /// on the click, loading — never the new-session hero — with sends and
-    /// picks waiting; the lane attaches when the resume answers, and the
-    /// history pages in after it (the resume is the touch that regenerates
-    /// a stale history, so no page may run before it). A session another
-    /// window holds still opens, read-only under the lease notice.
-    fn reopen_muse(&mut self, session_id: String, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_muse_started(cx);
-        crate::log::trace_mark("cache-miss");
-        let workspace = self.session_workspace(&session_id);
-        let mode = self.provider_open_mode(Some(&workspace), None);
-        self.open(session_id.clone(), Some(mode), quiet, window, cx);
-        if let Some(view) = self.find_view(&session_id, cx) {
-            self.attach_handoff_prefix(&view, cx);
-        }
-        crate::log::trace_mark("swap");
-        crate::log::trace_arm_first_frame();
-        // The terminal relay answers for the stored id: registered before
-        // the resume carries the bridge (unless muse refused it this run).
-        if !self.muse_hub.as_ref().is_some_and(|hub| hub.refuses_resume_bridge()) {
-            self.register_terminal_session(
-                &session_id,
-                std::path::PathBuf::from(workspace),
-                ProviderId::Muse.as_str(),
-            );
-        }
-        let factory = self.provider_factory.clone();
-        let resumed = session_id.clone();
-        let work = move || -> Result<MuseReopen, provider::ProviderError> {
-            let provider = factory(ProviderId::Muse)?;
-            #[cfg(not(test))]
-            let (provider, events) = conn::gate(provider);
-            let resume = provider
-                .send(provider::Command::ResumeSession {
-                    request_id: provider::new_request_id(),
-                    session_id: resumed,
-                    cursor: None,
-                    metadata_only: true,
-                    mode: None,
-                })
-                .map(|_| ());
-            crate::log::trace_mark("resume-ack");
-            #[cfg(test)]
-            let (provider, events) = conn::gate_sync(provider);
-            Ok((provider, events, resume))
+    /// Write or refresh the record of a session its provider lists (a Muse
+    /// session) from its newest list row — the P4-B migration trigger
+    /// (docs/70 §3): *the first time an old Muse session is opened in
+    /// Baaz*, never at launch or on list arrival. A session with neither a
+    /// record nor a row (boot `--session` before the list lands) is the
+    /// listing provider's too — it is the only one whose sessions exist
+    /// outside Baaz's records — and gets a record with what is known.
+    /// Claude Code and Codex sessions always have their record already.
+    fn adopt_listed_record(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let known = self.provider_sessions.get(session_id).map(|record| record.provider.clone());
+        let row = self.sessions.iter().find(|entry| entry.id == session_id && !entry.replayed);
+        let provider = match (row, known.as_deref()) {
+            (Some(row), _) if row.provider.lists_sessions() => row.provider,
+            (None, None) => match ProviderId::all().into_iter().find(|id| id.lists_sessions()) {
+                Some(id) => id,
+                None => return,
+            },
+            // A record but no listing row, or another provider's session:
+            // nothing newer to read.
+            _ => return,
         };
-        self.wire_call_in(cx, work, move |this, result, window, cx| {
-            let view = this.find_view(&session_id, cx).filter(|view| view.read(cx).is_starting());
-            let (mut provider, events, resume) = match result {
-                Ok(opened) => opened,
-                Err(error) => {
-                    crate::baaz_log!("muse reopen of {session_id} could not start: {error}");
-                    if let Some(view) = view {
-                        view.update(cx, |view, cx| view.start_failed(error.to_string(), cx));
-                    }
-                    return;
-                }
-            };
-            let Some(view) = view else {
-                // The person moved on and the view is gone: nothing follows.
-                provider.shutdown();
-                return;
-            };
-            let lease = match &resume {
-                Ok(()) => false,
-                // The resume still regenerated the history: page anyway.
-                Err(error) if error.hint() == provider::RefusalHint::StaleHistory => {
-                    crate::baaz_log!("resume of {session_id} hit a stale history ({error}); paging anyway");
-                    false
-                }
-                // Another window holds it: read-only, no dialog, the row
-                // stays selectable.
-                Err(error) if error.hint() == provider::RefusalHint::HeldElsewhere => {
-                    crate::baaz_log!("resume of {session_id} rejected ({error}); lease notice on the view");
-                    true
-                }
-                Err(error) => {
-                    crate::baaz_log!("resume of {session_id} failed: {error}");
-                    provider.shutdown();
-                    let message = error.to_string();
-                    view.update(cx, |view, cx| view.start_failed(message, cx));
-                    if error.severity() == provider::Severity::Dialog {
-                        this.set_dialog(cx, Dialog {
-                            title: error.title(),
-                            detail: error.to_string(),
-                            kind: DialogKind::Error,
-                            primary: "Dismiss",
-                            action: DialogAction::Dismiss,
-                            archive_target: None,
-                        });
-                    }
-                    return;
-                }
-            };
-            crate::baaz_log!("muse lane reopened session={session_id} lease_held={lease}");
-            view.update(cx, |view, cx| {
-                view.attach_provider(session_id.clone(), provider, events, cx);
-                view.start_landed(window, cx);
-                if lease {
-                    view.set_lease_lost(crate::app::LEASE_NOTICE, cx);
-                }
-                view.backfill_lane(cx);
-            });
-            cx.notify();
-        });
+        let listed = self
+            .saved_list
+            .as_deref()
+            .and_then(|list| list.sessions.iter().find(|listed| listed.session_id == session_id));
+        let index = self.index.get(session_id);
+        let title = listed.and_then(|l| l.title.clone()).or_else(|| index.map(|i| i.title.clone()));
+        let first_prompt = listed
+            .and_then(|l| l.first_user_prompt.clone())
+            .or_else(|| index.and_then(|i| i.first_user_prompt.clone()));
+        let (workspace, project, turns, created_ms, updated_ms) = match row {
+            Some(row) => (
+                row.workspace.clone(),
+                row.project.clone(),
+                if row.turns_unknown { 0 } else { row.turns },
+                row.created.timestamp_millis(),
+                row.updated.timestamp_millis(),
+            ),
+            None => {
+                let now = crate::usage::now_ms();
+                (None, None, 0, now, now)
+            }
+        };
+        let changed = crate::provider_sessions::upsert_listed(
+            &mut self.provider_sessions,
+            provider.as_str(),
+            session_id,
+            workspace,
+            project,
+            title,
+            first_prompt,
+            turns,
+            created_ms,
+            updated_ms,
+        );
+        if changed {
+            crate::baaz_log!("record written for {} session {session_id} from its list row", provider.as_str());
+            self.persist_provider_sessions(cx);
+        }
+    }
+
+    /// Whether a record holds no history anywhere — no settled turn, no
+    /// prompt ever sent — so its reopen opens fresh instead. A session its
+    /// provider lists counts only when its list row confirms zero turns: a
+    /// record written with no row behind it never drops a real session.
+    fn record_holds_no_history(&self, record: &crate::provider_sessions::ProviderSessionRecord) -> bool {
+        if record.turns > 0 || record.first_prompt.is_some() {
+            return false;
+        }
+        let listed = ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions());
+        !listed
+            || self
+                .sessions
+                .iter()
+                .any(|entry| entry.id == record.session_id && !entry.turns_unknown && entry.turns == 0)
+    }
+
+    /// Whether a reopen on `provider_id` must not register the terminal
+    /// bridge first: its shared child refused the resume's bridge once
+    /// this run (the hub's memo), so the relay would answer for nothing.
+    fn resume_bridge_refused(&self, provider_id: ProviderId) -> bool {
+        provider_id.shares_one_child() && self.muse_hub.as_ref().is_some_and(|hub| hub.refuses_resume_bridge())
     }
 
     /// The root a session of this id runs in: its own row's workspace when
@@ -2228,25 +2221,21 @@ impl Harness {
     pub(super) fn open(
         &mut self,
         session_id: String,
-        reopen: Option<aui_protocol::PermissionMode>,
         quiet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A Muse row: `reopen` draws it opening (its lane attaches when the
-        // resume answers, sends wait, history loading); without it the row
-        // opens read-only — scripted chrome (`--no-connect` / `--replay`),
-        // which is what lets a capture drive drafts and switching. Always
-        // Muse — never the new-session default, which read "Codex" or
-        // "Claude Code" on a reopened Muse session.
+        // Scripted chrome's row (`--no-connect` / `--replay`): it opens
+        // read-only, with no lane — which is what lets a capture drive
+        // drafts and switching. A live reopen goes through
+        // `reopen_provider` for every provider (docs/70). Always Muse —
+        // never the new-session default, which read "Codex" or "Claude
+        // Code" on a reopened Muse session.
         let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
-        let view = cx.new(|cx| match reopen {
-            Some(mode) => SessionView::new_lane_reopen(session_id.clone(), mode, host, window, cx),
-            None => SessionView::new(session_id.clone(), host, window, cx),
-        });
+        let view = cx.new(|cx| SessionView::new(session_id.clone(), host, window, cx));
         let fold_on = self.layout.fold_finished_turns;
         view.update(cx, |view, cx| {
             view.fold_finished_turns = fold_on;
@@ -2297,7 +2286,9 @@ impl Harness {
         // Muse's quiet re-read, on the menu's terms only: the tier never
         // answered, failed, went dark, or is older than about five
         // minutes. The wire only — never the pty scrape on every open.
-        let muse_async = due.contains(&ProviderId::Muse)
+        // The tier is the billing-tier provider's reading (Muse's).
+        let tier_due = due.iter().copied().find(|id| id.has_billing_tier());
+        let muse_async = tier_due.is_some()
             && self.muse_slot.is_ready()
             && crate::tier::muse_menu_refresh_due(self.tier.as_ref());
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
@@ -2320,7 +2311,7 @@ impl Harness {
         // the wire re-read below is about to replace it. It carries the
         // remembered answer's own probe time, so re-recording it never
         // re-stamps its age (an unchanged reading writes nothing at all).
-        let muse = if due.contains(&ProviderId::Muse) && !muse_async {
+        let muse = if tier_due.is_some() && !muse_async {
             self.tier.as_ref().map(|tier| {
                 (
                     Some(tier.footer_label()),
@@ -2335,8 +2326,8 @@ impl Harness {
         // The asynchronous reads: their rows read "Refreshing…" until
         // each completion clears its provider and repaints the menu.
         let mut async_ids = Vec::new();
-        if muse_async {
-            async_ids.push(ProviderId::Muse);
+        if let Some(id) = tier_due.filter(|_| muse_async) {
+            async_ids.push(id);
         }
         if due.contains(&ProviderId::Codex) {
             async_ids.push(ProviderId::Codex);
@@ -2393,27 +2384,39 @@ impl Harness {
     pub(crate) fn start_model(&self, provider_id: ProviderId, project: Option<&str>, cx: &gpui::App) -> Option<String> {
         let picks = self.projects.picks(project.and_then(|id| self.projects.find(id)));
         let remembered = picks.model_for(provider_id.as_str());
-        if provider_id == ProviderId::Muse {
+        if provider_id.catalog_flags_session_model() {
             return projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
         }
         remembered
     }
 
-    /// A Muse open's extras ([`MuseOpen`]); `None` for any other provider.
-    fn muse_open(&self, provider_id: ProviderId, workspace: Option<&str>, project: Option<&str>) -> Option<MuseOpen> {
-        if provider_id != ProviderId::Muse {
-            return None;
+    /// What an open on `provider_id` carries beyond its workspace
+    /// ([`OpenExtras`]). A provider that routes a model vendor through the
+    /// open ([`ProviderId::open_routes_model_vendor`]) names it — the
+    /// new-session pick's own spelling when it is this provider (`echo` in
+    /// a scripted run), else the provider's id — and starts in the host's
+    /// default posture unless a mode was picked; every other provider
+    /// carries `mode`, the mode the chip stands on.
+    fn open_extras(
+        &self,
+        provider_id: ProviderId,
+        mode: aui_protocol::PermissionMode,
+        workspace: Option<&str>,
+        project: Option<&str>,
+    ) -> OpenExtras {
+        if !provider_id.open_routes_model_vendor() {
+            return OpenExtras { model_provider: None, mode: Some(mode) };
         }
-        let model_provider = if ProviderId::parse(&self.new_provider) == ProviderId::Muse {
+        let model_provider = if ProviderId::parse(&self.new_provider) == provider_id {
             self.new_provider.clone()
         } else {
-            ProviderId::Muse.as_str().to_owned()
+            provider_id.as_str().to_owned()
         };
         let mode = self
             .args
             .approval_mode
             .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode);
-        Some(MuseOpen { model_provider, mode })
+        OpenExtras { model_provider: Some(model_provider), mode }
     }
 
     fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
@@ -2479,10 +2482,10 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
-        let muse = self.muse_open(provider_id, Some(&workspace), project.as_deref());
+        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref());
         let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, request_id, workspace_bg, mode, project, workspace, epoch, Some(cancelled), muse)
+            provider_open_work(factory, provider_id, request_id, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
@@ -2554,7 +2557,7 @@ impl Harness {
         match bridged {
             Ok((provider, events, session_id, title)) => {
                 self.finish_provider_open(
-                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, epoch },
+                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, epoch, lease_held: false },
                     window,
                     cx,
                 );
@@ -2586,7 +2589,7 @@ impl Harness {
     /// row, and the centre pane with the composer focused — so it becomes
     /// the visible session.
     fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
-        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch } =
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch, lease_held } =
             open;
         // Last ask wins: an earlier open finishing after a newer one was
         // asked for never steals focus or the send — its child is shut
@@ -2643,12 +2646,9 @@ impl Harness {
         // already has a record, and naming it here made the next ⌘N
         // "reuse" whatever was clicked last — a handoff destination's row
         // reads zero turns, so it passed for unsent and ⌘N did nothing.
-        // A Muse session's existence is Muse's list, not a record.
-        let fresh = if provider_id == ProviderId::Muse {
-            !self.sessions.iter().any(|entry| entry.id == session_id)
-        } else {
-            !self.provider_sessions.contains_key(&session_id)
-        };
+        // Every provider's session has a record since P4-B (docs/70): a
+        // Muse reopen writes one from its list row before it gets here.
+        let fresh = !self.provider_sessions.contains_key(&session_id);
         if fresh {
             match project.clone() {
                 Some(id) => {
@@ -2664,6 +2664,11 @@ impl Harness {
         // existing session's turns page in now.
         if !fresh && crate::providers::pages_history(provider_id) {
             view.update(cx, |view, cx| view.backfill_lane(cx));
+        }
+        // Another window holds the session: it still opens, read-only under
+        // the lease notice, with no dialog — the row stays selectable.
+        if lease_held {
+            view.update(cx, |view, cx| view.set_lease_lost(crate::app::LEASE_NOTICE, cx));
         }
         // The swap that makes it the visible session: parks the outgoing
         // view, points the event subscription at the new one, focuses the
@@ -2705,46 +2710,55 @@ impl Harness {
         if let Some(id) = project.clone() {
             self.set_override(session_id, |meta| meta.project = Some(id.clone()), cx);
         }
-        // A Muse session is in Muse's own list: no local record. Its row
-        // goes in now from what the open knows — zero turns, so out of view
-        // until the first send titles it — and no `session/list` round trip
-        // is spent on one row.
-        if provider_id == ProviderId::Muse {
-            if !self.sessions.iter().any(|entry| entry.id == session_id) {
-                let mut row = sidebar::local_started_row(
-                    session_id,
-                    sidebar::UNNAMED.to_owned(),
-                    project,
-                    Some(workspace),
-                    crate::clock::now_local(),
-                );
-                // Opened, not started: nothing runs until the first turn
-                // (whose start arms the row). A draft that makes the row
-                // visible must not read Working.
-                row.running = false;
-                self.sessions.push(row);
-                self.invalidate_list();
-            }
-            return;
-        }
-        // The local record: `session/list` only knows muse sessions, so
-        // this row is what brings the lane back after a restart — the
+        // The local record, for every provider (docs/70): it routes the
+        // next reopen through `reopen_provider` and holds Baaz's own facts
+        // (turns, first prompt, handoff links). For Claude Code and Codex
+        // it is also what brings the lane back after a restart — the
         // sidebar reads it, and the click reopens it. Written before the
         // row below is built, so the two never disagree.
         crate::provider_sessions::upsert_open(
             &mut self.provider_sessions,
             provider_id.as_str(),
             session_id,
-            Some(workspace),
-            project,
+            Some(workspace.clone()),
+            project.clone(),
             title,
         );
-        crate::provider_sessions::write(&self.provider_sessions);
+        self.persist_provider_sessions(cx);
+        // A provider that lists its own sessions (Muse) owns their rows:
+        // the record never builds one. Its row goes in now from what the
+        // open knows — zero turns, so out of view until the first send
+        // titles it — and no `session/list` round trip is spent on one row.
+        if provider_id.lists_sessions() {
+            self.ensure_listed_row(session_id, project, workspace);
+            return;
+        }
         // No row with content yet: like a muse draft, the session earns
         // its row on the first send (`ProviderTurnAccepted`), titled from
         // the prompt — but the record above already exists, so a restart
         // before that still reopens it.
         self.merge_provider_rows();
+    }
+
+    /// A local row for a session of a provider that lists its own
+    /// sessions, when the list has not shown it yet: titled "New session",
+    /// zero turns (so out of view until its first send), and not running —
+    /// opened, not started; the first turn's start arms it. The list's own
+    /// row replaces it when it arrives ([`sidebar::merge_session_list`]).
+    fn ensure_listed_row(&mut self, session_id: &str, project: Option<String>, workspace: String) {
+        if self.sessions.iter().any(|entry| entry.id == session_id) {
+            return;
+        }
+        let mut row = sidebar::local_started_row(
+            session_id,
+            sidebar::UNNAMED.to_owned(),
+            project,
+            Some(workspace),
+            crate::clock::now_local(),
+        );
+        row.running = false;
+        self.sessions.push(row);
+        self.invalidate_list();
     }
 
     /// "New session" on a provider pick (Claude Code / Codex). A plain new
@@ -2849,10 +2863,10 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
         let epoch = self.provider_open_epoch;
-        let muse = self.muse_open(provider_id, Some(&workspace), project.as_deref());
+        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref());
         let cancelled = std::sync::Arc::clone(&self.provider_opens_cancelled);
         let work = move || {
-            provider_open_work(factory, provider_id, opened, workspace_bg, mode, project, workspace, epoch, Some(cancelled), muse)
+            provider_open_work(factory, provider_id, opened, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
         };
         let timed = request_id.clone();
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
@@ -3100,8 +3114,14 @@ impl Harness {
         }
         let mut changed = false;
         let mut touched_link = removed_linked;
-        let mut records: Vec<crate::provider_sessions::ProviderSessionRecord> =
-            self.provider_sessions.values().cloned().collect();
+        // A provider that lists its own sessions (Muse) owns their rows:
+        // its records route reopens and hold Baaz's facts, never a row.
+        let mut records: Vec<crate::provider_sessions::ProviderSessionRecord> = self
+            .provider_sessions
+            .values()
+            .filter(|record| !ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions()))
+            .cloned()
+            .collect();
         records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         for record in &records {
             touched_link |= sidebar::needs_collapse(&record.session_id, &self.provider_sessions, &self.overrides);
@@ -3293,8 +3313,9 @@ impl Harness {
         // through `activate`, and `on_frame` drops any arm raised
         // mid-switch), so typing lands nowhere until the destination opens.
         self.focus_composer = false;
-        let provider_id = ProviderId::parse(&record.provider);
-        if provider_id == ProviderId::Muse {
+        // A record naming no provider this build knows is refused — never
+        // reopened on `ProviderId::parse`'s Muse fallback.
+        let Some(provider_id) = ProviderId::parse_known(&record.provider) else {
             crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
             self.session_switch_pending = false;
             self.abort_replacing(cx);
@@ -3310,20 +3331,23 @@ impl Harness {
                 },
             );
             return;
-        }
+        };
         // An untouched draft — a record with no settled turns and no
         // prompt ever sent — holds no history anywhere: resuming it would
         // replay nothing, so it opens fresh instead, and the stale record
         // leaves with it so the sidebar never accumulates dead rows. (A
         // record whose only turn was cut off carries `firstPrompt` with
-        // `turns == 0`: that prompt must resume, not be dropped.)
-        if record.turns == 0 && record.first_prompt.is_none() {
+        // `turns == 0`: that prompt must resume, not be dropped.) A
+        // session its provider lists counts as untouched only when its
+        // list row says so: a record written with no row to read (boot
+        // `--session` before the list) never drops a real session.
+        if self.record_holds_no_history(&record) {
             crate::baaz_log!(
                 "provider reopen: {} has no turns, opening fresh",
                 record.session_id
             );
             crate::provider_sessions::remove(&mut self.provider_sessions, &record.session_id);
-            crate::provider_sessions::write(&self.provider_sessions);
+            self.persist_provider_sessions(cx);
             self.merge_provider_rows();
             let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
@@ -3414,6 +3438,7 @@ impl Harness {
                             workspace,
                             title: record.title.clone(),
                             epoch,
+                            lease_held: false,
                         },
                         window,
                         cx,
@@ -3435,16 +3460,22 @@ impl Harness {
             }
             return;
         }
+        // A provider whose sessions share one child: the window starts it
+        // now, and the factory below waits while it comes up.
+        self.ensure_provider_started(provider_id, cx);
         let factory = self.provider_factory.clone();
         let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
         // The terminal relay's route: the resumed session's bridge answers
         // for the stored id, so it is (re-)registered BEFORE the resume
-        // runs — refreshing the root it drives.
-        self.register_terminal_session(
-            &record.session_id,
-            std::path::PathBuf::from(workspace.clone()),
-            record.provider.as_str(),
-        );
+        // runs — refreshing the root it drives — unless the shared child
+        // refused the resume's bridge once this run (the hub's memo).
+        if !self.resume_bridge_refused(provider_id) {
+            self.register_terminal_session(
+                &record.session_id,
+                std::path::PathBuf::from(workspace.clone()),
+                record.provider.as_str(),
+            );
+        }
         // What Retry re-runs when this reopen fails: cloned up front,
         // because `work` below borrows the record into the background.
         let retry_reopen = ProviderOpenRetry::Reopen(Box::new(record.clone()));
@@ -3500,8 +3531,24 @@ impl Harness {
                 crate::log::trace_mark("reopen adapter connected");
                 #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
-                let session_id =
-                    crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode))?;
+                // Two refusals still land the lane (docs/70 §4), for any
+                // adapter that raises them: a stale history the resume
+                // already regenerated pages in anyway, and a session
+                // another window holds opens read-only under the lease
+                // notice. Any other refusal fails the reopen.
+                let (session_id, lease_held) =
+                    match crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode)) {
+                        Ok(session_id) => (session_id, false),
+                        Err(error) if error.hint() == provider::RefusalHint::StaleHistory => {
+                            crate::baaz_log!("resume of {} hit a stale history ({error}); paging anyway", record.session_id);
+                            (record.session_id.clone(), false)
+                        }
+                        Err(error) if error.hint() == provider::RefusalHint::HeldElsewhere => {
+                            crate::baaz_log!("resume of {} rejected ({error}); lease notice on the view", record.session_id);
+                            (record.session_id.clone(), true)
+                        }
+                        Err(error) => return Err(error),
+                    };
                 crate::log::trace_mark("reopen resume acked");
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
@@ -3517,6 +3564,7 @@ impl Harness {
                     workspace: record.workspace.clone().unwrap_or(workspace),
                     title: record.title.clone(),
                     epoch,
+                    lease_held,
                 })
             })();
             (result, moved)
@@ -3583,7 +3631,7 @@ impl Harness {
         self.sessions.retain(|entry| entry.id != session_id);
         self.overrides.remove(session_id);
         if crate::provider_sessions::remove(&mut self.provider_sessions, session_id) {
-            crate::provider_sessions::write(&self.provider_sessions);
+            self.persist_provider_sessions(cx);
         }
         crate::sessions::write(&self.overrides);
         self.rejoin();
@@ -3656,6 +3704,7 @@ impl Harness {
                             workspace,
                             title,
                             epoch,
+                            lease_held: false,
                         },
                         window,
                         cx,
@@ -3722,6 +3771,7 @@ impl Harness {
                     workspace: workspace_bg,
                     title,
                     epoch,
+                    lease_held: false,
                     // The fork groups under no project: it is a new session
                     // the sidebar names when its first turn lands.
                 }),
@@ -3999,7 +4049,7 @@ impl Harness {
                 self.sessions.retain(|entry| entry.id != old_id);
                 self.overrides.remove(old_id);
                 if crate::provider_sessions::remove(&mut self.provider_sessions, old_id) {
-                    crate::provider_sessions::write(&self.provider_sessions);
+                    self.persist_provider_sessions(cx);
                 }
                 crate::sessions::write(&self.overrides);
                 self.rejoin();
@@ -4123,7 +4173,7 @@ impl Harness {
         // `/create-skill ` draft and the composer focused. Never sent. The
         // arm survives a non-muse activation untouched — the draft is a muse
         // skill prompt, so it waits for a muse session.
-        if self.pending_create_skill && view.read(cx).provider_kind() == crate::providers::ProviderId::Muse {
+        if self.pending_create_skill && view.read(cx).provider_kind().writes_skills_by_prompt() {
             self.pending_create_skill = false;
             let draft = crate::skills_page::create_skill_draft().to_owned();
             view.update(cx, |view, cx| {
@@ -4312,17 +4362,15 @@ impl Harness {
             // the session may earn a generated title, and the record moves
             // to now — the lane's `turn/started`.
             SessionEvent::ProviderTurnAccepted { session_id, prompt, turn_id, .. } => {
-                // A Muse lane's rows, titles and drafts follow the hub's
-                // `TurnRunning` on the connection stream, which every Muse
-                // session's turn raises (see `on_hub_event`).
-                if view.read(cx).provider_kind() == ProviderId::Muse {
-                    return;
-                }
+                // Every provider's turn, Muse's included (docs/70): rows,
+                // titles and drafts follow the view's own lane.
+                let provider_kind = view.read(cx).provider_kind();
                 let (session_id, prompt, turn_id) =
                     (session_id.clone(), prompt.clone(), turn_id.clone());
                 // A turn that started is a session made real: it is no
                 // draft any more, whether it already had a row or not.
                 self.drafts.retain(|_, named| named != &session_id);
+                self.unsent.remove(&session_id);
                 let handoff_dest =
                     sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
                 // A handoff destination's first words are the pack, then the
@@ -4336,22 +4384,46 @@ impl Harness {
                     );
                 }
                 if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
-                    crate::provider_sessions::write(&self.provider_sessions);
+                    self.persist_provider_sessions(cx);
                 }
                 // A generated title outranks the prompt, even on a retry
                 // of a first turn that never settled (`send_title`).
                 let title = sidebar::send_title(&session_id, Some(&prompt), &self.overrides);
+                if !self.sessions.iter().any(|entry| entry.id == session_id) {
+                    // No row yet (a restart between the open and this
+                    // send): build it now, titled from the prompt — from
+                    // the record, or for a provider that lists its own
+                    // sessions, as a local row until the list shows it.
+                    self.merge_provider_rows();
+                    if provider_kind.lists_sessions() {
+                        let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
+                        let workspace = self.session_workspace(&session_id);
+                        self.ensure_listed_row(&session_id, project, workspace);
+                        // A handoff destination's rowless first turn is the
+                        // pack: the row carries the chain title (Y2a).
+                        if handoff_dest {
+                            let label = sidebar::handoff_title_of(&session_id, &self.provider_sessions, &self.overrides)
+                                .map(|t| sidebar::one_line(&t));
+                            if let (Some(label), Some(entry)) =
+                                (label, self.sessions.iter_mut().find(|entry| entry.id == session_id))
+                            {
+                                entry.label = label;
+                            }
+                        }
+                    }
+                }
                 if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
                     if sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest) {
                         self.invalidate_list();
-                    }
-                } else {
-                    // No row yet (a restart between the open and this
-                    // send): build it now, titled from the prompt.
-                    self.merge_provider_rows();
-                    if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                        sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest);
-                        self.invalidate_list();
+                        // The row just went from invisible to visible: a
+                        // reveal armed when this session was opened may
+                        // already have given up on it (it was filtered as
+                        // empty), so re-arm it as an outside activation
+                        // does — only for the session this window has open.
+                        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                            self.reveal = Some(session_id.clone());
+                            self.reveal_unknown = None;
+                        }
                     }
                 }
                 // A first send may earn a generated title: the same cheap
@@ -4380,23 +4452,10 @@ impl Harness {
             // the lane's `turn/completed`.
             SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
                 let (session_id, turn_id, meta) = (session_id.clone(), turn_id.clone(), meta.clone());
+                // Every provider's turn, Muse's included (docs/70): the
+                // ledger row is tagged with its provider, and the row,
+                // record and byline move here — one row, never a relist.
                 let provider_kind = view.read(cx).provider_kind();
-                // A Muse lane's turn: the usage ledger's row, as Muse rows
-                // always were (untagged), stamped with the session's cursor;
-                // its row and byline follow the hub's `TurnSettled` on the
-                // connection stream (see `on_hub_event`).
-                if provider_kind == ProviderId::Muse {
-                    let cursor = view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
-                    let row = crate::usage::row_from_finished(
-                        &session_id,
-                        &cursor,
-                        &turn_id,
-                        crate::usage::now_ms(),
-                        &meta,
-                    );
-                    self.wire_call(cx, move || crate::usage::record_backfilled(&[row]), |_this, (), _cx| {});
-                    return;
-                }
                 let provider = provider_kind.as_str().to_owned();
                 // A Claude Code report seeds the next fresh session's
                 // chip: display-only (the argv never sees it — see
@@ -4445,7 +4504,7 @@ impl Harness {
                     &session_id,
                     exchanges,
                 ) {
-                    crate::provider_sessions::write(&self.provider_sessions);
+                    self.persist_provider_sessions(cx);
                 }
                 self.rejoin_provider_row(&session_id);
                 // A new exchange is new searchable words (docs/50 P3): the
@@ -5038,17 +5097,13 @@ impl Harness {
         let prefix = view.update(cx, |view, _| view.handoff_snapshot_turns());
         self.pending_handoff =
             Some(crate::handoff::PendingHandoff { source_session: source, epoch, prefix });
-        if to == ProviderId::Muse {
-            self.select_new_provider(ProviderId::Muse, cx);
-            self.session_switch_pending = true;
-            self.switch_claim = Some((run.source_session.clone(), self.switch_epoch));
-            self.new_session(window, cx);
-        } else {
-            let workspace = facts.workspace.clone();
-            let project =
-                self.projects.resolve_available(Some(&workspace), None).map(|p| p.id.clone());
-            self.open_on_provider(to, project, workspace, window, cx);
-        }
+        // Every destination opens the same way (docs/70): on its provider's
+        // lane, in the source's workspace — a shared child started first.
+        crate::baaz_log!("handoff from {} opens its destination on {}", run.source_session, to.as_str());
+        self.ensure_provider_started(to, cx);
+        let workspace = facts.workspace.clone();
+        let project = self.projects.resolve_available(Some(&workspace), None).map(|p| p.id.clone());
+        self.open_on_provider(to, project, workspace, window, cx);
     }
 
     /// Carry the source's pane state onto a handoff destination that holds
@@ -5167,7 +5222,7 @@ impl Harness {
         // from the submit, exactly like `ProviderTurnAccepted` (Y2a) — so
         // the head row shows "Working" and is never filtered as empty.
         if crate::provider_sessions::touch(&mut self.provider_sessions, &dest) {
-            crate::provider_sessions::write(&self.provider_sessions);
+            self.persist_provider_sessions(cx);
         }
         let now = crate::clock::now_local();
         if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
@@ -5333,7 +5388,7 @@ impl Harness {
     /// halves unlink — another chain's links are never touched.
     fn clear_handoff_links(&mut self, source: &str, dest: &str, cx: &mut Context<Self>) {
         crate::provider_sessions::clear_handoff(&mut self.provider_sessions, source, dest);
-        crate::provider_sessions::write(&self.provider_sessions);
+        self.persist_provider_sessions(cx);
         let (source, dest) = (source.to_owned(), dest.to_owned());
         if let Some(meta) = self.overrides.get(source.as_str()) {
             if meta.handoff_to.as_deref() == Some(dest.as_str()) {
@@ -5607,7 +5662,7 @@ impl Harness {
                     cx,
                 );
             }
-            crate::provider_sessions::write(&self.provider_sessions);
+            self.persist_provider_sessions(cx);
         }
         let solo_source = !self.provider_sessions.contains_key(source);
         let solo_dest = !self.provider_sessions.contains_key(dest);
@@ -8769,7 +8824,7 @@ done
             vc.update(|window, cx| {
                 baaz.update(cx, |harness, cx| {
                     harness.new_provider = default.as_str().to_owned();
-                    harness.open("muse-row".into(), None, true, window, cx);
+                    harness.open("muse-row".into(), true, window, cx);
                 });
             });
             vc.run_until_parked();
@@ -10477,7 +10532,7 @@ done
         // the row exists, the chain links are in place.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-m".to_owned(), None, false, window, cx);
+                harness.open("dest-m".to_owned(), false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(
@@ -10723,7 +10778,7 @@ done
         // the row exists, the chain links are in place.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-m2".to_owned(), None, false, window, cx);
+                harness.open("dest-m2".to_owned(), false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(
@@ -10963,7 +11018,7 @@ done
         // A muse destination with the pack submitted but never acked.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.open("dest-me".to_owned(), None, false, window, cx);
+                harness.open("dest-me".to_owned(), false, window, cx);
                 let view = harness.active.clone().expect("the destination is open");
                 view.update(cx, |view, cx| {
                     view.note_handoff_pack(
@@ -12501,6 +12556,9 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.delete_provider_session(&open_id, cx));
         });
+        // The store is written off the UI thread now (docs/70): let the
+        // background write land before reading the file.
+        vc.run_until_parked();
         let _held = held;
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -12520,5 +12578,408 @@ done
             );
         });
         lane_restore(state);
+    }
+
+    // ------------------------------------------------- P4-B Muse records
+
+    /// What a Muse double answers `ResumeSession` with: the session, or a
+    /// typed refusal the reopen still lands under.
+    #[derive(Clone, Copy)]
+    enum MuseResume {
+        Ok,
+        Refused(provider::RefusalHint),
+    }
+
+    /// A Muse-shaped double behind the factory: answers the reopen's
+    /// `ResumeSession` per `answer`, accepts every `PageTranscript`, lists an
+    /// empty catalog and no pending work, and records every command — no
+    /// child, no server (docs/70 §6).
+    fn muse_resume_factory(
+        answer: MuseResume,
+    ) -> (crate::providers::ProviderFactory, std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) {
+        use provider::ProviderAdapter as _;
+        struct MuseDouble {
+            rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
+            answer: MuseResume,
+            commands: std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
+        }
+        impl provider::ProviderAdapter for MuseDouble {
+            fn id(&self) -> provider::ProviderId {
+                aui_protocol::Provider::Muse
+            }
+            fn connect(&mut self, _client: &provider::ConnectInfo) -> Result<provider::Handshake, provider::ProviderError> {
+                Ok(provider::Handshake {
+                    provider: aui_protocol::Provider::Muse,
+                    agent_name: "muse-double".into(),
+                    agent_version: "0.0.0".into(),
+                })
+            }
+            fn capabilities(&self) -> provider::CapabilitySet {
+                use provider::{Capability, CapabilityState};
+                let native = CapabilityState::Native;
+                let off = || CapabilityState::Unavailable { reason: "the muse double resumes and pages only".into() };
+                provider::CapabilitySet::new([
+                    (Capability::SessionLifecycle, native.clone()),
+                    (Capability::Transcript, native.clone()),
+                    (Capability::ModelCatalog, native.clone()),
+                    (Capability::SubmitTurn, off()),
+                    (Capability::ForkSession, off()),
+                    (Capability::CompactSession, off()),
+                    (Capability::SessionConfig, off()),
+                    (Capability::SessionShell, off()),
+                    (Capability::SteerTurn, off()),
+                    (Capability::TurnControl, off()),
+                    (Capability::Approvals, off()),
+                    (Capability::Questions, off()),
+                    (Capability::Account, off()),
+                    (Capability::ClientTools, off()),
+                    (Capability::ReasoningTraces, off()),
+                    (Capability::SubagentTurns, off()),
+                ])
+            }
+            fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+                self.commands.lock().expect("commands").push(command.clone());
+                match command {
+                    provider::Command::ResumeSession { session_id, .. } => match self.answer {
+                        MuseResume::Ok => Ok(provider::Ack::Session { session_id, title: None }),
+                        MuseResume::Refused(hint) => Err(provider::ProviderError::Refused(provider::Refusal {
+                            hint,
+                            title: "Refused".into(),
+                            reason: "the double refuses this resume".into(),
+                            severity: provider::Severity::Banner,
+                            session_scoped: true,
+                        })),
+                    },
+                    provider::Command::PageTranscript { .. } => Ok(provider::Ack::Accepted),
+                    provider::Command::ListModels { .. } => {
+                        Ok(provider::Ack::ModelCatalog { models: Vec::new(), provider: "muse".into() })
+                    }
+                    provider::Command::ListPending { .. } => {
+                        Ok(provider::Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                    }
+                    other => Err(provider::ProviderError::unsupported(
+                        other.capability(),
+                        "the muse double resumes and pages only",
+                    )),
+                }
+            }
+            fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
+                self.rx.clone()
+            }
+            fn shutdown(&mut self) {}
+        }
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory_commands = commands.clone();
+        let factory: crate::providers::ProviderFactory = std::sync::Arc::new(move |id: ProviderId| {
+            assert!(id.lists_sessions(), "only the listing provider is asked for a lane here");
+            let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
+            let mut adapter = MuseDouble { rx, answer, commands: factory_commands.clone() };
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        });
+        (factory, commands)
+    }
+
+    /// A live harness (not scripted chrome) with Muse up on a stand-in hub,
+    /// the double behind the factory and one listed Muse row, `s-muse-old`,
+    /// made outside Baaz: 3 turns, no record.
+    fn p4b_harness(
+        vc: &mut gpui::VisualTestContext,
+        dir: &std::path::Path,
+        answer: MuseResume,
+    ) -> (gpui::Entity<Harness>, std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) {
+        let baaz = lane_harness(vc, dir);
+        let (factory, commands) = muse_resume_factory(answer);
+        let workspace = dir.to_string_lossy().into_owned();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.args.offline = false;
+                mark_muse_up(harness);
+                harness.provider_factory = factory;
+                harness.sessions.clear();
+                let mut row = chain_muse_entry("s-muse-old", "Chart the ferry routes", 3);
+                row.workspace = Some(workspace);
+                harness.sessions.push(row);
+                harness.index.insert(
+                    "s-muse-old".into(),
+                    IndexEntry {
+                        title: "Ferry routes".into(),
+                        first_user_prompt: Some("chart the ferry routes".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.sessions_loaded = true;
+            });
+        });
+        (baaz, commands)
+    }
+
+    fn resumes_of(commands: &std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) -> Vec<(String, bool)> {
+        commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::ResumeSession { session_id, metadata_only, .. } => {
+                    Some((session_id.clone(), *metadata_only))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pages_of(commands: &std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) -> usize {
+        commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter(|command| matches!(command, provider::Command::PageTranscript { .. }))
+            .count()
+    }
+
+    /// docs/70 §3/§6: the first open in Baaz of a Muse session made
+    /// elsewhere writes its record from the list row and reopens through
+    /// `reopen_provider` (a lane view, the history paged in after a
+    /// metadata-only resume); a second reopen, after a restart that lost
+    /// the row, is routed by that record alone.
+    #[gpui::test]
+    fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-muse-reopen");
+        let vc = cx.add_empty_window();
+        let (baaz, commands) = p4b_harness(vc, &state.2, MuseResume::Ok);
+        assert!(vc.update(|_, cx| baaz.read(cx).provider_sessions.is_empty()), "no record before the open");
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let record = harness.provider_sessions.get("s-muse-old").expect("the open wrote a record");
+            assert_eq!(record.provider, "muse");
+            assert_eq!(record.turns, 3, "the row's turns, so the open-fresh rule cannot drop it");
+            assert_eq!(record.title.as_deref(), Some("Ferry routes"));
+            assert_eq!(record.first_prompt.as_deref(), Some("chart the ferry routes"));
+            assert_eq!(record.workspace.as_deref(), Some(state.2.to_string_lossy().as_ref()));
+            let view = harness.active.clone().expect("the session opened");
+            assert_eq!(view.read(cx).session_id, "s-muse-old");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse);
+            assert!(!view.read(cx).is_starting(), "the lane landed");
+            assert!(harness.provider_open_error.is_none(), "no failure");
+            assert!(harness.drafts.values().all(|id| id != "s-muse-old"), "a reopen is never a draft");
+            assert_eq!(harness.sessions.iter().filter(|e| e.id == "s-muse-old").count(), 1, "one row");
+            assert_eq!(
+                harness.sessions.iter().find(|e| e.id == "s-muse-old").map(|e| e.label.as_str()),
+                Some("Chart the ferry routes"),
+                "the row stays the list's"
+            );
+        });
+        assert_eq!(resumes_of(&commands), vec![("s-muse-old".to_owned(), true)], "one metadata-only resume");
+        assert!(pages_of(&commands) >= 1, "the history pages in after the ack");
+        let on_disk = crate::provider_sessions::read();
+        assert_eq!(on_disk.get("s-muse-old").map(|r| r.provider.as_str()), Some("muse"), "the file holds it");
+        // A restart: views and rows gone, the record read back from disk.
+        let mut forgotten = Vec::new();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                forgotten.extend(harness.active.take());
+                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                harness.sessions.clear();
+                harness.index.clear();
+                harness.provider_sessions = crate::provider_sessions::read();
+                harness.merge_provider_rows();
+                assert!(harness.sessions.is_empty(), "a Muse record never builds a row: the list owns it");
+            });
+        });
+        let _forgotten = forgotten;
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        assert_eq!(
+            resumes_of(&commands),
+            vec![("s-muse-old".to_owned(), true), ("s-muse-old".to_owned(), true)],
+            "the record alone routes the second reopen"
+        );
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("reopened");
+            assert_eq!(view.read(cx).session_id, "s-muse-old");
+            assert_eq!(harness.provider_sessions.get("s-muse-old").map(|r| r.turns), Some(3));
+        });
+        lane_restore(state);
+    }
+
+    /// A Muse session another window holds still opens through the one
+    /// reopen landing: the lane attaches, read-only under the lease notice,
+    /// no inline failure, no dialog — and its history pages in.
+    #[gpui::test]
+    fn a_held_elsewhere_muse_reopen_lands_read_only_under_the_lease_notice(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-held");
+        let vc = cx.add_empty_window();
+        let (baaz, commands) =
+            p4b_harness(vc, &state.2, MuseResume::Refused(provider::RefusalHint::HeldElsewhere));
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the session opened");
+            assert_eq!(view.read(cx).session_id, "s-muse-old");
+            assert_eq!(view.read(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
+            assert!(harness.provider_open_error.is_none(), "not a failed open");
+            assert!(harness.overlays.read(cx).dialog.is_none(), "no dialog");
+        });
+        assert!(pages_of(&commands) >= 1, "the history still pages in");
+        lane_restore(state);
+    }
+
+    /// A stale history the resume already regenerated pages in anyway:
+    /// the view lands normally, with no lease notice and no failure.
+    #[gpui::test]
+    fn a_stale_history_muse_reopen_pages_in_anyway(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-stale");
+        let vc = cx.add_empty_window();
+        let (baaz, commands) =
+            p4b_harness(vc, &state.2, MuseResume::Refused(provider::RefusalHint::StaleHistory));
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the session opened");
+            assert_eq!(view.read(cx).session_id, "s-muse-old");
+            assert_ne!(view.read(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
+            assert!(harness.provider_open_error.is_none(), "not a failed open");
+        });
+        assert!(pages_of(&commands) >= 1, "the history pages in");
+        lane_restore(state);
+    }
+
+    /// Any other refusal fails the reopen inline, like a Codex reopen's.
+    #[gpui::test]
+    fn a_refused_muse_reopen_fails_inline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-gone");
+        let vc = cx.add_empty_window();
+        let (baaz, _commands) =
+            p4b_harness(vc, &state.2, MuseResume::Refused(provider::RefusalHint::SessionGone));
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let failure = baaz.read(cx).provider_open_error.clone().expect("an inline failure");
+            assert_eq!(failure.provider, ProviderId::Muse);
+            assert_eq!(failure.session_id.as_deref(), Some("s-muse-old"));
+        });
+        lane_restore(state);
+    }
+
+    /// docs/70 §4: a Muse turn moves one row through the view's own lane
+    /// events, like Codex — the record counts it, the ledger row is tagged
+    /// `muse` — and the hub's `TurnRunning` / `TurnSettled` move only a
+    /// viewless session's row. Nothing relists (`load_sessions`).
+    #[gpui::test]
+    fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
+        use crate::session::SessionEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("p4b-turn");
+        let vc = cx.add_empty_window();
+        let (baaz, _commands) = p4b_harness(vc, &state.2, MuseResume::Ok);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.sessions.push(chain_muse_entry("s-muse-cli", "Run from the CLI", 2));
+            });
+        });
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("opened"));
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let event = SessionEvent::ProviderTurnAccepted {
+                    session_id: "s-muse-old".into(),
+                    prompt: "and the night ferries".into(),
+                    turn_id: "t-4".into(),
+                };
+                harness.on_session_event(view.clone(), &event, cx);
+                assert!(!harness.sessions_list_in_flight, "an admission never relists");
+                assert_eq!(
+                    harness.provider_sessions.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
+                    Some("chart the ferry routes"),
+                    "the record keeps the session's own first words"
+                );
+                // The hub hears the same turn: a viewed session ignores it.
+                harness.on_hub_event(
+                    provider::ProviderEvent::TurnSettled {
+                        session_id: "s-muse-old".into(),
+                        turn_id: "t-4".into(),
+                        outcome: provider::facts::TurnOutcome::Completed,
+                    },
+                    cx,
+                );
+                assert!(!harness.sessions_list_in_flight, "a settle never relists");
+            });
+        });
+        // The view settles the turn: four folded exchanges would be the
+        // fold's word; here the record's count only ever moves up.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                if let Some(record) = harness.provider_sessions.get_mut("s-muse-old") {
+                    record.turns = 4;
+                }
+                let event = SessionEvent::ProviderTurnFinished {
+                    session_id: "s-muse-old".into(),
+                    turn_id: "t-4".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                };
+                harness.on_session_event(view.clone(), &event, cx);
+                assert!(!harness.sessions_list_in_flight, "a finished turn never relists");
+                let row = harness.sessions.iter().find(|e| e.id == "s-muse-old").expect("the row");
+                assert_eq!(row.turns, 4, "the one row moved");
+                assert_eq!(row.label, "Chart the ferry routes", "and stays the list's row");
+            });
+        });
+        // A session with no view here (the muse CLI): the hub moves its row.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.on_hub_event(
+                    provider::ProviderEvent::TurnRunning { session_id: "s-muse-cli".into(), turn_id: "t-9".into() },
+                    cx,
+                );
+                assert!(harness.sessions.iter().any(|e| e.id == "s-muse-cli" && e.running), "it reads running");
+                harness.on_hub_event(
+                    provider::ProviderEvent::TurnSettled {
+                        session_id: "s-muse-cli".into(),
+                        turn_id: "t-9".into(),
+                        outcome: provider::facts::TurnOutcome::Completed,
+                    },
+                    cx,
+                );
+                assert!(!harness.sessions_list_in_flight, "a settle never relists");
+                // It stands down on the idle `statusChanged`, as before P4-B
+                // (docs/64 §4 item 4) — still one row, still no relist.
+                harness.on_hub_event(
+                    provider::ProviderEvent::StatusChanged {
+                        session_id: "s-muse-cli".into(),
+                        running: false,
+                        attention: Vec::new(),
+                    },
+                    cx,
+                );
+                assert!(harness.sessions.iter().any(|e| e.id == "s-muse-cli" && !e.running), "and stands down");
+                assert!(!harness.sessions_list_in_flight, "with no relist");
+                assert!(!harness.provider_sessions.contains_key("s-muse-cli"), "and writes no record");
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// An unknown provider id in a record is refused as unknown — never
+    /// reopened on `ProviderId::parse`'s Muse fallback — while a Muse
+    /// record parses as Muse.
+    #[test]
+    fn a_records_provider_parses_strictly() {
+        assert_eq!(ProviderId::parse_known("muse"), Some(ProviderId::Muse));
+        assert_eq!(ProviderId::parse_known("codex"), Some(ProviderId::Codex));
+        assert_eq!(ProviderId::parse_known("claude-code"), Some(ProviderId::ClaudeCode));
+        assert_eq!(ProviderId::parse_known("echo"), None);
+        assert_eq!(ProviderId::parse_known(""), None);
+        assert_eq!(ProviderId::parse("echo"), ProviderId::Muse, "the flag's fallback is unchanged");
     }
 }

@@ -120,6 +120,28 @@ impl Harness {
         cx.notify();
     }
 
+    /// Write the provider records (`provider-sessions.json`) off the UI
+    /// thread: snapshotted here, written on the background executor in
+    /// generation order like `sessions.json` ([`Self::settle_overrides`]),
+    /// so a late write never lands stale records over a newer one, and the
+    /// store can grow (a record per opened Muse session, docs/70) without
+    /// costing a frame. The quit flush writes synchronously while one is in
+    /// flight ([`Self::flush_right_save`]).
+    pub(crate) fn persist_provider_sessions(&mut self, cx: &mut Context<Self>) {
+        let generation = crate::provider_sessions::next_write_generation();
+        let snapshot = self.provider_sessions.clone();
+        self.provider_sessions_writes_in_flight += 1;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move { crate::provider_sessions::write_ordered(generation, &snapshot) })
+                .await;
+            let _ = this.update(cx, |this, _| {
+                this.provider_sessions_writes_in_flight = this.provider_sessions_writes_in_flight.saturating_sub(1);
+            });
+        })
+        .detach();
+    }
+
     /// Forget `project_id` on every session that carries it, settled once:
     /// project removal re-resolves the rows by root, so a later re-add finds
     /// them again.
