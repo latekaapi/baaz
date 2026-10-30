@@ -123,7 +123,33 @@ def _usage_script():
 # (`--sidebar-fixture`, rows instead of skeleton bars — allowed offline) and
 # scripted statuses for the footer account and the Providers rows, so the
 # capture reads like a signed-in window instead of "Checking providers...".
-P6_SIDEBAR = ["--sidebar-fixture", "fixtures/sidebar/projects.json"]
+def _p6_sidebar_fixture():
+    """fixtures/sidebar/projects.json re-dated relative to now. The rows'
+    labels ("3d", "12d") and date groups read against the newest row —
+    the live session in `child-lost-*` (stamped at the capture's wall
+    clock), the newest fixture row in `launch-failure*` — so the fixture's
+    fixed September dates would drift a day in every baseline each day
+    ("47d" → "48d"). The offsets are 3.5 days plus whole days: whole days
+    apart from each other (so against the newest fixture row every row
+    keeps its time of day and its calendar group), and half a day past a
+    whole day against the wall clock, never where the day before or after
+    would cross a 2/7/31-day group edge. Any time of day reads the same."""
+    with open(os.path.join(REPO, "fixtures", "sidebar", "projects.json")) as f:
+        rows = json.load(f)
+    days = [3.5, 3.5, 4.5, 4.5, 5.5, 7.5, 8.5, 9.5, 10.5, 12.5, 14.5, 16.5, 18.5, 20.5,
+            22.5, 25.5, 27.5, 29.5]
+    days += [35.5 + 5 * i for i in range(max(0, len(rows) - len(days)))]
+    now = time.time()
+    for row, back in zip(rows, days):
+        at = now - back * 86400
+        row["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+    path = os.path.join(tempfile.mkdtemp(prefix="uiprobe-p6-sidebar-"), "sidebar.json")
+    with open(path, "w") as f:
+        json.dump(rows, f)
+    return path
+
+
+P6_SIDEBAR = ["--sidebar-fixture", _p6_sidebar_fixture()]
 
 
 def _p6_statuses(claude_auth):
