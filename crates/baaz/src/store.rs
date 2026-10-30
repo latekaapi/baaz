@@ -33,8 +33,23 @@ pub fn support_dir() -> PathBuf {
     {
         return std::env::temp_dir().join(format!("baaz-test-state-{}", std::process::id()));
     }
+    // The same rule for a deterministic capture (the visual probe): an entry
+    // that names no state dir of its own must never write the person's real
+    // store. Before this, `composer-*`, `lane-*` and `reopen-failed` captures
+    // left probe prompts in the owner's history and set `provider.json`.
+    #[allow(unreachable_code)]
+    if crate::clock::deterministic() {
+        return capture_state_dir();
+    }
     #[allow(unreachable_code)]
     default_support_dir()
+}
+
+/// The throwaway store a deterministic capture with no `BAAZ_STATE_DIR`
+/// uses: one fresh directory per process, so two shots of the same entry
+/// start from the same (empty) state.
+fn capture_state_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("baaz-capture-state-{}", std::process::id()))
 }
 
 /// `~/Library/Application Support/baaz` regardless of `BAAZ_STATE_DIR`:
