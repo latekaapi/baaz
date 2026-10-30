@@ -116,6 +116,10 @@ def _usage_script():
             "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
     ]
 
+# The P6 entries' throwaway state dir (see them below): made once at
+# import, never the real store.
+_P6_STATE = tempfile.mkdtemp(prefix="uiprobe-p6-state-")
+
 ENTRIES = {
     "login-choose":         {"shot": ["--no-connect", "--login", "choose"]},
     "login-apikey":         {"shot": ["--no-connect", "--login", "apikey"]},
@@ -351,6 +355,26 @@ ENTRIES = {
     # (Muse), Signed out (Claude Code) and Not installed (Codex):
     # offline, deterministic, no baseline yet — generate on main after
     # merge, never to silence a finding. Capture and look.
+    # P6 (docs/71): the typed "Couldn't start" view — a crash with the
+    # child's stderr well, and a signed-out open with its Sign in — then a
+    # scripted Codex lane whose child dies once (the quiet banner with
+    # Retry now) and twice (the failure view for the lost lane). Offline,
+    # no child, no turn. Each runs on its own throwaway state dir: the
+    # provider pick and the scripted send would otherwise land in the real
+    # store (the last provider, the prompt history) and move other
+    # entries' captures. No baselines yet — generate on main after merge.
+    "launch-failure":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "launch-failed:codex:crashed"],
+                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
+    "launch-failure-signed-out": {"shot": ["--no-connect", "--login", "signed-in",
+                                           "--steps", "launch-failed:claude-code:signed-out"],
+                                  "env": {"BAAZ_STATE_DIR": _P6_STATE}},
+    "child-lost-banner":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:codex;send:hello lost probe;wait:3000;child-lost"],
+                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
+    "child-lost-twice":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:codex;send:hello lost probe;wait:3000;child-lost;child-lost"],
+                             "env": {"BAAZ_STATE_DIR": _P6_STATE}},
     "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:providers"],
                              "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":

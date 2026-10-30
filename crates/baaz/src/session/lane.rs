@@ -31,9 +31,14 @@ pub(super) fn refusal_banner(refusal: &provider::Refusal) -> String {
     }
 }
 
-/// The lost-connection banner's lead: [`provider::ProviderEvent::ConnectionRestored`]
-/// clears a banner that starts with it, and only that one.
-const CONNECTION_LOST: &str = "Provider connection lost: ";
+/// The quiet banner a lane wears when its child died (docs/71 §2): the
+/// provider's label from the registry, and what happens next.
+pub(crate) fn lost_banner(provider: ProviderId) -> String {
+    format!(
+        "{} stopped unexpectedly. It will pick up where it left off on your next message.",
+        provider.label()
+    )
+}
 
 /// Which event stream owns a session view. Set at construction, never
 /// reassigned: there is no setter and no public field.
@@ -286,23 +291,15 @@ impl SessionView {
             self.request_provider_pending(cx);
             self.request_provider_models(cx);
         }
-        // A Claude Code lane outlives a lost child: its adapter resumes the
-        // session (`--resume`) on the next send, and the resumed child's
-        // events arrive on this same stream — so only that lane keeps
-        // draining past a lost connection.
-        // A Muse lane rides the shared child, which the hub respawns and
-        // re-attaches: it keeps draining too.
-        let revives = self.provider_kind().lane_survives_lost_child();
+        // Every lane outlives a lost child (docs/71 §2): Claude Code's
+        // adapter resumes the session (`--resume`) and Codex's starts a
+        // fresh app-server and `thread/resume`s it, on the next send or on
+        // Retry now; a Muse lane rides the shared child, which the hub
+        // respawns and re-attaches. The revived child's events arrive on
+        // this same stream, so the lane keeps draining past a loss.
         self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
-                let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
                 if this.update(cx, |view, cx| view.on_provider_event(event, cx)).is_err() {
-                    return;
-                }
-                // Any other lane's provider is hung up and will never
-                // deliver again: stop draining so a late event cannot
-                // surface past the banner.
-                if lost && !revives {
                     return;
                 }
             }
@@ -546,6 +543,18 @@ impl SessionView {
                 if let provider::facts::TurnOutcome::Failed { signed_out: true, .. } = outcome {
                     cx.emit(super::SessionEvent::SignedOut);
                 }
+                // The row's "Failed" (or its standing down), for every
+                // provider (docs/71 §6): Claude Code and Codex settle only
+                // failures here, after the turn's own finish.
+                let (failed, error) = match outcome {
+                    provider::facts::TurnOutcome::Failed { message, .. } => (true, message),
+                    _ => (false, None),
+                };
+                cx.emit(super::SessionEvent::ProviderTurnOutcome {
+                    session_id: self.session_id.clone(),
+                    failed,
+                    error,
+                });
                 cx.notify();
             }
             // A submission's words handed back: by the intent the row's
@@ -591,29 +600,24 @@ impl SessionView {
             provider::ProviderEvent::AccountChanged { .. }
             | provider::ProviderEvent::LoginCompleted { .. }
             | provider::ProviderEvent::UsageChanged { .. } => {}
-            // The shared child is back and this session re-attached: the
-            // lost-connection banner stands down.
+            // The child is back (a revived one, or the shared child
+            // re-attached): the lost banner stands down.
             provider::ProviderEvent::ConnectionRestored => {
-                if self.banner.as_deref().is_some_and(|banner| banner.starts_with(CONNECTION_LOST)) {
+                // Only the lost banner stands down: it is the one that
+                // carries Retry now.
+                if self.banner_action == Some(super::BannerAction::RetryNow) {
                     self.banner = None;
                     self.banner_action = None;
                     cx.notify();
                 }
             }
             provider::ProviderEvent::ConnectionLost { reason } => {
-                // Hang up the lane's provider: it will never deliver again —
-                // unless its connection is shared and comes back (Muse),
-                // where hanging up would only unbind this session.
-                if let (Lane::Provider(lane), false) = (&self.lane, self.provider_kind().shares_one_child()) {
-                    if let Ok(mut provider) = lane.provider.lock() {
-                        provider.shutdown();
-                    }
-                }
                 // No finish will ever land, so settle the send state here:
                 // drop every optimistic bubble, stop reading Working, and
                 // drop every approval or question the dead child asked —
-                // nothing is left to answer them — or each sticks with no
-                // turn behind it ("Finishing up…" forever, 2026-10-15).
+                // the adapter already settled them (docs/71 §2), and nothing
+                // is left to answer them — or each sticks with no turn
+                // behind it ("Finishing up…" forever, 2026-10-15).
                 self.submitting = false;
                 for optimistic in std::mem::take(&mut self.pending_optimistic) {
                     self.remove_optimistic_turn(&optimistic.id);
@@ -621,20 +625,98 @@ impl SessionView {
                 self.clear_running();
                 self.external_approvals.clear();
                 self.external_questions.clear();
-                // A child that will not come back closes the session for the
-                // window (a handoff destination that never acknowledged its
-                // pack fails its run); a shared one (Muse) comes back.
-                if !self.provider_kind().lane_survives_lost_child() {
-                    cx.emit(super::SessionEvent::Closed);
-                }
+                // Every surface that read the waiting approval (the row,
+                // the header, the badge) re-reads it now.
+                cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
                 // A Muse session wears the window's own reconnect banner
-                // (its one child is the window's connection); any other
-                // lane says it here.
-                if !self.provider_kind().shares_one_child() {
-                    self.set_banner(&format!("{CONNECTION_LOST}{reason}"), None, cx);
+                // (its one child is the window's connection, and the hub
+                // brings it back); every other lane speaks for itself.
+                if self.provider_kind().shares_one_child() {
+                    cx.notify();
+                } else {
+                    self.note_child_lost(&reason, cx);
                 }
             }
         }
+    }
+
+    /// A lane's child died (its stream said so, or a revive failed): the
+    /// quiet banner with Retry now — the session stays, and the next send
+    /// revives it — unless it is the second death within
+    /// [`super::LOST_TWICE_WINDOW`] with no turn finished between, which
+    /// stops it coming back on its own and hands the window the typed
+    /// failure view instead (docs/71 §2).
+    fn note_child_lost(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let now = crate::clock::now_instant();
+        let twice = self.lost_at.is_some_and(|at| now.saturating_duration_since(at) < super::LOST_TWICE_WINDOW);
+        self.lost_at = Some(now);
+        if twice {
+            let stderr_excerpt = self
+                .lane_provider()
+                .and_then(|provider| provider.lock().ok().map(|provider| provider.stderr_tail()))
+                .unwrap_or_default();
+            self.set_banner(&lost_banner(self.provider_kind()), Some(super::BannerAction::RetryNow), cx);
+            cx.emit(super::SessionEvent::ChildFailed { message: reason.to_owned(), stderr_excerpt });
+            // A handoff destination that never acknowledged its pack fails
+            // its run here, as a closed one did before revival.
+            cx.emit(super::SessionEvent::Closed);
+            return;
+        }
+        self.set_banner(&lost_banner(self.provider_kind()), Some(super::BannerAction::RetryNow), cx);
+    }
+
+    /// "Retry now" (the lost banner's, or the failure view's Retry): ask
+    /// the adapter to revive its child without a turn
+    /// (`FollowSession`). The restored connection takes the banner down; a
+    /// revive that fails is the child dying again.
+    pub(crate) fn retry_lost_child(&mut self, cx: &mut Context<Self>) {
+        let session_id = self.session_id.clone();
+        self.provider_send(
+            provider::Command::FollowSession { session_id, after: None },
+            cx,
+            |this, result, cx| match result {
+                Ok(_) => {
+                    if this.banner_action == Some(super::BannerAction::RetryNow) {
+                        this.banner = None;
+                        this.banner_action = None;
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.revive_failed(&error, cx);
+                }
+            },
+        );
+    }
+
+    /// A send or a Retry now on a lost lane could not bring the child back:
+    /// that is the child dying again. Returns whether the lane was lost
+    /// (and so the failure is accounted for here).
+    pub(super) fn revive_failed(&mut self, error: &provider::ProviderError, cx: &mut Context<Self>) -> bool {
+        if self.lost_at.is_none() {
+            return false;
+        }
+        if matches!(error, provider::ProviderError::Unavailable { .. }) {
+            self.note_child_lost(&error.to_string(), cx);
+        } else {
+            self.report_provider_error(error, cx);
+        }
+        true
+    }
+
+    /// The lost lane's turn finished: it is healthy again, so a later
+    /// death starts the count afresh.
+    pub(super) fn note_turn_finished_live(&mut self) {
+        self.lost_at = None;
+    }
+
+    /// `child-lost` (captures, live checks): fold the loss the adapter
+    /// would report, with no child behind it.
+    pub(crate) fn step_child_lost(&mut self, cx: &mut Context<Self>) {
+        self.on_provider_event(
+            provider::ProviderEvent::ConnectionLost { reason: "the agent process exited".into() },
+            cx,
+        );
     }
 
     /// The lane's provider, for tests driving the gate directly.
@@ -876,6 +958,18 @@ impl SessionView {
                     // in the subscriptions, not here.)
                     if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {
                         self.clear_running();
+                        // A live turn finished: the lane is healthy, and a
+                        // provider that settles only failures (Claude Code,
+                        // Codex) stands the row's "Failed" down here — its
+                        // failure, when it was one, follows this finish.
+                        self.note_turn_finished_live();
+                        if !self.provider_kind().reports_turn_lifecycle() {
+                            cx.emit(super::SessionEvent::ProviderTurnOutcome {
+                                session_id: self.session_id.clone(),
+                                failed: false,
+                                error: None,
+                            });
+                        }
                     }
                     self.submitting = false;
                     // The lane's terminal: the application records the
@@ -1537,13 +1631,14 @@ mod tests {
         });
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(
-                view.read(cx)
-                    .banner
-                    .as_deref()
-                    .is_some_and(|banner| banner.contains("child exited")),
-                "the lost connection shows the session error banner"
+            let view = view.read(cx);
+            assert_eq!(
+                view.banner.as_deref(),
+                Some(lost_banner(ProviderId::Codex).as_str()),
+                "the lost connection shows the quiet lost banner"
             );
+            assert_eq!(view.banner_action, Some(super::super::BannerAction::RetryNow));
+            assert!(view.external_questions.is_empty(), "the dead child's question is gone");
         });
     }
 
@@ -1582,34 +1677,88 @@ mod tests {
         }
     }
 
+    /// Every lane survives a lost child (docs/71 §2): a Codex lane keeps
+    /// its provider (no hang-up — its adapter revives on the next send),
+    /// keeps draining, and wears the quiet banner with Retry now. A second
+    /// loss inside the window with no turn finished stops it coming back
+    /// on its own: the view hands the window the failure view
+    /// (`ChildFailed`) and fails a waiting handoff (`Closed`).
     #[gpui::test]
-    fn nothing_surfaces_after_the_connection_is_lost(cx: &mut gpui::TestAppContext) {
+    fn a_lost_lane_stays_open_and_a_second_loss_hands_over_the_failure(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view(vc, "s-1");
-        vc.update(|_, _| {
-            tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "child exited".into() })
-                .expect("the lane channel is open");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        vc.update(|_, cx| {
+            let seen = seen.clone();
+            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| match event {
+                super::super::SessionEvent::ChildFailed { message, .. } => {
+                    assert_eq!(message, "child exited again");
+                    seen.borrow_mut().push("failed");
+                }
+                super::super::SessionEvent::Closed => seen.borrow_mut().push("closed"),
+                super::super::SessionEvent::ProviderApprovalsChanged { .. } => seen.borrow_mut().push("rows"),
+                _ => {}
+            });
+            std::mem::forget(sub);
         });
+        tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "child exited".into() })
+            .expect("the lane channel is open");
         vc.run_until_parked();
-        // The drain loop is gone with the connection, so the receiver is
-        // dropped: a late tap may not even send, and must never surface.
-        let _ = tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
-            session_id: "s-1".to_owned(),
-            approval_id: "ap-late".to_owned(),
-            headline: "a tap from after the hangup".to_owned(),
+        assert_eq!(*seen.borrow(), ["rows"], "one loss: the rows re-read, nothing closes");
+        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        let still_open = lane.lock().expect("lane provider").send(provider::Command::FollowSession {
+            session_id: "s-1".into(),
+            after: None,
         });
+        assert!(still_open.is_ok(), "the provider was not hung up: {still_open:?}");
+        // The lane still drains: a revived child's tap reaches the surface.
+        tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+            session_id: "s-1".to_owned(),
+            approval_id: "ap-revived".to_owned(),
+            headline: "from the revived child".to_owned(),
+        })
+        .expect("the lane still drains after the loss");
         vc.run_until_parked();
         vc.update(|_, cx| {
-            let view = view.read(cx);
-            assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("child exited")),
-                "the lost connection still shows the session error banner"
-            );
-            assert!(
-                view.external_approvals.get("ap-late").is_none(),
-                "an approval raised after ConnectionLost never reaches the surface"
-            );
+            assert!(view.read(cx).external_approvals.get("ap-revived").is_some(), "the revived ask surfaces");
+            assert_eq!(view.read(cx).banner_action, Some(super::super::BannerAction::RetryNow));
+        });
+        // The revive restored the connection: the lost banner stands down.
+        tx.unbounded_send(provider::ProviderEvent::ConnectionRestored).expect("the lane channel is open");
+        vc.run_until_parked();
+        vc.update(|_, cx| assert!(view.read(cx).banner.is_none(), "restored takes the banner down"));
+        tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "child exited again".into() })
+            .expect("the lane channel is open");
+        vc.run_until_parked();
+        assert_eq!(*seen.borrow(), ["rows", "rows", "failed", "closed"], "the second loss hands over");
+    }
+
+    /// A finished turn between two losses means the lane was healthy: the
+    /// second loss is a first one again, never the failure view.
+    #[gpui::test]
+    fn a_finished_turn_between_losses_restarts_the_count(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+        vc.update(|_, cx| {
+            let failed = failed.clone();
+            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+                if matches!(event, super::super::SessionEvent::ChildFailed { .. }) {
+                    failed.set(true);
+                }
+            });
+            std::mem::forget(sub);
+        });
+        tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "first".into() }).expect("open");
+        vc.run_until_parked();
+        submit_and_deliver(&view, &tx, vc, "after the revive");
+        tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "second".into() }).expect("open");
+        vc.run_until_parked();
+        assert!(!failed.get(), "a finished turn in between restarts the count");
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).banner_action, Some(super::super::BannerAction::RetryNow), "the quiet banner again");
         });
     }
 
@@ -1655,7 +1804,7 @@ mod tests {
             let view = view.read(cx);
             assert!(!view.busy(), "no turn reads as running after the loss");
             assert!(view.external_approvals.get("ap-1").is_none(), "the dead child's ask is gone");
-            assert!(view.banner.as_deref().is_some_and(|banner| banner.contains("exited mid-turn")));
+            assert_eq!(view.banner.as_deref(), Some(lost_banner(ProviderId::ClaudeCode).as_str()));
         });
         tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
             session_id: "s-1".to_owned(),

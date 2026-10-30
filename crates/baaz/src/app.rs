@@ -602,22 +602,57 @@ pub(crate) enum ProviderOpenRetry {
     Reopen(Box<crate::provider_sessions::ProviderSessionRecord>),
     /// Start a fresh session on the provider: a failed new-session open.
     OpenNew { project: Option<String>, workspace: String },
+    /// Bring back the lane whose child died twice in a row (docs/71 §2):
+    /// the parked view comes back and its adapter revives the child
+    /// (`FollowSession`), with the transcript it already holds.
+    Revive,
 }
 
-/// A provider open that failed after the UI already moved (Z4): the window
-/// lands on the failed session with this inline instead of a modal dialog
-/// over another session's transcript.
+/// A provider that could not start, typed (docs/71 §3): a failed open, or a
+/// child that died twice within [`crate::session::LOST_TWICE_WINDOW`]. The
+/// window lands on the failed session with this inline (Z4) instead of a
+/// modal dialog over another session's transcript. Grew out of the old
+/// `ProviderOpenError`: the same inline error, now with its kind, the
+/// child's own stderr and the actions the kind implies.
 #[derive(Clone)]
-pub(crate) struct ProviderOpenError {
-    /// The session the window sits on: the clicked session for a reopen,
-    /// `None` for a fresh open that never earned an id.
+pub(crate) struct LaunchFailure {
+    /// The session the window sits on: the clicked session for a reopen or
+    /// a dead lane, `None` for a fresh open that never earned an id.
     pub session_id: Option<String>,
     /// Whose open failed: names the title, the buttons and the composer.
     pub provider: ProviderId,
-    /// The open failure, verbatim.
-    pub error: String,
+    /// What went wrong, typed: the sentence and the actions follow it.
+    pub kind: crate::provider_status::FailureKind,
+    /// The failure, verbatim.
+    pub message: String,
+    /// The child's last stderr lines (at most
+    /// [`provider::STDERR_TAIL_LINES`]), oldest first; empty when it said
+    /// nothing there.
+    pub stderr_excerpt: Vec<String>,
     /// What Retry re-runs.
     pub retry: ProviderOpenRetry,
+}
+
+/// A provider open that failed on the background turn, with what the
+/// child said on stderr before it went: the adapter is gone by the time the
+/// failure lands, so its tail travels with the error.
+pub(crate) struct OpenFailed {
+    /// The open's refusal.
+    pub error: provider::ProviderError,
+    /// The child's last stderr lines.
+    pub stderr: Vec<String>,
+}
+
+impl From<provider::ProviderError> for OpenFailed {
+    fn from(error: provider::ProviderError) -> Self {
+        Self { error, stderr: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for OpenFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 
 /// The Ask question waiting for its session (B2a-H4d): the query plus the
@@ -1313,7 +1348,7 @@ pub struct Harness {
     /// and the next successful activation clears it. `session_id` is the
     /// clicked session for a reopen, `None` for a fresh open that never
     /// earned an id.
-    pub(crate) provider_open_error: Option<ProviderOpenError>,
+    pub(crate) provider_open_error: Option<LaunchFailure>,
     pub(crate) provider_open_epoch: u64,
     /// Set by quit ([`Self::shutdown_provider_views`]): a provider draft's
     /// open still on the background executor hangs its child up the
@@ -5850,77 +5885,112 @@ impl Harness {
         }
     }
 
-    /// The inline state for a provider open that failed after the click
-    /// moved (Z4): the failed title, the error, Retry + Providers…, and a
-    /// disabled composer naming the provider. This is deliberately not a
-    /// session view, so no transcript — and no tier banner — from anywhere
-    /// else can render here.
+    /// The inline state for a provider that could not start (Z4, typed in
+    /// docs/71 §3): the title, one sentence from the failure's kind, the
+    /// failure itself, the child's last stderr lines in a mono well, then
+    /// Retry, the action the kind implies (Install / Sign in / Update, each
+    /// the D5 flow of that name) and Providers…, over a disabled composer
+    /// naming the provider. This is deliberately not a session view, so no
+    /// transcript — and no tier banner — from anywhere else can render
+    /// here.
     fn render_provider_open_error(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-        failure: &ProviderOpenError,
+        failure: &LaunchFailure,
     ) -> AnyElement {
         let p = cx.aui().colors;
-        let label = failure.provider.label();
-        // The click handlers re-run the failed open, or open Settings on
-        // the Providers section. Each wrapper carries the role and the
-        // human label: `button` has no aria builder of its own, so the
-        // header toggle wraps it the same way.
+        let id = failure.provider;
+        let label = id.label();
+        // The click handlers re-run the failed open, run the kind's own
+        // D5 flow, or open Settings on the Providers section. Each wrapper
+        // carries the role and the human label: `button` has no aria
+        // builder of its own, so the header toggle wraps it the same way.
         let retry = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.retry_provider_open(window, cx);
         });
         let providers = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.open_providers(cx);
         });
+        let title = match (&failure.retry, failure.session_id.is_some()) {
+            (ProviderOpenRetry::Revive, _) => format!("{label} stopped"),
+            (_, true) => format!("Couldn't reopen {label}"),
+            (_, false) => format!("Couldn't start {label}"),
+        };
+        let retry_label = match failure.retry {
+            ProviderOpenRetry::Revive => format!("Retry starting {label}"),
+            _ if failure.session_id.is_some() => format!("Retry reopening {label}"),
+            _ => format!("Retry starting {label}"),
+        };
+        let mut actions = h_flex().gap(px(scale::SP_2)).mt(px(scale::SP_2)).child(
+            div()
+                .id("reopen-failed-retry")
+                .role(gpui::Role::Button)
+                .aria_label(retry_label)
+                .child(button("reopen-retry", "Retry").primary().on_click(retry)),
+        );
+        if let Some(action) = failure.kind.action() {
+            let run = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.run_failure_action(id, action, window, cx);
+            });
+            actions = actions.child(
+                div()
+                    .id("launch-failed-action")
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("{} {label}", action.label()))
+                    .child(button("launch-failed-kind", action.label()).on_click(run)),
+            );
+        }
+        actions = actions.child(
+            div()
+                .id("reopen-failed-providers")
+                .role(gpui::Role::Button)
+                .aria_label("Open Providers settings")
+                .child(button("reopen-providers", "Providers…").on_click(providers)),
+        );
+        let mut body = v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap(px(scale::SP_3))
+            .pb(px(HERO_LIFT))
+            .px(px(scale::SP_7))
+            .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink).child(title))
+            .child(div().ui(scale::FS_13).text_color(p.ink_2).child(match failure.retry {
+                // A lane that died twice: say why it is not coming back on
+                // its own, and what Retry does.
+                ProviderOpenRetry::Revive => {
+                    format!("{label} stopped twice in a row, so Baaz stopped restarting it. Retry picks up where it left off.")
+                }
+                _ => failure.kind.sentence(label),
+            }))
+            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(failure.message.clone()));
+        if !failure.stderr_excerpt.is_empty() {
+            // The child's own last words, verbatim and at most twelve
+            // lines: what a person (or a bug report) needs to tell a
+            // missing login from a crash.
+            body = body.child(
+                div()
+                    .id("launch-failed-stderr")
+                    .role(gpui::Role::Log)
+                    .aria_label(format!("{label}'s last output"))
+                    .w_full()
+                    .max_w(px(640.0))
+                    .mt(px(scale::SP_2))
+                    .px(px(scale::SP_3))
+                    .py(px(scale::SP_2))
+                    .rounded(px(scale::R_SM))
+                    .bg(p.surface_1)
+                    .border_1()
+                    .border_color(p.line)
+                    .mono(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .child(failure.stderr_excerpt.join("\n")),
+            );
+        }
         v_flex()
             .size_full()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(scale::SP_3))
-                    .pb(px(HERO_LIFT))
-                    .px(px(scale::SP_7))
-                    .child(
-                        div()
-                            .text_role(aui_tokens::TextRole::Title)
-                            .text_color(p.ink)
-                            .child(if failure.session_id.is_some() {
-                                format!("Couldn't reopen {label}")
-                            } else {
-                                format!("Couldn't start {label}")
-                            }),
-                    )
-                    .child(
-                        div()
-                            .ui(scale::FS_12)
-                            .text_color(p.ink_3)
-                            .child(failure.error.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(scale::SP_2))
-                            .mt(px(scale::SP_2))
-                            .child(
-                                div()
-                                    .id("reopen-failed-retry")
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Retry reopening {label}"))
-                                    .child(button("reopen-retry", "Retry").primary().on_click(retry)),
-                            )
-                            .child(
-                                div()
-                                    .id("reopen-failed-providers")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Open Providers settings")
-                                    .child(
-                                        button("reopen-providers", "Providers…").on_click(providers),
-                                    ),
-                            ),
-                    ),
-            )
+            .child(body.child(actions))
             .child(
                 div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
                     div()
@@ -5933,6 +6003,28 @@ impl Harness {
                 ),
             )
             .into_any_element()
+    }
+
+    /// The failure view's typed action (docs/71 §3), each the D5 flow of
+    /// the same name: Install and Update open the setup sheet with the
+    /// command typed, Sign in runs the provider's own sign-in.
+    pub(crate) fn run_failure_action(
+        &mut self,
+        id: ProviderId,
+        action: crate::provider_status::FailureAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::provider_status::FailureAction;
+        match action {
+            FailureAction::SignIn => self.banner_sign_in(id, window, cx),
+            FailureAction::Install => {
+                self.connect_provider_action(id, aui::screens::ProviderAction::Install, window, cx)
+            }
+            FailureAction::Update => {
+                self.connect_provider_action(id, aui::screens::ProviderAction::Update, window, cx)
+            }
+        }
     }
 
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

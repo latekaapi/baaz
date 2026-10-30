@@ -939,6 +939,10 @@ fn codex_choices() -> Vec<ApprovalChoice> {
     ]
 }
 
+/// The card kind that closes a turn whose `codex app-server` died under it
+/// ([`CodexFold::abandon_live_turn`]): an error block naming the exit.
+pub const CHILD_EXITED_CARD: &str = "codex-child-exited";
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: turn id → started turn (many
@@ -980,6 +984,10 @@ pub struct CodexFold {
     usage: HashMap<(String, String), TokenCounts>,
     account: AccountSnapshot,
     current_turn: Option<String>,
+    /// The turn `turn/started` opened and no `turn/completed` has closed
+    /// yet: what [`CodexFold::abandon_live_turn`] closes when the child
+    /// dies under it.
+    live_turn: Option<String>,
     /// History turn ids already folded from a `thread/resume` response, so
     /// a second resume folds nothing twice. Live turns never land here —
     /// a resumed turn is completed, and the server never re-emits it.
@@ -1046,6 +1054,34 @@ impl CodexFold {
     /// The latest turn id seen on `turn/started`, if any.
     pub fn current_turn(&self) -> Option<&str> {
         self.current_turn.as_deref()
+    }
+
+    /// The child died (docs/71 §2): settle every approval card it raised as
+    /// refused — nothing will ever answer them — and close the turn it was
+    /// running with a [`CHILD_EXITED_CARD`] naming `reason`, the way an
+    /// interrupted `turn/completed` would. Nothing open folds to nothing.
+    pub fn abandon_live_turn(&mut self, reason: &str) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for item_id in carded {
+            self.resolve_approval(&item_id, ApprovalState::Denied, &mut deltas);
+        }
+        self.elicitation_sites.clear();
+        let Some(turn_id) = self.live_turn.take() else { return deltas };
+        self.ensure_assistant(&turn_id, &mut deltas);
+        self.push_block(
+            &turn_id,
+            Block::Generic { kind: CHILD_EXITED_CARD.into(), status: "error".into(), text: reason.to_owned() },
+            &mut deltas,
+        );
+        let thread_id = self.thread_id.clone().unwrap_or_default();
+        deltas.extend(self.finish_turn(&Notification::TurnCompleted {
+            thread_id,
+            turn_id,
+            status: "interrupted".into(),
+            duration_ms: 0,
+        }));
+        deltas
     }
 
     /// Remember the effective model (from `model/list` or the turn params):
@@ -1629,6 +1665,7 @@ impl CodexFold {
             }
             Notification::TurnStarted { .. } => {
                 self.current_turn = notification.turn_id().map(str::to_owned);
+                self.live_turn = self.current_turn.clone();
                 // Open the assistant turn the moment Codex starts (X1),
                 // not at its first completed item: the view goes running
                 // on this start, so a long-silent turn reads as working,
@@ -2148,6 +2185,9 @@ impl CodexFold {
 
     fn finish_turn(&mut self, notification: &Notification) -> Vec<Delta> {
         let Some(turn_id) = notification.turn_id() else { return Vec::new() };
+        if self.live_turn.as_deref() == Some(turn_id) {
+            self.live_turn = None;
+        }
         let mut deltas = Vec::new();
         // Close the turn's still-open executions first: their cards must
         // stop spinning even on a turn that carried no other content.
@@ -2254,6 +2294,28 @@ pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(Provide
             },
         });
     }
+    // A turn that completed `failed` settles failed, with the turn's own
+    // error words: the row's "Failed" stands on this (docs/71 §6).
+    if let (Frame::Notification(Notification::TurnCompleted { status, turn_id, .. }), Some(session_id)) =
+        (&frame, session_id.clone())
+    {
+        if status == "failed" {
+            let message = serde_json::from_str::<Value>(line).ok().and_then(|value| {
+                value
+                    .pointer("/params/turn/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+            emit(ProviderEvent::TurnSettled {
+                session_id,
+                turn_id: turn_id.clone(),
+                outcome: provider::facts::TurnOutcome::Failed {
+                    message: Some(message.unwrap_or_else(|| "The turn failed.".into())),
+                    signed_out: false,
+                },
+            });
+        }
+    }
     if let (Some(mode), Some(session_id)) = (reported, session_id.or(settings_thread)) {
         if fold.note_permission_mode(mode) {
             emit(ProviderEvent::ApprovalModeChanged { session_id, mode });
@@ -2275,6 +2337,48 @@ fn is_agent_delta(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// docs/71 §2: the child died mid-turn with an approval carded — the
+    /// card settles as refused and the turn closes with the exit named,
+    /// once; with nothing open the abandon folds to nothing.
+    #[test]
+    fn a_dead_child_settles_its_cards_and_closes_its_turn() {
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        let lines = [
+            r#"{"method":"thread/started","params":{"thread":{"id":"th-1","sessionId":"th-1"}}}"#,
+            r#"{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}}"#,
+            r#"{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","turnId":"turn-1","itemId":"exec-1","command":"rm -rf x","reason":"cleanup"}}"#,
+        ];
+        for line in lines {
+            step_line(&mut fold, line, &mut |event| events.push(event));
+        }
+        let deltas = fold.abandon_live_turn("the agent process exited");
+        assert!(deltas.iter().any(|delta| matches!(delta,
+            Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. })), "{deltas:?}");
+        assert!(deltas.iter().any(|delta| matches!(delta,
+            Delta::BlockAdded { block: Block::Generic { kind, .. }, .. } if kind == CHILD_EXITED_CARD)));
+        assert!(matches!(deltas.last(), Some(Delta::TurnFinished { turn_id, .. }) if turn_id == "turn-1"));
+        assert!(fold.abandon_live_turn("again").is_empty(), "nothing open twice");
+    }
+
+    /// docs/71 §6: a `turn/completed` that failed settles `Failed` with the
+    /// turn's own error words, after its finish.
+    #[test]
+    fn a_failed_turn_settles_failed_with_its_words() {
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        for line in [
+            r#"{"method":"thread/started","params":{"thread":{"id":"th-1","sessionId":"th-1"}}}"#,
+            r#"{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"turn-1","items":[],"status":"failed","error":{"message":"stream disconnected"}}}}"#,
+        ] {
+            step_line(&mut fold, line, &mut |event| events.push(event));
+        }
+        assert!(matches!(events.last(), Some(ProviderEvent::TurnSettled {
+            outcome: provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false }, ..
+        }) if message == "stream disconnected"), "{events:?}");
+    }
+
     /// D5 B5: Codex's typed refused credential — `codexErrorInfo:
     /// "unauthorized"` or an HTTP 401 on a connection variant — settles the
     /// turn with the sign-in hint; other errors do not.

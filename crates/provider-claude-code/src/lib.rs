@@ -822,6 +822,16 @@ impl ClaudeCodeAdapter {
         )))
     }
 
+    /// Bring a lost child back (docs/71 §2): `--resume` the session and
+    /// say the connection is restored, so the lane's banner stands down.
+    /// `Ok(false)` when nothing was lost.
+    fn revive(&self, session_id: &str) -> Result<bool, ProviderError> {
+        let Some(launch) = self.revive_launch(session_id) else { return Ok(false) };
+        self.relaunch(&launch)?;
+        let _ = self.tx.send(ProviderEvent::ConnectionRestored);
+        Ok(true)
+    }
+
     /// Fold one raw child stdout line and confirm whatever it settles: the
     /// same [`ControlHub::ingest_line`] the live pump runs per line, so a
     /// scripted frame in tests settles exactly what the live child would.
@@ -883,8 +893,13 @@ impl ClaudeCodeAdapter {
                 RunningChild::spawn(&self.program, launch, &self.hub, &config)
             }
         }
-        .map_err(|error| {
-            ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProviderError::launch_refusal(
+                provider::RefusalHint::NotInstalled,
+                "Claude Code isn't installed",
+                format!("could not spawn claude: {error}"),
+            ),
+            _ => ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") },
         })?;
         *child = Some(running);
         // The guard drops here: `send_initialize` locks the child again to
@@ -1465,11 +1480,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             });
         }
         if !claude_version_supported(&version) {
-            return Err(ProviderError::Rejected {
-                reason: format!(
-                    "claude {version} is below the floor {CLAUDE_VERSION_FLOOR}; refusing"
-                ),
-            });
+            return Err(ProviderError::launch_refusal(
+                provider::RefusalHint::TooOld,
+                "Claude Code needs an update",
+                format!("claude {version} is below the floor {CLAUDE_VERSION_FLOOR}; refusing"),
+            ));
         }
         *self.connected.lock().expect("connected mutex") = true;
         *self.version.lock().expect("version mutex") = Some(version.clone());
@@ -1698,9 +1713,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // lost connection): the session lives on in its transcript,
                 // so this turn resumes it rather than failing against a
                 // dead stdin.
-                if let Some(launch) = self.revive_launch(&session_id) {
-                    self.relaunch(&launch)?;
-                }
+                self.revive(&session_id)?;
                 // A mode pick the old child could not take live (Full
                 // access, or out of a launched Read-only): relaunch into it
                 // before the turn goes out.
@@ -1901,8 +1914,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 };
                 Ok(Ack::TranscriptPage { deltas: deltas[start..end].to_vec(), next_cursor })
             }
-            Command::FollowSession { .. } => {
-                self.require_child()?;
+            // "Retry now" on a lost child: resume it here, without a
+            // turn. A live child needs nothing.
+            Command::FollowSession { session_id, .. } => {
+                if !self.revive(&session_id)? {
+                    self.require_child()?;
+                }
                 Ok(Ack::Accepted)
             }
             Command::UnfollowSession { .. } => Ok(Ack::Accepted),
@@ -1956,6 +1973,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     /// refresh never blocks on a streaming turn.
     fn read_usage(&self) -> Option<provider::UsageReport> {
         self.fold.try_lock().ok()?.account().usage_report()
+    }
+
+    fn stderr_tail(&self) -> Vec<String> {
+        self.hub.stderr.lines()
     }
 
     fn shutdown(&mut self) {

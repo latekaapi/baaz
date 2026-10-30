@@ -71,6 +71,105 @@ the thread. Kill it twice fast: the typed failure view with stderr and Retry. A 
 settles everywhere. The conformance suite runs in `cargo test --workspace` against all three adapters. Gates as
 docs/69 §4.
 
-## 6. As built
+## 6. As built (30 Oct 2026)
 
-(filled in by the build)
+Built on `main` as §2–§4 say, with the deviations listed below.
+
+**Seam (`crates/provider`).** `ProviderAdapter::stderr_tail()` (default empty) and `Provider::stderr_tail()`:
+a peek at the child's last ≤ `STDERR_TAIL_LINES` (12) stderr lines, never the wire. `provider::StderrTail`
+is the one ring both CLI adapters drain every child into (one per adapter, reset per spawn, so a child that
+dies on its first breath still leaves its words). `RefusalHint::{NotInstalled, TooOld}` plus
+`ProviderError::launch_refusal(hint, title, reason)`: the factory's missing binary, a spawn's `ENOENT`, and both
+adapters' version-floor refusals are now typed (they were `Unavailable`/`Rejected` text). `ConnectionLost`'s doc
+states the contract (turn closed and approvals/questions settled before it, nothing pending after it, the
+session kept), and `FollowSession` is "Retry now" on a lost child.
+
+**1 · Reconnect-and-resume.** Every lane now drains past a loss; the registry's `lane_survives_lost_child` is
+gone (it would be `true` for all three). Codex (`provider-codex`): the pump settles the dead child
+(`settle_lost_child`: answerable approvals and questions dropped, `CodexFold::abandon_live_turn` refuses every
+carded approval and closes the live turn with a `codex-child-exited` error card, then `ConnectionLost` naming the
+last stderr line). A shutdown retires the child first, so a hang-up reports nothing. The next `SubmitInput`, or
+`FollowSession`, revives: a fresh app-server, the handshake, `thread/resume` of the held thread (no history
+re-fold — the view holds it), then `ConnectionRestored`. A revive whose spawn fails leaves `revive_owed`, so the
+next try revives again. Claude Code keeps its `--resume`, now also on `FollowSession`, and says
+`ConnectionRestored` after either. The view: no hang-up and no `Closed` on the first loss; the quiet banner
+"<Label> stopped unexpectedly. It will pick up where it left off on your next message." with **Retry now**
+(`BannerAction::RetryNow`, Info kind); `ConnectionRestored` takes it down. A second loss — or a failed revive —
+within `LOST_TWICE_WINDOW` (30 s) with no live turn finished in between emits `SessionEvent::ChildFailed`
+(and `Closed`, which fails a handoff destination as before); the window parks the view with its lane and lands
+the failure view (`fail_lost_lane`), whose Retry (`ProviderOpenRetry::Revive`) brings the same view back and
+sends `FollowSession`. Muse is unchanged: the hub's respawn, the window's banner (`shares_one_child`).
+
+**2 · Approvals settle in the adapter.** Codex as above; Claude Code's `abandon_live_turns` now also clears its
+pending queues when no turn is open. A late decision for a dead child's approval is refused
+`unknown_approval`; `ListPending` lists nothing. The view clears its taps and emits `ProviderApprovalsChanged`,
+so the row, header and badge re-read.
+
+**3 · The typed failure view.** `ProviderOpenError` → `app::LaunchFailure { session_id, provider, kind,
+message, stderr_excerpt, retry }`; `provider_status::FailureKind { NotInstalled, SignedOut, TooOld, Crashed,
+Refused(hint) }` (classified from the refusal's hint, then the latest status, else Crashed), with one sentence
+and an implied `FailureAction { Install, SignIn, Update }` reusing D5 (`connect_provider_action` for
+Install/Update, `banner_sign_in` for Sign in). The open path carries the child's stderr out with the refusal
+(`app::OpenFailed`). Render: title, the kind's sentence (a twice-dead lane says so), the failure, a mono well
+(`Role::Log`, labelled) of ≤ 12 lines, Retry · the kind's action · Providers…, each wrapper with a role and label.
+New `--steps` verbs `launch-failed:<provider>[:<kind>]` and `child-lost`; new uiprobe entries
+`launch-failure`, `launch-failure-signed-out`, `child-lost-banner`, `child-lost-twice` (no baselines yet).
+
+**4 · Failed rows for Claude Code and Codex.** Both adapters settle a failed turn as `TurnSettled { Failed
+{ message } }` after its finish: Claude Code from an error `result` (`frame::result_failure`: `is_error` or an
+`error_*` subtype, its own words), Codex from `turn/completed` status `failed` (its `turn.error.message`). The
+view turns every `TurnSettled` into `SessionEvent::ProviderTurnOutcome`, and a live finish on a provider that
+does not report turn lifecycle (`reports_turn_lifecycle`, Claude Code/Codex) into a success outcome first; the
+app calls `record_turn_outcome` (idempotent, so Muse's hub path recording too is harmless).
+
+**5 · Conformance suite.** `crates/baaz/tests/conformance.rs`, 9 tests over all three adapters on fake children
+(baaz already depends on every adapter, so no new crate and no lock change). Claude Code and Codex spawn
+`crates/baaz/tests/fixtures/conformance/fake_agent.py`, which replays a fixture to whatever the adapter asks and
+can die on cue with stderr; Muse spawns the provider-muse puppet through a real `MuseHub::connect` (so the hub's
+respawn is exercised), with a new `--turn-shape=approval|failed|open|crash`. Scenarios: open + text turn; tool
+call; approval allow/deny asked once, settled exactly once (a second decision refused typed); interrupt (ends the
+turn, or a typed refusal on a non-Native turn control); resume; error turn; child crash mid-turn (turn closed and
+card settled before the loss, nothing pending after, late decision refused, stderr kept, revive and next turn
+runs); a child that cannot start (open fails, stderr kept); absent capability refused typed.
+
+Fixtures: recorded ones are used as they are (`fixtures/claude-code/{basic,read-search,permission,
+permission-deny,stored-history}.jsonl`, `fixtures/codex/{basic,read-search,approval,interrupt,resume}.jsonl`).
+**Hand-written, never on a wire** (the rule was no recording and no turn): `crates/baaz/tests/fixtures/conformance/
+claude-failed-turn.jsonl` (basic with an error `result`), `codex-failed-turn.jsonl` (basic with a `failed`
+`turn/completed`), and the puppet's four turn shapes. The scripted crash is the fake's `#crash-at-request` /
+the puppet's `crash` shape, not a fixture.
+
+**Deviations, and why.**
+1. *Cancelled* is `Denied` on the card: `aui_protocol::ApprovalState` has no cancelled state and agentic-ui was
+   out of scope. Claude Code already settled this way.
+2. No new `ApprovalSettled` event: the adapter's card delta is the settlement, and the view's
+   `ProviderApprovalsChanged` on the loss makes every surface re-read.
+3. Muse's approvals are not cancelled on a loss: they live in its durable session, not in the child, and the hub
+   re-reads them on re-attach. While the child is down its lane answers `ListPending`/`DecideApproval`
+   `Unavailable` (typed), which the suite asserts. The twice-in-30-s rule does not apply to Muse lanes (the
+   window's reconnect owns the shared child).
+4. Claude Code's interrupt has no fixture and gets none (no recording): its adapter refuses it typed (turn control
+   is Unverified, never probed), and the suite asserts that refusal.
+5. Muse runs on the puppet, not an msp replay: the msp transcripts predate 1.2's shapes and the puppet already
+   drives the hub in provider-muse's own tests. The tool-call scenario does not run on Muse (the puppet has no
+   tool shape; muse-adapter's fold tests cover the msp tool shapes). Muse's resume is metadata-only
+   (`pages_history`), so its contract is the ack on the same id and a working turn after it.
+6. A Claude Code child that dies at once does not fail the open (the open returns before the child speaks): it
+   reads as a loss, and a revive that dies again lands the failure view.
+7. A reopened Claude Code / Codex session replays its history as finished turns, which stands a row's "Failed"
+   down (history carries no failure). Muse is unaffected (`reports_turn_lifecycle`).
+8. The library banner's action takes no role, so the lost banner is wrapped in a `Role::Status` group labelled
+   with its message and "Retry now".
+9. Captures write the real store. The first `child-lost-*` probe runs (before they had their own state dir)
+   wrote `provider.json` = codex and a "hello lost probe" history/row entry into
+   `~/Library/Application Support/baaz`; reverted by hand (`provider.json` back to muse — what the 29 Oct
+   baselines show — and the two entries removed). The P6 entries now carry a throwaway `BAAZ_STATE_DIR`; older
+   entries that pick a provider or send (`composer-*`, `lane-*`, `reopen-failed`) still write the real store.
+
+Tests added: `conformance.rs` (9); lane `a_lost_lane_stays_open_and_a_second_loss_hands_over_the_failure`,
+`a_finished_turn_between_losses_restarts_the_count`; app `a_lane_lost_twice_lands_the_failure_view_and_retry_brings_it_back`,
+`a_lane_turn_outcome_moves_the_rows_failed_state`, `a_missing_cli_fails_the_open_typed_not_installed`,
+`a_launch_failure_is_typed_from_its_hint_then_the_status`; codex fold `a_dead_child_settles_its_cards_and_closes_its_turn`,
+`a_failed_turn_settles_failed_with_its_words`; claude frame `an_error_result_reads_as_a_failure_in_its_own_words`;
+provider `stderr_tail` (2). Changed: three lane tests that pinned the old hang-up (`nothing_surfaces_after_…`
+became the stays-open test; two read the new banner).

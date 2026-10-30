@@ -119,7 +119,20 @@ pub trait ProviderAdapter: Send {
     fn read_usage(&self) -> Option<crate::UsageReport> {
         None
     }
+
+    /// The last lines the agent's process wrote to stderr, oldest first, at
+    /// most [`STDERR_TAIL_LINES`]: what a "couldn't start" view quotes when
+    /// the child failed to open or died. A peek at a buffer the adapter
+    /// already drains — never a wire call. The default has no child to
+    /// read, so it is empty.
+    fn stderr_tail(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
+
+/// How many stderr lines [`ProviderAdapter::stderr_tail`] keeps: the
+/// failure view's mono well shows at most this many.
+pub const STDERR_TAIL_LINES: usize = 12;
 
 /// The one way to talk to a provider: an adapter behind the enforced gate.
 ///
@@ -184,6 +197,12 @@ impl Provider {
     /// fold, never the wire, so no capability is needed to ask.
     pub fn read_usage(&self) -> Option<crate::UsageReport> {
         self.inner.read_usage()
+    }
+
+    /// The child's last stderr lines (see [`ProviderAdapter::stderr_tail`]).
+    /// Ungated, like [`Self::read_usage`]: a peek, never the wire.
+    pub fn stderr_tail(&self) -> Vec<String> {
+        self.inner.stderr_tail()
     }
 
     /// Hang up. Idempotent; also runs on drop.

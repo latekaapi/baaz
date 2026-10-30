@@ -276,6 +276,31 @@ fn fail_waiters(shared: &Arc<Mutex<Shared>>, reason: &str) {
     }
 }
 
+/// The child died under the session (docs/71 §2): every approval and
+/// question it raised is settled as cancelled here, in the adapter — the
+/// answerable records go, so a late decision is refused as unknown and
+/// can never reach a new child under a stale request id — and the turn it
+/// was running closes with the exit named, before the lost connection is
+/// reported.
+fn settle_lost_child(
+    shared: &Arc<Mutex<Shared>>,
+    fold: &Arc<Mutex<CodexFold>>,
+    events: &Sender<ProviderEvent>,
+    reason: &str,
+) {
+    if let Ok(mut shared) = shared.lock() {
+        shared.approvals.clear();
+        shared.questions.clear();
+    }
+    let (session_id, deltas) = match fold.lock() {
+        Ok(mut fold) => (fold.session_id().map(str::to_owned), fold.abandon_live_turn(reason)),
+        Err(_) => return,
+    };
+    if !deltas.is_empty() {
+        let _ = events.send(ProviderEvent::Deltas { session_id, deltas });
+    }
+}
+
 /// A request that never got its answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestError {
@@ -1051,7 +1076,22 @@ pub struct RunningChild {
     next_id: Mutex<u64>,
     shared: Arc<Mutex<Shared>>,
     pump: Option<std::thread::JoinHandle<()>>,
+    /// Set by [`Self::shutdown`] before the child is stopped: the pump's
+    /// end of stream that follows is a hang-up, not a loss — it settles
+    /// nothing and reports nothing.
+    retired: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the pump when stdout ended on its own (the child died): the
+    /// adapter revives the session on the next send.
+    lost: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// What the pump says when the child died under the session, with the
+/// child's last stderr line when it left one.
+pub const CHILD_EXITED_REASON: &str = "the agent process exited";
+
+/// How long the pump waits, after stdout closes, for stderr to close too
+/// before it names the exit with whatever tail it has.
+const STDERR_SETTLE: Duration = Duration::from_millis(400);
 
 impl RunningChild {
     /// Spawn `codex app-server` and pump its stdout: responses complete
@@ -1085,6 +1125,20 @@ impl RunningChild {
         fold: Arc<Mutex<CodexFold>>,
         events: Sender<ProviderEvent>,
     ) -> std::io::Result<Self> {
+        Self::spawn_session(program, extra_args, env, fold, events, provider::StderrTail::new())
+    }
+
+    /// [`Self::spawn_with_env`] draining the child's stderr into `stderr`,
+    /// the adapter's one ring: a child that dies on its first breath still
+    /// leaves its words for the failure view (docs/71 §3).
+    pub fn spawn_session(
+        program: &str,
+        extra_args: &[String],
+        env: &[(String, String)],
+        fold: Arc<Mutex<CodexFold>>,
+        events: Sender<ProviderEvent>,
+        stderr: provider::StderrTail,
+    ) -> std::io::Result<Self> {
         // `extra_args` rides after `app-server`: the global `-c`
         // config overrides live there too (`codex app-server -c …`), and
         // they are process-scoped — this child's config only. The child's
@@ -1099,13 +1153,18 @@ impl RunningChild {
             .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         provider::child_env::scrub_command(&mut command);
         for (key, value) in env {
             command.env(key, value);
         }
         let mut child = command.spawn()?;
+        stderr.drain(child.stderr.take().expect("stderr piped"), "provider-codex-stderr", Some("codex"))?;
         let stdout = child.stdout.take().expect("stdout piped");
+        let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump_retired = Arc::clone(&retired);
+        let pump_lost = Arc::clone(&lost);
         let stdin_raw = child.stdin.take().expect("stdin piped");
         let stdin = Arc::new(Mutex::new(stdin_raw));
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -1198,12 +1257,28 @@ impl RunningChild {
                 // alone would sit out the full 120s `recv_timeout` and fail
                 // with a misleading "{method} timed out".
                 fail_waiters(&pump_shared, "the agent process exited before answering");
-                let _ = events.send(ProviderEvent::ConnectionLost {
-                    reason: "the agent process exited".into(),
-                });
+                // A hang-up (shutdown, a revive replacing this child) is
+                // not a loss: nothing to settle, nothing to report.
+                if pump_retired.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let said = stderr.settled(STDERR_SETTLE);
+                let reason = match said.last() {
+                    Some(line) => format!("{CHILD_EXITED_REASON}: {}", line.trim()),
+                    None => CHILD_EXITED_REASON.to_owned(),
+                };
+                settle_lost_child(&pump_shared, &fold, &events, &reason);
+                pump_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = events.send(ProviderEvent::ConnectionLost { reason });
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self { child, stdin, next_id: Mutex::new(1), shared, pump: Some(pump) })
+        Ok(Self { child, stdin, next_id: Mutex::new(1), shared, pump: Some(pump), retired, lost })
+    }
+
+    /// Whether this child's stdout ended on its own: it died, and the
+    /// session revives on the next send.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The JSON-RPC refusal for a server request Baaz cannot serve: an
@@ -1588,6 +1663,8 @@ impl RunningChild {
 
     /// Hang up. Idempotent; also runs on drop.
     pub fn shutdown(&mut self) {
+        // Deliberate: the pump's end of stream that follows is expected.
+        self.retired.store(true, std::sync::atomic::Ordering::SeqCst);
         // Detach, never join: the pump ends when stdout closes, which is
         // when the child exits after stdin closes.
         self.pump.take();

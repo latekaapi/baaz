@@ -172,6 +172,7 @@ impl SessionView {
             Some(BannerAction::RetryTurn(text)) => self.submit(text, cx),
             Some(BannerAction::RetryShell(command)) => self.run_user_shell(command, cx),
             Some(BannerAction::OpenProviders) => cx.emit(SessionEvent::OpenProviders),
+            Some(BannerAction::RetryNow) => self.retry_lost_child(cx),
             None => cx.notify(),
         }
     }

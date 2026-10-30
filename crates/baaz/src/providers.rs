@@ -284,14 +284,6 @@ impl ProviderId {
         matches!(self, ProviderId::Muse)
     }
 
-    /// A lane outlives a lost connection: Claude Code's adapter resumes the
-    /// session (`--resume`) on the next send, and a shared child is
-    /// respawned and re-attached. Any other lane's child is gone for good,
-    /// so its session closes for the window.
-    pub fn lane_survives_lost_child(self) -> bool {
-        matches!(self, ProviderId::ClaudeCode | ProviderId::Muse)
-    }
-
     /// In scripted chrome (`--no-connect` / `--replay`) its new session is
     /// a local view rather than a scripted lane: the capture baselines were
     /// drawn with Muse's local draft, like [`Self::row_mark`]'s.
@@ -632,14 +624,16 @@ pub(crate) fn terminal_socket_path(socket: &Path) -> PathBuf {
 /// binary is missing or the handshake fails — the caller surfaces it with
 /// the provider's name and opens nothing, never a silent muse fallback.
 fn open_provider(id: ProviderId, socket: &Path) -> Result<Provider, ProviderError> {
-    let program = resolve_program(id).ok_or_else(|| ProviderError::Unavailable {
-        reason: match binary_name(id) {
-            Some(binary) => format!(
+    let program = resolve_program(id).ok_or_else(|| match binary_name(id) {
+        Some(binary) => ProviderError::launch_refusal(
+            provider::RefusalHint::NotInstalled,
+            format!("{} isn't installed", id.label()),
+            format!(
                 "{binary} was not found on PATH or in the usual install locations ({} for an override)",
                 env_override(id).unwrap_or("BAAZ_CLAUDE")
             ),
-            None => "muse sessions ride the legacy pump, never a spawned child".into(),
-        },
+        ),
+        None => ProviderError::Unavailable { reason: "muse sessions ride the legacy pump, never a spawned child".into() },
     })?;
     let program = program.to_string_lossy().into_owned();
     // Z5: the inherit-owner-servers opt-ins, read once per session open —

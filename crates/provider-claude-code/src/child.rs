@@ -114,70 +114,17 @@ fn trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("BAAZ_TRACE").is_ok_and(|v| v == "1"))
 }
 
-/// How many of the child's last stderr lines an exit card quotes.
-const STDERR_TAIL_LINES: usize = 6;
+/// How many of the child's last stderr lines an exit card quotes (the
+/// adapter keeps [`provider::STDERR_TAIL_LINES`] for the failure view).
+const EXIT_CARD_LINES: usize = 6;
 
-/// The child's stderr, drained by its own thread into a short tail: the
-/// CLI's own reason when it exits ("No conversation found…", a refused
-/// flag), which the exit card quotes. Draining also keeps a chatty child
-/// from blocking on a full stderr pipe.
-#[derive(Clone, Default)]
-pub(crate) struct StderrTail {
-    lines: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
-    done: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-}
-
-impl StderrTail {
-    /// Drain `stderr` on a fresh thread until it closes.
-    pub(crate) fn spawn(stderr: impl Read + Send + 'static) -> std::io::Result<Self> {
-        let tail = Self::default();
-        let sink = tail.clone();
-        std::thread::Builder::new()
-            .name("provider-claude-code-stderr".into())
-            .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { break };
-                    sink.push(&line);
-                }
-                sink.close();
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(tail)
-    }
-
-    /// Keep one stderr line (blank ones are dropped).
-    pub(crate) fn push(&self, line: &str) {
-        if trace_enabled() {
-            eprintln!("baaz: claude stderr: {line}");
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            return;
-        }
-        let mut lines = self.lines.lock().expect("stderr tail mutex");
-        if lines.len() == STDERR_TAIL_LINES {
-            lines.pop_front();
-        }
-        lines.push_back(line.to_owned());
-    }
-
-    /// The stream closed: nothing more will land.
-    pub(crate) fn close(&self) {
-        let (closed, ready) = &*self.done;
-        *closed.lock().expect("stderr done mutex") = true;
-        ready.notify_all();
-    }
-
-    /// The tail joined into one line, once stderr has closed or `wait` has
-    /// passed (stdout and stderr close in either order); `None` when the
-    /// child said nothing there.
-    pub(crate) fn settled_text(&self, wait: std::time::Duration) -> Option<String> {
-        let (closed, ready) = &*self.done;
-        let guard = closed.lock().expect("stderr done mutex");
-        drop(ready.wait_timeout_while(guard, wait, |closed| !*closed).expect("stderr done mutex"));
-        let lines = self.lines.lock().expect("stderr tail mutex");
-        (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join(" "))
-    }
+/// The exit card's words from a settled stderr tail: the last
+/// [`EXIT_CARD_LINES`] lines joined into one, `None` when the child said
+/// nothing there.
+fn exit_card_text(lines: &[String]) -> Option<String> {
+    let start = lines.len().saturating_sub(EXIT_CARD_LINES);
+    let said: Vec<&str> = lines[start..].iter().map(|line| line.trim()).collect();
+    (!said.is_empty()).then(|| said.join(" "))
 }
 
 /// The end-of-stream reason for a child whose stderr said `stderr`: the
@@ -200,7 +147,7 @@ pub(crate) fn spawn_pump(
     stdout: impl Read + Send + 'static,
     hub: &Arc<ControlHub>,
     epoch: u64,
-    stderr: Option<StderrTail>,
+    stderr: Option<provider::StderrTail>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let pump_hub = Arc::clone(hub);
     std::thread::Builder::new()
@@ -213,7 +160,7 @@ pub(crate) fn spawn_pump(
             // A turn the child never finished ends here, carded, and
             // the lane learns the connection is gone — unless Baaz
             // hung up on purpose (`shutdown` retired the epoch).
-            let said = stderr.and_then(|tail| tail.settled_text(STDERR_SETTLE));
+            let said = stderr.and_then(|tail| exit_card_text(&tail.settled(STDERR_SETTLE)));
             pump_hub.ingest_end_of_stream(epoch, &exit_reason(said.as_deref()));
         })
         .map_err(|error| std::io::Error::other(error.to_string()))
@@ -313,7 +260,11 @@ impl RunningChild {
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = StderrTail::spawn(child.stderr.take().expect("stderr piped"))?;
+        // The adapter's one ring (on the hub): it outlives this child, so
+        // a child that dies on its first breath still leaves its words for
+        // the failure view.
+        hub.stderr.drain(child.stderr.take().expect("stderr piped"), "provider-claude-code-stderr", Some("claude"))?;
+        let stderr = hub.stderr.clone();
         let epoch = hub.begin_child();
         let stdin = StdinWriter::spawn(child.stdin.take().expect("stdin piped"), hub, epoch)?;
         hub.attach_stdin(epoch, stdin.clone());
