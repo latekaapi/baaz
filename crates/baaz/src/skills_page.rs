@@ -42,6 +42,16 @@ use crate::wire::WireCall;
 /// page's own actions instead of the composer's (docs/16-keymap.md).
 pub(crate) const SKILLS_CONTEXT: &str = "HarnessSkills";
 
+/// Where the page's own header starts: below the sheet's title row and the
+/// fade under it, the inset the Settings column takes. The window's top bar
+/// floats over the centre sheet, so a smaller inset drew "Skills · project
+/// · Search · Add skill" dimmed and half under the bar (2026-10-30).
+pub(crate) const SKILLS_HEADER_TOP: f32 = aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW;
+
+/// The header row's own height (the search field and the Add button), so
+/// the Add menu opens just under it.
+const SKILLS_HEADER_ROW_H: f32 = 36.0;
+
 /// The page's filter: All plus one segment per scope section (D56).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SkillsFilter {
@@ -1502,12 +1512,13 @@ impl Harness {
             this.toggle_add_menu(cx);
         });
         let header = h_flex()
+            .debug_selector(|| "skills-header".into())
             .flex_none()
             .w_full()
             .items_center()
             .gap(px(scale::SP_3))
             .px(px(12.0))
-            .pt(px(16.0))
+            .pt(px(SKILLS_HEADER_TOP))
             .child(div().flex_none().ui(19.8).semibold().text_color(p.ink).child("Skills"))
             .child(div().flex_none().ui(14.3).text_color(p.ink_4).child("·"))
             .child(
@@ -1876,7 +1887,7 @@ impl Harness {
                         .aria_label("Dismiss menu")
                         .on_click(dismiss),
                 )
-                .child(div().absolute().top(px(52.0)).right(px(12.0)).child(card)),
+                .child(div().absolute().top(px(SKILLS_HEADER_TOP + SKILLS_HEADER_ROW_H)).right(px(12.0)).child(card)),
         )
         .into_any_element()
     }
