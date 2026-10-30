@@ -6007,21 +6007,10 @@ impl Harness {
                     .child(failure.stderr_excerpt.join("\n")),
             );
         }
-        v_flex()
-            .size_full()
-            .child(body.child(actions))
-            .child(
-                div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
-                    div()
-                        .w_full()
-                        .px(px(scale::SP_7))
-                        .py(px(scale::SP_4))
-                        .ui(scale::FS_12)
-                        .text_color(p.ink_4)
-                        .child(format!("{label} is not available")),
-                ),
-            )
-            .into_any_element()
+        // No composer stand-in under the view: "<Provider> is not available"
+        // was wrong for a missing history or a dead first start, and the
+        // view above already says what happened and what to do.
+        v_flex().size_full().child(body.child(actions)).into_any_element()
     }
 
     /// The failure view's typed action (docs/71 §3), each the D5 flow of
