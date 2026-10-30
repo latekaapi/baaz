@@ -600,7 +600,7 @@ dependencies = [
 [[package]]
 name = "aui"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "anyhow",
  "aui-icons",
@@ -615,7 +615,7 @@ dependencies = [
 [[package]]
 name = "aui-cef"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "aui",
  "aui-webview",
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "aui-icons"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "aui-motion"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "aui-tokens",
  "gpui-kit",
@@ -651,7 +651,7 @@ dependencies = [
 [[package]]
 name = "aui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "anyhow",
  "serde",
@@ -660,7 +660,7 @@ dependencies = [
 [[package]]
 name = "aui-terminal"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "alacritty_terminal",
  "aui",
@@ -678,7 +678,7 @@ dependencies = [
 [[package]]
 name = "aui-tokens"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -691,7 +691,7 @@ dependencies = [
 [[package]]
 name = "aui-webview"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.2#c2ae1a16e673a3d4c661b8d455856e5d6206078e"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.3#52cae12fcc1283d5c1e733e1dc972d4c4602454c"
 dependencies = [
  "aui",
  "aui-icons",
@@ -876,7 +876,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
