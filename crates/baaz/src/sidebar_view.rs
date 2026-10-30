@@ -120,6 +120,10 @@ const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_m
 /// arrives at all (a failed fork, a send that never lands).
 pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 
+/// How far below the list's top an unmeasured reveal target must be before
+/// [`steer_to_row`] jumps to it by index: past about two screens of rows.
+const FAR_REVEAL_ROWS: usize = 48;
+
 /// Steer the sidebar list toward row `ix`; returns whether it jumped.
 ///
 /// `ensure_row_visible` (gpui's `scroll_to_reveal_item`) steers by the
@@ -128,11 +132,14 @@ pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 /// out", so the reveal stalled with the row out of sight (an imported
 /// session near the bottom of a 2,400-row Unfiled, QA 2026-10-30). Such a
 /// target is placed at the top of the viewport by index instead, which
-/// needs no measurement; the next frame measures it.
+/// needs no measurement; the next frame measures it. A target within
+/// [`FAR_REVEAL_ROWS`] of the top keeps the measured steer, which converges
+/// in a few frames and leaves the rows above it (a group's own header) in
+/// view — a jump there would put the row at the very top.
 fn steer_to_row(list: &gpui::ListState, ix: usize) -> bool {
     let top = list.logical_scroll_top();
     let laid_out = list.viewport_bounds().size.height > px(0.0);
-    if laid_out && ix > top.item_ix && list.bounds_for_item(ix).is_none() {
+    if laid_out && ix > top.item_ix + FAR_REVEAL_ROWS && list.bounds_for_item(ix).is_none() {
         list.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
         return true;
     }
@@ -3168,6 +3175,11 @@ mod tests {
         }
         let top = vc.update(|_, cx| baaz.read(cx).sidebar_list_top());
         assert!(settled, "the far row is on screen within a few frames (top {top:?}, target {target})");
+        // A near target keeps the measured steer: no jump that would put
+        // it at the very top and hide the rows above it (its group header).
+        state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+        draw_b3c_list(vc, &g, &state);
+        assert!(!steer_to_row(&state, 6), "a near row is steered to, not jumped to");
         b3c_teardown(&dir, guard, old);
     }
 
