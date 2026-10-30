@@ -109,17 +109,117 @@ fn deterministic() -> bool {
     std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
-/// Write the store, atomically. Best-effort like [`crate::sessions::write`]:
-/// a store that cannot be written loses a row, never a session.
+/// Write the store, atomically, now. Best-effort like
+/// [`crate::sessions::write`]: a store that cannot be written loses a row,
+/// never a session. The window writes through
+/// [`write_ordered`] off the UI thread instead; this is the synchronous
+/// form (the quit flush, a view's own display-text write, tests), and it
+/// takes its place in the same generation line.
 ///
 /// A deterministic capture never writes: its sessions are scripted, and they
 /// must not land in the owner's store.
 pub fn write(store: &ProviderSessionStore) {
+    write_ordered(next_write_generation(), store);
+}
+
+/// Every write's place in line, taken on the UI thread when the store is
+/// snapshotted: a write landing late on a background thread is recognised
+/// as older than one already on disk (the `sessions.json` writer's rule,
+/// docs/51 #10).
+static WRITE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The newest generation on disk; held while writing, so writes are one at
+/// a time.
+static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+/// The next write generation (see [`write_ordered`]).
+pub fn next_write_generation() -> u64 {
+    WRITE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Write `store` unless a newer generation already reached the disk: what
+/// lets the window write off the UI thread, where two quick writes may
+/// finish in either order — the older one is skipped instead of landing
+/// stale records over the newer.
+pub fn write_ordered(generation: u64, store: &ProviderSessionStore) {
     if deterministic() {
+        return;
+    }
+    let Ok(mut written) = WRITTEN.lock() else { return };
+    if generation <= *written {
         return;
     }
     if let Ok(text) = serde_json::to_vec_pretty(store) {
         let _ = crate::store::write_atomic(&path(), &text);
+    }
+    *written = generation;
+}
+
+/// Insert or refresh the record of a session a provider lists itself (a
+/// Muse session), from its newest list row: the first open in Baaz of a
+/// session made elsewhere writes it (docs/70 §3), and every later reopen
+/// refreshes the turn count and title first — the CLI may have added
+/// turns since — so the "no turns, open fresh" rule never drops a real
+/// session. Facts the record already holds and the row does not say are
+/// kept; the turn count never goes down. Returns whether anything changed.
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_listed(
+    store: &mut ProviderSessionStore,
+    provider: &str,
+    session_id: &str,
+    workspace: Option<String>,
+    project: Option<String>,
+    title: Option<String>,
+    first_prompt: Option<String>,
+    turns: u64,
+    created_ms: i64,
+    updated_ms: i64,
+) -> bool {
+    let pick = |value: Option<String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    let (title, first_prompt) = (pick(title), pick(first_prompt).map(|p| crate::sidebar::one_line(&p)));
+    match store.get_mut(session_id) {
+        Some(record) => {
+            let before = record.clone();
+            record.provider = provider.to_owned();
+            if record.workspace.is_none() {
+                record.workspace = workspace;
+            }
+            if record.project.is_none() {
+                record.project = project;
+            }
+            if title.is_some() {
+                record.title = title;
+            }
+            if record.first_prompt.is_none() {
+                record.first_prompt = first_prompt;
+            }
+            if turns > record.turns {
+                record.turns = turns;
+                record.updated_ms = record.updated_ms.max(updated_ms);
+            }
+            *record != before
+        }
+        None => {
+            store.insert(
+                session_id.to_owned(),
+                ProviderSessionRecord {
+                    provider: provider.to_owned(),
+                    session_id: session_id.to_owned(),
+                    workspace,
+                    project,
+                    created_ms,
+                    updated_ms,
+                    turns,
+                    title,
+                    first_prompt,
+                    handoff_to: None,
+                    handoff_from: None,
+                    handoff_from_provider: None,
+                    handoff_title: None,
+                    display_texts: HashMap::new(),
+                },
+            );
+            true
+        }
     }
 }
 
@@ -291,7 +391,7 @@ pub fn clear_handoff(store: &mut ProviderSessionStore, source: &str, dest: &str)
 }
 
 /// The `ResumeSession` command that reopens `record`: a full resume, not a
-/// metadata peek — the adapter replays the transcript's deltas (Claude Code
+/// metadata peek, unless the provider pages its history — the adapter replays the transcript's deltas (Claude Code
 /// replays its `~/.claude` jsonl, Codex its thread), which the lane folds
 /// into the view. The caller mints `request_id` (a UUIDv7 command id, like
 /// every seam command) so this module never reaches past the provider seam
@@ -302,11 +402,16 @@ pub fn resume_command(
     request_id: &str,
     mode: Option<aui_protocol::PermissionMode>,
 ) -> provider::Command {
+    // A provider that pages its history (Muse) re-attaches without it —
+    // the view pages it in after the ack — and starts in the host's
+    // posture unless a mode was picked, like its open.
+    let pages = crate::providers::ProviderId::parse_known(&record.provider)
+        .is_some_and(crate::providers::pages_history);
     provider::Command::ResumeSession {
         request_id: request_id.to_owned(),
         session_id: record.session_id.clone(),
         cursor: None,
-        metadata_only: false,
+        metadata_only: pages,
         mode,
     }
 }

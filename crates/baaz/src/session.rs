@@ -409,9 +409,9 @@ pub enum SessionEvent {
         session_id: String,
     },
     /// A provider lane settled a turn: a `TurnFinished` delta landed. The
-    /// application records the byline, the ledger row and the record bump
-    /// (a Muse lane: the ledger row; its row follows the hub's
-    /// `TurnSettled`).
+    /// application records the byline, the ledger row and the record bump,
+    /// and moves the one row — for every provider, Muse included
+    /// (docs/70).
     /// Replayed history settles here too (a reopen replays finished
     /// turns), and every write below is idempotent, so replays land the
     /// byline without double-counting the ledger.

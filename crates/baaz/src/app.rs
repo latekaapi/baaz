@@ -845,6 +845,10 @@ pub struct Harness {
     /// Override writes snapshotted by `settle_overrides` and not yet on
     /// disk; while any is, the quit flush writes synchronously.
     pub(crate) overrides_writes_in_flight: usize,
+    /// `provider-sessions.json` writes still on the background executor
+    /// ([`Self::persist_provider_sessions`]): the quit flush writes the
+    /// store synchronously while any is out.
+    pub(crate) provider_sessions_writes_in_flight: usize,
     /// The last right-pane snapshot landed, hashed: an identical refresh
     /// skips the redraw.
     pub(crate) right_snapshot_print: Option<u64>,
@@ -1626,6 +1630,7 @@ impl Harness {
             right_save_epoch: 0,
             right_save_pending: false,
             overrides_writes_in_flight: 0,
+            provider_sessions_writes_in_flight: 0,
             right_snapshot_print: None,
             right_watch: None,
             right_refresh_again: false,
@@ -2310,31 +2315,33 @@ impl Harness {
             // A new reading keeps the tier live past its boot-time one: the
             // footer meter and the banner follow through `push_tier`.
             ProviderEvent::UsageChanged { report } => self.apply_usage_changed(&report, cx),
+            // A Muse turn on the shared connection. A session with a view in
+            // this window follows its own lane's `ProviderTurnAccepted` /
+            // `ProviderTurnFinished`, like every provider (docs/70); only a
+            // session with no view here — run from the muse CLI or another
+            // window — moves its one row from this stream. Never a relist.
             ProviderEvent::TurnRunning { session_id, .. } => {
-                // The row reads running now, no `session/list` round trip.
-                self.sync_row_live(&session_id, true, cx);
-                self.muse_turn_started(session_id, cx);
+                if Self::live_view_for(&self.active, &self.session_cache, &session_id, cx).is_none() {
+                    self.sync_row_live(&session_id, true, cx);
+                }
             }
             ProviderEvent::TurnSettled { session_id, outcome, .. } => {
                 // The turn's terminal, recorded into the row and the store: a
                 // failed turn's message is what `Failed` stands on, and a
-                // later success (or a retry's start) stands it down.
+                // later success (or a retry's start) stands it down. Only
+                // this stream carries the outcome, so it records for every
+                // Muse session, viewed or not.
                 let (failed, error) = match outcome {
                     provider::facts::TurnOutcome::Failed { message, .. } => (true, message),
                     _ => (false, None),
                 };
-                self.sync_row_live(&session_id, false, cx);
+                if Self::live_view_for(&self.active, &self.session_cache, &session_id, cx).is_none() {
+                    self.sync_row_live(&session_id, false, cx);
+                }
                 self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
                 // A finished turn is when the index has something new to say
-                // about the session, so the sidebar is refreshed then rather
-                // than on a timer.
+                // about the session; the read is fingerprinted and cheap.
                 self.load_index(cx);
-                self.load_sessions(cx);
-                self.record_last_summary(cx);
-                // The free excerpt just landed; a poor one may earn one
-                // debounced rewrite — idle sessions only, never a running
-                // turn.
-                self.maybe_rewrite_byline(cx);
             }
             // A loaded session's `(status, attention)` flipped: folded into
             // the row for sessions whose view is not open; the open session
@@ -2354,98 +2361,6 @@ impl Harness {
         self.title_from_transcript(cx);
         cx.notify();
     }
-
-    /// A Muse turn started: the session is made real — no draft any more —
-    /// and its row goes visible, titled from the open view's prompt; a
-    /// rowless first send gets its local row; the first send may earn a
-    /// generated title.
-    fn muse_turn_started(&mut self, session_id: String, cx: &mut Context<Self>) {
-            let prompt = self
-                .active
-                .as_ref()
-                .filter(|view| view.read(cx).session_id == session_id)
-                .and_then(|view| view.read(cx).first_prompt_text());
-            // A turn that started is a session made real: it is no draft
-            // any more, whether it already had a row or not.
-            self.drafts.retain(|_, named| named != &session_id);
-            self.unsent.remove(&session_id);
-            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                // muse 1.3.0 lists a zero-turn session in `session/list`
-                // like any other row, so the draft this turn is making real
-                // may already be a wire entry here rather than the `local`
-                // placeholder the `else` arm below still covers — either
-                // shape is invisible (`SessionEntry::is_empty`) until
-                // `first_send_update` runs (see its doc).
-                let handoff_dest =
-                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
-                let title = sidebar::send_title(&session_id, prompt.as_deref(), &self.overrides);
-                if sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest) {
-                    self.invalidate_list();
-                    // The row just went from invisible to visible. A reveal
-                    // armed when this session was opened may already have
-                    // given up on it: `reveal_sidebar_row` disarms on the
-                    // first miss for a *known* session with nowhere to go,
-                    // which this row was — present in `self.sessions`, but
-                    // filtered as empty — until the line above. Re-arm it
-                    // exactly as an outside activation does, so the sidebar
-                    // still steers to the row a first send just created; but
-                    // only for the session this window has open, so a turn
-                    // on some other session never steals its reveal.
-                    if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
-                        self.reveal = Some(session_id.clone());
-                        self.reveal_unknown = None;
-                    }
-                }
-            } else if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
-                // The first send of this window's rowless draft: insert its
-                // local row now, titled from the prompt, newest-dated for
-                // the top of its project group. A turn no open view sent
-                // names nothing this window can title, so it inserts no row.
-                let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
-                let workspace = self.session_workspace(&session_id);
-                // A handoff destination's rowless first turn is the pack, not
-                // the person's words: the row carries the chain title (Y2a).
-                let label = if sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides) {
-                    sidebar::handoff_title_of(&session_id, &self.provider_sessions, &self.overrides)
-                        .map(|t| sidebar::one_line(&t))
-                        .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
-                } else {
-                    prompt
-                        .filter(|prompt| !prompt.is_empty())
-                        .map(|prompt| sidebar::one_line(&prompt))
-                        .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
-                };
-                let row = sidebar::local_started_row(
-                    &session_id,
-                    label,
-                    project,
-                    Some(workspace),
-                    crate::clock::now_local(),
-                );
-                self.sessions.retain(|entry| entry.id != session_id);
-                self.sessions.push(row);
-                self.invalidate_list();
-                // The row did not exist when this session opened, so the
-                // reveal armed then may already have given up on it: re-arm
-                // exactly as the `first_send_update` branch above does, so
-                // the sidebar still steers to the row a first send just
-                // created. This branch only runs for the open session.
-                self.reveal = Some(session_id.clone());
-                self.reveal_unknown = None;
-            }
-            // A first send may earn a generated title: one cheap model call
-            // in a throwaway side session, never blocking this turn. Only
-            // the open view's own turn qualifies — its prompt is the title's
-            // source, and a turn no open view sent names nothing this window
-            // can title.
-            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
-                let prompt = self.active.as_ref().and_then(|view| view.read(cx).first_prompt_text());
-                self.maybe_start_title(&session_id, prompt, cx);
-            }
-            }
-
-
-
 
     /// The reconnect procedure: respawn, `initialize`, then `session/resume`
     /// from the last observed cursor, which serves `history.mode: "none"` and
@@ -3029,6 +2944,11 @@ impl Harness {
     /// the red-dot close and the app-quit hook all land here, so up to
     /// 750 ms of pane state never dies with the process.
     pub(crate) fn flush_right_save(&mut self) {
+        // The provider records' background write rides the same
+        // durability point: a quit with one in flight lands it now.
+        if self.provider_sessions_writes_in_flight > 0 {
+            crate::provider_sessions::write(&self.provider_sessions);
+        }
         if !self.right_save_pending && self.overrides_writes_in_flight == 0 {
             return;
         }
@@ -4809,7 +4729,7 @@ impl Harness {
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse's connection is Muse's business: a Claude Code or Codex
         // session (or no session) never wears its banner (docs/50 P1).
-        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind() == ProviderId::Muse);
+        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind().shares_one_child());
         if !muse_session {
             return None;
         }
@@ -5886,6 +5806,16 @@ impl Harness {
         self.connect(cx);
     }
 
+    /// Start `id`'s shared child when its sessions ride one
+    /// ([`ProviderId::shares_one_child`]); a no-op for a provider that
+    /// spawns a child per session. Every open and reopen calls it before
+    /// asking the factory for a lane, which waits while the child starts.
+    pub(crate) fn ensure_provider_started(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        if id.shares_one_child() {
+            self.ensure_muse_started(cx);
+        }
+    }
+
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         // A disabled provider is never the default for new sessions: fall
         // back to the first enabled one (Muse when none is).
@@ -5896,9 +5826,7 @@ impl Harness {
         };
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
-        if id == ProviderId::Muse {
-            self.ensure_muse_started(cx);
-        }
+        self.ensure_provider_started(id, cx);
         cx.notify();
     }
 
