@@ -247,3 +247,24 @@ the always-rendering bug of #4 would have failed with its culprit's line.
 renders. gpui stops the link only when the window is occluded, which is why earlier runs — the test window behind the
 owner's apps — read 0.0–0.1 % and docs/61 saw one 0.6. A visible idle Baaz costs ~0.7 % CPU at 120 Hz. Fixing it is a
 gpui-pre change (stop the link when no frame is requested); the budget is unchanged and the number is real.
+
+## 10. Speed S4 — the three follow-ups (2026-10-30, on `main`)
+
+Each measured before and after the same way: `baaz --perf-turn` (new, headless on gpui's test platform: no window, no
+child, no model, a throwaway state dir; `scripts/perf-budgets.py` group `turn`), release build, median of runs. "Old"
+is the pre-S4 code built with this measurement harness, on the v0.6.3 library and on agentic-ui `main`.
+
+| What | Cause found | Fix | Before → after | Budget (old vs it) |
+|---|---|---|---|---|
+| A turn's arrival at length (`turn.render_turn_at_300_us` / `_at_3000_us`) | the card-state walk over every block of every turn per refresh (0.79 ms at 3,000), the suffix copy and sent pairing over the whole transcript, the row offset summed over the prefix, the deterministic clock re-walking every turn, and `record_created_files` re-scanning the session (plus a `realpath` per created file) on every settle | per-turn `CardSite`s re-walked from the rebuilt turn only; tail cut and rebuilt in place; `sent::pair_from` resumes from a per-turn cursor; offset summed over the tail; clock as a prefix maximum; created files scanned from the previous settle's turn | 150–183 / **823–841 µs** → 14–21 / **14–16 µs** (flat) | 100 µs; old 830 fails |
+| A finished Muse turn's UI thread at 2,600 rows (`turn.settle_ui_ms`) | measured after S1: no relist any more, but the index re-read cloned 2,600 entries (0.9 ms), its reply rejoined every row (2.3 ms), built every search row (6.3 ms) and invalidated the list, so the next frame rebuilt the visible list and grouping (3.3 ms); every byline/title override write did the rejoin and search build again | `index` is an `Arc`; the read diffs off-thread (`index::changed_ids`) and a few changed rows land through `apply_index_delta`: `rejoin_scoped`, `search_rows_scoped` + `search::upsert_sessions` (chains fall back to the whole build); `set_override` and the turn-finished sync scoped alike; `invalidate_row` patches a row whose time/words/live state moved into the cached list in place, so only the grouping rebuilds | **14.7–15.7 ms** → **1.6 ms** | 5 ms; old 14.7 fails |
+| A long answer streaming (`turn.long_answer_chunk_p99_us` / `_p50_us`, 120 KB in 200-byte chunks, chunks past 60 KB: fold + refresh + `parsed_markdown`) | the whole accumulated markdown re-parsed per chunk | agentic-ui `MarkdownStream` (64df13f), automatic through `parsed_markdown` | p99 **2.31 ms** / p50 1.56 ms (v0.6.3) → p99 **0.43–0.55 ms** / p50 0.08–0.09 ms | p99 1.2 ms, p50 0.4 ms; old 2.31 / 1.56 fail |
+
+The criterion bench agrees: `render_cache/stream_turn_at_3000` 1.03 ms → 106 µs, `_at_300` 196 → 91 µs (the bench
+also times its own turn generation, ~68 µs of each).
+
+Seen and left: the grouping rebuild after a moved row (~1 ms at 2,600 rows, O(rows)); `row_pending` walks the open
+view's turns on every row sync; the windowed `--bench` with a 120 KB answer shows frames growing to ~30 ms at the end
+of the answer — that is gpui laying out and painting the whole growing markdown element every frame (request_layout
+430, paint 247, prepaint 194 of 1,361 samples; `MarkdownStream` 4), not parsing. Virtualising inside one long block is
+the fix and is not done here.

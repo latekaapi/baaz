@@ -96,17 +96,27 @@
         },
         "turn.render_turn_at_300_us": {
           "budget": 100,
-          "measured": 15,
+          "measured": 18,
           "unit": "us"
         },
         "turn.render_turn_at_3000_us": {
           "budget": 100,
-          "measured": 15,
+          "measured": 18,
           "unit": "us"
         },
         "turn.settle_ui_ms": {
           "budget": 5,
-          "measured": 1.6
+          "measured": 2.0
+        },
+        "turn.long_answer_chunk_p99_us": {
+          "budget": 1200,
+          "measured": 560,
+          "unit": "us"
+        },
+        "turn.long_answer_chunk_p50_us": {
+          "budget": 400,
+          "measured": 95,
+          "unit": "us"
         }
       }
     },
@@ -216,6 +226,16 @@
         "turn.settle_ui_ms": {
           "budget": 5,
           "measured": 1.6
+        },
+        "turn.long_answer_chunk_p99_us": {
+          "budget": 1200,
+          "measured": 510,
+          "unit": "us"
+        },
+        "turn.long_answer_chunk_p50_us": {
+          "budget": 400,
+          "measured": 86,
+          "unit": "us"
         }
       }
     }
