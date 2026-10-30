@@ -173,3 +173,9 @@ Tests added: `conformance.rs` (9); lane `a_lost_lane_stays_open_and_a_second_los
 `a_failed_turn_settles_failed_with_its_words`; claude frame `an_error_result_reads_as_a_failure_in_its_own_words`;
 provider `stderr_tail` (2). Changed: three lane tests that pinned the old hang-up (`nothing_surfaces_after_…`
 became the stays-open test; two read the new banner).
+
+**Superseded in the 30 Oct fix round (harness 550939a, aui a93d58d):** a lane lost twice no longer parks the view for
+the full-centre failure view. The session stays with its transcript and its lost banner grows in place (`Banner::body`):
+"<Provider> stopped twice in a row.", the kind's words, the stderr well, Retry and the kind's action. The full-centre
+view is only for a session that never opened. The raw error line shows only when it adds something
+(`provider_status::failure_detail`).
