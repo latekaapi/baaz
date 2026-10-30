@@ -4640,6 +4640,13 @@ impl Harness {
             // A provider lane landed or settled an approval card: the
             // row re-reads the open view's pending words, so it stands
             // on the needs-you state while the approval waits.
+            // The reply is whole and the provider is only saving memories:
+            // the row stops reading `Working`. Titles and bylines still wait
+            // for the turn's own settle.
+            SessionEvent::ReplyComplete { session_id } => {
+                self.sync_row_live(session_id, false, cx);
+                cx.notify();
+            }
             SessionEvent::ProviderApprovalsChanged { session_id } => {
                 self.sync_row_live(session_id, false, cx);
                 cx.notify();

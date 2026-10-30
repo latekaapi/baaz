@@ -14,6 +14,49 @@ impl SessionView {
     // the cost notes — is [`crate::steps`]; these are only the bodies that
     // touch this view's own state, which is why they live here.
 
+    /// `fixture-models`: a fixed three-row catalog shaped like Muse's own
+    /// (owner screenshot 2026-10-30), each row listing reasoning levels so
+    /// it opens a submenu — offline, no catalog request, nothing persisted.
+    pub(crate) fn step_fixture_models(&mut self, cx: &mut Context<Self>) {
+        let levels: Vec<String> = ["minimal", "low", "medium", "high", "xhigh"].map(str::to_owned).to_vec();
+        let row = |id: &str, label: &str, default: bool, active: bool| ModelCatalogEntry {
+            model_id: id.to_owned(),
+            display_label: label.to_owned(),
+            description: Some("A sample catalog row for captures.".to_owned()),
+            is_active: active,
+            is_default: default,
+            provider_id: "meta".to_owned(),
+            context_limit: Some(1_000_000),
+            efforts: levels.clone(),
+            default_reasoning_effort: Some("medium".to_owned()),
+            effort_notes: Vec::new(),
+        };
+        self.models = vec![
+            row("muse-wonder-1.0", "Muse Wonder 1.0", true, false),
+            row("muse-spark-1.3", "Muse Spark 1.3", false, false),
+            row("muse-spark-1.2", "Muse Spark 1.2", false, true),
+        ];
+        self.models_error = None;
+        self.models_fixture = true;
+        cx.notify();
+    }
+
+    /// `submenu`: open the model menu's highlighted row's submenu, as the
+    /// → key does (the menu must be open; a row with no submenu shows
+    /// nothing).
+    pub(crate) fn step_submenu(&mut self, cx: &mut Context<Self>) {
+        if !self.overlays.read(cx).is_open(MenuKind::Model) {
+            crate::steps::record_step_failure("submenu");
+            return;
+        }
+        self.overlays.update(cx, |overlays, _| {
+            if let Some(menu) = overlays.menu.as_mut() {
+                menu.sub_open = true;
+            }
+        });
+        cx.notify();
+    }
+
     /// `meter`: pin the context meter's breakdown open.
     pub(crate) fn step_meter(&mut self, cx: &mut Context<Self>) {
         self.meter_open = true;

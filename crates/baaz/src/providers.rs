@@ -244,8 +244,9 @@ impl ProviderId {
     }
 
     /// A turn can stay open past its whole reply on the provider's own
-    /// bookkeeping (Muse's memory-reminder tail): "Finishing up…", not
-    /// "Working".
+    /// bookkeeping (Muse's memory-reminder tail): the turn reads finished —
+    /// a sendable composer, a quiet "saving memories" note — while it stays
+    /// open until its `turn/completed`.
     pub fn has_reminder_tail(self) -> bool {
         matches!(self, ProviderId::Muse)
     }

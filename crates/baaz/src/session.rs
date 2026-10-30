@@ -114,8 +114,9 @@ fn centred(content: impl IntoElement) -> AnyElement {
 /// block, none of them still streaming, and no tool call still running.
 ///
 /// What [`SessionView::reply_complete_for_running_turn`] reads for the
-/// running turn: a complete reply with the turn still open means Muse is on
-/// the `reminderChild` tail, and the status row says so.
+/// running turn: a complete reply with the turn still open — once a token
+/// reading says the model call that wrote it ended — means Muse is on the
+/// `reminderChild` tail, and the turn reads finished.
 fn reply_complete(turn: &Turn) -> bool {
     let Turn::Assistant { blocks, .. } = turn else { return false };
     let mut saw_text = false;
@@ -432,6 +433,15 @@ pub enum SessionEvent {
     /// instead of `Working`.
     ProviderApprovalsChanged {
         /// The lane session whose cards moved.
+        session_id: String,
+    },
+    /// The running turn's reply is whole and the provider is only doing
+    /// its own bookkeeping now (Muse's memory-reminder tail): the turn
+    /// reads finished. The application re-reads the row, so it stops
+    /// reading `Working` while the turn stays open; titles and bylines
+    /// still wait for the turn's own settle.
+    ReplyComplete {
+        /// The session whose reply completed.
         session_id: String,
     },
     /// A provider lane settled a turn: a `TurnFinished` delta landed. The
@@ -926,6 +936,20 @@ pub struct SessionView {
     /// still pending (X1b). An early stop drains them and hands the newest
     /// text back to the composer.
     pending_optimistic: Vec<PendingOptimistic>,
+    /// The running turn whose last model call ended on a whole reply: a
+    /// token-usage reading landed while its reply stood complete. What
+    /// [`Self::on_reminder_tail`] stands on, so a reply that completes
+    /// while the model is still composing its next tool call never reads
+    /// as finished. Cleared when the turn moves on or ends.
+    reply_done: Option<String>,
+    /// `fixture-models` filled the model menu: no catalog request may
+    /// replace it (captures only).
+    models_fixture: bool,
+    /// Sends made during the reminder tail that the provider queued, by
+    /// request id → their optimistic bubble: the bubble stands for the
+    /// queued words (no queue-strip row) until the turn starts and its
+    /// echo replaces it.
+    tail_queued: HashMap<String, String>,
     /// History is still being paged in behind the live stream.
     loading_history: bool,
     /// A `view/page` chain is in flight. Separate from `loading_history`,
@@ -1361,6 +1385,9 @@ impl SessionView {
             tool_first_seen: HashMap::new(),
             submitting: false,
             pending_optimistic: Vec::new(),
+            reply_done: None,
+            models_fixture: false,
+            tail_queued: HashMap::new(),
             loading_history: false,
             backfill_running: false,
             backfill_stale_retried: false,
@@ -1949,6 +1976,7 @@ impl SessionView {
     /// out of that from the window.
     pub(crate) fn clear_running(&mut self) {
         self.running = None;
+        self.reply_done = None;
         self.ticker = None;
         self.last_tick_secs = None;
     }
@@ -2027,9 +2055,8 @@ impl SessionView {
     /// Whether the running turn's reply has fully arrived while the turn is
     /// still open: after the `agentMessage` completes and `session/tokenUsage`
     /// arrives, Muse runs `reminderChild` items (memory reminders) for 30–70 s
-    /// before `turn/completed`. The status row reads "Finishing up…"
-    /// meanwhile instead of "Working…", so a long quiet tail does not read
-    /// as stuck.
+    /// before `turn/completed`.
+    #[cfg(test)]
     pub fn reply_complete_for_running_turn(&self) -> bool {
         let Some(running) = self.running.as_ref() else { return false };
         self.cached_turns
@@ -2038,13 +2065,66 @@ impl SessionView {
             .is_some_and(|turn| reply_complete(turn))
     }
 
+    /// [`Self::reply_complete_for_running_turn`] off the fold itself, which
+    /// a lane event has just moved and the render cache has not seen yet.
+    fn reply_complete_in_fold(&self) -> bool {
+        let Some(running) = self.running.as_ref() else { return false };
+        self.store
+            .session()
+            .and_then(|session| session.turns.iter().rev().find(|turn| turn.id() == running.turn_id))
+            .is_some_and(reply_complete)
+    }
+
+    /// A lane event moved the fold or the facts: re-read whether the
+    /// running turn's reply is done. `usage_landed` is a fresh token-usage
+    /// reading — a model call just ended — which, over a whole reply, says
+    /// the call ended on the reply rather than on a tool call still being
+    /// composed. Only a provider with a reminder tail tracks it. Emits
+    /// [`SessionEvent::ReplyComplete`] on the edge, so the row re-reads.
+    pub(super) fn note_reply_progress(&mut self, usage_landed: bool, cx: &mut Context<Self>) {
+        if !self.provider_kind().has_reminder_tail() {
+            return;
+        }
+        let complete = self.reply_complete_in_fold();
+        if !complete {
+            self.reply_done = None;
+            return;
+        }
+        if usage_landed && self.reply_done.is_none() {
+            self.reply_done = self.running.as_ref().map(|running| running.turn_id.clone());
+            cx.emit(SessionEvent::ReplyComplete { session_id: self.session_id.clone() });
+            cx.notify();
+        }
+    }
+
     /// Whether the running turn is on Muse's `reminderChild` tail: its reply
-    /// is whole while the turn stays open. Only Muse reports that tail — a
-    /// Codex or Claude Code turn open past its reply is still working on
-    /// something the provider never named, so it never reads "Finishing
-    /// up… memory reminders" (seen on a Codex turn, 2026-10-17).
+    /// is whole, the model call that wrote it has ended, and the turn stays
+    /// open. Only Muse reports that tail — a Codex or Claude Code turn open
+    /// past its reply is still working on something the provider never
+    /// named (seen on a Codex turn, 2026-10-17).
     pub fn on_reminder_tail(&self) -> bool {
-        self.provider_kind().has_reminder_tail() && self.reply_complete_for_running_turn()
+        self.provider_kind().has_reminder_tail()
+            && self.running.as_ref().is_some_and(|running| self.reply_done.as_deref() == Some(running.turn_id.as_str()))
+            && self.reply_complete_in_fold()
+    }
+
+    /// The reminder tail reads as a finished turn (owner 2026-10-30): the
+    /// reply is done and nothing waits on the person. The composer is
+    /// ready, the row stops reading `Working`, the transcript draws the
+    /// turn settled, and a quiet note says the provider is saving
+    /// memories. The turn itself stays open until its `turn/completed`.
+    pub fn saving_memories(&self) -> bool {
+        self.on_reminder_tail()
+            && !self.waiting_on_you().is_some_and(|(approvals, questions)| approvals + questions > 0)
+    }
+
+    /// Whether the session reads as working: busy, and not on a tail that
+    /// reads as finished. What the stop button, the inline progress row,
+    /// the live transcript tail and the sidebar row stand on; the stop
+    /// itself (Escape) and the guards that must not race the provider
+    /// still read [`Self::busy`].
+    pub fn working(&self) -> bool {
+        self.busy() && !self.saving_memories()
     }
 
     /// Whether the composer is empty, which is what Escape branches on — and

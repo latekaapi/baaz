@@ -213,8 +213,12 @@ impl SessionView {
         }
         self.pending_optimistic.push(PendingOptimistic { id: optimistic_id.clone(), text: text.clone() });
         let planning = self.plan;
+        // A send while the reply is done but the turn still open (Muse
+        // saving memories): the provider queues it behind the tail, and its
+        // bubble stands from now on, so nothing looks lost.
+        let tail = self.saving_memories();
         self.provider_send(command, cx, move |this, result, cx| {
-            this.submitted_provider(result, text, planning, optimistic_id, cx);
+            this.submitted_provider(result, text, planning, optimistic_id, tail, cx);
         });
         cx.notify();
     }
@@ -227,10 +231,18 @@ impl SessionView {
         text: String,
         planning: bool,
         optimistic_id: String,
+        tail: bool,
         cx: &mut Context<Self>,
     ) {
         crate::log::send_mark("ack");
         match result {
+            // Queued behind a finished reply's tail: the turn reads done, so
+            // the words read sent — the bubble stays (no queue-strip row)
+            // and the turn's own echo replaces it when it starts.
+            Ok(provider::Ack::TurnAccepted { turn_id, queued: true }) if tail => {
+                self.submitting = false;
+                self.tail_queued.insert(turn_id, optimistic_id);
+            }
             // Queued behind the running turn: the queue strip shows it, not
             // a bubble — its user turn arrives when it starts.
             Ok(provider::Ack::TurnAccepted { queued: true, .. }) => {
@@ -853,6 +865,9 @@ impl SessionView {
     /// quiet apart from that row: it never banners (see
     /// `request_provider_models`).
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
+        if self.models_fixture {
+            return;
+        }
         // A provider whose one catalog is shared across its sessions lists
         // over its own connection, whatever the view holds.
         if self.provider_kind().catalog_flags_session_model() {

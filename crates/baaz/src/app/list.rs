@@ -452,7 +452,7 @@ impl Harness {
         let mut started_running = started;
         if started {
             if let Some(view) = self.active.clone() {
-                if view.read(cx).session_id == session_id && !view.read(cx).busy() {
+                if view.read(cx).session_id == session_id && !view.read(cx).working() {
                     started_running = false;
                 }
             }
@@ -484,7 +484,7 @@ impl Harness {
                 changed = true;
             }
             if !started {
-                let running = view.read(cx).busy();
+                let running = view.read(cx).working();
                 if entry.running != running {
                     entry.running = running;
                     changed = true;
