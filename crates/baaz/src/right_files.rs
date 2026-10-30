@@ -38,6 +38,19 @@ pub(crate) struct FilesUi {
     pub lines_memo: std::cell::RefCell<Option<LinesMemo>>,
     /// The reveal token the code view last banded with.
     pub band_token: u64,
+    /// Whether the code preview soft-wraps: `layout.json`'s `codeWrap`,
+    /// read when the pane state is made and flipped with it.
+    pub code_wrap: CodeWrap,
+}
+
+/// The preview's wrap choice, starting from `layout.json` (ON when unset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CodeWrap(pub bool);
+
+impl Default for CodeWrap {
+    fn default() -> Self {
+        Self(crate::layout::read().code_wrap)
+    }
 }
 
 /// The lines of a text preview, split once per file and kept.
@@ -245,7 +258,7 @@ pub(crate) fn files_screen(
         );
     };
     if let Some(preview) = cache.preview_for(&root) {
-        return preview_screen(cache, &root, &preview, width, window, cx);
+        return preview_screen(cache, &root, &preview, width, focus, window, cx);
     }
     let ui = &cache.files_ui;
     let filter_open = ui.filter.is_some();
@@ -353,7 +366,15 @@ pub(crate) fn files_screen(
 }
 
 /// The preview: a view pushed on Files (docs/43 §2.5).
-fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width: f32, window: &mut Window, cx: &mut Context<Harness>) -> (AnyElement, AnyElement) {
+fn preview_screen(
+    cache: &RightCache,
+    root: &Path,
+    preview: &FilePreview,
+    width: f32,
+    focus: &gpui::FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<Harness>,
+) -> (AnyElement, AnyElement) {
     let p = cx.aui().colors;
     let abs = root.join(&preview.path);
     let folder = preview.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
@@ -381,6 +402,14 @@ fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width:
         }));
     }
     let image = crate::right::is_image_path(&preview.name);
+    let wrap = cache.files_ui.code_wrap.0;
+    if matches!(&preview.content, PreviewContent::Text { .. }) && !gone {
+        row = row.action(
+            pane_action("right-file-wrap", IconName::Wrap, if wrap { "Don't wrap lines (⌥Z)" } else { "Wrap lines (⌥Z)" })
+                .toggled(wrap)
+                .on_click(cx.listener(|this: &mut Harness, _, _, cx| this.toggle_code_wrap(cx))),
+        );
+    }
     let body: AnyElement = match &preview.content {
         PreviewContent::Loading => code_skeleton(&[118.0, 92.0, 152.0, 132.0, 66.0, 112.0, 142.0, 74.0, 126.0, 100.0], cx).into_any_element(),
         _ if gone => state_block("right-file-gone", IconName::File, "This file is gone")
@@ -401,7 +430,7 @@ fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width:
         },
         PreviewContent::Text { language, code } => {
             let lines = preview_lines(&cache.files_ui, preview, code);
-            let mut view = code_view("right-file-code", lines).language(language.clone());
+            let mut view = code_view("right-file-code", lines).language(language.clone()).soft_wrap(wrap).width_hint(width);
             if let Some(band) = preview.highlight.clone() {
                 view = view.band(band, cache.files_ui.band_token);
             }
@@ -420,7 +449,50 @@ fn preview_screen(cache: &RightCache, root: &Path, preview: &FilePreview, width:
                 .into_any_element()
         }
     };
+    // ⌥Z flips wrapping, as in VS Code. The preview takes the Files focus
+    // so the key lands here; every other key goes on as before.
+    let body = div()
+        .id("right-file-body")
+        .size_full()
+        .track_focus(focus)
+        .key_context("RightFiles")
+        // A click into the code takes the keyboard, so ⌥Z works from there.
+        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, window, cx| {
+            window.focus(&this.right_files_focus.clone(), cx);
+        }))
+        .on_key_down(cx.listener(|this: &mut Harness, e: &gpui::KeyDownEvent, _, cx| {
+            if is_wrap_key(&e.keystroke) && this.code_preview_open() {
+                this.toggle_code_wrap(cx);
+                cx.stop_propagation();
+            }
+        }))
+        .child(body)
+        .into_any_element();
     (row.into_any_element(), body)
+}
+
+/// ⌥Z, VS Code's "Toggle Word Wrap".
+pub(crate) fn is_wrap_key(keystroke: &gpui::Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    keystroke.key == "z" && m.alt && !m.platform && !m.control && !m.shift && !m.function
+}
+
+impl Harness {
+    /// Whether the right pane shows a text file's preview now.
+    pub(crate) fn code_preview_open(&self) -> bool {
+        self.right_project()
+            .and_then(|(root, _)| self.right_cache.preview_for(&root))
+            .is_some_and(|preview| matches!(preview.content, PreviewContent::Text { .. }))
+    }
+
+    /// The preview's Wrap button and ⌥Z: soft wrap on or off, for every
+    /// file, kept in `layout.json`.
+    pub(crate) fn toggle_code_wrap(&mut self, cx: &mut Context<Self>) {
+        self.layout.code_wrap = !self.layout.code_wrap;
+        self.right_cache.files_ui.code_wrap = CodeWrap(self.layout.code_wrap);
+        self.persist_layout(cx);
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
