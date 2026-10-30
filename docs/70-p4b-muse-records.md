@@ -137,9 +137,10 @@ Where the code moved a point, the closest faithful option, and why:
 4. **`TurnSettled` keeps two more things than §4 lists:** `record_turn_outcome` (the failed-turn state; only the
    hub stream carries the outcome, so dropping it would lose Muse's "Failed" rows — Claude Code and Codex have the
    same gap, which P6 should close) and `load_index` (which §4 says stays). A viewless row still stands down on
-   the idle `statusChanged`, as before (docs/64 §4 item 4). A turn started **elsewhere** on a session that has a
-   view here no longer flips its row to running (the view hears no `ProviderTurnAccepted` for it) — the same as
-   Codex; rare enough to leave.
+   the idle `statusChanged`, as before (docs/64 §4 item 4). The hub's `TurnRunning` / `TurnSettled` sync the one
+   row's live state for every Muse session, viewed or not (follow-up commit): a turn started **elsewhere** on a
+   session open here raises no admission in this window, and `sync_row_live` already declines a start the open
+   view saw finish.
 5. **"No turns, open fresh" for a listed session** needs its list row to confirm zero turns
    (`record_holds_no_history`): boot `--session <id>` before the list lands writes a record with nothing known,
    and must not drop a real session. A Muse draft the list confirms empty now reopens fresh, like Codex's.
@@ -159,6 +160,13 @@ Where the code moved a point, the closest faithful option, and why:
 11. **Scripted chrome** (`--no-connect` / `--replay`) writes no records (`provider_sessions::read` is empty and
     `write` is a no-op under `BAAZ_DETERMINISTIC=1`, and the trigger runs live only), so captures are unchanged.
 12. **No boot catalog warm-up branch** existed in these files any more; nothing to convert.
+13. **Ghost chain rows (found in the live check of 7ff7f92, fixed in the follow-up):** `merge_provider_rows`
+    synthesised a "New session · now" row for every override id a handoff link names whenever *any* record
+    existed. In a state dir copied without `provider-sessions.json`, the Claude Code / Codex chain members that
+    file anchors all came back as ghosts once a Muse reopen wrote the first record. Before P4-B the same happened
+    as soon as any Claude/Codex record existed; in the owner's real store those members have records, so they
+    never showed. Now only an id whose own override carries `handoff_from` (a Muse destination waiting for the
+    list) stands in for its row.
 
 Tests added: `a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it`,
 `a_held_elsewhere_muse_reopen_lands_read_only_under_the_lease_notice`, `a_stale_history_muse_reopen_pages_in_anyway`,

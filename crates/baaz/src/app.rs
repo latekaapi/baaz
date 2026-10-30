@@ -2315,15 +2315,16 @@ impl Harness {
             // A new reading keeps the tier live past its boot-time one: the
             // footer meter and the banner follow through `push_tier`.
             ProviderEvent::UsageChanged { report } => self.apply_usage_changed(&report, cx),
-            // A Muse turn on the shared connection. A session with a view in
-            // this window follows its own lane's `ProviderTurnAccepted` /
-            // `ProviderTurnFinished`, like every provider (docs/70); only a
-            // session with no view here — run from the muse CLI or another
-            // window — moves its one row from this stream. Never a relist.
+            // A Muse turn on the shared connection. Rows, records and titles
+            // follow the view's own lane (`ProviderTurnAccepted` /
+            // `ProviderTurnFinished`), like every provider (docs/70); this
+            // stream only moves the one row's live state — for a session
+            // with no view here (the muse CLI, another window), and for a
+            // viewed one whose turn started elsewhere, which raises no
+            // admission in this window. `sync_row_live` declines a start
+            // the open view has already seen finish. Never a relist.
             ProviderEvent::TurnRunning { session_id, .. } => {
-                if Self::live_view_for(&self.active, &self.session_cache, &session_id, cx).is_none() {
-                    self.sync_row_live(&session_id, true, cx);
-                }
+                self.sync_row_live(&session_id, true, cx);
             }
             ProviderEvent::TurnSettled { session_id, outcome, .. } => {
                 // The turn's terminal, recorded into the row and the store: a
@@ -2335,9 +2336,7 @@ impl Harness {
                     provider::facts::TurnOutcome::Failed { message, .. } => (true, message),
                     _ => (false, None),
                 };
-                if Self::live_view_for(&self.active, &self.session_cache, &session_id, cx).is_none() {
-                    self.sync_row_live(&session_id, false, cx);
-                }
+                self.sync_row_live(&session_id, false, cx);
                 self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
                 // A finished turn is when the index has something new to say
                 // about the session; the read is fingerprinted and cheap.
