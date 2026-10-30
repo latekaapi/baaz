@@ -558,6 +558,100 @@ ENTRIES.update({
     "signed-out-banner":       _d5("new;signed-out", login="signed-in"),
 })
 
+# P7 import (docs/72, the approved P7Import board): a fixture owner home
+# with a few hand-made Claude Code and Codex session files, and a state dir
+# of its own per entry. `BAAZ_IMPORT_OWNER_HOME` points the scan at the
+# fixture — never the real ~/.claude or ~/.codex — and a capture writes no
+# journal and no records to disk, so both settle shots start from the same
+# state. Offline, no child, no turn. `project:` adopts the fixture's
+# harness and agentic-ui folders so they read as Baaz projects (ticked).
+def _import_fixture():
+    # Not under $TMPDIR: the scan counts a run in a temp dir as scripted, so
+    # the fixture's folders live in the repo's target dir instead (removed
+    # at exit; the path never paints — parents read `~/Projects`).
+    import atexit
+    owner = os.path.join(REPO, "target", f"uiprobe-import-owner-{os.getpid()}")
+    shutil.rmtree(owner, ignore_errors=True)
+    os.makedirs(owner)
+    atexit.register(shutil.rmtree, owner, True)
+
+    def claude(folder, sid, prompt, day, entry="claude-desktop", turns=2):
+        cwd = os.path.join(owner, "Projects", folder)
+        os.makedirs(cwd, exist_ok=True)
+        slug = os.path.join(owner, ".claude", "projects", cwd.replace("/", "-"))
+        os.makedirs(slug, exist_ok=True)
+        lines = []
+        for n in range(turns):
+            ts = f"2026-10-{day:02d}T1{n}:00:00.000Z"
+            text = prompt if n == 0 else f"follow-up {n}"
+            lines.append({"type": "user", "message": {"role": "user", "content": text},
+                          "cwd": cwd, "entrypoint": entry, "sessionId": sid, "timestamp": ts})
+            lines.append({"type": "assistant", "message": {"role": "assistant",
+                          "content": [{"type": "text", "text": f"answer {n}"}]}, "timestamp": ts})
+        with open(os.path.join(slug, sid + ".jsonl"), "w") as f:
+            f.write("".join(json.dumps(l) + "\n" for l in lines))
+        return cwd
+
+    def codex(folder, tid, prompt, day, exec_run):
+        cwd = os.path.join(owner, "Projects", folder)
+        os.makedirs(cwd, exist_ok=True)
+        dated = os.path.join(owner, ".codex", "sessions", "2026", "10", f"{day:02d}")
+        os.makedirs(dated, exist_ok=True)
+        lines = [
+            {"timestamp": f"2026-10-{day:02d}T09:00:00.000Z", "type": "session_meta",
+             "payload": {"id": tid, "cwd": cwd, "originator": "codex_exec" if exec_run else "codex_cli_rs",
+                         "source": "exec" if exec_run else "cli"}},
+            {"timestamp": f"2026-10-{day:02d}T09:00:01.000Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": prompt}},
+        ]
+        with open(os.path.join(dated, f"rollout-2026-10-{day:02d}T09-00-00-{tid}.jsonl"), "w") as f:
+            f.write("".join(json.dumps(l) + "\n" for l in lines))
+
+    harness = claude("harness", "c0000001-0000-4000-8000-000000000001", "Tier V probe for right pane", 21)
+    claude("harness", "c0000001-0000-4000-8000-000000000002", "Sidebar fluid round, FF values", 24)
+    claude("harness", "c0000001-0000-4000-8000-000000000003", "Relay: L3 gate failing on pty", 19)
+    claude("harness", "c0000001-0000-4000-8000-000000000004", "summarise the diff", 25, entry="sdk-cli")
+    aui = claude("agentic-ui", "c0000001-0000-4000-8000-000000000005", "Checkbox tri-state in tokens", 23)
+    codex("agentic-ui", "01a15e17-bdc8-7393-bb12-000000000006", "rename the router", 22, False)
+    claude("cockpit", "c0000001-0000-4000-8000-000000000007", "Ledger double-counts a turn", 20)
+    claude("lakshya-v2", "c0000001-0000-4000-8000-000000000008", "Exam tracker layout", 18)
+    codex("art-src", "01a15e17-bdc8-7393-bb12-000000000009", "make one image", 17, True)
+    codex("art-src", "01a15e17-bdc8-7393-bb12-00000000000a", "make another image", 16, True)
+    # One file that is not a transcript: reported, never dropped.
+    bad = os.path.join(owner, ".claude", "projects", harness.replace("/", "-"))
+    with open(os.path.join(bad, "c0000001-0000-4000-8000-0000000000ff.jsonl"), "w") as f:
+        f.write("not json\n")
+    return owner, harness, aui
+
+
+_IMPORT_OWNER, _IMPORT_HARNESS, _IMPORT_AUI = _import_fixture()
+
+
+def _import_entry(steps):
+    pre = f"project:{_IMPORT_HARNESS};project:{_IMPORT_AUI};settings:providers/claude-code"
+    return {"shot": ["--no-connect", "--login", "signed-in", "--steps", f"{pre};{steps}" if steps else pre],
+            "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": D5_CLAUDE_CONNECTED,
+                    "BAAZ_IMPORT_OWNER_HOME": _IMPORT_OWNER,
+                    "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-import-state-")}}
+
+
+ENTRIES.update({
+    # The offer on the Claude Code card, before any import.
+    "settings-card-import":    _import_entry("wait:300"),
+    # The sheet: folders (projects ticked), the option, the note.
+    "import-sheet":            _import_entry("import-open"),
+    # The run held after 2 of the chosen sessions.
+    "import-progress":         _import_entry("import-open;import-run:2"),
+    # The result: what landed, the unreadable file, the toast's Undo.
+    "import-done":             _import_entry("import-open;import-run;wait:500"),
+    # First run: Claude Code Connected and the fixture home holds sessions
+    # not in Baaz — one line under the connect rows.
+    "connect-import":          {"shot": ["--no-connect", "--login", "connect", "--steps", "wait:300"],
+                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": D5_CLAUDE_CONNECTED,
+                                        "BAAZ_IMPORT_OWNER_HOME": _IMPORT_OWNER,
+                                        "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-import-state-")}},
+})
+
 D5_ENTRIES = [
     "connect-first-run", "connect-checking", "connect-all-missing", "connect-all-signed-out",
     "connect-too-old", "connect-menu", "setup-sheet-install", "setup-sheet-signin",

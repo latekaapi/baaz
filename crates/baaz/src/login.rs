@@ -733,6 +733,10 @@ impl Harness {
                 self.muse_sheet = false;
                 self.connect_statuses = crate::connect::initial_connect_statuses();
                 self.connect_status_stamp = crate::connect::status_stamp();
+                // The sample is a first run: the import offer may stand
+                // under the rows (a capture scans only a fixture home).
+                self.import.first_run = true;
+                self.refresh_import_scan(cx);
                 cx.notify();
             }
         }

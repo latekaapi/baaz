@@ -2535,6 +2535,17 @@ mod tests {
             adapter.home_env_for("some-other-session").is_some(),
             "the pin never leaks across sessions"
         );
+        // Pinned at another owner home (an imported session from a fixture,
+        // docs/72): the child and the history read that home's `.claude`.
+        let fixture = PathBuf::from("/tmp/baaz-import-fixture-owner");
+        crate::home::pin_legacy_resume_at(&id, &fixture);
+        let env = adapter.home_env_for(&id).expect("a fixture home is named");
+        assert!(
+            env.iter().any(|(name, value)| name == "CLAUDE_CONFIG_DIR"
+                && value == "/tmp/baaz-import-fixture-owner/.claude"),
+            "the child resumes from the fixture's config dir: {env:?}"
+        );
+        assert_eq!(adapter.config_dir_for(&id), fixture.join(".claude"), "history reads it too");
         crate::home::clear_legacy_resume(&id);
         assert!(adapter.home_env_for(&id).is_some(), "a cleared pin resumes Baaz-homed");
     }

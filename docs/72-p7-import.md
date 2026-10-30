@@ -88,3 +88,96 @@ ticking, idempotent execute, Undo removes exactly the journal's ids, **an import
 under consent and is never moved**, the migration planner skips it. Surfaces pass Tier V with the new entries.
 Live: a throwaway copy of a few of the owner's session files in a fixture owner home → import → reopen one (history
 paints) → Undo. The owner's real import is the owner's to click.
+
+## 6. As built (30 Oct 2026)
+
+Built on `main` as §1–§3 say; deviations below.
+
+**Engine (`crates/baaz/src/import.rs`, headless).** `scan_dirs(claude_config, codex_home)` walks once per home
+through `history::stored_transcripts` / `rollout::stored_rollouts` and reads, per file, a **head** (line by line,
+≤ 512 KB, stopping once cwd, first prompt and first timestamp are known) and a **tail** (the last 64 KB, for the last
+timestamp); `stat` gives the fallback times. Claude: cwd from the first line carrying one, scripted when
+`entrypoint == "sdk-cli"`, first prompt = first `user` line not `isMeta`, not `isSidechain`, not a tag block
+(`<command-…>`, `<local-command-…>`, `<system-reminder>`), not `Caveat:`, not a tool result. Codex:
+`session_meta.payload.cwd`, scripted when `originator == "codex_exec"` or `source == "exec"` (probed on all 95 of the
+owner's rollouts: every one says both), first prompt = the first `event_msg` `user_message` (the `response_item` copy
+is wrapped in injected context). Any cwd under `/tmp`, `/private/tmp`, `/private/var`, `/var/folders` or `$TMPDIR` is
+scripted too. A file with no parseable line is reported by path (`Scan::unreadable`); a file with lines but no prompt
+is counted as `empty` and never offered. `plan(scan, known, projects, home)` is pure: drops ids the registry holds,
+groups by cwd, resolves each folder to a project by exact canonical root (never a prefix, `Projects::resolve`'s rule),
+sorts **Baaz projects first, then newest activity** (so the ticked folders are never folded into "N more folders"),
+counts per provider (`Tally { offered, scripted, known, folders }`). `execute_batch` reads each chosen file whole once
+to count turns (pre-filtered lines, the same prompt predicates) and builds the record (`origin: "imported"`,
+workspace = cwd, project = the folder's adoption, the scan's created/updated, `turns.max(1)`, first prompt, no title);
+`land` inserts only ids the store lacks (never overwrites a Baaz record). `Journal` (`import-journal.json`): runs
+`{id, atMs, sessions: [{provider, sessionId}]}`; `undo` removes exactly a run's ids, and only while they are still
+imported records, then drops the run. `write_fixture_home` builds the perf/test fixture.
+
+**The trap, closed.** `ProviderSessionRecord.origin` (`#[serde(default)]`, `ORIGIN_IMPORTED`, `is_imported()`).
+`gate_resume` returns `LegacyOwner` for an imported record of that provider before anything else, whatever the
+consent; `plan_migration` skips imported records. The `LegacyOwner` arm now calls `pin_legacy_resume_for(record)`:
+an imported record pins at `import::owner_home()`. Test:
+`session_migration::tests::an_imported_session_resumes_legacy_under_consent_and_never_moves` (consent recorded →
+imported Claude and Codex gate `LegacyOwner`, a Baaz record still gates `LazyMove`, the plan lists only the Baaz
+record, the arm pins and every owner-side file — transcript, companion dir, rollout — is still in place, nothing in
+Baaz's home).
+
+**Pins may name a home (provider crates).** `home::pin_legacy_resume_at(id, owner_home)` and
+`home::legacy_owner_home(id)` in both adapters (the pin set became a map). A pin at the real `HOME` changes nothing; a
+pin at another home (the probe's fixture) makes Claude Code read history from `<home>/.claude` and start the child
+with that `CLAUDE_CONFIG_DIR`, and Codex start its child with `CODEX_HOME=<home>/.codex`. This is what lets a live
+check reopen an imported session from a fixture home without touching the owner's.
+
+**Wiring (`crates/baaz/src/import_ui.rs`).** `Harness.import: ImportUi { cache, scanning, rescan_owed, sheet,
+journal, run, first_run }`. The scan + plan run on the background executor (`refresh_import_scan`); renders read the
+cache only. Refresh triggers: Settings › Providers opens (only when the cache is older than 10 min), the sheet opens
+(always, "Import more…" wants what is left), a run finishes, an Undo; a refresh asked for while one runs is owed and
+runs when it lands. The card's counts are the cached plan **re-read against the live store** (`live_tally`), so a
+session landed mid-run is "in Baaz" at once and the card never waits on a rescan. A run is batches of 25 on the
+background executor; each batch lands as one `land` + journal note + `persist_provider_sessions` (the S1 off-thread
+writer) + `merge_provider_rows`. At the end: `drop_empty`, the journal written, `rebuild_search_index` (the P3 path —
+`provider_search::Homes::for_app` now names `import::owner_home()` as the owner home, so a fixture home is searched
+too), the toast via `push_undo(UndoBatch::Imported(run_id))`, a re-plan. Undo (toast or `import-undo`) runs
+`import::undo`, persists, re-merges, rebuilds search, re-plans. `BAAZ_IMPORT_OWNER_HOME` overrides the owner home;
+under `BAAZ_DETERMINISTIC=1` nothing is scanned without it (`scan_allowed`), and the journal is neither read nor
+written (records already never are), so a capture's two settle shots start alike. A capture stamps its run with the
+newest imported session's time instead of the wall clock ("4 imported 24 Oct" reads the same every day).
+
+**Dry run.** `baaz --import-dry-run`: scan + plan over the owner's homes (or `BAAZ_IMPORT_OWNER_HOME`), one JSON
+object on stdout, reads the registry and `projects.json`, writes nothing (it returns before the state-dir migration and
+the provider status boot).
+
+**Probe.** Entries `settings-card-import`, `import-sheet`, `import-progress` (`import-run:2` holds after two),
+`import-done`, plus `connect-import` (the first-run line), all offline on a fixture owner home under
+`target/uiprobe-import-owner-<pid>` (not under `$TMPDIR`, which the scan counts as scripted; removed at exit) with
+their own state dirs. Verbs `import-open` (scans synchronously so a script never races the background scan),
+`import-toggle:<folder|path|scripted>`, `import-run[:<n>]`, `import-undo`. Perf budget `store.import_scan_ms`
+(2,000-file fixture, 16 KB of tool output in each).
+
+**Deviations from the board, and why.**
+1. *The card line is drawn beside the library card, not inside it.* `aui::screens::provider_card` has no footer slot
+   and agentic-ui was out of scope, so Baaz wraps the card and the line in one frame (the card's surface, radius and
+   edge); the card's own inset edge draws the hairline above the line. It reads as one card.
+2. *The first-run offer is the connect screen's assist line* ("Found N earlier sessions on this Mac. Import…", the
+   link opens the sheet), not the board's boxed line with a secondary button — the library's connect screen has no
+   slot between the rows and the footer either. Codex's sign-in assist owns the line while it runs.
+3. *The sheet's frame is Baaz's own* with the setup sheet's measures (44 header, 16 pad, radius 12, surface 2, the
+   floating shadow, the library scrim): `sheet_frame` always draws a provider mark and the board's sheet has none.
+4. *Checkboxes are the library's (`aui::skills::checkbox`, 16 px, accent fill).* In the dark theme the accent is
+   near-white and the check glyph is white, so a ticked box reads as a filled square with a faint check — the same
+   as the Skills import preview. Fixing the glyph colour is an agentic-ui change.
+5. *Folder order:* projects first, then newest activity (the spec says newest first; the board shows projects first).
+6. *Counts the board did not have:* a session file with no prompt (opened and left — 50 on this Mac) is never
+   offered or counted; Codex's card counts rollouts with a prompt, so it says "83 Codex sessions on this Mac, all
+   scripted runs (codex exec)" here (95 files, 12 empty).
+7. *"N more folders"* folds everything after seven visible rows (eight fit without a fold); its box is tri-state
+   over the folded folders.
+8. *The toast* is the app's toast (bottom right, `5 sessions imported · Undo`, 8 s), not a centred one.
+9. *Result line* names projects and, when some sessions went to folders that are not projects, "and J other
+   folders"; "Show the J" toggles a mono list of the unreadable paths (≤ 12, then "and K more").
+
+**Owner's homes, read-only dry run (release build, 30 Oct):** 1,995 files; Claude Code 1,744 offered in 33 folders,
+118 scripted (sdk-cli or a temp cwd), 0 already in Baaz; Codex 0 offered, 83 scripted, 12 empty; 50 empty in all; 0
+unreadable. Top folders: lakshya-v2 842 (+10 scripted), lakshya-v2/platform/tools/exam 744, harness 66 (project),
+cockpit 18, agentic-ui 10, then dharisanam-revival/storage/enrich/182/* (2–5 each). The defaults (projects ticked)
+import 67 (harness and one of its worktrees). Scan: 1.7 s cold, ~220 ms warm.

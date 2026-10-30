@@ -227,7 +227,7 @@ impl Harness {
 
     /// One toast with one Undo for one undoable batch, and a timer that takes
     /// both away together, so a press after the toast has gone does nothing.
-    pub(super) fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
+    pub(crate) fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
         let toast =
             self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, &detail, "Undo"));
         let undo = batch.clone();
@@ -250,6 +250,7 @@ impl Harness {
         match batch {
             UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
             UndoBatch::Archived(ids) => self.set_overrides(&ids, |meta| meta.archived = false, cx),
+            UndoBatch::Imported(run) => self.undo_import(&run, cx),
         }
     }
 
