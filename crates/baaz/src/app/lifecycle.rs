@@ -10594,6 +10594,60 @@ done
         lane_restore(state);
     }
 
+    /// An imported session whose folder is no Baaz project shows like any
+    /// session from an unadopted folder: a row in Unfiled, tagged with its
+    /// folder (QA 2026-10-30: imported cockpit sessions were nowhere).
+    #[gpui::test]
+    fn an_imported_session_from_an_unadopted_folder_shows_in_unfiled(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("import-unfiled");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let folder = state.2.join("cockpit");
+        std::fs::create_dir_all(&folder).expect("the folder");
+        let folder = folder.to_string_lossy().into_owned();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let mut record = crate::provider_sessions::ProviderSessionRecord {
+                    provider: "claude-code".into(),
+                    session_id: "imp-1".into(),
+                    workspace: Some(folder.clone()),
+                    project: None,
+                    created_ms: 1_790_000_000_000,
+                    updated_ms: 1_790_419_872_640,
+                    turns: 4,
+                    title: None,
+                    first_prompt: Some("Build and run Cockpit".into()),
+                    handoff_to: None,
+                    handoff_from: None,
+                    handoff_from_provider: None,
+                    handoff_title: None,
+                    display_texts: std::collections::HashMap::new(),
+                    origin: Some(crate::provider_sessions::ORIGIN_IMPORTED.into()),
+                };
+                record.project = None;
+                harness.index_loaded = true;
+                harness.sessions_loaded = true;
+                harness.layout.group_by = Some(crate::layout::GroupBy::Project);
+                let added = crate::import::land(&mut harness.provider_sessions, vec![record]);
+                assert_eq!(added, vec!["imp-1".to_owned()]);
+                harness.merge_provider_rows();
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let visible = harness.visible_sessions(cx);
+            assert!(visible.iter().any(|row| row.id == "imp-1"), "the imported row is visible: {:?}",
+                visible.iter().map(|r| (&r.id, r.turns, &r.workspace, &r.project)).collect::<Vec<_>>());
+            let grouping = harness.sidebar_grouping(cx);
+            let crate::sidebar::Grouping::Project(groups) = &*grouping else { panic!("project grouping") };
+            let unfiled = groups.iter().find(|g| g.id.as_ref() == crate::sidebar::OTHER_GROUP).expect("an Unfiled group");
+            assert!(unfiled.sessions.iter().any(|row| row.id.as_ref() == "imp-1"), "the row is in Unfiled");
+        });
+        lane_restore(state);
+    }
+
     /// Opening a session is never activity, whatever its record counted:
     /// a reopen whose replay folds more exchanges than the record holds (an
     /// imported count, a Muse list's `turnCount`, a record synthesised from

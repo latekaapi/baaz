@@ -269,7 +269,8 @@ pub(crate) fn visible_folders<'a>(plan: &'a Plan, choice: &Choice) -> (Vec<&'a i
     (shown[..LISTED_FOLDERS].to_vec(), rest)
 }
 
-/// The result sentence: "122 sessions imported into 4 projects."
+/// The result sentence: "122 sessions imported into 4 projects." (or
+/// "… into 4 projects and Unfiled.").
 pub(crate) fn result_line(run: &ImportRun) -> String {
     let n = run.added.len();
     if n == 0 {
@@ -280,11 +281,14 @@ pub(crate) fn result_line(run: &ImportRun) -> String {
     match (p, f) {
         (0, 0) => format!("{sessions} imported."),
         (p, 0) => format!("{sessions} imported into {}.", plural(p, "project", "projects")),
-        (0, f) => format!("{sessions} imported into {}.", plural(f, "folder", "folders")),
-        (p, f) => format!(
+        // Sessions from a folder that is no project show in the sidebar's
+        // Unfiled group, so the sentence says that rather than a folder
+        // count the sidebar never shows.
+        (0, _) => format!("{sessions} imported into {}.", crate::sidebar::UNFILED_LABEL),
+        (p, _) => format!(
             "{sessions} imported into {} and {}.",
             plural(p, "project", "projects"),
-            plural(f, "other folder", "other folders")
+            crate::sidebar::UNFILED_LABEL
         ),
     }
 }
@@ -1371,8 +1375,14 @@ mod tests {
             finished: true,
         };
         assert_eq!(result_line(&run), "2 sessions imported into 1 project.");
+        // A folder that is no project lands its sessions in the sidebar's
+        // Unfiled group: the sentence names where they are (QA 2026-10-30).
         run.other_folders.insert("/x".into());
-        assert_eq!(result_line(&run), "2 sessions imported into 1 project and 1 other folder.");
+        assert_eq!(result_line(&run), "2 sessions imported into 1 project and Unfiled.");
+        run.other_folders.insert("/y".into());
+        assert_eq!(result_line(&run), "2 sessions imported into 1 project and Unfiled.");
+        run.projects.clear();
+        assert_eq!(result_line(&run), "2 sessions imported into Unfiled.");
         assert_eq!(thousands(1896), "1,896");
         assert_eq!(thousands(122), "122");
         assert_eq!(thousands(1_000_000), "1,000,000");

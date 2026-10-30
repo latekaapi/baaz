@@ -173,8 +173,8 @@ their own state dirs. Verbs `import-open` (scans synchronously so a script never
 7. *"N more folders"* folds everything after seven visible rows (eight fit without a fold); its box is tri-state
    over the folded folders.
 8. *The toast* is the app's toast (bottom right, `5 sessions imported · Undo`, 8 s), not a centred one.
-9. *Result line* names projects and, when some sessions went to folders that are not projects, "and J other
-   folders"; "Show the J" toggles a mono list of the unreadable paths (≤ 12, then "and K more").
+9. *Result line* names projects and, when some sessions went to folders that are not projects, "and Unfiled"
+   (where those rows are in the sidebar; it said "and J other folders" until the 30 Oct QA round); "Show the J" toggles a mono list of the unreadable paths (≤ 12, then "and K more").
 
 **Owner's homes, read-only dry run (release build, 30 Oct):** 1,995 files; Claude Code 1,744 offered in 33 folders,
 118 scripted (sdk-cli or a temp cwd), 0 already in Baaz; Codex 0 offered, 83 scripted, 12 empty; 50 empty in all; 0
