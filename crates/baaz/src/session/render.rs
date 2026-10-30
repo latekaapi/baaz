@@ -7,7 +7,7 @@
 use super::*;
 use std::path::Path;
 use aui::data::button;
-use aui_tokens::ActiveAui;
+use aui_tokens::{ActiveAui, AuiStyled as _};
 use crate::providers::{ApprovalChoice, ExternalApproval};
 
 /// How often a running terminal card's mirror re-reads its tab: 10 Hz is
@@ -1922,6 +1922,20 @@ fn running_tool_word(block: &Block) -> Option<String> {
     }
 }
 
+/// The grown lost banner's words: a bold lead, then what it means for this
+/// kind. A crash says why it stopped coming back and what Retry does; any
+/// other kind says its own sentence (signed out, too old, …).
+fn child_failure_words(kind: crate::provider_status::FailureKind, label: &str) -> (String, String) {
+    let lead = format!("{label} stopped twice in a row.");
+    let tail = match kind {
+        crate::provider_status::FailureKind::Crashed => {
+            "Baaz stopped restarting it. Retry picks up where it left off.".to_owned()
+        }
+        other => other.sentence(label),
+    };
+    (lead, tail)
+}
+
 /// One calm word for a tool family, from the fold's kind. An MCP tool keeps
 /// the server's own tool name, verbatim.
 fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
@@ -1944,6 +1958,11 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// wire that said "not now" — and a plain dismiss otherwise.
     pub(super) fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let message = self.banner.clone()?;
+        if self.banner_action == Some(crate::session::BannerAction::RetryNow) {
+            if let Some(failure) = self.child_failure.clone() {
+                return Some(self.render_child_failure(&failure, cx));
+            }
+        }
         let label = match self.banner_action {
             Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(crate::session::BannerAction::RetryNow) => "Retry now",
@@ -1972,6 +1991,86 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             row.into_any_element()
         };
         Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element())
+    }
+
+    /// The lost banner grown into the typed failure (docs/71 §2–§3): the
+    /// lane's child died twice in a row, so it stops coming back on its
+    /// own. Same frame and place as the quiet banner, under the transcript
+    /// and over the composer — both stay (owner 2026-10-30) — now with
+    /// the kind's sentence, the failure's words when they add anything,
+    /// the child's last stderr lines in a mono well (at most twelve), and
+    /// Retry · the kind's action · Providers…, each with a role and label.
+    fn render_child_failure(&self, failure: &crate::session::ChildFailure, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let label = self.provider_kind().label();
+        let (lead, tail) = Self::child_failure_words(failure.kind, label);
+        let sentence = format!("{lead} {tail}");
+        let retry = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.run_banner_action(cx));
+        let providers = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SessionEvent::OpenProviders));
+        let mut actions = h_flex().gap(px(scale::SP_2)).child(
+            div()
+                .id("child-failed-retry")
+                .role(gpui::Role::Button)
+                .aria_label(format!("Retry starting {label}"))
+                .child(button("child-failed-retry-button", "Retry").size(aui::data::ButtonSize::Xs).primary().on_click(retry)),
+        );
+        if let Some(action) = failure.kind.action() {
+            let run = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(SessionEvent::FailureAction(action));
+            });
+            actions = actions.child(
+                div()
+                    .id("child-failed-action")
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("{} {label}", action.label()))
+                    .child(button("child-failed-kind", action.label()).size(aui::data::ButtonSize::Xs).on_click(run)),
+            );
+        }
+        actions = actions.child(
+            div()
+                .id("child-failed-providers")
+                .role(gpui::Role::Button)
+                .aria_label("Open Providers settings")
+                .child(button("child-failed-providers-button", "Providers…").size(aui::data::ButtonSize::Xs).on_click(providers)),
+        );
+        let mut body = v_flex().w_full().gap(px(scale::SP_2));
+        if let Some(detail) =
+            crate::provider_status::failure_detail(&failure.message, &sentence, &failure.stderr_excerpt)
+        {
+            body = body.child(div().ui(scale::FS_12).text_color(p.ink_3).child(detail));
+        }
+        if !failure.stderr_excerpt.is_empty() {
+            // The child's own last words, verbatim and at most twelve lines.
+            let lines = failure.stderr_excerpt.len().saturating_sub(provider::STDERR_TAIL_LINES);
+            body = body.child(
+                div()
+                    .id("child-failed-stderr")
+                    .role(gpui::Role::Log)
+                    .aria_label(format!("{label}'s last output"))
+                    .w_full()
+                    .px(px(scale::SP_3))
+                    .py(px(scale::SP_2))
+                    .rounded(px(scale::R_SM))
+                    .bg(p.surface_2)
+                    .border_1()
+                    .border_color(p.line)
+                    .mono(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .child(failure.stderr_excerpt[lines..].join("\n")),
+            );
+        }
+        let row = banner(
+            "session-banner-failed",
+            BannerKind::Info,
+            vec![BannerRun::Bold(lead.into()), BannerRun::Text(format!(" {tail}").into())],
+        )
+        .body(body.child(actions));
+        let row = div()
+            .id("session-banner-child-failed")
+            .role(gpui::Role::Status)
+            .aria_label(sentence)
+            .child(row);
+        div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element()
     }
 
     /// The billing guard's banner, directly over the composer

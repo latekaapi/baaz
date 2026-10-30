@@ -3379,40 +3379,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// A lane's child died twice within [`crate::session::LOST_TWICE_WINDOW`]
-    /// without finishing a turn (docs/71 §2): it stops coming back on its
-    /// own, and the window lands on the typed failure view for it — the
-    /// view parks with its transcript and its attached lane, so Retry
-    /// brings it back and revives the child. A lane that is not the open
-    /// one keeps its banner instead.
-    pub(crate) fn fail_lost_lane(
-        &mut self,
-        view: &Entity<SessionView>,
-        message: String,
-        stderr_excerpt: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.active.as_ref().is_some_and(|active| active == view) {
-            return;
-        }
-        let (session_id, provider) = {
-            let view = view.read(cx);
-            (view.session_id.clone(), view.provider_kind())
-        };
-        self.park_active(cx);
-        self.subscriptions.clear();
-        self.pending_id = Some(session_id.clone());
-        self.provider_open_error = Some(LaunchFailure {
-            session_id: Some(session_id),
-            provider,
-            kind: crate::provider_status::FailureKind::Crashed,
-            message,
-            stderr_excerpt,
-            retry: ProviderOpenRetry::Revive,
-        });
-        cx.notify();
-    }
-
     /// Retry on the inline failure state re-runs the failed open. A
     /// success lands through the normal activation path (including the
     /// per-session right-pane restore `activate` performs); a failure
@@ -3423,20 +3389,6 @@ impl Harness {
             ProviderOpenRetry::Reopen(record) => self.reopen_provider(*record, window, cx),
             ProviderOpenRetry::OpenNew { project, workspace } => {
                 self.open_on_provider(failure.provider, project, workspace, window, cx)
-            }
-            ProviderOpenRetry::Revive => {
-                let Some(session_id) = failure.session_id else { return };
-                let Some(at) = self.session_cache.iter().position(|(id, _)| *id == session_id) else {
-                    // The parked lane went (evicted, deleted): nothing to
-                    // revive in place, so the session reopens from its record.
-                    if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
-                        self.reopen_provider(record, window, cx);
-                    }
-                    return;
-                };
-                let (_, view) = self.session_cache.remove(at);
-                self.activate(view.clone(), false, window, cx);
-                view.update(cx, |view, cx| view.retry_lost_child(cx));
             }
         }
     }
@@ -4475,10 +4427,26 @@ impl Harness {
             // A destination that errors out before it acknowledged the pack
             // never sends `HandoffPackFailed`: fail its still-Prepared run
             // here, so the links roll back instead of lingering with it.
-            // The lane's child died twice in a row (docs/71 §2): the
-            // typed failure view takes the centre, and Retry revives it.
+            // The lane's child died twice in a row (docs/71 §2): the view
+            // grows its own lost banner into the typed failure, under its
+            // transcript; the window only notes it.
             SessionEvent::ChildFailed { message, stderr_excerpt } => {
-                self.fail_lost_lane(&view, message.clone(), stderr_excerpt.clone(), cx);
+                let session_id = view.read(cx).session_id.clone();
+                crate::baaz_log!(
+                    "session {session_id}: the agent died twice in a row ({message}; {} stderr lines)",
+                    stderr_excerpt.len()
+                );
+            }
+            // The grown lost banner's typed action: the D5 flow of that
+            // name for this session's provider.
+            SessionEvent::FailureAction(action) => {
+                let provider = view.read(cx).provider_kind();
+                let action = *action;
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.run_failure_action(provider, action, window, cx);
+                    });
+                }));
             }
             // A lane's turn ended: its row's "Failed" follows the outcome,
             // for every provider (docs/71 §6).
@@ -6857,11 +6825,13 @@ mod tests {
         lane_restore(state);
     }
 
-    /// docs/71 §2–§3: a lane whose child dies twice in a row lands the
-    /// typed failure view (kind Crashed, Retry revives) with the view
-    /// parked, not closed; Retry brings the same view back.
+    /// docs/71 §2–§3 (owner 2026-10-30): a lane whose child dies twice in
+    /// a row keeps its session on screen — transcript and composer — and
+    /// grows its lost banner into the typed failure (kind Crashed, the
+    /// stderr well); it never takes the centre or parks. Retry revives the
+    /// child and takes the failure down.
     #[gpui::test]
-    fn a_lane_lost_twice_lands_the_failure_view_and_retry_brings_it_back(cx: &mut gpui::TestAppContext) {
+    fn a_lane_lost_twice_keeps_its_transcript_and_grows_the_banner(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let state = lane_state("lost-twice");
         let vc = cx.add_empty_window();
@@ -6883,32 +6853,27 @@ mod tests {
         vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
-            let harness = baaz.read(cx);
-            assert!(harness.provider_open_error.is_none(), "one loss keeps the session on screen");
-            assert!(harness.active.as_ref() == Some(&view), "the lane stays open");
+            assert!(view.read(cx).child_failure().is_none(), "one loss is the quiet banner only");
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
         vc.run_until_parked();
-        let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let failure = harness.provider_open_error.clone().expect("the second loss lands the failure view");
-            assert_eq!(failure.provider, ProviderId::Codex);
-            assert_eq!(failure.kind, crate::provider_status::FailureKind::Crashed);
-            assert_eq!(failure.session_id.as_deref(), Some(session_id.as_str()));
-            assert!(matches!(failure.retry, ProviderOpenRetry::Revive));
-            assert!(harness.active.is_none(), "the failure view takes the centre");
+            assert!(harness.provider_open_error.is_none(), "no full-centre failure view for a lane that opened");
+            assert!(harness.active.as_ref() == Some(&view), "the session stays open, transcript and composer");
             assert!(
-                harness.session_cache.iter().any(|(id, parked)| *id == session_id && *parked == view),
-                "the view is parked with its lane, not closed"
+                !harness.session_cache.iter().any(|(_, parked)| *parked == view),
+                "the view is not parked"
             );
+            let failure = view.read(cx).child_failure().cloned().expect("the banner grew into the failure");
+            assert_eq!(failure.kind, crate::provider_status::FailureKind::Crashed);
+            assert_eq!(failure.stderr_excerpt.len(), 3, "the step's sample well");
         });
-        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.retry_provider_open(window, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.run_banner_action(cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
-            let harness = baaz.read(cx);
-            assert!(harness.provider_open_error.is_none(), "Retry stands the failure down");
-            assert!(harness.active.as_ref() == Some(&view), "the same view comes back");
+            assert!(view.read(cx).child_failure().is_none(), "Retry revives and stands the failure down");
+            assert!(baaz.read(cx).active.as_ref() == Some(&view), "the same view throughout");
         });
         lane_restore(state);
     }

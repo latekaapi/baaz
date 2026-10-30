@@ -604,16 +604,14 @@ pub(crate) enum ProviderOpenRetry {
     Reopen(Box<crate::provider_sessions::ProviderSessionRecord>),
     /// Start a fresh session on the provider: a failed new-session open.
     OpenNew { project: Option<String>, workspace: String },
-    /// Bring back the lane whose child died twice in a row (docs/71 §2):
-    /// the parked view comes back and its adapter revives the child
-    /// (`FollowSession`), with the transcript it already holds.
-    Revive,
 }
 
-/// A provider that could not start, typed (docs/71 §3): a failed open, or a
-/// child that died twice within [`crate::session::LOST_TWICE_WINDOW`]. The
+/// A provider that could not start, typed (docs/71 §3): a failed open —
+/// a session that never opened, so there is no transcript to keep. The
 /// window lands on the failed session with this inline (Z4) instead of a
-/// modal dialog over another session's transcript. Grew out of the old
+/// modal dialog over another session's transcript. (A lane whose child
+/// died twice keeps its transcript: its own banner grows into the failure,
+/// [`crate::session::ChildFailure`].) Grew out of the old
 /// `ProviderOpenError`: the same inline error, now with its kind, the
 /// child's own stderr and the actions the kind implies.
 #[derive(Clone)]
@@ -5900,8 +5898,10 @@ impl Harness {
     }
 
     /// The inline state for a provider that could not start (Z4, typed in
-    /// docs/71 §3): the title, one sentence from the failure's kind, the
-    /// failure itself, the child's last stderr lines in a mono well, then
+    /// docs/71 §3) of a session that never opened: the title, one sentence
+    /// from the failure's kind, the failure's own words only when they add
+    /// to it ([`crate::provider_status::failure_detail`]), the child's last
+    /// stderr lines in a mono well, then
     /// Retry, the action the kind implies (Install / Sign in / Update, each
     /// the D5 flow of that name) and Providers…, over a disabled composer
     /// naming the provider. This is deliberately not a session view, so no
@@ -5926,16 +5926,15 @@ impl Harness {
         let providers = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.open_providers(cx);
         });
-        let title = match (&failure.retry, failure.session_id.is_some()) {
-            (ProviderOpenRetry::Revive, _) => format!("{label} stopped"),
-            (_, true) => format!("Couldn't reopen {label}"),
-            (_, false) => format!("Couldn't start {label}"),
+        let (title, retry_label) = if failure.session_id.is_some() {
+            (format!("Couldn't reopen {label}"), format!("Retry reopening {label}"))
+        } else {
+            (format!("Couldn't start {label}"), format!("Retry starting {label}"))
         };
-        let retry_label = match failure.retry {
-            ProviderOpenRetry::Revive => format!("Retry starting {label}"),
-            _ if failure.session_id.is_some() => format!("Retry reopening {label}"),
-            _ => format!("Retry starting {label}"),
-        };
+        let sentence = failure.kind.sentence(label);
+        // The raw failure only when it adds to the sentence and the well
+        // (owner 2026-10-30: never the same fact twice).
+        let detail = crate::provider_status::failure_detail(&failure.message, &sentence, &failure.stderr_excerpt);
         let mut actions = h_flex().gap(px(scale::SP_2)).mt(px(scale::SP_2)).child(
             div()
                 .id("reopen-failed-retry")
@@ -5970,15 +5969,8 @@ impl Harness {
             .pb(px(HERO_LIFT))
             .px(px(scale::SP_7))
             .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink).child(title))
-            .child(div().ui(scale::FS_13).text_color(p.ink_2).child(match failure.retry {
-                // A lane that died twice: say why it is not coming back on
-                // its own, and what Retry does.
-                ProviderOpenRetry::Revive => {
-                    format!("{label} stopped twice in a row, so Baaz stopped restarting it. Retry picks up where it left off.")
-                }
-                _ => failure.kind.sentence(label),
-            }))
-            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(failure.message.clone()));
+            .child(div().ui(scale::FS_13).text_color(p.ink_2).child(sentence))
+            .children(detail.map(|detail| div().ui(scale::FS_12).text_color(p.ink_3).child(detail)));
         if !failure.stderr_excerpt.is_empty() {
             // The child's own last words, verbatim and at most twelve
             // lines: what a person (or a bug report) needs to tell a
