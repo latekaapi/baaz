@@ -47,9 +47,9 @@
     "side": {
       "context": null,
       "cumulative": {
-        "outputTokens": 0,
-        "promptTokens": 0,
-        "totalTokens": 0
+        "outputTokens": 8,
+        "promptTokens": 120,
+        "totalTokens": 128
       },
       "goal": null,
       "queued": [],
@@ -58,7 +58,7 @@
       "pending_inputs": {},
       "model": null,
       "approval_mode": "onRequest",
-      "last_cursor": "v:syn:6",
+      "last_cursor": "v:syn:7",
       "command_text": {},
       "restored_prompt": null,
       "model_route_unserved": null,
