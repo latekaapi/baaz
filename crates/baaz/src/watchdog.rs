@@ -26,14 +26,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// How often the UI thread beats.
-pub const BEAT_EVERY: Duration = Duration::from_millis(100);
-/// How often the watchdog looks.
-pub const POLL_EVERY: Duration = Duration::from_millis(100);
-/// A beat older than this is a stall.
-pub const STALL_AFTER: Duration = Duration::from_millis(500);
+/// How often the UI thread beats. Once a second: a 100 ms beat cost a
+/// visible idle Baaz ~0.3 % CPU (`idle.cpu_pct` 0.7–0.8 against its 0.5
+/// budget, 31 Oct), and a freeze a person notices lasts seconds anyway.
+pub const BEAT_EVERY: Duration = Duration::from_millis(1_000);
+/// How often the watchdog looks (its own thread; costs the UI nothing).
+pub const POLL_EVERY: Duration = Duration::from_millis(250);
+/// A beat older than this is a stall: one and a half beats.
+pub const STALL_AFTER: Duration = Duration::from_millis(1_500);
 /// A stall this long gets a `sample` of the whole process.
-pub const SAMPLE_AFTER: Duration = Duration::from_millis(1_000);
+pub const SAMPLE_AFTER: Duration = Duration::from_millis(2_000);
 /// At most one `sample` per this long.
 pub const SAMPLE_COOLDOWN: Duration = Duration::from_secs(300);
 /// Stall stack files kept in `logs/` (oldest removed first).
@@ -268,16 +270,16 @@ mod tests {
     fn a_quiet_ui_thread_begins_a_stall_samples_once_and_ends_on_the_next_beat() {
         let mut d = Detector::default();
         assert!(d.observe(100, 50).is_empty(), "a fresh beat is no stall");
-        assert!(d.observe(500, 50).is_empty(), "450 ms is under the threshold");
-        assert_eq!(d.observe(600, 50), vec![Event::Began { silent_ms: 550 }]);
-        assert!(d.observe(1_000, 50).is_empty(), "a stall is reported once");
+        assert!(d.observe(1_500, 50).is_empty(), "1,450 ms is under the threshold");
+        assert_eq!(d.observe(1_600, 50), vec![Event::Began { silent_ms: 1_550 }]);
+        assert!(d.observe(1_900, 50).is_empty(), "a stall is reported once");
         assert_eq!(d.observe(2_100, 50), vec![Event::Sample { silent_ms: 2_050 }]);
         assert!(d.observe(3_000, 50).is_empty(), "sampled once per stall");
         assert_eq!(d.observe(3_100, 3_050), vec![Event::Ended { silent_ms: 2_950 }]);
         assert!(d.observe(3_200, 3_150).is_empty(), "beating again is quiet");
     }
 
-    /// The thread body on a real clock: beat, go quiet for 700 ms, beat
+    /// The thread body on a real clock: beat, go quiet for 1.7 s, beat
     /// again — the sink sees the stall begin and end, and the line it
     /// would write names the crumb.
     #[test]
@@ -299,15 +301,15 @@ mod tests {
             beat.store(origin.elapsed().as_millis() as u64, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(30));
         }
-        // The simulated stall: no beat for 700 ms.
-        std::thread::sleep(Duration::from_millis(700));
+        // The simulated stall: no beat for 1.7 s (past STALL_AFTER).
+        std::thread::sleep(Duration::from_millis(1_700));
         beat.store(origin.elapsed().as_millis() as u64, Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(80));
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         let seen = events.lock().unwrap().clone();
-        assert!(matches!(seen.first(), Some(Event::Began { silent_ms }) if *silent_ms > 500), "{seen:?}");
-        assert!(matches!(seen.last(), Some(Event::Ended { silent_ms }) if *silent_ms >= 500), "{seen:?}");
+        assert!(matches!(seen.first(), Some(Event::Began { silent_ms }) if *silent_ms > 1_500), "{seen:?}");
+        assert!(matches!(seen.last(), Some(Event::Ended { silent_ms }) if *silent_ms >= 1_500), "{seen:?}");
         let line = stall_line(612, true, Some(598), "settings:render", "first-content");
         assert_eq!(
             line,
