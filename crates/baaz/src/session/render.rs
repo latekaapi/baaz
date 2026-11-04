@@ -12,6 +12,13 @@ use crate::providers::{ApprovalChoice, ExternalApproval};
 
 /// How often a running terminal card's mirror re-reads its tab: 10 Hz is
 /// live to the eye and a twelfth of a 120 Hz display's frames.
+/// How far above the measured band's top edge the jump pill's bottom sits: 8
+/// clear of `stack_h`, the measured height of what stands on it (status,
+/// approvals, banners, the queue). With nothing there, 8 above the band.
+fn jump_pill_lift(stack_h: f32) -> f32 {
+    stack_h.max(0.0) + 8.0
+}
+
 const TERMINAL_MIRROR_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The transcript column as its own cached entity:
@@ -131,7 +138,6 @@ impl SessionView {
             }
         }
         let composer = self.render_composer(cx);
-        let jump = self.render_jump_pill(cx);
         // v3: the composer is a raised card on the transcript's measure,
         // 12 px inside the sheet's bottom (18 from the window, the pills'
         // 18 from the top); no pane-wide band or hairline.
@@ -141,16 +147,18 @@ impl SessionView {
                 .max_w(px(TRANSCRIPT_MEASURE))
                 .mx_auto()
                 .relative()
-                .children(jump)
                 .child(composer),
         ).into_any_element()
     }
 
     /// Jump to latest (docs/41 §2.9): Floating, centred over the measure,
-    /// 8 above the composer, while the reader has scrolled up from the
-    /// tail — unless the needs-you banner is up, which points the same way
-    /// and says why.
-    fn render_jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// 8 above whatever stands on the composer, while the reader has scrolled
+    /// up from the tail — unless the needs-you banner is up, which points the
+    /// same way and says why. Seated on the composer it covered their words
+    /// (owner 2026-11-04). The caller hangs it off the top of the measured
+    /// band, the signed-out banner included; the session's own stack floats
+    /// right above that and reports its height.
+    pub fn render_jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.list_state.is_scrolled_to_end().unwrap_or(true) || self.cached_turns.is_empty() || self.waiting_on_you().is_some() {
             return None;
         }
@@ -165,7 +173,7 @@ impl SessionView {
                 .left_0()
                 .right_0()
                 .bottom(gpui::relative(1.0))
-                .pb(px(8.0))
+                .pb(px(jump_pill_lift(self.stack_h.get())))
                 .flex()
                 .justify_center()
                 .child(aui::transcript::jump_pill("jump-latest", "Jump to latest").on_jump(jump))
@@ -3141,6 +3149,15 @@ impl InlineProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pill clears whatever stands on the composer. Seated on the
+    /// composer alone it covered the plan banner's words (owner 2026-11-04);
+    /// with nothing there it stays where docs/41 §2.9 has it.
+    #[test]
+    fn the_jump_pill_clears_the_stack_over_the_composer() {
+        assert_eq!(jump_pill_lift(0.0), 8.0);
+        assert_eq!(jump_pill_lift(44.0), 52.0);
+    }
 
     /// Speed S4: a streamed refresh — the resumed pairing, the resumed
     /// clock, the row offset and the card sites kept above the rebuilt

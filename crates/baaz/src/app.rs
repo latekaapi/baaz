@@ -5584,6 +5584,7 @@ impl Harness {
                     view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
                 };
                 let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
+                let jump = view.update(cx, |view, cx| view.render_jump_pill(cx));
                 // The composer floats over the transcript (owner 2026-10-15:
                 // "it's not floating on top of the transcript"): the band is
                 // absolute at the sheet's bottom and the list runs under it.
@@ -5626,7 +5627,16 @@ impl Harness {
                             // The signed-out banner rides the composer (D5
                             // B5), inside the measured child so the list
                             // ends above both.
-                            .child(gpui_kit::base::v_flex().w_full().children(provider_banner.take()).child(band)),
+                            .child(
+                                gpui_kit::base::v_flex()
+                                    .w_full()
+                                    .relative()
+                                    .children(provider_banner.take())
+                                    .child(band)
+                                    // Off this column's top, so it clears the
+                                    // signed-out banner as well as the stack.
+                                    .children(jump),
+                            ),
                     )
                     .children(self.render_corner_stack(cx).map(Self::corner_above_band))
                     .into_any_element();
