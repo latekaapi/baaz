@@ -182,6 +182,7 @@ impl Harness {
                 // more than the failure itself.
                 crate::baaz_log!("account/read failed: {error}");
                 crate::baaz_log!("account → loggedOut");
+                this.tier_retry_settled();
                 this.auth = Auth::SignedOut;
                 this.login.reset_to_choose();
                 this.run_login_steps(cx);
@@ -243,6 +244,7 @@ impl Harness {
             }
             None => {
                 crate::baaz_log!("account → loggedOut");
+                self.tier_retry_settled();
                 // The live connection reports no login: forget what it
                 // said and re-probe Muse so the logged line follows.
                 crate::provider_status::note_muse_account(None);
@@ -492,6 +494,7 @@ impl Harness {
                 None => {
                     crate::tier::forget();
                     this.tier = None;
+                    this.tier_retry_settled();
                     this.forget_muse_rows(cx);
                     this.auth = Auth::SignedOut;
                     this.login.reset_to_choose();
