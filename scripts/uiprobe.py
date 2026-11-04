@@ -714,6 +714,25 @@ D5_ENTRIES = [
 ]
 
 
+# "Jump to latest" over the banners above the composer: scrolled up one
+# wheel, the pill sits clear of the banner's words (owner 2026-11-04: it sat
+# on the composer and covered them), and without a banner 8 above the
+# composer. A short fixture on purpose: a list with rows it has not measured
+# (the 300-turn stress) cannot say it left its end, and draws no pill.
+def _jump_entry(*extra, steps="wait:1500;wheel:300;wait:800"):
+    return {"shot": ["--no-connect", "--login", "signed-in",
+                     "--replay", "fixtures/msp/synthetic-markdown.jsonl",
+                     *extra, "--steps", steps],
+            "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-jump-state-")}}
+
+
+ENTRIES.update({
+    "jump-pill":               _jump_entry("--tier", "subscription"),
+    "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),
+    "jump-pill-signed-out":    _jump_entry("--tier", "subscription",
+                                           steps="wait:1500;signed-out;wait:600;wheel:30;wait:300;wheel:30;wait:800"),
+})
+
 # B8 merged Diff review and Git changes into one Changes view: the old
 # `right-diff` and `right-git` entry names stay as aliases of
 # `right-changes` (same steps, same screen), so older invocations keep
