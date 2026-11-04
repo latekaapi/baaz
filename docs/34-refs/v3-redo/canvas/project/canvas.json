@@ -358,6 +358,13 @@
    "w": 1440,
    "h": 4200,
    "title": "D5 · Providers — first run, setup, provider card — PROPOSAL (2026-10-24)"
+  },
+  "P7Import.dc.html": {
+   "x": 0,
+   "y": 34600,
+   "w": 1440,
+   "h": 2900,
+   "title": "P7 · Import — earlier Claude Code and Codex sessions — APPROVED (2026-10-30)"
   }
  },
  "createdOnFiles": {
@@ -559,6 +566,21 @@
    "w": 440,
    "fill": "blue",
    "text": "DECIDED (owner, 2026-10-17): Option A + the strip (board below). B, C and D are kept for the record only. No tab bar in any option: the pane's own row is just its glyph, its name and its actions. A · Toggles in the transcript's title row (Changes · Files · Page, then Terminal, which already works this way): a lit icon is the pane on screen; click another to swap, the lit one to close. One pane at a time; the terminal docks below as today, so 'several selected' means one right pane + the terminal. B · The same toggles, but up to two can be on: the pane splits top / bottom (drag the line); a third replaces the older one. C · Two on = two columns side by side; needs a wide window (here the sidebar had to close). D · No chooser: one pane toggle; the pane shows whatever you last opened from the transcript (a diff chip, a file link, an output, a page) with Back; Files would be ⌘P, Changes the fold row's chip. Recommendation: A — one mechanism the header already uses for the terminal, nothing hidden, no layout to manage; B only if you often want Changes and the Page together."
+  },
+  "t10": {
+   "kind": "title1",
+   "maxW": 1960,
+   "text": "P7 · Import (30 Oct): bring your earlier Claude Code and Codex sessions in",
+   "w": 240,
+   "x": 0,
+   "y": 34360
+  },
+  "n18": {
+   "x": 1520,
+   "y": 34700,
+   "w": 440,
+   "fill": "green",
+   "text": "DECIDED (owner, 30 Oct): board APPROVED as drawn. 1 · In place: records + search words; files stay in ~/.claude / ~/.codex, resuming continues the same session the CLI sees. 2 · Once, with \"Import more…\" on the card (no automatic listing). 3 · Keep Undo in the toast (removes the records, never the files)."
   }
  },
  "order": [
@@ -612,7 +634,8 @@
   "Main.dc.html",
   "D6PageRecent.dc.html",
   "D6OneBar.dc.html",
-  "D5Providers.dc.html"
+  "D5Providers.dc.html",
+  "P7Import.dc.html"
  ],
  "pages": [],
  "title": "Baaz v3"

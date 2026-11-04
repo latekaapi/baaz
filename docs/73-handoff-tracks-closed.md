@@ -59,3 +59,29 @@ seen: hover, real clicks on "Show in sidebar", native web views — those are on
 ## 4. Next milestone (owner's pick)
 
 Browser R1 → R3–R5, or D7/D8 (Skills page, dialogs, app chrome). The tracker's "Next" list has both.
+
+## 5. Addendum, 31 Oct–4 Nov: the owner's test round and close-out (supersedes §0)
+
+Pushed: agentic-ui **v0.6.4**, Baaz pinned to it, the local patch parked again. The next handoff is docs/74.
+
+The owner's test of the finished build found what the gates had not. All fixed:
+
+| Reported | Cause | Fix |
+|---|---|---|
+| Hidden Browse page's link bubbles over Sessions | a hidden page window was only transparent and stayed over its rect | aui `shim.m`: input monitor, bubble ordered out, mouse-leave on hide (2781cc4, 71dd4c2) |
+| Effort submenu cut by the window | submenu hung from its row with no edge check | `aui::overlay::submenu_seat` (87f8bf9) |
+| "Finishing up… memory reminders" holding the composer | everything followed `busy()` | `working()`: the reply reads finished, Send works, a send queues on Muse (d4dda96, 65bc735) |
+| Code preview scrolling sideways | `code_view` never wrapped | soft wrap by default, Wrap button and ⌥Z, `codeWrap` (ac13131, 83b1d20) |
+| App hang | **not reproduced.** Likely `bundle.sh` swapping under a running Baaz, so new Chromium helpers ran under the old engine (`observer_list` failures in `Browser/cef.log`). Unproven: the hang's time is unknown | `bundle.sh` parks at `target/bundle/next`, `--swap` after quit (1aa4884); `logs/baaz.log`, stall watchdog; per-row `realpath` off the UI thread (5ff8de1) |
+| Back under the shade; no "New sessions start in" in Settings; question hidden on answered rows; loud field focus; Skills too wide | | 36a4aaf, 7e24f8e, aui 1c4dd37, 7a4f4ba, 878d111 |
+
+The final live test (driven from the main session, see docs/74 §2) passed all 10 checks and found three more, also
+fixed: a transient plan probe stuck as a false "Muse did not say which plan" banner (2859c50), the Jump pill over the
+banner (e458888), and 434 false background `stall:` lines (3a9a3e3).
+
+Not seen live, only under test clocks: the plan probe's automatic retry and wake path. Not proven: why that probe failed
+(it is logged now).
+
+**Correction:** 5930762's message says idle CPU is "back to 0". It is not a fix: `idle.cpu_pct` reads 0 or about 1 %
+depending on machine state, on either side of that commit (control: 1.05–1.1 on both). This is the display-link wake in
+docs/51 §9, still over the 0.5 budget when the window is visible, and it fails the perf gate on some runs.
