@@ -4338,6 +4338,9 @@ impl Harness {
         }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
+        if view.read(cx).provider_kind().has_billing_tier() {
+            self.tier_probe_on_muse_lane(cx);
+        }
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| {
             view.set_context(titles, self.user_shell);
@@ -6433,6 +6436,187 @@ mod tests {
         vc.update(|window, cx| {
             cx.new(|cx| Harness::new(lane_args(dir), crate::shot::CaptureToken::default(), window, cx))
         })
+    }
+
+    /// A signed-in window over a state dir and an `auth.json` of its own.
+    /// Holds `MUSE_AUTH_PATH` until the guard drops; tests never read the
+    /// person's credential to decide a plan.
+    struct TierWindow {
+        state: Option<(std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf)>,
+        old_auth: Option<std::ffi::OsString>,
+    }
+    impl Drop for TierWindow {
+        fn drop(&mut self) {
+            match self.old_auth.take() {
+                Some(path) => std::env::set_var("MUSE_AUTH_PATH", path),
+                None => std::env::remove_var("MUSE_AUTH_PATH"),
+            }
+            if let Some(state) = self.state.take() {
+                lane_restore(state);
+            }
+        }
+    }
+
+    fn tier_window<'a>(
+        name: &str,
+        auth_json: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (TierWindow, &'a mut gpui::VisualTestContext, gpui::Entity<Harness>) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state(name);
+        let auth = state.2.join("auth.json");
+        std::fs::write(&auth, auth_json).expect("the fixture auth.json");
+        let old_auth = std::env::var_os("MUSE_AUTH_PATH");
+        std::env::set_var("MUSE_AUTH_PATH", &auth);
+        let dir = state.2.clone();
+        let guard = TierWindow { state: Some(state), old_auth };
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &dir);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.auth = Auth::SignedIn(crate::auth::Identity {
+                    lane: provider::AccountLane::AccountLogin,
+                    name: "Ada".into(),
+                    email: "ada@example.com".into(),
+                });
+            });
+        });
+        (guard, vc, baaz)
+    }
+
+    fn high_usage() -> Tier {
+        Tier::Subscription {
+            plan: "Muse Code High Usage".into(),
+            current_pct: Some(2),
+            weekly_pct: Some(2),
+            resets: vec![],
+            usage_unavailable: false,
+        }
+    }
+
+    const SIGNED_IN_AUTH: &str = r#"{"providers":{"meta":{"user_email":"ada@example.com","subs_active":true}}}"#;
+
+    /// The owner's window, 2026-11-04. A subscribed login whose token has
+    /// since refreshed (the remembered mtime no longer matches, so the cache
+    /// answers nothing and a probe runs), and that probe gets no verdict. It
+    /// used to land `Tier::Unavailable` with the banner on every Muse
+    /// session until "Check again". The plan stands, no banner.
+    #[gpui::test]
+    fn a_failed_probe_keeps_a_confirmed_plan_and_raises_no_banner(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) = tier_window("tier-kept", SIGNED_IN_AUTH, cx);
+        crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
+        assert_eq!(crate::tier::cached(), None, "the refreshed token invalidated the cache");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.land_tier_probe(Err("the /upgrade card did not answer in time".into()), false, cx);
+                assert_eq!(harness.tier, Some(high_usage()));
+                assert_eq!(harness.tier_banner(), None, "a transient unknown raises no banner");
+            });
+        });
+        let back: crate::tier::Cached = crate::store::read_json(&crate::tier::cache_path());
+        assert_eq!(back.tier, Some(high_usage()), "and does not overwrite what was known");
+    }
+
+    /// The same failure on a login nothing ever confirmed: the banner.
+    #[gpui::test]
+    fn a_failed_probe_on_a_login_never_confirmed_still_banners(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) = tier_window("tier-unknown", SIGNED_IN_AUTH, cx);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.land_tier_probe(Err("no card".into()), false, cx);
+                let banner = harness.tier_banner().expect("nobody knows this login's plan");
+                assert!(banner.text.starts_with("Muse did not say which plan"), "{}", banner.text);
+                assert!(!banner.blocking);
+            });
+        });
+    }
+
+    /// Pay-as-you-go still warns: as a verdict over a known subscription,
+    /// and through a failed re-verify of it.
+    #[gpui::test]
+    fn pay_as_you_go_still_warns(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) = tier_window("tier-payg", SIGNED_IN_AUTH, cx);
+        crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.land_tier_probe(Ok(Tier::PayAsYouGo), false, cx);
+                assert!(harness.tier_banner().is_some_and(|banner| banner.blocking), "the verdict lands");
+                harness.land_tier_probe(Err("no card".into()), false, cx);
+                assert_eq!(harness.tier, Some(Tier::PayAsYouGo));
+                assert!(harness.tier_banner().is_some_and(|banner| banner.blocking), "a failure does not lift it");
+            });
+        });
+    }
+
+    /// Muse's own flag says the subscription lapsed: the remembered plan is
+    /// no longer known, so a failed probe banners rather than vouching.
+    #[gpui::test]
+    fn a_lapsed_subscription_is_not_kept(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) =
+            tier_window("tier-lapsed", r#"{"providers":{"meta":{"subs_active":false}}}"#, cx);
+        crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.land_tier_probe(Err("no card".into()), false, cx);
+                assert!(harness.tier_banner().is_some());
+            });
+        });
+    }
+
+    /// The re-probe runs by itself on the backoff's clock, then stops: ten
+    /// idle hours run no more. Each failure stays a failure (a test's probe
+    /// never reaches a CLI: `billing::run_probe`).
+    #[gpui::test]
+    fn a_failed_probe_retries_on_the_backoff_and_stops(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) = tier_window("tier-backoff", SIGNED_IN_AUTH, cx);
+        crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
+        let failures = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).tier_retry.failures());
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.land_tier_probe(Err("no card".into()), false, cx)));
+        assert_eq!(failures(vc), 1);
+        let mut seen = Vec::new();
+        for delay in crate::tier::PROBE_RETRY_BACKOFF {
+            vc.executor().advance_clock(delay);
+            vc.run_until_parked();
+            seen.push(failures(vc));
+        }
+        assert_eq!(seen, vec![2, 3, 4]);
+        vc.executor().advance_clock(std::time::Duration::from_secs(10 * 3600));
+        vc.run_until_parked();
+        assert_eq!(failures(vc), 4, "the backoff is spent: no loop");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.tier_retry_timer.is_none());
+            assert_eq!(harness.tier, Some(high_usage()));
+        });
+        // A wake starts it over.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.tier_probe_on_wake(cx)));
+        vc.executor().advance_clock(crate::tier::PROBE_AFTER_WAKE);
+        vc.run_until_parked();
+        assert_eq!(failures(vc), 1, "the wake's own probe, on a fresh backoff");
+        // A verdict ends it, and the pending timer with it.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.land_tier_probe(Ok(high_usage()), false, cx)));
+        vc.executor().advance_clock(std::time::Duration::from_secs(3600));
+        vc.run_until_parked();
+        assert_eq!(failures(vc), 0);
+    }
+
+    /// A Muse lane opening asks again only once the gap has passed.
+    #[gpui::test]
+    fn a_muse_lane_open_reprobes_only_past_the_gap(cx: &mut gpui::TestAppContext) {
+        let (_guard, vc, baaz) = tier_window("tier-occasion", SIGNED_IN_AUTH, cx);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.land_tier_probe(Err("no card".into()), false, cx);
+                harness.tier_probe_on_muse_lane(cx);
+                assert!(!harness.tier_probing, "just failed: walking through sessions drives no TUI");
+                harness.tier_retry = crate::tier::ProbeRetry::default();
+                let long_ago = crate::tier::now_secs() - crate::tier::PROBE_OCCASION_GAP.as_secs();
+                harness.tier_retry.failed(long_ago);
+                harness.tier_probe_on_muse_lane(cx);
+                assert!(harness.tier_probing, "owed and past the gap");
+            });
+        });
+        vc.run_until_parked();
     }
 
     /// Perf P1: the search rows leave out side sessions by every mark —

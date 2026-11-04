@@ -54,8 +54,10 @@
 //!
 //! * **The raw terminal output is never logged.** Only the parsed plan name
 //!   and the two percentages ever leave this module.
-//! * **A failed probe never stops the app.** Every failure is
-//!   [`Tier::Unavailable`], which shows a quiet banner and blocks nothing.
+//! * **A failed probe never stops the app.** A login whose plan kind was
+//!   never confirmed reads as [`Tier::Unavailable`], a quiet banner that
+//!   blocks nothing. A login already confirmed keeps its plan through a
+//!   failure ([`settle_probe`]); either way [`ProbeRetry`] tries again.
 //!
 //! The result is cached in `~/Library/Application Support/baaz/tier.json`
 //! keyed by the modification time of `auth.json`, so a logout and a fresh
@@ -364,6 +366,145 @@ pub struct Cached {
     /// builds wrote, which therefore re-probe once.
     #[serde(default)]
     pub kind_confirmed: bool,
+    /// The last subscription an oracle confirmed for this login. `tier` may
+    /// since have become a numeric-id reading under a refreshed credential,
+    /// which is not confirmed by itself, and a token refresh is no reason to
+    /// forget what plan the login is on. Cleared by a pay-as-you-go verdict
+    /// and by another account's `auth.json`. See [`known_for_login`].
+    #[serde(default)]
+    pub confirmed_plan: Option<Tier>,
+    /// `providers.meta.user_email` from the `auth.json` this was written
+    /// against: what tells a refreshed token from another account, which
+    /// `auth_mtime` cannot.
+    #[serde(default)]
+    pub login_email: Option<String>,
+}
+
+/// What this login is known to be, from the remembered answer, whatever has
+/// happened to `auth.json`'s mtime since: a token refresh moves that and
+/// says nothing about the plan. `None` when nothing was ever confirmed, when
+/// the file belongs to another account, or when muse's own `subs_active`
+/// says a remembered subscription has lapsed.
+///
+/// A remembered pay-as-you-go is known too: an answer that bills must not
+/// fade to "unknown" because a re-verify failed. `last_human_plan` is not
+/// evidence: it survives a pay-as-you-go on purpose.
+pub fn known_for_login(cached: &Cached, email: Option<&str>, subs_active: Option<bool>) -> Option<Tier> {
+    if let (Some(then), Some(now)) = (cached.login_email.as_deref(), email) {
+        if then != now {
+            return None;
+        }
+    }
+    let subscription = match &cached.tier {
+        Some(Tier::PayAsYouGo) => return Some(Tier::PayAsYouGo),
+        Some(tier @ Tier::Subscription { .. }) if cached.kind_confirmed => Some(tier.clone()),
+        _ => cached.confirmed_plan.clone(),
+    };
+    subscription.filter(|_| subs_active != Some(false))
+}
+
+/// [`known_for_login`] for the login on disk now.
+pub fn known_now() -> Option<Tier> {
+    let cached: Cached = crate::store::read_json(&cache_path());
+    let text = std::fs::read_to_string(crate::auth::auth_path()).ok();
+    let (email, subs_active) = match &text {
+        Some(text) => (login_email_in(text), subs_active_in(text)),
+        None => (None, None),
+    };
+    known_for_login(&cached, email.as_deref(), subs_active)
+}
+
+/// `providers.meta.user_email` from `auth.json`'s text. Pure, for tests.
+pub fn login_email_in(auth_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(auth_json).ok()?;
+    value.get("providers")?.get("meta")?.get("user_email")?.as_str().map(str::to_owned)
+}
+
+/// What a finished probe comes to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settled {
+    /// The tier to hold.
+    pub tier: Tier,
+    /// Why the probe did not answer, when it did not: the tier above is then
+    /// what was already known (or [`Tier::Unavailable`]) and another probe is
+    /// owed. Safe to show and to log; it never quotes the terminal.
+    pub unanswered: Option<String>,
+    /// Whether `tier` is new knowledge for the cache. A failure over a known
+    /// answer writes nothing: the file keeps its old `auth_mtime`, so the
+    /// next boot still asks.
+    pub remember: bool,
+}
+
+/// Decide what a probe's answer means, given what this login is `known` to
+/// be. A verdict always wins, a pay-as-you-go over a subscription included.
+/// A probe that got no verdict — no card in time, a card this build cannot
+/// read — says nothing about the login: a known answer stands, and only a
+/// login never confirmed reads as unknown.
+pub fn settle_probe(answer: Result<Tier, String>, known: Option<Tier>) -> Settled {
+    let reason = match answer {
+        Ok(Tier::Unavailable(reason)) | Err(reason) => reason,
+        Ok(tier) => return Settled { tier, unanswered: None, remember: true },
+    };
+    match known {
+        Some(tier) => Settled { tier, unanswered: Some(reason), remember: false },
+        None => Settled { tier: Tier::Unavailable(reason.clone()), unanswered: Some(reason), remember: true },
+    }
+}
+
+/// How long after each failed probe the next one runs. Then none, until an
+/// occasion: the machine waking, or a Muse lane opening. A probe drives a
+/// whole TUI (never a turn), so this stays a handful a day at worst.
+pub const PROBE_RETRY_BACKOFF: [Duration; 3] =
+    [Duration::from_secs(60), Duration::from_secs(300), Duration::from_secs(1800)];
+/// An occasion runs a probe only this long after the last failed one: walking
+/// through Muse sessions is not a reason to drive the TUI again.
+pub const PROBE_OCCASION_GAP: Duration = Duration::from_secs(300);
+/// After a wake: long enough for the network to come back.
+pub const PROBE_AFTER_WAKE: Duration = Duration::from_secs(20);
+
+/// The re-probe owed after a probe that got no verdict: pure bookkeeping, so
+/// the bound is a test and not a promise. The application owns the timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProbeRetry {
+    wanted: bool,
+    /// Failures since the last verdict or wake.
+    failures: usize,
+    last_failure_at: u64,
+}
+
+impl ProbeRetry {
+    /// A probe got no verdict at `now`: the delay before the next, or `None`
+    /// once the backoff is spent.
+    pub fn failed(&mut self, now: u64) -> Option<Duration> {
+        self.wanted = true;
+        self.last_failure_at = now;
+        let delay = PROBE_RETRY_BACKOFF.get(self.failures).copied();
+        self.failures += 1;
+        delay
+    }
+
+    /// A probe got a verdict, or the login went away: nothing is owed.
+    pub fn settled(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The machine woke: whatever failed before says nothing about now, so
+    /// the backoff starts over. Whether a probe is owed at all.
+    pub fn woke(&mut self) -> bool {
+        self.failures = 0;
+        self.wanted
+    }
+
+    /// Whether a Muse lane opening at `now` should run the owed probe.
+    pub fn occasion_due(&self, now: u64) -> bool {
+        self.wanted && now.saturating_sub(self.last_failure_at) >= PROBE_OCCASION_GAP.as_secs()
+    }
+
+    /// Failures since the last verdict or wake.
+    #[cfg(test)]
+    pub fn failures(&self) -> usize {
+        self.failures
+    }
 }
 
 /// Forget the remembered tier and plan name: a deliberate sign-out means
@@ -469,7 +610,9 @@ pub fn now_secs() -> u64 {
 /// reads as `None` sooner ([`payg_answer_stale`]), and a remembered
 /// `usage_unavailable` older than about five minutes does too
 /// ([`unavailable_answer_stale`]); a remembered subscription with numbers
-/// keeps today's behaviour.
+/// keeps today's behaviour. A remembered "unknown" is never served: it is
+/// the absence of an answer, and a boot that took it at its word would hold
+/// the banner with no probe owed.
 pub fn cached() -> Option<Tier> {
     cached_at(now_secs())
 }
@@ -478,6 +621,9 @@ pub fn cached() -> Option<Tier> {
 pub fn cached_at(now: u64) -> Option<Tier> {
     let cached: Cached = crate::store::read_json(&cache_path());
     if cached.auth_mtime != auth_mtime() {
+        return None;
+    }
+    if matches!(cached.tier, Some(Tier::Unavailable(_))) {
         return None;
     }
     if matches!(cached.tier, Some(Tier::PayAsYouGo)) && payg_answer_stale(cached.probed_at_secs, now) {
@@ -548,14 +694,36 @@ fn remember_with(tier: &Tier, mtime: Option<u64>, now: u64, kind_confirmed: bool
         _ => None,
     };
     let last_human_plan = own.clone().or(prev_known);
+    let login_email = std::fs::read_to_string(crate::auth::auth_path()).ok().and_then(|text| login_email_in(&text));
+    let same_login = match (prev.login_email.as_deref(), login_email.as_deref()) {
+        (Some(then), Some(now)) => then == now,
+        _ => true,
+    };
+    let held_confirmed = match &prev.tier {
+        Some(tier @ Tier::Subscription { .. }) if prev.kind_confirmed => Some(tier.clone()),
+        _ => prev.confirmed_plan.clone(),
+    }
+    .filter(|_| same_login);
     let mut tier = tier.clone();
     if let Tier::Subscription { plan, .. } = &mut tier {
         if !is_human_plan_name(plan) {
             *plan = last_human_plan.clone().unwrap_or_else(|| GENERIC_PLAN_LABEL.to_owned());
         }
     }
-    let cached =
-        Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan, probed_at_secs: Some(now), kind_confirmed };
+    let confirmed_plan = match &tier {
+        Tier::Subscription { .. } if kind_confirmed => Some(tier.clone()),
+        Tier::PayAsYouGo => None,
+        _ => held_confirmed,
+    };
+    let cached = Cached {
+        auth_mtime: mtime,
+        tier: Some(tier),
+        last_human_plan,
+        probed_at_secs: Some(now),
+        kind_confirmed,
+        confirmed_plan,
+        login_email,
+    };
     if let Ok(text) = serde_json::to_vec_pretty(&cached) {
         let _ = crate::store::write_atomic(&cache_path(), &text);
     }
@@ -2705,6 +2873,7 @@ mod tests {
             last_human_plan: Some("Muse Code Power Usage".into()),
             probed_at_secs: Some(mtime),
             kind_confirmed: true,
+            ..Default::default()
         };
         crate::store::write_atomic(&cache_path(), &serde_json::to_vec_pretty(&prev).expect("seed"))
             .expect("seed tier.json");
@@ -2767,6 +2936,173 @@ mod tests {
             panic!("expected a subscription");
         };
         assert_eq!(plan, "Subscription");
+    }
+
+    fn high_usage() -> Tier {
+        Tier::Subscription {
+            plan: "Muse Code High Usage".into(),
+            current_pct: Some(2),
+            weekly_pct: Some(2),
+            resets: vec![],
+            usage_unavailable: false,
+        }
+    }
+
+    /// The owner's Baaz, 2026-11-04: a subscribed login, one probe with no
+    /// verdict, and a banner saying nobody knows the plan. A failure says
+    /// nothing about the login: the known plan stands and the file is left
+    /// alone, so the next boot still asks.
+    #[test]
+    fn a_probe_with_no_verdict_keeps_what_the_login_is_known_to_be() {
+        for answer in [
+            Err("the /upgrade card did not answer in time".to_owned()),
+            Ok(Tier::Unavailable("the /upgrade card did not give the same answer twice".to_owned())),
+        ] {
+            let settled = settle_probe(answer, Some(high_usage()));
+            assert_eq!(settled.tier, high_usage());
+            assert!(settled.unanswered.is_some(), "another probe is owed");
+            assert!(!settled.remember, "a failure is not an answer to cache");
+        }
+        let payg = settle_probe(Err("no card".into()), Some(Tier::PayAsYouGo));
+        assert_eq!(payg.tier, Tier::PayAsYouGo, "a billing answer does not fade to unknown");
+    }
+
+    /// Never confirmed: the banner's case, as it always was.
+    #[test]
+    fn a_login_never_confirmed_stays_unknown() {
+        let settled = settle_probe(Err("no card".into()), None);
+        assert_eq!(settled.tier, Tier::Unavailable("no card".into()));
+        assert!(settled.unanswered.is_some() && settled.remember);
+    }
+
+    /// A verdict is a verdict: pay-as-you-go lands over a known subscription.
+    #[test]
+    fn a_verdict_always_replaces_what_was_known() {
+        let payg = settle_probe(Ok(Tier::PayAsYouGo), Some(high_usage()));
+        assert_eq!(payg, Settled { tier: Tier::PayAsYouGo, unanswered: None, remember: true });
+        let sub = settle_probe(Ok(high_usage()), Some(Tier::PayAsYouGo));
+        assert_eq!(sub.tier, high_usage());
+        assert_eq!(sub.unanswered, None);
+    }
+
+    /// What counts as knowing, from the file. `kind_confirmed` alone does
+    /// not: a remembered unknown carried it, which is how the owner's
+    /// `tier.json` looked while the banner stood.
+    #[test]
+    fn known_for_login_reads_the_confirmed_kind_and_nothing_weaker() {
+        let confirmed = Cached { tier: Some(high_usage()), kind_confirmed: true, ..Default::default() };
+        assert_eq!(known_for_login(&confirmed, None, None), Some(high_usage()));
+        assert_eq!(known_for_login(&confirmed, None, Some(true)), Some(high_usage()));
+        assert_eq!(known_for_login(&confirmed, None, Some(false)), None, "muse says the subscription lapsed");
+
+        let unconfirmed = Cached { tier: Some(high_usage()), kind_confirmed: false, ..Default::default() };
+        assert_eq!(known_for_login(&unconfirmed, None, None), None, "numbers are not a plan kind");
+
+        let unknown = Cached {
+            tier: Some(Tier::Unavailable("no card".into())),
+            kind_confirmed: true,
+            last_human_plan: Some("Muse Code High Usage".into()),
+            ..Default::default()
+        };
+        assert_eq!(known_for_login(&unknown, None, None), None, "a name kept across a pay-as-you-go is no evidence");
+
+        let payg = Cached { tier: Some(Tier::PayAsYouGo), kind_confirmed: true, ..Default::default() };
+        assert_eq!(known_for_login(&payg, None, Some(true)), Some(Tier::PayAsYouGo));
+
+        assert_eq!(known_for_login(&Cached::default(), None, None), None);
+    }
+
+    /// The account is what `known_for_login` keys on, not the token.
+    #[test]
+    fn another_account_inherits_nothing() {
+        let cached = Cached {
+            tier: Some(high_usage()),
+            kind_confirmed: true,
+            login_email: Some("a@example.com".into()),
+            ..Default::default()
+        };
+        assert_eq!(known_for_login(&cached, Some("a@example.com"), None), Some(high_usage()));
+        assert_eq!(known_for_login(&cached, Some("b@example.com"), None), None);
+        assert_eq!(known_for_login(&cached, None, None), Some(high_usage()), "no address to compare");
+        assert_eq!(
+            login_email_in(r#"{"providers":{"meta":{"user_email":"a@example.com","subs_active":true}}}"#).as_deref(),
+            Some("a@example.com")
+        );
+    }
+
+    /// A numeric-id reading under a refreshed token is not confirmed by
+    /// itself, and it must not erode what was: the routine sequence between
+    /// the card and the next failed boot probe.
+    #[test]
+    fn a_numeric_reading_after_a_token_refresh_keeps_the_confirmed_plan() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let taken = now_secs();
+        remember_at(&high_usage(), Some(1_000), taken);
+        let numbers = Tier::Subscription {
+            plan: "27681631238169137".into(),
+            current_pct: Some(9),
+            weekly_pct: Some(9),
+            resets: vec![],
+            usage_unavailable: false,
+        };
+        remember_with(&numbers, Some(2_000), taken + 60, false);
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert!(!back.kind_confirmed, "the reading itself confirms nothing");
+        assert_eq!(known_for_login(&back, None, None), Some(high_usage()));
+
+        // A pay-as-you-go verdict ends it, though the name stays on file.
+        remember_at(&Tier::PayAsYouGo, Some(3_000), taken + 120);
+        remember_with(&numbers, Some(4_000), taken + 180, false);
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.last_human_plan.as_deref(), Some("Muse Code High Usage"));
+        assert_eq!(known_for_login(&back, None, None), None);
+    }
+
+    /// `tier.json` as it stood on the owner's disk reads as known: the
+    /// fields this change added are absent from it.
+    #[test]
+    fn a_file_from_before_the_confirmed_plan_field_reads_as_known() {
+        let text = r#"{"authMtime":1,"tier":{"tier":"subscription","plan":"Muse Code High Usage","currentPct":2,"weeklyPct":2,"resets":[],"usageUnavailable":false},"lastHumanPlan":"Muse Code High Usage","probedAtSecs":1,"kindConfirmed":true}"#;
+        let cached: Cached = serde_json::from_str(text).expect("the older shape reads");
+        assert!(matches!(known_for_login(&cached, Some("a@example.com"), None), Some(Tier::Subscription { .. })));
+    }
+
+    /// A remembered unknown is never served, so a boot re-asks.
+    #[test]
+    fn a_remembered_unknown_is_not_an_answer() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        remember(&Tier::Unavailable("no card".into()));
+        assert_eq!(cached(), None);
+    }
+
+    /// Never a loop: the delays are spent, then nothing runs until an
+    /// occasion, and an occasion is itself rate-limited.
+    #[test]
+    fn the_retry_backs_off_and_stops() {
+        let mut retry = ProbeRetry::default();
+        assert!(!retry.occasion_due(u64::MAX), "nothing owed, nothing due");
+        let delays: Vec<_> = (0..6).map(|n| retry.failed(1_000 + n)).collect();
+        assert_eq!(
+            delays,
+            vec![
+                Some(Duration::from_secs(60)),
+                Some(Duration::from_secs(300)),
+                Some(Duration::from_secs(1800)),
+                None,
+                None,
+                None,
+            ]
+        );
+        assert!(!retry.occasion_due(1_005), "the failure just happened");
+        assert!(!retry.occasion_due(1_005 + 299));
+        assert!(retry.occasion_due(1_005 + 300), "still owed, the next Muse lane may ask");
+
+        assert!(retry.woke(), "a wake starts the backoff over, and a probe is owed");
+        assert_eq!(retry.failed(9_000), Some(Duration::from_secs(60)));
+
+        retry.settled();
+        assert!(!retry.woke(), "a verdict owes nothing");
+        assert!(!retry.occasion_due(u64::MAX));
     }
 
     /// `tier.json` as older builds wrote it — string clauses, no

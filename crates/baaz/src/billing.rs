@@ -7,8 +7,16 @@
 //! `tier_probing`; nothing else in the app reads the probe's internals.
 //!
 //! The rule the whole file exists for (`docs/06-billing.md`): **a probe that
-//! failed never stops the app**. Every failure becomes [`Tier::Unavailable`],
-//! which draws a quiet banner and blocks nothing.
+//! failed never stops the app**. A failure leaves a login whose plan kind is
+//! known as it was and a login never confirmed on [`Tier::Unavailable`], a
+//! quiet banner that blocks nothing ([`tier::settle_probe`]); both get
+//! another probe by themselves, bounded ([`tier::ProbeRetry`]).
+//!
+//! Why the bound and the keeping (2026-11-04): one failed boot probe set
+//! [`Tier::Unavailable`] and nothing ever looked again. The menu's re-read is
+//! wire-only, reads nothing on a cold host, and a numeric-id reading cannot
+//! settle an unknown; only pay-as-you-go re-verified. The owner's subscribed
+//! window carried the banner for days, on every Muse session.
 
 use gpui::Context;
 
@@ -38,8 +46,7 @@ impl Harness {
     /// answer is provisional until a second probe agrees, with the waits on
     /// the background path; meanwhile the banner keeps the existing
     /// probing/Checking state, never the pay-as-you-go banner. **A probe that
-    /// fails never stops the app**: it becomes [`Tier::Unavailable`], which
-    /// draws a quiet banner and blocks nothing.
+    /// fails never stops the app**: see [`Self::land_tier_probe`].
     pub(crate) fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
         // `--tier` fakes the probe for a screenshot, and nothing else.
         if let Some(faked) = self.args.tier.clone() {
@@ -50,10 +57,16 @@ impl Harness {
         if !force {
             if let Some(cached) = tier::cached() {
                 self.tier = Some(cached);
+                self.tier_retry_settled();
                 self.push_tier(cx);
                 return;
             }
         }
+        self.start_tier_probe(force, cx);
+    }
+
+    /// Run the probe. `report`: a person asked, so the answer gets a toast.
+    fn start_tier_probe(&mut self, report: bool, cx: &mut Context<Self>) {
         if self.tier_probing {
             return;
         }
@@ -76,32 +89,100 @@ impl Harness {
                     read.as_ref(),
                     tier::auth_mtime(),
                     tier::now_secs(),
-                    || tier::probe(&program),
+                    || run_probe(&program),
                     || std::thread::sleep(tier::PAYG_CONFIRM_INTERVAL),
                 )
             },
-            move |this, result, cx| {
-                this.tier_probing = false;
-                // The reason is the module's own words, never the terminal's.
-                let tier = result.unwrap_or_else(Tier::Unavailable);
-                tier::remember(&tier);
-                this.tier = Some(tier.clone());
-                this.push_tier(cx);
-                // An asked-for probe reports back; a boot probe that found the
-                // plan simply clears its banner.
-                if force {
-                    let (title, detail) = match &tier {
-                        Tier::Subscription { plan, .. } => ("Plan checked", format!("Plan: {plan}")),
-                        Tier::PayAsYouGo => {
-                            ("Plan checked", "Plan: pay-as-you-go — every turn bills API usage".to_owned())
-                        }
-                        Tier::Unavailable(reason) => ("Still unknown", format!("Still unknown: {reason}")),
-                    };
-                    this.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
-                }
-                cx.notify();
-            },
+            move |this, result, cx| this.land_tier_probe(result, report, cx),
         );
+    }
+
+    /// A finished probe. A verdict lands. No verdict changes nothing for a
+    /// login whose kind is known, raises the quiet banner on one that is
+    /// not, and either way owes another probe.
+    pub(crate) fn land_tier_probe(&mut self, answer: Result<Tier, String>, report: bool, cx: &mut Context<Self>) {
+        self.tier_probing = false;
+        let known = tier::known_now().or_else(|| matches!(self.tier, Some(Tier::PayAsYouGo)).then_some(Tier::PayAsYouGo));
+        let settled = tier::settle_probe(answer, known);
+        // The reason is the module's own words, never the terminal's. It
+        // used to go nowhere, and a four-day-old banner could not say why.
+        if let Some(reason) = &settled.unanswered {
+            crate::baaz_log!("tier probe: no verdict ({reason}); holding {}", settled.tier.footer_label());
+        }
+        if settled.remember {
+            tier::remember(&settled.tier);
+        }
+        // The window's own numbers are at least as new as the file's.
+        let keep_numbers =
+            settled.unanswered.is_some() && matches!((&self.tier, &settled.tier), (Some(Tier::Subscription { .. }), Tier::Subscription { .. }));
+        if !keep_numbers {
+            self.tier = Some(settled.tier.clone());
+        }
+        match &settled.unanswered {
+            None => self.tier_retry_settled(),
+            Some(_) => self.owe_tier_probe(cx),
+        }
+        self.push_tier(cx);
+        // An asked-for probe reports back; a boot probe that found the
+        // plan simply clears its banner.
+        if report {
+            let (title, detail) = match (&settled.tier, &settled.unanswered) {
+                (Tier::Unavailable(reason), _) => ("Still unknown", format!("Still unknown: {reason}")),
+                (tier, Some(reason)) => {
+                    ("Could not check", format!("Keeping {}: {reason}", tier.footer_label()))
+                }
+                (Tier::Subscription { plan, .. }, None) => ("Plan checked", format!("Plan: {plan}")),
+                (Tier::PayAsYouGo, None) => {
+                    ("Plan checked", "Plan: pay-as-you-go — every turn bills API usage".to_owned())
+                }
+            };
+            self.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
+        }
+        cx.notify();
+    }
+
+    /// The probe owed after one with no verdict: on the backoff's clock, and
+    /// nothing at all once that is spent, until an occasion.
+    fn owe_tier_probe(&mut self, cx: &mut Context<Self>) {
+        let delay = self.tier_retry.failed(tier::now_secs());
+        self.tier_retry_timer = delay.map(|delay| self.tier_probe_after(delay, cx));
+    }
+
+    fn tier_probe_after(&self, delay: std::time::Duration, cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                // Signed out meanwhile: the login is gone, and so is the debt.
+                if matches!(this.auth, crate::login::Auth::SignedIn(_)) {
+                    this.start_tier_probe(false, cx);
+                } else {
+                    this.tier_retry_settled();
+                }
+            });
+        })
+    }
+
+    /// Nothing is owed any more: a verdict, or the login went away.
+    pub(crate) fn tier_retry_settled(&mut self) {
+        self.tier_retry.settled();
+        self.tier_retry_timer = None;
+    }
+
+    /// The machine woke: an owed probe gets another go, once the network is
+    /// back. The timers themselves do not count asleep, so a thirty-minute
+    /// wait over a night is still thirty minutes away without this.
+    pub(crate) fn tier_probe_on_wake(&mut self, cx: &mut Context<Self>) {
+        if self.tier_retry.woke() {
+            self.tier_retry_timer = Some(self.tier_probe_after(tier::PROBE_AFTER_WAKE, cx));
+        }
+    }
+
+    /// A Muse lane just opened: the person is looking at the banner's home,
+    /// so an owed probe past its gap runs now.
+    pub(crate) fn tier_probe_on_muse_lane(&mut self, cx: &mut Context<Self>) {
+        if self.tier_retry.occasion_due(tier::now_secs()) {
+            self.start_tier_probe(false, cx);
+        }
     }
 
     /// The banner the open session should be drawing, given the tier and
@@ -213,6 +294,20 @@ impl Harness {
                 cx.notify();
             },
         );
+    }
+}
+
+/// The card. Tests never reach a real CLI: a test window that signs in, or
+/// a retry's timer under a test clock, lands on this refusal instead.
+fn run_probe(program: &str) -> Result<Tier, String> {
+    #[cfg(test)]
+    {
+        let _ = program;
+        Err("tests never reach a real CLI".to_owned())
+    }
+    #[cfg(not(test))]
+    {
+        tier::probe(program)
     }
 }
 

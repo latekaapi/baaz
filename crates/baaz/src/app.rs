@@ -1139,6 +1139,10 @@ pub struct Harness {
     pub(crate) tier: Option<Tier>,
     /// A probe is in flight; a second one is not started on top of it.
     pub(crate) tier_probing: bool,
+    /// The probe owed after one that got no verdict.
+    pub(crate) tier_retry: crate::tier::ProbeRetry,
+    /// Its timer. Replacing or clearing this cancels it.
+    pub(crate) tier_retry_timer: Option<gpui::Task<()>>,
     /// Baaz's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
     pub(crate) overrides: sessions::Overrides,
@@ -1713,6 +1717,8 @@ impl Harness {
             focus_settings: false,
             tier: None,
             tier_probing: false,
+            tier_retry: Default::default(),
+            tier_retry_timer: None,
             overrides: sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
             migration_paths_expanded: false,
@@ -1918,6 +1924,16 @@ impl Harness {
             while status_wake.next().await.is_some() {
                 while status_wake.try_recv().is_ok() {}
                 if this.update(cx, |this, cx| this.sync_provider_state(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
+        // The machine woke: a tier probe that got no verdict gets another go.
+        let mut wake = crate::watchdog::wake_channel();
+        this.tasks.push(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while wake.next().await.is_some() {
+                if this.update(cx, |this, cx| this.tier_probe_on_wake(cx)).is_err() {
                     return;
                 }
             }
