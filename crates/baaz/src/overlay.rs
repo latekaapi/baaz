@@ -480,7 +480,13 @@ impl Harness {
     /// agent acts. `None` when the pane is not on a native page, the strip
     /// is moving, or nothing floats.
     fn wanted_page_float(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
-        if self.mode != crate::layout::Mode::Sessions || !self.layout.right_open || self.right_strip_moving || self.settings_page.open {
+        if self.settings_page.open {
+            return None;
+        }
+        if self.mode == crate::layout::Mode::Browse {
+            return self.wanted_agent_line(self.browser.centre_page_rect?, window, cx);
+        }
+        if !self.layout.right_open || self.right_strip_moving {
             return None;
         }
         if crate::layout::right_kind(&self.layout) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
@@ -513,16 +519,75 @@ impl Harness {
             let print = 1 + page.annotations().len() as u64 * 7;
             return Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), print));
         }
-        let session = self.active.as_ref()?.read(cx).session_id.clone();
-        let label = self.terminal_service.browser_activity(&session)?;
-        let width = gpui::px((70.0 + 7.2 * label.chars().count() as f32).min(f32::from(rect.size.width) - 16.0)) + pad * 2.0;
-        let height = gpui::px(32.0) + pad * 2.0;
+        self.wanted_agent_line(rect, window, cx)
+    }
+
+    /// The session whose work the line shows: the page on screen's owner, else
+    /// whichever session is waiting on the person.
+    pub(crate) fn line_session(&self, cx: &App) -> Option<String> {
+        let shown = if self.mode == crate::layout::Mode::Browse {
+            self.browse_centre_shown()
+                .and_then(|id| self.browser.tabs.get(id))
+                .and_then(|tab| match &tab.owner {
+                    crate::browser::tabs::Owner::Session(session) => Some(session.clone()),
+                    crate::browser::tabs::Owner::Person => None,
+                })
+        } else {
+            self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+        };
+        shown
+            .filter(|session| self.terminal_service.agent_activity(session).is_some())
+            .or_else(|| self.terminal_service.session_asking())
+    }
+
+    /// The line's window over `rect`, a page's rect: centred on its foot, as wide as
+    /// the line's measure allows, tall enough for the card it grows into.
+    fn wanted_agent_line(&self, rect: Bounds<Pixels>, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
+        let session = self.line_session(cx)?;
+        let activity = self.terminal_service.agent_activity(&session)?;
+        let pad = gpui::px(SHADOW_PAD);
+        let origin = window.bounds().origin;
+        let width = gpui::px(f32::min(640.0, f32::from(rect.size.width) - 24.0)) + pad * 2.0;
+        let body = if activity.asking.as_ref().is_some_and(|ask| ask.approval) { 124.0 } else { 48.0 };
+        let height = gpui::px(body) + pad * 2.0;
         let bottom = rect.bottom() - gpui::px(16.0) + pad;
         let left = rect.left() + (rect.size.width - width) / 2.0;
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        label.hash(&mut h);
+        session.hash(&mut h);
+        activity.label.hash(&mut h);
+        activity.held.hash(&mut h);
+        format!("{:?}", activity.asking).hash(&mut h);
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
+    }
+
+    /// What the line says for `session`'s `activity`.
+    fn agent_line_state(activity: &crate::terminal::service::AgentActivity, name: &str, page_host: &str) -> aui::browse::agent_window::LineState {
+        use aui::browse::agent_window::{ApprovalData, LineState};
+        if activity.held {
+            return LineState::YouDrive;
+        }
+        if let Some(ask) = &activity.asking {
+            if !ask.approval {
+                return LineState::NeedsYou { text: ask.detail.clone().into() };
+            }
+            let title = if ask.detail.is_empty() {
+                format!("{name} wants to go ahead")
+            } else {
+                format!("{name} wants to: {}", ask.detail)
+            };
+            return LineState::Approval(ApprovalData {
+                title: title.into(),
+                host: page_host.to_owned().into(),
+                line: page_host.to_owned().into(),
+                kind_pill: ask.kind.clone().into(),
+                hint: format!("{} always asks", ask.kind).into(),
+                deny: "Don't allow".into(),
+                allow: ask.kind.clone().into(),
+                allow_always: None,
+            });
+        }
+        LineState::from_task(aui::browse::TaskFace::Reading, format!("{name} is {}", activity.label))
     }
 
     /// Open, move or close the Page float window (the corner's dance).
@@ -593,7 +658,10 @@ impl Harness {
 
     /// The Page float's content: the notes panel or the agent pill. Their
     /// clicks run on the main window, where the page's state lives.
-    fn render_page_float(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.mode == crate::layout::Mode::Browse {
+            return self.render_agent_line(window, cx);
+        }
         let state = self.existing_browser(cx)?;
         let page = state.read(cx);
         let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
@@ -647,14 +715,39 @@ impl Harness {
             let compact = page.page_rect().is_some_and(|r| f32::from(r.size.width) < 360.0);
             return Some(aui::workbench::notes_panel("page-float-notes", &notes, name, Some(clear), Some(send), compact, cx).into_any_element());
         }
-        let session = self.active.as_ref()?.read(cx).session_id.clone();
-        let label = self.terminal_service.browser_activity(&session)?;
-        let mark = match agent {
-            Some(crate::providers::ProviderId::ClaudeCode) => aui_icons::Provider::Claude,
-            Some(crate::providers::ProviderId::Codex) => aui_icons::Provider::Codex,
-            _ => aui_icons::Provider::Muse,
-        };
-        Some(aui::workbench::agent_pill("page-float-pill", mark, format!("{name} is {label}"), cx).into_any_element())
+        self.render_agent_line(window, cx)
+    }
+
+    /// The line: what the agent is doing, Take over and Hand back, and the card it
+    /// grows into when the person must decide. Clicks run on the main thread's
+    /// service, which owns the waiting tool.
+    fn render_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let session = self.line_session(cx)?;
+        let activity = self.terminal_service.agent_activity(&session)?;
+        let name = self.session_lane_provider(&session).label();
+        let host = self
+            .terminal_service
+            .page_host(&session, cx)
+            .unwrap_or_default();
+        let state = Self::agent_line_state(&activity, name, &host);
+        let input = self.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone();
+        let baaz = cx.weak_entity();
+        let line = aui::browse::agent_window::agent_line("page-float-line", &state, &input).on_intent(move |intent, _, cx| {
+            use aui::browse::agent_window::LineIntent;
+            let session = session.clone();
+            let _ = baaz.update(cx, |this, cx| {
+                let service = &this.terminal_service;
+                match intent {
+                    LineIntent::TakeOver => service.take_over(&session),
+                    LineIntent::HandBack => service.hand_back(&session),
+                    LineIntent::Allow | LineIntent::AllowAlways | LineIntent::Done => service.answer_person(&session, true),
+                    LineIntent::Deny => service.answer_person(&session, false),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        });
+        Some(div().p(gpui::px(SHADOW_PAD)).w_full().child(line).into_any_element())
     }
 
     /// A fingerprint of what the corner shows: the toasts, and the
@@ -765,7 +858,7 @@ impl Harness {
                 self.hosting_overlay = false;
                 stack
             }
-            OverlayKind::PageFloat => self.render_page_float(cx),
+            OverlayKind::PageFloat => self.render_page_float(window, cx),
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).

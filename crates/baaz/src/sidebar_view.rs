@@ -1050,8 +1050,10 @@ impl Harness {
             .into_iter()
             .map(|(session, label, rows)| {
                 let entry = self.sessions.iter().find(|entry| entry.id == session);
-                let running = entry.is_some_and(|entry| entry.running);
-                let waiting = entry.is_some_and(|entry| !entry.attention.is_empty() || entry.approval_command.is_some() || entry.pending_question.is_some());
+                let page_work = self.terminal_service.agent_activity(&session);
+                let asking = page_work.as_ref().is_some_and(|work| work.asking.is_some());
+                let running = entry.is_some_and(|entry| entry.running) || page_work.is_some();
+                let waiting = asking || entry.is_some_and(|entry| !entry.attention.is_empty() || entry.approval_command.is_some() || entry.pending_question.is_some());
                 let (state, status) = if waiting {
                     (AgentState::Waiting, "needs you")
                 } else if running {

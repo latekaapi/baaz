@@ -84,7 +84,7 @@ pub fn permission_mode_from_claude(wire: &str) -> Option<PermissionMode> {
 
 /// The tools Read-only denies outright: every built-in that writes or
 /// runs a shell, and Baaz's own MCP tools that act (the bridge's reading
-/// tools — `terminal_list/read/screen`, `browser_open/read/links/
+/// tools — `terminal_list/read/screen`, `browser_navigate/snapshot/read/
 /// screenshot` — stay usable).
 ///
 /// `dontAsk` alone is not Read-only: it refuses only what no rule allows,
@@ -143,8 +143,17 @@ pub const READ_ONLY_DENIED_TOOLS: [&str; 25] = [
 
 /// The Baaz bridge tools Read-only denies (served as
 /// `mcp__baaz__<tool>`): those that type, run, open or close.
-pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 6] =
-    ["terminal_open", "terminal_run", "terminal_send", "terminal_close", "browser_click", "browser_type"];
+pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 9] = [
+    "terminal_open",
+    "terminal_run",
+    "terminal_send",
+    "terminal_close",
+    "browser_act",
+    "browser_run",
+    "browser_emulate",
+    "browser_upload",
+    "browser_ask",
+];
 
 /// The settings layer that makes Read-only read-only: `permissions.deny`
 /// for [`READ_ONLY_DENIED_TOOLS`] and [`READ_ONLY_DENIED_BRIDGE_TOOLS`],
@@ -911,7 +920,7 @@ mod tests {
             for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "PowerShell"] {
                 assert!(deny.contains(&tool), "{tool} denied: {deny:?}");
             }
-            for tool in ["terminal_run", "terminal_send", "terminal_open", "terminal_close", "browser_click", "browser_type"] {
+            for tool in ["terminal_run", "terminal_send", "terminal_open", "terminal_close", "browser_act", "browser_run", "browser_emulate", "browser_upload", "browser_ask"] {
                 assert!(deny.contains(&format!("mcp__baaz__{tool}").as_str()), "{tool} denied: {deny:?}");
             }
             // The reading bridge tools stay usable.

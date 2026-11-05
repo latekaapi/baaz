@@ -1245,6 +1245,8 @@ pub struct Harness {
     pub(crate) corner_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// D6: the Page screen's float (pill, notes panel) over its native page.
     pub(crate) page_float: Option<crate::overlay::Overlay>,
+    /// The agent line's input: it needs one even while it only reports.
+    pub(crate) agent_line_input: Option<Entity<gpui_kit::base::input::TextareaState>>,
     pub(crate) page_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
@@ -1816,6 +1818,7 @@ impl Harness {
             page_float: None,
             page_float_pending: None,
             main_window: None,
+            agent_line_input: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
         };
@@ -1838,6 +1841,13 @@ impl Harness {
                 harness.update(cx, |harness, cx| {
                     harness.show_browser_for_agent(&session, cx);
                 });
+            });
+        });
+        let tabs_harness = cx.entity();
+        this.terminal_service.set_browser_tabs_hook(move |cx: &mut App, call| {
+            let harness = tabs_harness.clone();
+            cx.defer(move |cx| {
+                harness.update(cx, |harness, cx| harness.agent_tabs_call(call, cx));
             });
         });
         // When the agent runs something the dock opens — never focused, so
@@ -2709,7 +2719,7 @@ impl Harness {
     }
 
     /// The non-toggling open behind [`Self::select_right`], [`Self::show_right`]
-    /// and the agent's `browser_open`: set the kind, force the pane open,
+    /// and the agent's `browser_navigate`: set the kind, force the pane open,
     /// persist, prewarm, save, refresh, notify. Never arms URL focus — the
     /// callers that owe it (a person's own open) arm it themselves, so an
     /// agent navigation never steals the keyboard.
