@@ -25,6 +25,8 @@ pub async fn ensure_domains(ctx: &Ctx) -> Result<(), String> {
     for domain in ["Page", "Runtime", "Network", "Log", "DOM", "Accessibility"] {
         ctx.call(&format!("{domain}.enable"), json!({})).await?;
     }
+    // A session's tab usually isn't on screen; the page should behave as if it were.
+    let _ = ctx.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true})).await;
     ctx.tab.borrow_mut().domains_on = true;
     Ok(())
 }

@@ -2640,6 +2640,8 @@ impl Harness {
         // `leave_browse_address` skips its refocus off Browse.
         self.browse_last_holds = false;
         self.leave_browse_address(window, cx);
+        // A menu belongs to the mode it opened in; left open it would hide a page.
+        self.overlays.update(cx, |overlays, _| overlays.menu = None);
         // The CEF claim check filters `BaazBrowse` rows by this flag, set
         // here (never read from gpui state inside the router callback).
         crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
@@ -4081,7 +4083,7 @@ impl Harness {
     /// agent-saved files — with Reveal in Finder on landed files, Cancel
     /// download while active, Try again on failed ones — plus All
     /// downloads for `~/Downloads`.
-    fn render_browse_downloads(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_browse_downloads(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{download_line, download_owner_label};
         if !self.browser.downloads_open {
             return None;
@@ -4165,7 +4167,7 @@ impl Harness {
                         ("browse-download-retry", id),
                         "Try again",
                         "Try again",
-                        cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                        self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                             let url = url.clone();
                             this.retry_browse_download(tab, &url, window, cx);
                         }),
@@ -4192,6 +4194,9 @@ impl Harness {
         menu = menu.child(all);
         // D4: opened from the sidebar's button, the popover hangs under it
         // (window coordinates), its left edge on the button's.
+        if self.hosting_overlay {
+            return Some(menu.relative().top(px(0.0)).right(px(0.0)).into_any_element());
+        }
         if let Some(anchor) = self.browser.downloads_anchor {
             let at = gpui::point(anchor.left(), anchor.bottom() + px(6.0));
             return Some(gpui::deferred(gpui::anchored().position(at).child(menu.relative().top(px(0.0)).right(px(0.0)))).with_priority(2).into_any_element());
@@ -4886,7 +4891,8 @@ impl Harness {
         let omnibox = (!blank_page && !self.field_overlay_wanted(cx))
             .then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar))
             .flatten();
-        let downloads = self.render_browse_downloads(window, cx);
+        // The sidebar's downloads popover draws in the overlay window, over the live page.
+        let downloads = (!self.downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
         let extensions = self.render_browse_extensions(window, cx);
         let more = self.render_browse_more(window, cx);
         // A click outside the popovers dismisses them, like the tab menu:
