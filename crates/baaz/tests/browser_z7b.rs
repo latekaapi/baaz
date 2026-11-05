@@ -4,7 +4,7 @@
 //! round-trips live in the `terminal/service.rs` unit tests (each tool
 //! through the socket against the scripted page, session isolation, URL
 //! refusals, the timeout path) and in `mcp-bridge/tests/browser_tools.rs`
-//! (forwarding, the screenshot image block, the thirteen-tool list). What
+//! (forwarding, the screenshot image block, the tool list). What
 //! remains here is the wiring contract plus pins, below.
 
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ fn workspace_source(name: &str) -> String {
 
 /// The engine tag carries the agent API: `eval_with_result`,
 /// `take_eval_results` and `agent_js` arrive together on v0.3.8, and the
-/// service builds every script from `agent_js`.
+/// service drives pages through `PageAutomation`.
 #[test]
 fn engine_tag_carries_the_agent_api() {
     let root = workspace_source("Cargo.toml");
@@ -38,39 +38,37 @@ fn engine_tag_carries_the_agent_api() {
     let parts: Vec<u32> = tag.split('.').map(|part| part.parse().expect("numeric tag")).collect();
     assert!(
         parts.as_slice() >= [0, 3, 8].as_slice(),
-        "Z7b builds on a tag with the eval API (>= v0.3.8): {aui_line}"
+        "Z7b builds on a tag with the agent API (>= v0.3.8): {aui_line}"
     );
     let service = source("terminal/service.rs");
-    for item in [
-        "agent_js::page_text",
-        "agent_js::list_links",
-        "agent_js::click",
-        "agent_js::type_text",
-        "eval_with_result",
-        "take_eval_results",
-    ] {
+    for item in ["automation()", "page.call(", "take_answers", "take_events"] {
         assert!(service.contains(item), "the service drives the page through {item}");
     }
 }
 
-/// The service routes all six tools on the UI thread, keeps pending evals
+/// The service routes every tool on the UI thread, keeps pending evals
 /// across drains like `PendingRun`, refuses non-page URLs, and times out
 /// with the contract sentence.
 #[test]
-fn service_routes_six_tools_with_refusals_and_timeout() {
+fn service_routes_every_tool_with_refusals_and_timeout() {
     let service = source("terminal/service.rs");
     for tool in [
-        "browser_open",
+        "browser_tabs",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_act",
         "browser_read",
-        "browser_links",
-        "browser_click",
-        "browser_type",
         "browser_screenshot",
+        "browser_console",
+        "browser_network",
+        "browser_errors",
+        "browser_emulate",
+        "browser_ask",
     ] {
         assert!(service.contains(tool), "the service routes {tool}");
     }
-    assert!(service.contains("BROWSER_TOOL_NAMES"), "the six tools are one named list");
-    assert!(service.contains("PendingBrowser"), "pending evals survive across drains");
+    assert!(service.contains("BROWSER_TOOL_NAMES"), "the tools are one named list");
+    assert!(service.contains("RunningJob"), "running tools survive across drains");
     assert!(service.contains("browser_url_allowed"), "URLs are allow-listed");
     assert!(service.contains("the page did not answer"), "the timeout names itself");
     assert!(
@@ -94,21 +92,26 @@ fn agent_open_updates_the_saved_pane_state() {
     assert!(app.contains("show_browser_for_agent"), "the hook opens the pane deferred");
 }
 
-/// The bridge lists thirteen tools next to the seven terminal ones, and
+/// The bridge lists its tools next to the seven terminal ones, and
 /// the docs name the steering text.
 #[test]
-fn bridge_lists_thirteen_and_docs_steer() {
+fn bridge_lists_the_tools_and_docs_steer() {
     let main = workspace_source("crates/mcp-bridge/src/main.rs");
     assert!(main.contains("register_browser_tools"), "the bridge serves the browser tools");
     assert!(main.contains("register_terminal_tools"), "the terminal tools stay");
     let docs = workspace_source("docs/15-browser-tools.md");
     for tool in [
-        "browser_open",
+        "browser_tabs",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_act",
         "browser_read",
-        "browser_links",
-        "browser_click",
-        "browser_type",
         "browser_screenshot",
+        "browser_console",
+        "browser_network",
+        "browser_errors",
+        "browser_emulate",
+        "browser_ask",
     ] {
         assert!(docs.contains(tool), "the docs table names {tool}");
     }

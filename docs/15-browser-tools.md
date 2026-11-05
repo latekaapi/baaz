@@ -14,33 +14,34 @@ Use the shell tool for quick captured checks. If a browser tool reports
 that Baaz isn't running, the browser is unavailable — say so and carry on
 without it.
 
-## The six tools
+## The tools (docs/27 §6.1, R2, as built)
+
+Written in `crates/baaz/src/browser/automation/` as linear async jobs over
+`aui_webview::PageAutomation` (CEF's in-process DevTools channel, no debugging port), polled by
+the service's drain. Each takes `tab` and defaults to the session's current page; a tab belonging to
+another session is refused.
 
 | tool | what it does |
 |---|---|
-| `browser_open {url}` | Open a URL in the visible browser: opens the Browser pane when closed, navigates, waits for the load to settle up to 15 s, answers the FINAL `{url, title}`. |
-| `browser_read {max_chars?=8000}` | The visible page as text: `{title, url, text}`. Read-only. |
-| `browser_links {max?=100}` | The visible page's links as `{links: [{href, text}]}`. Read-only. |
-| `browser_click {selector}` | Click the first match of a CSS selector; answers the element's text. |
-| `browser_type {selector, text}` | Type text into the first match of a CSS selector; answers the text set. |
-| `browser_screenshot {}` | The visible page as a PNG, returned as an MCP image content block (base64). Read-only. |
+| `browser_tabs {op, tab?, url?, name?}` | list, open (hidden, background), close, activate, name this session's tabs |
+| `browser_navigate {url}` | open a URL, wait for load; answers final url and title |
+| `browser_snapshot {interactive?, scope?, delta?, max_chars?, cursor?}` | AX tree as text with `[ref=eN]`, same-process iframes stitched, fenced |
+| `browser_act {action, ref or x,y, text?, key?, value?, to?}` | trusted click, type, fill, press, hover, select, scroll, drag; answers the settled diff and `effect` |
+| `browser_read {format?, max_chars?}` | text, markdown or links |
+| `browser_screenshot {full?, ref?, if_changed?}` | viewport, full page or element |
+| `browser_wait {ms?, text?, selector?, idle?}` | wait |
+| `browser_run {code}` | JS function body, 30 s; asks first on a page that isn't this machine's |
+| `browser_fetch {url}` | GET with the page's cookies |
+| `browser_console`, `browser_errors`, `browser_network {since?, ...}` | what the page said; `since: last_action`; `body_of` for a response |
+| `browser_emulate {device?, width?, height?, dark?, offline?, reset?}` | viewport and media |
+| `browser_upload {ref, files}` | always asks |
+| `browser_ask {message, kind?}` | waits for the person's Done |
 
-Each tool acts on the calling session's own webview — never another
-session's. A Codex bridge keeps calling with its spawn-time request id
-after its lane moved to the server-minted thread id; the service maps the
-request id onto the lane's current id, so those calls still reach the
-lane's tabs and browser and still open its pane. URLs are limited to
-`http`, `https`, `file` and `about:blank`; anything else (`javascript:`,
-`data:`, …) is refused before any webview sees it.
+**Approvals (§6.2):** `policy.rs` classifies a click, an Enter, or a value going into a password or file
+field, structurally, with no model: Send, Pay, Delete, Upload, sign-in. The tool waits on the line's card for
+up to 600 s (the bridge's socket gives up at 660 s), and a "no" answers `stopped` with nothing done.
 
-`browser_open` completes when the navigation it started settles — a title,
-or a short grace for a page that has none — and answers the FINAL
-`{url, title}`, never the requested URL: the engine normalises
-(`https://example.com` → `https://example.com/`) and follows redirects
-(`wikipedia.org` → `www.wikipedia.org`), so the requested URL would never
-match. A result that does not arrive within 15 s is the error
-`the page did not answer`; for `browser_open` it names the URL and says
-the page may still be loading — the deadline only stops waiting, never
-the load. Opening the pane from a tool updates the session's saved
-right-pane state (Browser, open) like a person's click would, without
-moving the keyboard.
+**Not built:** `browser_download`, `browser_history` (needs R4's db), cross-process iframes (out-of-process
+frames need a flat DevTools session), per-site "Always here" levels, before/after screenshots in the transcript.
+
+**Repeatable live check:** `scripts/agent-live-check.py`, on a real Chromium page, no model.

@@ -3,7 +3,7 @@
 //! answered — all through the real `serve_loop` path on in-memory buffers,
 //! against a background thread speaking the service's
 //! `{id, session, tool, params}` protocol. `ping` keeps working beside the
-//! thirteen tools.
+//! every tool.
 
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -182,7 +182,7 @@ fn initialize_carries_the_steering_instructions() {
 }
 
 #[test]
-fn tools_list_advertises_all_thirteen_tools_with_schemas() {
+fn tools_list_advertises_every_tool_with_schemas() {
     let path = socket_path();
     let script =
         Script { heard: Arc::default(), refuse_tool: None, shutdown: Arc::default() };
@@ -200,7 +200,7 @@ fn tools_list_advertises_all_thirteen_tools_with_schemas() {
     }
     assert!(names.contains(&"ping"), "ping stays: {names:?}");
     assert_eq!(TOOL_NAMES.len(), 7);
-    assert_eq!(BROWSER_TOOL_NAMES.len(), 6);
+    assert_eq!(BROWSER_TOOL_NAMES.len(), 15);
     assert_eq!(tools.len(), TOOL_NAMES.len() + BROWSER_TOOL_NAMES.len() + 1);
     for tool in tools {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
@@ -214,7 +214,7 @@ fn tools_list_advertises_all_thirteen_tools_with_schemas() {
         let read_only = tool.pointer("/annotations/readOnlyHint") == Some(&json!(true));
         assert_eq!(read_only, mcp_bridge::READ_ONLY_TOOL_NAMES.contains(&name), "{name}: {tool}");
     }
-    for acting in ["terminal_open", "terminal_run", "terminal_send", "terminal_close", "browser_click", "browser_type"] {
+    for acting in ["terminal_open", "terminal_run", "terminal_send", "terminal_close", "browser_act", "browser_run"] {
         assert!(!mcp_bridge::READ_ONLY_TOOL_NAMES.contains(&acting), "{acting} acts");
     }
     let run = tools.iter().find(|tool| tool.get("name") == Some(&json!("terminal_run"))).expect("run");
@@ -295,9 +295,13 @@ fn a_gone_socket_answers_unavailable_not_a_crash() {
         "terminal_read" | "terminal_screen" | "terminal_send" | "terminal_close" => {
             json!({"tab": "t1"})
         }
-        "browser_open" => json!({"url": "https://example.com"}),
-        "browser_click" => json!({"selector": "h1"}),
-        "browser_type" => json!({"selector": "input", "text": "hi"}),
+        "browser_navigate" => json!({"url": "https://example.com"}),
+        "browser_act" => json!({"action": "click", "ref": "e1"}),
+        "browser_tabs" => json!({"op": "list"}),
+        "browser_run" => json!({"code": "return 1"}),
+        "browser_fetch" => json!({"url": "https://example.com"}),
+        "browser_upload" => json!({"ref": "e1", "files": ["/tmp/a"]}),
+        "browser_ask" => json!({"message": "m"}),
         _ => json!({}),
     };
     let all: Vec<&&str> = TOOL_NAMES.iter().chain(BROWSER_TOOL_NAMES.iter()).collect();

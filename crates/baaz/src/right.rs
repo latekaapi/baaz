@@ -967,7 +967,7 @@ impl Harness {
     }
 }
 
-/// Whether an agent's `browser_open` for `session_id` changes what is on
+/// Whether an agent's `browser_navigate` for `session_id` changes what is on
 /// screen: only when that session is the one showing. A background
 /// session's agent changes only its own saved pane state.
 pub(crate) fn agent_open_flips_visible_pane(active: Option<&str>, session_id: &str) -> bool {

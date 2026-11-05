@@ -1,4 +1,4 @@
-//! The browser relay over a test socket: the six tools forward like the
+//! The browser relay over a test socket: the tools forward like the
 //! terminal ones, and a screenshot answer renders as an MCP image block.
 
 use std::io::{BufRead, BufReader, Cursor, Write};
@@ -140,37 +140,28 @@ fn result_of(reply: &Value) -> &Value {
 }
 
 #[test]
-fn the_six_tools_are_described_and_steered() {
-    assert_eq!(BROWSER_TOOL_NAMES.len(), 6);
+fn every_tool_is_described_and_takes_its_arguments() {
     let defs = mcp_bridge::browser::tool_defs();
-    assert_eq!(defs.len(), 6);
+    assert_eq!(defs.len(), BROWSER_TOOL_NAMES.len());
+    assert!(mcp_bridge::browser::INSTRUCTIONS.contains("person sees"), "the bridge steers the model");
     for (name, description, schema) in &defs {
-        assert!(
-            BROWSER_TOOL_NAMES.contains(&name.as_str()),
-            "defined tool is advertised: {name}"
-        );
-        assert!(
-            description.contains("person sees this browser"),
-            "{name} steers the model: {description}"
-        );
+        assert!(BROWSER_TOOL_NAMES.contains(&name.as_str()), "defined tool is advertised: {name}");
+        assert!(!description.is_empty(), "{name} says what it does");
         assert!(schema.get("type").is_some(), "{name} has a schema");
     }
-    let open = defs.iter().find(|(name, _, _)| name == "browser_open").expect("open");
-    assert!(
-        open.2.pointer("/required").and_then(Value::as_array).is_some_and(|required| required
-            .iter()
-            .any(|key| key == "url")),
-        "open requires a url: {}",
-        open.2
-    );
-    let click = defs.iter().find(|(name, _, _)| name == "browser_click").expect("click");
-    assert!(
-        click.2.pointer("/required").and_then(Value::as_array).is_some_and(|required| required
-            .iter()
-            .any(|key| key == "selector")),
-        "click requires a selector: {}",
-        click.2
-    );
+    let requires = |tool: &str, key: &str| {
+        let def = defs.iter().find(|(name, _, _)| name == tool).expect(tool);
+        def.2.pointer("/required").and_then(Value::as_array).is_some_and(|required| required.iter().any(|k| k == key))
+    };
+    assert!(requires("browser_navigate", "url"));
+    assert!(requires("browser_act", "action"));
+    assert!(requires("browser_tabs", "op"));
+    assert!(requires("browser_run", "code"));
+    for (name, _, schema) in &defs {
+        if name != "browser_tabs" {
+            assert!(schema.pointer("/properties/tab").is_some(), "{name} takes tab");
+        }
+    }
 }
 
 #[test]
@@ -184,13 +175,13 @@ fn browser_calls_forward_session_tool_and_params() {
         &[rpc(
             1,
             "tools/call",
-            json!({"name": "browser_open", "arguments": {"url": "https://example.com"}}),
+            json!({"name": "browser_navigate", "arguments": {"url": "https://example.com"}}),
         )],
         &registry,
     );
     let heard = script.heard.lock().expect("heard");
     assert_eq!(heard.len(), 1, "one socket call: {heard:?}");
-    assert_eq!(heard[0].tool, "browser_open");
+    assert_eq!(heard[0].tool, "browser_navigate");
     assert_eq!(heard[0].session, "s7", "the calling session travels");
     assert_eq!(heard[0].params, json!({"url": "https://example.com"}));
     drop(heard);
@@ -199,7 +190,7 @@ fn browser_calls_forward_session_tool_and_params() {
         .and_then(Value::as_str)
         .expect("one text block");
     let echoed: Value = serde_json::from_str(text).expect("result is JSON text");
-    assert_eq!(echoed.get("tool"), Some(&json!("browser_open")));
+    assert_eq!(echoed.get("tool"), Some(&json!("browser_navigate")));
     script.shutdown.store(true, Ordering::Release);
     worker.join().expect("server stops");
 }
@@ -234,9 +225,13 @@ fn a_gone_socket_answers_unavailable_for_browser_tools() {
     assert!(UnixStream::connect(&missing).is_err(), "nothing serves this path");
     let registry = registry_for(&missing, "s1");
     let args_for = |name: &str| match name {
-        "browser_open" => json!({"url": "https://example.com"}),
-        "browser_click" => json!({"selector": "h1"}),
-        "browser_type" => json!({"selector": "input", "text": "hi"}),
+        "browser_navigate" => json!({"url": "https://example.com"}),
+        "browser_act" => json!({"action": "click", "ref": "e1"}),
+        "browser_tabs" => json!({"op": "list"}),
+        "browser_run" => json!({"code": "return 1"}),
+        "browser_fetch" => json!({"url": "https://example.com"}),
+        "browser_upload" => json!({"ref": "e1", "files": ["/tmp/a"]}),
+        "browser_ask" => json!({"message": "m"}),
         _ => json!({}),
     };
     let lines: Vec<String> = BROWSER_TOOL_NAMES

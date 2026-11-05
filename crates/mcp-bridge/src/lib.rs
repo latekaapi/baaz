@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The terminal relay: the seven tools as MCP, forwarded to Baaz's socket.
 pub mod terminal;
-/// The browser relay: the six tools as MCP, over the same socket.
+/// The browser relay: the browser tools as MCP, over the same socket.
 pub mod browser;
 
 /// Protocol version the probe server answered with, and this bridge keeps.
@@ -331,22 +331,32 @@ fn initialize_result(registry: &ToolRegistry) -> Value {
 }
 
 /// The bridge tools that only look — list, read, screen, open a page,
-/// follow links, screenshot — advertised with the MCP `readOnlyHint`
+/// read the console and network, screenshot — advertised with the MCP `readOnlyHint`
 /// annotation. Codex runs an annotated tool without an approval and Muse
 /// allows it by policy (`allow:mcp_read_only_hint`), so in Read-only these
 /// keep working while every other bridge tool — unannotated — is refused.
 /// The same split as Claude Code's Read-only deny list
 /// (`provider_claude_code::argv::READ_ONLY_DENIED_BRIDGE_TOOLS`). Named,
 /// never defaulted: a new tool is acting until it is listed here.
-pub const READ_ONLY_TOOL_NAMES: [&str; 7] = [
+pub const READ_ONLY_TOOL_NAMES: [&str; 13] = [
     "terminal_list",
     "terminal_read",
     "terminal_screen",
-    "browser_open",
+    "browser_tabs",
+    "browser_navigate",
+    "browser_snapshot",
     "browser_read",
-    "browser_links",
     "browser_screenshot",
+    "browser_wait",
+    "browser_fetch",
+    "browser_console",
+    "browser_network",
+    "browser_errors",
 ];
+
+/// The bridge tools that can change something beyond the page's view, advertised
+/// with `destructiveHint`.
+pub const DESTRUCTIVE_TOOL_NAMES: [&str; 3] = ["browser_act", "browser_run", "browser_upload"];
 
 fn tools_list_result(registry: &ToolRegistry) -> Value {
     let tools: Vec<Value> = registry
@@ -360,6 +370,9 @@ fn tools_list_result(registry: &ToolRegistry) -> Value {
             });
             if READ_ONLY_TOOL_NAMES.contains(&t.name.as_str()) {
                 tool["annotations"] = json!({"readOnlyHint": true});
+            }
+            if DESTRUCTIVE_TOOL_NAMES.contains(&t.name.as_str()) {
+                tool["annotations"] = json!({"destructiveHint": true});
             }
             tool
         })
