@@ -52,6 +52,40 @@ fn capture_state_dir() -> PathBuf {
     std::env::temp_dir().join(format!("baaz-capture-state-{}", std::process::id()))
 }
 
+/// Removes this capture's throwaway store as the capture ends. Tier V makes one
+/// per shot, and 1,079 had piled up before this. Only ever the capture dir:
+/// a capture with its own `BAAZ_STATE_DIR` and every real run are untouched.
+pub fn remove_capture_state() {
+    if crate::clock::deterministic() && std::env::var_os("BAAZ_STATE_DIR").is_none() {
+        let _ = std::fs::remove_dir_all(capture_state_dir());
+    }
+}
+
+/// Removes the throwaway stores of captures that died before they could
+/// (`baaz-capture-state-<pid>` whose pid is gone). Off the UI thread.
+pub fn sweep_dead_capture_states() {
+    let _ = std::thread::Builder::new().name("capture-state-sweep".into()).spawn(|| {
+        sweep_dead_capture_states_in(&std::env::temp_dir(), |pid| {
+            // SAFETY: signal 0 only checks that the process exists.
+            let gone = unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            !gone
+        });
+    });
+}
+
+fn sweep_dead_capture_states_in(temp: &std::path::Path, alive: impl Fn(i32) -> bool) {
+    let Ok(entries) = std::fs::read_dir(temp) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.strip_prefix("baaz-capture-state-")) else { continue };
+        let Ok(pid) = pid.parse::<i32>() else { continue };
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) && !alive(pid) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// `~/Library/Application Support/baaz` regardless of `BAAZ_STATE_DIR`:
 /// the directory the real app writes, which a scripted run with its own state
 /// dir still has to recognise as Baaz's own (the tier probe's throwaway
@@ -358,5 +392,19 @@ mod isolation_tests {
         }
         assert_ne!(dir, super::default_support_dir());
         assert!(dir.starts_with(std::env::temp_dir()), "{dir:?}");
+    }
+
+    #[test]
+    fn only_dead_capture_states_are_swept() {
+        let temp = std::env::temp_dir().join(format!("baaz-capsweep-{}", std::process::id()));
+        for name in ["baaz-capture-state-111", "baaz-capture-state-222", "baaz-capture-state-x", "baaz-other-111"] {
+            std::fs::create_dir_all(temp.join(name)).unwrap();
+        }
+        super::sweep_dead_capture_states_in(&temp, |pid| pid == 222);
+        assert!(!temp.join("baaz-capture-state-111").exists(), "dead");
+        assert!(temp.join("baaz-capture-state-222").exists(), "alive");
+        assert!(temp.join("baaz-capture-state-x").exists(), "not a pid");
+        assert!(temp.join("baaz-other-111").exists(), "not ours");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

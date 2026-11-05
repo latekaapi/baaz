@@ -43,6 +43,7 @@ use crate::overlays::MenuKind;
 
 pub(crate) mod chrome;
 pub(crate) mod favicons;
+pub mod clone_sweep;
 mod sidebar_actions;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
