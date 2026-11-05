@@ -974,10 +974,7 @@ fn main() {
                                             this.shutdown_provider_views(cx);
                                             this.flush_right_save();
                                             this.flush_tabs_save();
-                                            // B2a-H2b: a Dock/signal quit in
-                                            // Browse keeps what Browse had
-                                            // live, like the menu quit.
-                                            this.persist_layout(cx);
+                                            this.persist_layout();
                                         })
                                     })
                                     .unwrap_or(())

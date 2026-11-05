@@ -490,7 +490,7 @@ impl Harness {
     pub(crate) fn toggle_code_wrap(&mut self, cx: &mut Context<Self>) {
         self.layout.code_wrap = !self.layout.code_wrap;
         self.right_cache.files_ui.code_wrap = CodeWrap(self.layout.code_wrap);
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 }

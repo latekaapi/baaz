@@ -100,7 +100,6 @@
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
 //! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range records a step failure, free |
 //! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range records a step failure, free |
-//! | `from-sessions:<n>` | expand the n-th From-sessions group of the current project (1-based, first-seen order), collapsing the rest; empty collapses every group; unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
 //! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty records a step failure, free |
@@ -109,7 +108,7 @@
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
 //! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
-//! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse with the ↩ chip (the offline `browse-from-session` shot), free |
+//! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse (the offline `browse-from-session` shot), free |
 //! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
@@ -132,7 +131,7 @@
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
 //! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number records a step failure, free |
-//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`browser-tabs=horizontal\|vertical`, `search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values record a step failure, free |
+//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values record a step failure, free |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
@@ -347,7 +346,6 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "tab-menu", run: |this, rest, _, cx| this.step_tab_menu(rest, cx) },
     WindowVerb { verb: "folder-new", run: |this, rest, _, cx| this.step_folder_new(rest, cx) },
     WindowVerb { verb: "space-new", run: |this, rest, _, cx| this.step_space_new(rest, cx) },
-    WindowVerb { verb: "from-sessions", run: |this, rest, _, cx| this.step_from_sessions(rest, cx) },
     WindowVerb {
         verb: "tab-discard-now",
         run: |this, _, window, cx| this.step_tab_discard_now(window, cx),

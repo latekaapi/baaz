@@ -1636,10 +1636,10 @@ impl Harness {
         if self.mode == crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
-        // A new session (possibly in another project) unparks any carried
-        // Browse tab and leaves the address field even when the mode never
-        // changed and `set_mode` early-returned.
-        self.browser.centre_override = None;
+        // A new session (possibly in another project) drops the session tab
+        // the Browse centre held and leaves the address field, even when the
+        // mode never changed and `set_mode` early-returned.
+        self.browse_session_tab = None;
         self.leave_browse_address(window, cx);
         // A `new` while a provider switch is pending is the person doing
         // something else: the switch is cancelled (its open lands stale
@@ -5049,7 +5049,7 @@ impl Harness {
         }
         let on = !self.layout.fold_finished_turns;
         crate::settings::apply_setting(&mut self.layout, "fold_finished_turns", on);
-        self.persist_layout(cx);
+        self.persist_layout();
         self.apply_fold_to_views(on, cx);
         self.invalidate_list();
         cx.notify();

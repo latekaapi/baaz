@@ -1483,7 +1483,7 @@ impl crate::app::Harness {
         let project = self.current_project().map(|p| p.name.clone());
         let session_id = self.feedback_session_id(cx);
         let session_title = session_id.as_ref().map(|id| {
-            self.browse_chip_session_name(&self.chain_head(id), cx)
+            self.session_display_name(&self.chain_head(id), cx)
         });
         let size = window.viewport_size();
         ScreenContext {
@@ -5311,16 +5311,15 @@ mod tests {
     }
 
     /// Session titles never show a raw id: a session with no title reads
-    /// `New session`, through the same ↩ chip rule the Browse header
-    /// wears — which is also what notes store.
+    /// `New session` — which is also what notes store.
     #[gpui::test]
-    fn chip_session_name_never_shows_a_raw_id(cx: &mut gpui::TestAppContext) {
+    fn session_display_name_never_shows_a_raw_id(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3c-chip-name");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let name = harness.browse_chip_session_name("local-draft-b0d3f00d", cx);
+            let name = harness.session_display_name("local-draft-b0d3f00d", cx);
             assert_eq!(name, "New session", "a title-less session never reads as a raw id");
             assert!(!name.contains("local-draft"), "no raw id leaks into the name");
         });

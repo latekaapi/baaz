@@ -1,9 +1,10 @@
 //! Browser tabs: the pure tab model (B2a-H1). No gpui types here.
 //!
-//! A tab belongs to a **space** (a project id, `None` with no project) and
+//! A tab belongs to a **space** (the browser's own: Personal, Work; older
+//! project-filed tabs moved into folders, see [`Tabs::ensure_spaces`]) and
 //! to an **owner**: the person, or one session. In Sessions mode the right
-//! pane shows the active session's own tabs; Browse mode (next tasks) will
-//! show the project's person tabs plus "From sessions".
+//! pane shows the active session's page; Browse mode shows the space's person
+//! tabs plus one task folder per session that owns tabs.
 //!
 //! [`Tabs`] is ordered (the strip order), tracks each owner's active tab,
 //! and keeps the last 20 closed tabs for reopen. It serialises to
@@ -132,20 +133,6 @@ pub(crate) const CLOSED_CAP: usize = 20;
 /// trailing slash Chromium reports it with).
 pub(crate) fn is_blank_url(url: &str) -> bool {
     url.trim_end_matches('/') == BLANK
-}
-
-/// One row of the pane's tab strip: the snapshot `right.rs` draws for the
-/// shown owner's tabs. Pure data, so the pane never reads the model.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StripTab {
-    /// Which tab this row selects or closes.
-    pub id: TabId,
-    /// The row's label: [`tab_label`] of the tab's title and URL.
-    pub title: String,
-    /// The tile's letter: [`tab_initial`] of the tab's title and URL.
-    pub initial: String,
-    /// Whether this row is the owner's active tab.
-    pub active: bool,
 }
 
 /// The whole tab model: ordered tabs, each owner's active tab, and the
@@ -399,9 +386,7 @@ impl Tabs {
     }
 
     /// Every session's tabs in `space`, grouped by session id in first-seen
-    /// order: Browse mode's "From sessions" (next tasks; the strip and the
-    /// sync use the single-owner views above until then).
-    #[allow(dead_code)]
+    /// order: Browse mode's task folders.
     pub(crate) fn session_tabs(&self, space: Option<&str>) -> Vec<(String, Vec<&Tab>)> {
         let mut groups: Vec<(String, Vec<&Tab>)> = Vec::new();
         for tab in &self.tabs {
