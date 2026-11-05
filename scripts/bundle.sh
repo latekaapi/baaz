@@ -39,11 +39,15 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/assets/icon-1024.png"
-OUT="$ROOT/target/bundle/Baaz.app"
+# A test build never lands on the owner's bundle: BAAZ_BUNDLE_DIR moves all
+# three paths below, BAAZ_BUNDLE_ID renames the app and its helpers.
+BUNDLE_DIR="${BAAZ_BUNDLE_DIR:-$ROOT/target/bundle}"
+BUNDLE_ID="${BAAZ_BUNDLE_ID:-sh.baaz.app}"
+OUT="$BUNDLE_DIR/Baaz.app"
 # Assembled here, on the same volume, then renamed over OUT in one step.
-STAGE="$ROOT/target/bundle/.Baaz.app.new"
+STAGE="$BUNDLE_DIR/.Baaz.app.new"
 # A finished build parked while a Baaz was running from OUT.
-NEXT="$ROOT/target/bundle/next/Baaz.app"
+NEXT="$BUNDLE_DIR/next/Baaz.app"
 
 running() { pgrep -f "$OUT/Contents/MacOS/Baaz" >/dev/null 2>&1; }
 
@@ -122,10 +126,10 @@ if [ "$WITH_CEF" = 1 ]; then
     for kind in "" "GPU" "Renderer" "Plugin" "Alerts"; do
         if [ -n "$kind" ]; then
             name="Baaz Helper ($kind)"
-            id="sh.baaz.app.helper.$(echo "$kind" | tr '[:upper:]' '[:lower:]')"
+            id="$BUNDLE_ID.helper.$(echo "$kind" | tr '[:upper:]' '[:lower:]')"
         else
             name="Baaz Helper"
-            id="sh.baaz.app.helper"
+            id="$BUNDLE_ID.helper"
         fi
         helper="$CONTENTS/Frameworks/$name.app/Contents"
         mkdir -p "$helper/MacOS"
@@ -173,7 +177,7 @@ cat >"$CONTENTS/Info.plist" <<EOF
     <key>CFBundleExecutable</key>
     <string>Baaz</string>
     <key>CFBundleIdentifier</key>
-    <string>sh.baaz.app</string>
+    <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
     <string>Baaz</string>
     <key>CFBundleDisplayName</key>

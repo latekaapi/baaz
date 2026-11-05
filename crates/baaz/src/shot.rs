@@ -408,6 +408,11 @@ pub fn capture_and_quit(
         }
         if crate::steps::step_failures() > 0 {
             let _ = std::io::Write::flush(&mut std::io::stdout());
+            // `exit` skips `on_app_quit`: without this Chromium's clone and the
+            // capture's state dir stay behind (docs/74 §1).
+            #[cfg(feature = "cef")]
+            aui_cef::shutdown(std::time::Duration::from_secs(3));
+            crate::store::remove_capture_state();
             std::process::exit(1);
         }
         cx.update(|cx| cx.quit());

@@ -80,6 +80,7 @@ mod provider_search;
 mod provider_sessions;
 mod provider_status;
 mod providers;
+mod quit_signals;
 mod resize;
 mod right;
 mod right_changes;
@@ -676,6 +677,7 @@ fn run_bench(args: Args) {
         cx.on_app_quit(|_| async {
             crate::tier::cleanup_probes();
             crate::browser::cleanup_screenshots();
+            crate::store::remove_capture_state();
         })
         .detach();
         bench::run(handle, seed, opts, command, cx);
@@ -798,6 +800,12 @@ fn main() {
                 perf_turn::run();
                 return;
             }
+            // `--sweep-clones`: one clone sweep with no grace, for check scripts'
+            // exit traps (docs/74 §1). Prints what it did.
+            Some("--sweep-clones") => {
+                println!("{:?}", browser::clone_sweep::sweep_own(std::time::Duration::ZERO));
+                return;
+            }
             // `--import-dry-run`: the P7 scan and plan over the owner's
             // homes (or `BAAZ_IMPORT_OWNER_HOME`), read-only — nothing is
             // written, not even Baaz's state dir. One JSON object on stdout.
@@ -832,7 +840,11 @@ fn main() {
         // (`~/Downloads` until the person chooses one).
         aui_cef::CefBackend::set_download_dir(crate::layout::browser_download_dir(&crate::layout::read()));
         crate::log::boot_mark("cef-loaded");
+        // Clones left by runs that died (docs/74 §1). Only a bundle that
+        // carries Chromium can make one.
+        crate::browser::clone_sweep::sweep_in_background();
     }
+    crate::store::sweep_dead_capture_states();
     // The provider status service (Y4): read the cache, log the statuses,
     // and probe every backend in the background — never gating the window.
     crate::provider_status::boot();
@@ -933,6 +945,7 @@ fn main() {
                 .detach();
             }
         }
+        crate::quit_signals::watch(cx);
         cx.on_app_quit(|cx| {
             // B7fix2: a quit that bypasses the menu's `QuitApp` (the Dock,
             // a signal-driven quit) still lands pending pane state first.
@@ -978,6 +991,7 @@ fn main() {
             async {
                 crate::tier::cleanup_probes();
                 crate::browser::cleanup_screenshots();
+                crate::store::remove_capture_state();
             }
         })
         .detach();
