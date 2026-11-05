@@ -36,7 +36,6 @@ use gpui::{
 use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
-use crate::browser::StripTab;
 use crate::layout::RightKind;
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
@@ -538,18 +537,12 @@ pub(crate) fn browser_placeholder_for(pane_open: bool, has_webview: bool) -> Bro
 }
 
 /// What [`render`] needs for the Browser kind: the live page when one
-/// exists, the shown owner's strip rows, and the window tab hover runs on.
+/// exists, and the window the pane's screens animate on.
 pub(crate) struct BrowserPane<'a> {
     /// The shown tab's live page; `None` draws the loading/closed states.
     pub state: Option<&'a Entity<aui_webview::WebviewState>>,
-    /// The shown owner's tabs; empty draws no strip.
-    pub tabs: &'a [StripTab],
-    /// The window, for tab hover tracking.
+    /// The window the pane's screens request frames on.
     pub window: &'a mut Window,
-    /// Whether the strip offers the "Browse" button (B2a-H4): true when
-    /// the shown owner is a session, whose active tab carries into Browse
-    /// full-width. Person tabs already live in Browse, so they get none.
-    pub carry: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -569,9 +562,6 @@ pub(crate) fn render(
         RightKind::Browser => match browser_placeholder_for(pane_open, browser.state.is_some()) {
             BrowserPlaceholder::Page => browser_pane(
                 browser.state.expect("has_webview means Some"),
-                browser.tabs,
-                browser.carry,
-                browser.window,
                 cx,
             ),
             BrowserPlaceholder::Loading => loading_state(
@@ -2219,13 +2209,9 @@ fn file_preview_pane(
 /// Console toasts.
 fn browser_pane(
     state: &Entity<aui_webview::WebviewState>,
-    tabs: &[StripTab],
-    carry: bool,
-    window: &mut Window,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
     let harness = cx.weak_entity();
-    let strip_harness = harness.clone();
     let pane =
         aui_webview::webview_pane("right-browser", state).on_intent(move |intent, window, cx| {
             if let Some(harness) = harness.upgrade() {
@@ -2240,7 +2226,6 @@ fn browser_pane(
         .aria_label("Browser")
         .size_full();
     // D6: the session has one page — no tab strip in the pane.
-    let _ = (tabs, carry, &strip_harness, window);
     column.child(pane).into_any_element()
 }
 

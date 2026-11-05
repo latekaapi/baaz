@@ -211,7 +211,6 @@ impl Harness {
         }
         self.schedule_tabs_write(cx);
         self.browse_session_tab = None;
-        self.browser.centre_override = None;
         match self.browser.tabs.active_of(&Owner::Person, Some(&id)) {
             Some(tab) => {
                 self.ensure_tab_page(HOME_KEY, tab, window, cx);

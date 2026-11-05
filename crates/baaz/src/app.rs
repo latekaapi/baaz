@@ -496,13 +496,10 @@ pub fn set_menus(cx: &mut App) {
                                 .clone()
                                 .downcast::<Harness>()
                                 .map(|harness| {
-                                    harness.update(cx, |this, cx| {
+                                    harness.update(cx, |this, _| {
                                         this.flush_right_save();
                                         this.flush_tabs_save();
-                                        // B2a-H2b: quitting in Browse keeps
-                                        // what Browse had live — the memory
-                                        // write rides the same flush.
-                                        this.persist_layout(cx);
+                                        this.persist_layout();
                                     })
                                 })
                                 .unwrap_or(())
@@ -1205,9 +1202,7 @@ pub struct Harness {
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
     /// Which half of the window the person is in (B2a-H2): sessions or
-    /// browse. Persists in `layout.json` ([`layout::Layout::mode`]); what
-    /// each mode remembers — right-pane state, scroll, selection —
-    /// persists beside it ([`layout::Layout::mode_memory`]).
+    /// browse. Persists in `layout.json` ([`layout::Layout::mode`]).
     pub(crate) mode: layout::Mode,
     /// Whether the sidebar owes its cached pane animation frames after a
     /// mode switch, so the slide runs to rest instead of freezing on its
@@ -1217,11 +1212,6 @@ pub struct Harness {
     /// When the last mode switch happened: the sidebar's new rows fade in
     /// over 80 ms from it (FF's swap arrival), see `render_sidebar`.
     pub(crate) mode_fade_since: Option<std::time::Instant>,
-    /// The From-sessions groups standing open in the Browse sidebar, by
-    /// session id: collapsed by default, flipped by the group header.
-    /// Part of [`SidebarKey`](crate::sidebar_view::SidebarKey), so an
-    /// expand repaints the cached pane.
-    pub(crate) browse_from_expanded: std::collections::HashSet<String>,
     /// The tab row a drag hovers over: the 2 px accent line's slot while
     /// a tab drag is in flight. Transient (cleared on drop), never keyed.
     pub(crate) browse_drop_target: Option<crate::browser::TabId>,
@@ -1262,9 +1252,11 @@ pub struct Harness {
     /// the row's own prepaint. The popup seats at this rect; cleared with
     /// the menu, refilled on the next pane repaint.
     pub(crate) tab_menu_bounds: Option<(u64, Bounds<Pixels>)>,
-    /// A session-owned tab the Browse centre shows (From sessions): it
-    /// stays owned by its session. Cleared by any person-tab select.
-    /// Part of the sidebar key (and read by the centre every frame).
+    /// A session-owned tab the Browse centre shows: a task-folder row, or
+    /// the session's page carried over from the pane. It stays owned by its
+    /// session and survives a mode switch. Cleared by any person-tab select,
+    /// a new session and a project or space change. Part of the sidebar key
+    /// (and read by the centre every frame).
     pub(crate) browse_session_tab: Option<crate::browser::TabId>,
     /// The Settings Shortcuts section's live rows, re-read when the dialog
     /// opens and after every shortcut edit. The dialog builds from state
@@ -1810,7 +1802,6 @@ impl Harness {
             subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_fade_since: None,
-            browse_from_expanded: std::collections::HashSet::new(),
             browse_drop_target: None,
             browse_drop_at_end: false,
             tab_menu: None,
@@ -1828,20 +1819,11 @@ impl Harness {
             tab_menu_bounds: None,
             browse_session_tab: None,
         };
-        // Booting into Browse restores what Browse remembered for the
-        // right pane (closed on a fresh file) — the live width and the
-        // divider seeding together; booting into Sessions keeps the
-        // stored globals exactly as before.
+        // Booting into Browse stands its right pane closed, like a switch.
         if this.mode == layout::Mode::Browse {
-            let remembered = this.layout.mode_memory.browse.clone();
-            this.layout.right_open = remembered.right_open;
-            this.layout.right_width = remembered.right_width;
-            this.layout.right_kind = remembered.right_kind;
-            this.right_resize.width = layout::right_width(&this.layout);
+            this.layout.enter_browse();
         }
-        // Boot onto the remembered sidebar (one state for both modes; the
-        // boot mode's slot is as good as the other's, see `persist_layout`).
-        this.sidebar_open = this.layout.mode_memory.get(this.mode).sidebar_open;
+        this.sidebar_open = this.layout.sidebar_open;
         // The CEF claim check's live-mode flag starts where the window
         // starts; every switch after this rides `set_mode`.
         crate::keymap::set_claim_live_browse(this.mode == layout::Mode::Browse);
@@ -1871,7 +1853,7 @@ impl Harness {
             cx.defer(move |cx| {
                 harness.update(cx, |harness, cx| {
                     harness.layout.terminal_open = true;
-                    harness.persist_layout(cx);
+                    harness.persist_layout();
                     cx.notify();
                 });
             });
@@ -2529,15 +2511,14 @@ impl Harness {
     }
 
     /// The sidebar's collapse toggle (⌘B): the rail is the column at zero
-    /// width. Remembered per mode (B2a-H6): hiding the sidebar in Browse
-    /// never touches Sessions' own sidebar, and back again.
+    /// width. One state for both modes.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         // A Browse menu hangs off a sidebar row or the page controls: with
         // the sidebar gone it pointed at nothing (seen live 2026-10-12, the
         // page menu stayed where the sidebar had been).
         self.close_browse_menu(cx);
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -2555,7 +2536,7 @@ impl Harness {
             self.ensure_terminal_tab(cx);
             window.focus(&self.terminal_focus, cx);
         }
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -2594,7 +2575,7 @@ impl Harness {
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         self.arm_browser_url_focus();
-        self.persist_layout(cx);
+        self.persist_layout();
         // B7: the webview is prepared here, on the toggle — never as a
         // render side effect — so the opening animation's first frame
         // does not pay the construction cost.
@@ -2629,10 +2610,10 @@ impl Harness {
     /// Set the window's mode, idempotently: asking for the current mode
     /// sets nothing (in Browse it still ensures the blank tab, so
     /// `mode:browse` twice never strands an empty centre) and never
-    /// toggles. Leaving saves the mode's right-pane state, scroll and
-    /// selection into `layout.json`; entering restores what it
-    /// remembered. The right pane is closed in Browse by default: a fresh
-    /// Browse slot remembers closed, so the first switch closes it.
+    /// toggles. The open session, the sidebar's scroll and the shown tab
+    /// are single states that a switch leaves alone. Browse's right pane
+    /// stands closed: the Sessions pane waits aside and comes back
+    /// ([`layout::Layout::enter_browse`]).
     pub(crate) fn set_mode(&mut self, mode: layout::Mode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == mode {
             if mode == layout::Mode::Browse {
@@ -2640,158 +2621,40 @@ impl Harness {
             }
             return;
         }
-        let leaving = self.mode_state(cx);
-        let entering = self.layout.mode_memory.switch(self.mode, leaving, mode);
         self.mode = mode;
-        // One sidebar for both modes (owner, 2026-10-12; reverses B2a-H6's
-        // per-mode memory): the switch lives in the chrome row, so a mode
-        // change must never open or close the column on its own — a closed
-        // sidebar stays closed across the switch, an open one stays open.
-        // `sidebar_open` is deliberately not read from `entering`.
-        // A mode switch unparks any carried session tab, leaves the address
-        // field (its dropdown belongs to Browse's centre) and resets the
-        // page-holds edge, so Browse never reopens onto stale centre state.
+        // One sidebar for both modes (owner, 2026-10-12): the switch lives
+        // in the chrome row, so a mode change never opens or closes the
+        // column on its own.
+        // The switch leaves the address field (its dropdown belongs to
+        // Browse's centre) and resets the page-holds edge.
         // `leave_browse_address` skips its refocus off Browse.
-        self.browser.centre_override = None;
         self.browse_last_holds = false;
         self.leave_browse_address(window, cx);
         // The CEF claim check filters `BaazBrowse` rows by this flag, set
         // here (never read from gpui state inside the router callback).
         crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
         self.layout.mode = mode;
-        self.layout.right_open = entering.right_open;
-        self.layout.right_width = entering.right_width;
-        self.layout.right_kind = entering.right_kind;
-        // A plain write: `switch` already put the leaving state in its slot
-        // and the entering slot is what we restore from. `persist_layout`
-        // here would re-read live state that still belongs to the mode we
-        // just left and file it under the one we entered.
-        layout::write(&self.layout);
+        match mode {
+            layout::Mode::Browse => self.layout.enter_browse(),
+            layout::Mode::Sessions => self.layout.leave_browse(),
+        }
+        self.persist_layout();
         // The sidebar's new rows fade in (the cached pane is re-armed from
         // `on_frame` while the fade runs).
         self.mode_fade_since = Some(cx.background_executor().now());
         if mode == layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
-            self.restore_browse_tab(&entering, cx);
-        } else {
-            self.restore_sessions_selection(&entering, window, cx);
-        }
-        // The entering mode's scroll offset goes back on. The sessions
-        // list owns the scroll state, so a Browse offset simply waits
-        // there until Sessions returns; the Browse list (B2a-H3's) is a
-        // plain column with nothing to restore yet.
-        if let Some(scroll) = entering.scroll {
-            self.sidebar_list.scroll_to(gpui::ListOffset {
-                item_ix: scroll.item,
-                offset_in_item: gpui::px(scroll.offset),
-            });
         }
         self.prewarm_browser_if_needed(cx);
         self.refresh_right_now(cx);
         cx.notify();
     }
 
-    /// Persist `layout.json` with the current mode's memory fresh
-    /// (B2a-H2b): every write carries what the live mode remembers now —
-    /// right-pane state, scroll, selection — so quitting (or crashing) in
-    /// Browse restores what was live, not what entering remembered. Every
-    /// `layout::write` call below goes through here; the write itself
+    /// Persist `layout.json` with the live sidebar state. The write itself
     /// stays a no-op under `BAAZ_DETERMINISTIC=1`.
-    pub(crate) fn persist_layout(&mut self, cx: &gpui::App) {
-        let live = self.mode_state(cx);
-        let sidebar_open = live.sidebar_open;
-        match self.mode {
-            layout::Mode::Sessions => self.layout.mode_memory.sessions = live,
-            layout::Mode::Browse => self.layout.mode_memory.browse = live,
-        }
-        // The sidebar is one state for both modes: both slots carry it, so
-        // a relaunch into either mode boots onto the same column.
-        self.layout.mode_memory.sessions.sidebar_open = sidebar_open;
-        self.layout.mode_memory.browse.sidebar_open = sidebar_open;
+    pub(crate) fn persist_layout(&mut self) {
+        self.layout.sidebar_open = self.sidebar_open;
         layout::write(&self.layout);
-    }
-
-    /// The live values a mode switch saves: the right pane, the sidebar
-    /// scroll and the selection — the open session, or the person's tab
-    /// in the current project.
-    fn mode_state(&self, cx: &gpui::App) -> layout::ModeState {
-        let top = self.sidebar_list_top();
-        let selected_session = self
-            .pending_id
-            .clone()
-            // The raw id: this runs on every layout write, and resolving the
-            // chain head clones the whole chain index — the restore path
-            // resolves the head instead.
-            .or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        let space = self.browse_space();
-        let selected_tab = self
-            .browser
-            .tabs_loaded
-            .then(|| self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref()))
-            .flatten()
-            .map(|id| id.0);
-        layout::ModeState {
-            sidebar_open: self.sidebar_open,
-            right_open: self.layout.right_open,
-            right_width: self.layout.right_width,
-            right_kind: self.layout.right_kind,
-            scroll: Some(layout::ScrollPos {
-                item: top.item_ix,
-                offset: f32::from(top.offset_in_item),
-            }),
-            selected_session,
-            selected_tab,
-        }
-    }
-
-    /// Reopen the session Sessions mode remembered, when it still has a
-    /// row in the current project and is not already open: the same
-    /// quiet open a sidebar click does, with no reveal and no list
-    /// steering. A remembered id from another project selects nothing —
-    /// restoring it would drag its project back under the window.
-    fn restore_sessions_selection(
-        &mut self,
-        entering: &layout::ModeState,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(id) = entering.selected_session.clone() else {
-            return;
-        };
-        let id = self.chain_head(&id);
-        let current = self
-            .pending_id
-            .clone()
-            .or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        if current.as_deref() == Some(id.as_str()) {
-            return;
-        }
-        let in_project = self
-            .sessions
-            .iter()
-            .any(|entry| entry.id == id && entry.project == self.current_project);
-        if in_project {
-            self.resume_quiet(id, window, cx);
-        }
-    }
-
-    /// Reselect the person tab Browse mode remembered, when it still
-    /// exists in the current project: the model activates and the
-    /// centre builds its page on the next frame. Anything else — an
-    /// unknown or session-owned id, or a tab from another project —
-    /// leaves the project's own active person tab alone (the entering
-    /// ensure just guaranteed there is one).
-    fn restore_browse_tab(&mut self, entering: &layout::ModeState, cx: &mut Context<Self>) {
-        let Some(tab) = entering.selected_tab else {
-            return;
-        };
-        let id = crate::browser::TabId(tab);
-        let ours = self.browser.tabs.get(id).is_some_and(|tab| {
-            tab.owner == crate::browser::Owner::Person && tab.space == self.browse_space()
-        });
-        if ours && self.browser.tabs.activate(id) {
-            self.schedule_tabs_write(cx);
-        }
     }
 
     /// Open the right pane on `kind`: records the kind, forces the pane
@@ -2819,7 +2682,7 @@ impl Harness {
         }
         crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
         self.arm_browser_url_focus();
-        self.persist_layout(cx);
+        self.persist_layout();
         // B7: prepare the webview on the pick, before the pane animates.
         self.prewarm_browser_if_needed(cx);
         // B7fix2: the real webview rides a deferred task with the window.
@@ -2854,7 +2717,7 @@ impl Harness {
         self.layout.right_kind = Some(kind);
         self.layout.right_open = true;
         crate::baaz_log!("open right pane: {kind:?} open={}", self.layout.right_open);
-        self.persist_layout(cx);
+        self.persist_layout();
         // B7: prepare the webview on the pick, before the pane animates.
         self.prewarm_browser_if_needed(cx);
         // B7fix2: the real webview rides a deferred task with the window.
@@ -3421,7 +3284,7 @@ impl Harness {
             }
         }
         window.focus(&self.terminal_focus, cx);
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -3449,7 +3312,7 @@ impl Harness {
             }
         }
         window.focus(&self.terminal_focus, cx);
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -3620,7 +3483,7 @@ impl Harness {
             let id = host.open_fake(&root, title, TabOwner::User, origin, script, &nonce, cx);
             host.drain(&id, cx);
         });
-        self.persist_layout(cx);
+        self.persist_layout();
         window.focus(&self.terminal_focus, cx);
         cx.notify();
     }
@@ -3745,12 +3608,12 @@ impl Harness {
                     let max = terminal::clamp_dock_height(f32::MAX, this.centre_height(window));
                     this.layout.terminal_height =
                         if maximised { Some(terminal::DOCK_DEFAULT_HEIGHT) } else { Some(max) };
-                    this.persist_layout(cx);
+                    this.persist_layout();
                     cx.notify();
                 }
                 TerminalDockAction::Close => {
                     this.layout.terminal_open = false;
-                    this.persist_layout(cx);
+                    this.persist_layout();
                     cx.notify();
                 }
                 TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
@@ -3775,7 +3638,7 @@ impl Harness {
             end_weak
                 .update(cx, |this: &mut Harness, cx| {
                     this.terminal_drag = None;
-                    this.persist_layout(cx);
+                    this.persist_layout();
                     cx.notify();
                 })
                 .ok();
@@ -4228,7 +4091,7 @@ impl Harness {
             let line = download_line(download, elapsed);
             let credit = match owner {
                 crate::browser::Owner::Session(session) => {
-                    download_owner_label(owner, Some(&self.browse_chip_session_name(session, cx)))
+                    download_owner_label(owner, Some(&self.session_display_name(session, cx)))
                 }
                 crate::browser::Owner::Person => None,
             };
@@ -4370,7 +4233,7 @@ impl Harness {
     }
 
     /// The ⋯ page-actions menu (B2a-H5): New tab, Find in page, the Zoom
-    /// row, Move tab to project ▸ (an inline project list), Open in
+    /// row, Open in
     /// Safari, Copy link, Developer tools (hidden when unsupported),
     /// Browser settings — and Annotate and Screenshot, which Browse keeps
     /// reachable here since it hides the library's nav row. No
@@ -4453,66 +4316,6 @@ impl Harness {
                 .child(zoom_reset)
                 .child(zoom_in),
         ));
-        let shown = self.browse_centre_shown();
-        // Moving tabs between projects is a person-tab operation: session
-        // tabs stay with their sessions, so the mover hides for them.
-        let shown_is_person = shown.is_some_and(|id| {
-            self.browser.tabs.get(id).is_some_and(|tab| tab.owner == crate::browser::Owner::Person)
-        });
-        let shown_space = shown
-            .and_then(|id| self.browser.tabs.get(id))
-            .and_then(|tab| tab.space.clone());
-        let projects: Vec<(String, String)> =
-            self.projects.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect();
-        let space = self.browse_space();
-        let movers: Vec<(String, String)> =
-            projects.into_iter().filter(|(pid, _)| Some(pid) != space.as_ref()).collect();
-        if shown_is_person && shown.is_some() && (!movers.is_empty() || shown_space.is_some()) {
-            let move_row = self.browse_menu_row(
-                "browse-more-move",
-                "Move tab to project ▸",
-                None,
-                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.browser.more_move_open = !this.browser.more_move_open;
-                    cx.notify();
-                }),
-                cx,
-            );
-            menu = menu.child(move_row);
-            if self.browser.more_move_open {
-                if let Some(shown) = shown {
-                    for (ix, (pid, name)) in movers.into_iter().enumerate() {
-                        let target = Some(pid.clone());
-                        let label = format!("Move to {name}");
-                        let row = self.browse_menu_row(
-                            ("browse-more-move-to", ix),
-                            &label,
-                            None,
-                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                                this.move_browse_tab_to_project(shown, target.clone(), window, cx);
-                                this.dismiss_browse_popovers(cx);
-                            }),
-                            cx,
-                        );
-                        menu = menu.child(row);
-                    }
-                    // A tab filed under a project can leave it again.
-                    if shown_space.is_some() {
-                        let row = self.browse_menu_row(
-                            "browse-more-move-none",
-                            "No project",
-                            None,
-                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                                this.move_browse_tab_to_project(shown, None, window, cx);
-                                this.dismiss_browse_popovers(cx);
-                            }),
-                            cx,
-                        );
-                        menu = menu.child(row);
-                    }
-                }
-            }
-        }
         // "Open in Safari" is an http(s) operation: any other scheme
         // hides the row instead of opening nothing.
         if self.browse_safari_url(cx).is_some() {
@@ -6611,10 +6414,6 @@ impl Render for Harness {
             // so the centre never resizes mid-switch. `right_open` still
             // rides the live layout into the shell, which is what holds
             // the width steady.
-            // B2a-H4: the pane's "Browse" button shows for session owners —
-            // person tabs already live in Browse, so they get none.
-            let carry =
-                matches!(self.shown_tab_owner(cx), crate::browser::Owner::Session(_));
             // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
             // three screens on a strip — Changes · Files · Page — each with
             // its own row; a toggle slides the strip (240 ms ease-out), a
@@ -6672,7 +6471,7 @@ impl Render for Harness {
                         &self.right_cache,
                         right_project.clone(),
                         &edits,
-                        crate::right::BrowserPane { state: page.as_ref(), tabs: &[], window: &mut *window, carry: false },
+                        crate::right::BrowserPane { state: page.as_ref(), window: &mut *window },
                         right_open,
                         self.right_resize.width,
                         agent,
@@ -6692,12 +6491,7 @@ impl Render for Harness {
                     &self.right_cache,
                     right_project,
                     &session_edits,
-                    crate::right::BrowserPane {
-                        state: browser.as_ref(),
-                        tabs: &self.browser_strip(cx),
-                        window: &mut *window,
-                        carry,
-                    },
+                    crate::right::BrowserPane { state: browser.as_ref(), window: &mut *window },
                     right_open,
                     self.right_resize.width,
                     "Muse",
@@ -6962,27 +6756,13 @@ impl Render for Harness {
         let overflow = self.render_overflow_menu(cx);
         let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
-        // The view-options and account menus draw inside the sidebar column
-        // (and the Sort / Group submenu beside it, over the centre), never
-        // over the right pane or the Browse page: they leave the page live.
-        let view_options_open = false;
         let project_menu = self.render_project_menu(cx);
         let files_menu = self.render_files_menu(cx);
-        // The Browse tab menu went with the old tab rows (D3); the v2 rows
-        // carry no context menu yet.
-        let tab_menu: Option<AnyElement> = None;
         // Z7a, the native-overlay rule: persist real navigations, resolve
         // pending screenshot attaches, and hide every native webview this
         // frame covers (the page is composited above gpui, so gpui cannot
         // draw over it — the host takes the view out instead).
-        self.sync_browser(
-            overflow.is_some(),
-            view_options_open,
-            project_menu.is_some(),
-            tab_menu.is_some(),
-            window,
-            cx,
-        );
+        self.sync_browser(window, cx);
         // A cover waits for the covered page's picture: until it stands in,
         // the live page is still above gpui, so the cover would show only
         // where it misses the page (the scrim dimmed the sidebar first).
@@ -7337,7 +7117,6 @@ impl Render for Harness {
                 .children(back_history)
                 .children(project_menu)
                 .children(files_menu)
-                .children(tab_menu)
                 // F2: the feedback capture layer paints above the palette,
                 // dialog, settings and menus, so the layer truly covers
                 // them; only toasts stay above the shell. R2b's slot copy
@@ -8545,18 +8324,57 @@ mod tests {
         assert!(open!(), "⌘B opens it in Browse");
         set!(Mode::Sessions);
         assert!(open!(), "switching to Sessions keeps an open sidebar open");
-        // Both slots agree with the live state after a toggle.
+        // The stored state follows the live one after a toggle.
         toggle!();
+        vc.update(|_, cx| assert!(!baaz.read(cx).layout.sidebar_open));
+        restore_state(state);
+    }
+
+    /// A round trip through Browse keeps the Sessions pane and the tab the
+    /// centre shows, and Browse's own pane stands closed. A person tab opened
+    /// in Browse takes the centre over a held session tab.
+    #[gpui::test]
+    fn a_mode_round_trip_keeps_the_pane_and_the_shown_tab(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{Mode, RightKind};
+        let state = hermetic_state("mode-round-trip");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)));
+        let carried = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.mode, Mode::Browse, "the fixture lands in Browse");
+            assert!(!h.layout.right_open, "Browse's pane stands closed");
+            let shown = h.browse_centre_shown().expect("the carried tab shows");
+            assert_eq!(h.browse_session_tab, Some(shown));
+            shown
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Sessions, window, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(!h.layout.mode_memory.sessions.sidebar_open);
-            assert!(!h.layout.mode_memory.browse.sidebar_open);
+            assert!(h.layout.right_open, "the Sessions pane comes back open");
+            assert_eq!(h.layout.right_kind, Some(RightKind::Files), "on its kind");
+            assert_eq!(h.browse_centre_shown(), None, "Sessions shows no centre page");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Browse, window, cx)));
+        vc.update(|_, cx| {
+            assert_eq!(baaz.read(cx).browse_centre_shown(), Some(carried), "the shown tab survives the trip");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.browse_session_tab, None);
+            let shown = h.browse_centre_shown().expect("the new tab shows");
+            assert_ne!(shown, carried, "the person's new tab takes the centre");
         });
         restore_state(state);
     }
 
-    /// B2a-H6: `settings-set:` flips the tabs layout (and the search
-    /// engine) through the same path the Settings rows use — and an
+    /// B2a-H6: `settings-set:` flips the search engine through the same
+    /// path the Settings rows use — and an
     /// unknown key or value changes nothing.
     #[gpui::test]
     fn settings_set_step_flips_search_engine(cx: &mut gpui::TestAppContext) {
@@ -9580,12 +9398,7 @@ mod tests {
                             &harness.right_cache,
                             project.clone(),
                             &[],
-                            crate::right::BrowserPane {
-                                state: None,
-                                tabs: &[],
-                                window: &mut *window,
-                                carry: false,
-                            },
+                            crate::right::BrowserPane { state: None, window: &mut *window },
                             true,
                             400.0,
                             "Muse",

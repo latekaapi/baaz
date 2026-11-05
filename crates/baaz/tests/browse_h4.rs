@@ -5,7 +5,7 @@
 //! states, Enter-to-URL-or-search, omnibox ranking, pick-up rows,
 //! back/forward stacks, the omnibox covering rule — are pinned by unit
 //! tests in `browser/toolbar.rs` and `browser/mod.rs`; this file pins the
-//! hand-over the gate cannot run: the ↩ chip round trip moves the same
+//! hand-over the gate cannot run: carrying a session tab moves the same
 //! tab (no reload, the same `WebviewState` entity renders in the centre),
 //! ⌘T in Browse opens a blank tab with the field focused, the five probe
 //! entries and their steps, and the toolbar's roles and labels.
@@ -143,7 +143,10 @@ fn omnibox_covers_only_while_rows_render() {
     assert!(open.contains("browse_suggestions"), "open means rows actually rank");
     let app = source("app.rs");
     let switch = fn_body(&app, "set_mode");
-    assert!(switch.contains("centre_override = None"), "a mode switch unparks the carry");
+    assert!(
+        !switch.contains("browse_session_tab = None"),
+        "a mode switch keeps the session tab the centre holds"
+    );
     assert!(switch.contains("leave_browse_address(window, cx)"), "a mode switch leaves the field");
     assert!(switch.contains("browse_last_holds = false"), "a mode switch resets the holds edge");
 }
@@ -246,30 +249,30 @@ fn ask_draft_lands_on_arrival_never_sent() {
     assert!(activate.contains("view.set_draft(next, window, cx)"), "the draft lands, never sent");
 }
 
-/// The carried tab unparks everywhere it must: sidebar and new-tab
-/// selection, pick-up and omnibox rows, project switch, and every mode
-/// switch. An omnibox session-tab row opens its session (updating the
-/// sidebar selection there) instead of carrying.
+/// The held session tab clears everywhere it must: sidebar and new-tab
+/// selection, pick-up and omnibox rows, a person tab opened from outside,
+/// and a project switch. An omnibox session-tab row opens its session
+/// (updating the sidebar selection there) instead of showing the tab.
 #[test]
-fn centre_override_clears_everywhere() {
+fn held_session_tab_clears_everywhere() {
     let browser = source("browser/mod.rs");
-    for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab"] {
+    for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab", "step_tab_new"] {
         assert!(
-            fn_body(&browser, name).contains("centre_override = None"),
-            "{name} unparks the carry"
+            fn_body(&browser, name).contains("browse_session_tab = None"),
+            "{name} clears the held tab"
         );
     }
     let row = fn_body(&browser, "activate_omnibox_target");
-    assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and unparks)");
+    assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and clears)");
     assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
     let lifecycle = source("app/lifecycle.rs");
     assert!(
-        fn_body(&lifecycle, "new_session_in").contains("centre_override = None"),
-        "a new session unparks even without a mode switch"
+        fn_body(&lifecycle, "new_session_in").contains("browse_session_tab = None"),
+        "a new session clears it even without a mode switch"
     );
     let projects = source("project_menu.rs");
     assert!(
         projects.contains("note_project_changed"),
-        "project adoptions unpark through the shared hook"
+        "project adoptions clear it through the shared hook"
     );
 }

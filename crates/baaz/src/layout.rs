@@ -195,113 +195,16 @@ impl<'de> Deserialize<'de> for Mode {
     }
 }
 
-/// A sidebar scroll position in persistable form: the list item and the
-/// pixels into it, the same pair [`gpui::ListOffset`] carries. Pure
-/// data, so each mode's offset survives a restart in `layout.json`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ScrollPos {
-    /// The top item's index.
+/// The Sessions right pane, set aside while Browse has the window: Browse
+/// stands with its own pane closed, and this is what Sessions gets back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsPane {
+    /// Whether the pane stood open.
     #[serde(default)]
-    pub item: usize,
-    /// The pixels into the top item.
-    #[serde(default)]
-    pub offset: f32,
-}
-
-/// What one mode remembers while the person is in the other (B2a-H2):
-/// the right pane's open state, kind and width, the sidebar's scroll
-/// offset, and which session or tab was selected. Saved on the way out,
-/// restored on the way back in — see [`ModeSlots::switch`].
-///
-/// B2a-H6: the sidebar's open state rides along too, so hiding the
-/// sidebar in Browse never touches Sessions' own sidebar.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModeState {
-    /// Whether the sidebar stood open in this mode. Open by default, so
-    /// a file written before this feature reads as today's behaviour.
-    #[serde(rename = "sidebarOpen", default = "default_true")]
-    pub sidebar_open: bool,
-    /// Whether the right pane stood open in this mode.
-    #[serde(rename = "rightOpen", default)]
-    pub right_open: bool,
-    /// The settled right-pane width in window pixels, if ever set here.
-    #[serde(rename = "rightWidth", default, skip_serializing_if = "Option::is_none")]
-    pub right_width: Option<f32>,
-    /// Which right-pane kind was last shown here, if ever opened here.
-    #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
-    pub right_kind: Option<RightKind>,
-    /// The sidebar's scroll offset while in this mode, if ever scrolled.
+    pub open: bool,
+    /// Which kind it showed, if it was ever opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scroll: Option<ScrollPos>,
-    /// The selected session while in Sessions mode, if any was open.
-    #[serde(rename = "selectedSession", default, skip_serializing_if = "Option::is_none")]
-    pub selected_session: Option<String>,
-    /// The selected person-tab id while in Browse mode, if any.
-    #[serde(rename = "selectedTab", default, skip_serializing_if = "Option::is_none")]
-    pub selected_tab: Option<u64>,
-}
-
-impl Default for ModeState {
-    /// Open sidebar, everything else shut: an untouched mode reads — and
-    /// stays out of `layout.json` — exactly like before this feature.
-    fn default() -> Self {
-        Self {
-            sidebar_open: true,
-            right_open: false,
-            right_width: None,
-            right_kind: None,
-            scroll: None,
-            selected_session: None,
-            selected_tab: None,
-        }
-    }
-}
-
-impl ModeState {
-    /// Whether nothing was ever remembered here: what keeps an untouched
-    /// mode out of `layout.json`, so old files read unchanged.
-    pub fn is_default(&self) -> bool {
-        *self == ModeState::default()
-    }
-}
-
-/// Both modes' remembered states, as one `layout.json` object.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ModeSlots {
-    /// What Sessions mode remembers.
-    #[serde(default, skip_serializing_if = "ModeState::is_default")]
-    pub sessions: ModeState,
-    /// What Browse mode remembers.
-    #[serde(default, skip_serializing_if = "ModeState::is_default")]
-    pub browse: ModeState,
-}
-
-impl ModeSlots {
-    /// The remembered state for `mode`.
-    pub fn get(&self, mode: Mode) -> &ModeState {
-        match mode {
-            Mode::Sessions => &self.sessions,
-            Mode::Browse => &self.browse,
-        }
-    }
-
-    /// Leave `from` carrying `leaving` and answer with what `to`
-    /// remembered: the one pure step behind every mode switch, so the
-    /// leaving mode's state is saved before the entering mode's is
-    /// restored, never the other way round.
-    pub fn switch(&mut self, from: Mode, leaving: ModeState, to: Mode) -> ModeState {
-        match from {
-            Mode::Sessions => self.sessions = leaving,
-            Mode::Browse => self.browse = leaving,
-        }
-        self.get(to).clone()
-    }
-
-    /// Whether neither mode remembered anything: what keeps the whole
-    /// object out of `layout.json` until the first real switch.
-    pub fn is_default_all(&self) -> bool {
-        self.sessions.is_default() && self.browse.is_default()
-    }
+    pub kind: Option<RightKind>,
 }
 
 /// Whether provider sessions may inherit the owner's own MCP servers
@@ -441,12 +344,15 @@ pub struct Layout {
     /// preference, so captures never depend on the owner's last mode.
     #[serde(rename = "mode", default)]
     pub mode: Mode,
-    /// What each mode remembers while the person is in the other: the
-    /// right pane's open state, kind and width, the sidebar scroll and
-    /// the selection. Untouched modes stay out of the file, so old files
-    /// read unchanged.
-    #[serde(rename = "modeMemory", default, skip_serializing_if = "ModeSlots::is_default_all")]
-    pub mode_memory: ModeSlots,
+    /// Whether the sidebar stands open: one state for both modes. Open by
+    /// default, so a file without the key reads as a fresh window.
+    #[serde(rename = "sidebarOpen", default = "default_true")]
+    pub sidebar_open: bool,
+    /// The Sessions right pane while the window is in Browse; `None` in
+    /// Sessions, where `right_open` and `right_kind` are that pane. Kept in
+    /// the file so a quit in Browse hands it back after the relaunch.
+    #[serde(rename = "sessionsPane", default, skip_serializing_if = "Option::is_none")]
+    pub sessions_pane: Option<SessionsPane>,
     /// The engine an address commit searches with (B2a-H6): what the
     /// Settings → Browser page owns. Missing reads as Google, like the
     /// old toolbar const.
@@ -504,6 +410,29 @@ fn default_search_all() -> bool {
     true
 }
 
+impl Layout {
+    /// Set the Sessions right pane aside for Browse, whose own pane stands
+    /// closed on the default kind. A pane already aside (a relaunch into
+    /// Browse) stays what Sessions gets back.
+    pub fn enter_browse(&mut self) {
+        let pane = SessionsPane { open: self.right_open, kind: self.right_kind };
+        self.sessions_pane.get_or_insert(pane);
+        self.right_open = false;
+        self.right_kind = None;
+    }
+
+    /// Hand Sessions its right pane back. Whatever Browse's pane did goes.
+    pub fn leave_browse(&mut self) {
+        if let Some(pane) = self.sessions_pane.take() {
+            self.right_open = pane.open;
+            self.right_kind = pane.kind;
+        } else {
+            self.right_open = false;
+            self.right_kind = None;
+        }
+    }
+}
+
 impl Default for Layout {
     fn default() -> Self {
         Self {
@@ -529,7 +458,8 @@ impl Default for Layout {
             right_kind: None,
             use_own_mcp: UseOwnMcp::default(),
             mode: Mode::Sessions,
-            mode_memory: ModeSlots::default(),
+            sidebar_open: true,
+            sessions_pane: None,
             search_engine: crate::browser::toolbar::SearchEngine::Google,
             download_dir: None,
             code_wrap: true,
@@ -563,7 +493,7 @@ pub fn read() -> Layout {
 /// Best-effort: a store that cannot be written loses a width, which is a
 /// nuisance, and never a session, which would be a loss. A deterministic
 /// capture writes nothing at all: like [`read`], the owner's file must
-/// never gain a capture's widths, modes or per-mode memory.
+/// never gain a capture's widths or modes.
 pub fn write(layout: &Layout) {
     if crate::clock::deterministic() {
         return;
@@ -706,18 +636,8 @@ mod tests {
             right_kind: Some(RightKind::Changes),
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
             mode: Mode::Browse,
-            mode_memory: ModeSlots {
-                sessions: ModeState {
-                    sidebar_open: true,
-                    right_open: true,
-                    right_width: Some(420.0),
-                    right_kind: Some(RightKind::Changes),
-                    scroll: None,
-                    selected_session: Some("s-1".to_owned()),
-                    selected_tab: None,
-                },
-                browse: ModeState::default(),
-            },
+            sidebar_open: false,
+            sessions_pane: Some(SessionsPane { open: true, kind: Some(RightKind::Files) }),
             search_engine: crate::browser::toolbar::SearchEngine::Kagi,
             download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
             code_wrap: false,
@@ -740,7 +660,8 @@ mod tests {
         assert!(text.contains("\"rightKind\":\"changes\""));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         assert!(text.contains("\"mode\":\"browse\""));
-        assert!(text.contains("\"modeMemory\":{\"sessions\":{\"sidebarOpen\":true,\"rightOpen\":true"));
+        assert!(text.contains("\"sidebarOpen\":false"));
+        assert!(text.contains("\"sessionsPane\":{\"open\":true,\"kind\":\"files\"}"));
         assert!(text.contains("\"searchEngine\":\"kagi\""));
         assert!(text.contains("\"downloadDir\":\"/tmp/baaz-downloads\""));
         let back: Layout = serde_json::from_str(&text).unwrap();
@@ -762,18 +683,15 @@ mod tests {
         assert!(back.use_own_mcp.codex);
         assert!(!back.use_own_mcp.claude_code);
         assert_eq!(back.mode, Mode::Browse);
-        assert!(back.mode_memory.sessions.right_open);
-        assert_eq!(back.mode_memory.sessions.right_width, Some(420.0));
-        assert_eq!(back.mode_memory.sessions.right_kind, Some(RightKind::Changes));
-        assert_eq!(back.mode_memory.sessions.selected_session.as_deref(), Some("s-1"));
-        assert!(back.mode_memory.sessions.sidebar_open);
-        assert!(back.mode_memory.browse.is_default());
+        assert!(!back.sidebar_open);
+        assert_eq!(back.sessions_pane, Some(SessionsPane { open: true, kind: Some(RightKind::Files) }));
         assert_eq!(back.search_engine, crate::browser::toolbar::SearchEngine::Kagi);
         assert_eq!(back.download_dir, Some(PathBuf::from("/tmp/baaz-downloads")));
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.mode, Mode::Sessions);
-        assert!(old.mode_memory.is_default_all());
+        assert!(old.sidebar_open);
+        assert_eq!(old.sessions_pane, None);
         assert_eq!(old.group_by, None);
         assert!(old.expanded_groups.is_empty());
         assert!(old.search_all_projects);
@@ -867,42 +785,66 @@ mod tests {
     }
 
     #[test]
-    fn switching_saves_the_leaving_mode_and_restores_the_entering_one() {
-        let mut slots = ModeSlots::default();
-        let sessions_left = ModeState {
-            sidebar_open: true,
+    fn browse_sets_the_sessions_pane_aside_and_hands_it_back() {
+        let mut layout = Layout {
             right_open: true,
             right_width: Some(420.0),
-            right_kind: Some(RightKind::Files),
-            scroll: Some(ScrollPos { item: 3, offset: 4.0 }),
-            selected_session: Some("s-1".to_owned()),
-            selected_tab: None,
+            right_kind: Some(RightKind::Changes),
+            ..Layout::default()
         };
-        // Into Browse for the first time: the sessions frame is saved,
-        // and Browse restores its default (pane closed, nothing selected).
-        let entering = slots.switch(Mode::Sessions, sessions_left.clone(), Mode::Browse);
-        assert_eq!(entering, ModeState::default());
-        assert_eq!(slots.get(Mode::Sessions), &sessions_left);
-        // Back to Sessions: Browse's frame is saved, Sessions restores
-        // exactly what it left with.
-        let browse_left = ModeState {
-            sidebar_open: false,
-            right_open: false,
-            right_width: None,
-            right_kind: None,
-            scroll: None,
-            selected_session: None,
-            selected_tab: Some(7),
-        };
-        let back = slots.switch(Mode::Browse, browse_left.clone(), Mode::Sessions);
-        assert_eq!(back, sessions_left);
-        assert_eq!(slots.get(Mode::Browse), &browse_left);
-        // Untouched slots stay out of the file; remembered ones persist.
-        assert!(ModeSlots::default().is_default_all());
-        assert!(!slots.is_default_all());
-        let text = serde_json::to_string(&slots).unwrap();
-        let back: ModeSlots = serde_json::from_str(&text).unwrap();
-        assert_eq!(back, slots);
+        layout.enter_browse();
+        assert!(!layout.right_open, "Browse stands with its pane closed");
+        assert_eq!(layout.right_kind, None, "on the default kind");
+        assert_eq!(layout.right_width, Some(420.0), "one width for both modes");
+        // Browse's own pane comes and goes; Sessions never sees it.
+        layout.right_open = true;
+        layout.right_kind = Some(RightKind::Files);
+        let text = serde_json::to_string(&layout).unwrap();
+        layout.leave_browse();
+        assert!(layout.right_open);
+        assert_eq!(layout.right_kind, Some(RightKind::Changes));
+        assert_eq!(layout.sessions_pane, None, "Sessions owns the plain fields again");
+        // A quit in Browse: the relaunch keeps what was set aside.
+        let mut relaunched: Layout = serde_json::from_str(&text).unwrap();
+        relaunched.enter_browse();
+        assert!(!relaunched.right_open);
+        relaunched.leave_browse();
+        assert!(relaunched.right_open);
+        assert_eq!(relaunched.right_kind, Some(RightKind::Changes));
+    }
+
+    /// Files written while each mode kept its own layout still load, and
+    /// the next write leaves those keys behind. Their per-mode values are
+    /// not read: the sidebar reads open, the plain fields stand.
+    #[test]
+    fn a_file_with_per_mode_keys_still_loads() {
+        let text = r#"{
+            "sidebar_width": 300.0,
+            "rightOpen": true,
+            "mode": "browse",
+            "modeMemory": {
+                "sessions": {
+                    "sidebarOpen": false,
+                    "rightOpen": true,
+                    "rightWidth": 420.0,
+                    "rightKind": "changes",
+                    "scroll": {"item": 3, "offset": 4.0},
+                    "selectedSession": "s-1"
+                },
+                "browse": {"sidebarOpen": false, "selectedTab": 7}
+            },
+            "sessions": {"rightOpen": true},
+            "browse": {"selectedTab": 7}
+        }"#;
+        let layout: Layout = serde_json::from_str(text).unwrap();
+        assert_eq!(layout.sidebar_width, Some(300.0), "the rest of the file survives");
+        assert_eq!(layout.mode, Mode::Browse);
+        assert!(layout.right_open);
+        assert!(layout.sidebar_open);
+        let written = serde_json::to_string(&layout).unwrap();
+        for key in ["modeMemory", "selectedSession", "selectedTab"] {
+            assert!(!written.contains(key), "{key} stays out of the next write");
+        }
     }
 
     #[test]
@@ -971,31 +913,18 @@ mod tests {
         assert_eq!(sidebar_width(&with_width(300.0)), 300.0);
     }
 
-    /// B2a-H6: the sidebar's open state rides per mode — open by
-    /// default, so a file from before this feature reads as today's
-    /// behaviour — surviving a switch each way.
+    /// The sidebar's one open state: open by default, and a closed one
+    /// survives the round trip.
     #[test]
-    fn sidebar_open_defaults_open_and_rides_each_mode() {
-        assert!(ModeState::default().sidebar_open);
-        assert!(ModeState::default().is_default());
-        let old: ModeState = serde_json::from_str("{}").unwrap();
-        assert!(old.sidebar_open, "a file from before H6 reads open");
-        let hidden: ModeState = serde_json::from_str("{\"sidebarOpen\":false}").unwrap();
-        assert!(!hidden.sidebar_open);
-        assert!(!hidden.is_default(), "hidden persists instead of reading as untouched");
-        let text = serde_json::to_string(&hidden).unwrap();
-        assert!(text.contains("\"sidebarOpen\":false"));
-        let back: ModeState = serde_json::from_str(&text).unwrap();
-        assert_eq!(back, hidden);
-        // A switch carries each mode's own sidebar both ways.
-        let mut slots = ModeSlots::default();
-        slots.switch(Mode::Sessions, ModeState::default(), Mode::Browse);
-        let browse_hidden = ModeState { sidebar_open: false, ..ModeState::default() };
-        let back = slots.switch(Mode::Browse, browse_hidden.clone(), Mode::Sessions);
-        assert!(back.sidebar_open, "Sessions kept its own open sidebar");
-        assert_eq!(slots.get(Mode::Browse), &browse_hidden);
+    fn sidebar_open_defaults_open_and_persists() {
+        assert!(Layout::default().sidebar_open);
+        let old: Layout = serde_json::from_str("{}").unwrap();
+        assert!(old.sidebar_open, "a file without the key reads open");
+        let closed = Layout { sidebar_open: false, ..Layout::default() };
+        let text = serde_json::to_string(&closed).unwrap();
+        let back: Layout = serde_json::from_str(&text).unwrap();
+        assert!(!back.sidebar_open);
     }
-
 
     /// B2a-H6: downloads land in `~/Downloads` until chosen, and the row
     /// shows `~/…` for home paths.

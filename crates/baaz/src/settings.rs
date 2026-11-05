@@ -650,7 +650,7 @@ impl Harness {
     /// Browser page's rows own it; the toolbar reads it on every commit.
     pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
         self.layout.search_engine = engine;
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -661,7 +661,7 @@ impl Harness {
         #[cfg(feature = "cef")]
         aui_cef::CefBackend::set_download_dir(dir.clone());
         self.layout.download_dir = Some(dir);
-        self.persist_layout(cx);
+        self.persist_layout();
         cx.notify();
     }
 
@@ -720,8 +720,8 @@ impl Harness {
     }
 
     /// `settings-set:<key>=<value>`: the scripted twin of the Settings →
-    /// Browser rows. `browser-tabs=horizontal|vertical` lands instantly;
-    /// anything else records a step failure, never a silent no-op.
+    /// Browser rows. `search-engine=<name>` lands instantly; anything else
+    /// records a step failure, never a silent no-op.
     pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) {
         let (key, value) =
             rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));

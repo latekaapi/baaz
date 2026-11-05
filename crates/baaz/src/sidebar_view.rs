@@ -264,7 +264,7 @@ impl Render for SidebarPane {
     }
 }
 
-/// One From-sessions group as the cached sidebar keys it: the session and
+/// One task folder as the cached sidebar keys it: the session and
 /// its tabs' `(id, session-active)`. Labels never enter the key: a retitle
 /// moves the tabs-model generation (and the visible-rows pointer on a
 /// session rename), which is what the key compares.
@@ -296,7 +296,6 @@ pub(crate) struct SidebarKey {
     tabs_generation: u64,
     browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
     browse_groups: Vec<BrowseGroupPrint>,
-    browse_expanded: Vec<String>,
     browse_session_tab: Option<u64>,
     tab_menu: Option<u64>,
     /// Bumped as favicons land, so the column repaints with them.
@@ -326,7 +325,7 @@ pub(crate) struct SidebarKey {
 }
 
 /// One person tab the Browse sidebar draws, with the live page facts
-/// behind its row state. Shared with the horizontal strip's chips.
+/// behind its row state.
 pub(crate) struct BrowseTabSnap {
     pub(crate) id: crate::browser::TabId,
     pub(crate) title: String,
@@ -338,7 +337,7 @@ pub(crate) struct BrowseTabSnap {
     pub(crate) favicon: Option<String>,
 }
 
-/// One session tab under From sessions, still owned by its session.
+/// One session tab under its task folder, still owned by its session.
 pub(crate) struct BrowseSessionTabSnap {
     favicon: Option<String>,
     id: crate::browser::TabId,
@@ -408,7 +407,7 @@ impl SidebarKey {
             .collect()
     }
 
-    /// The From-sessions groups: one `(session, tabs)` pair per session
+    /// The task folders: one `(session, tabs)` pair per session
     /// in the current project that owns tabs, in first-seen order, each
     /// tab as `(id, session-active)`. A session tab opening or closing
     /// moves the key directly; a retitle moves it through the
@@ -472,8 +471,6 @@ impl SidebarKey {
         } else {
             (Vec::new(), 0, Vec::new(), Vec::new())
         };
-        let mut browse_expanded: Vec<String> = baaz.browse_from_expanded.iter().cloned().collect();
-        browse_expanded.sort();
         let browse_session_tab = baaz.browse_session_tab.map(|id| id.0);
         let tab_menu = baaz.tab_menu.map(|id| id.0);
         let account_menu_open = baaz.overlays.read(cx).is_open(MenuKind::Account);
@@ -490,7 +487,6 @@ impl SidebarKey {
             tabs_generation,
             browse_flags,
             browse_groups,
-            browse_expanded,
             browse_session_tab,
             tab_menu,
             favicons: baaz.browser.favicons.generation,
@@ -2530,14 +2526,6 @@ mod tests {
         });
         let closed = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
         assert!(pinned != closed, "a close re-arms the cached pane");
-        // A From-sessions expand moves the key.
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.browse_from_expanded.insert("s-1".to_owned());
-            })
-        });
-        let expanded = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(closed != expanded, "an expand re-arms the cached pane");
         // The open tab menu is keyed too.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
@@ -2545,7 +2533,7 @@ mod tests {
             })
         });
         let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(expanded != menu, "the tab menu re-arms the cached pane");
+        assert!(closed != menu, "the tab menu re-arms the cached pane");
         b3c_teardown(&dir, guard, old);
     }
 
@@ -2608,7 +2596,7 @@ mod tests {
         b3c_teardown(&dir, guard, old);
     }
 
-    /// B2a-H3b item 6: while a From-sessions tab shows, ⌘W stops showing
+    /// B2a-H3b item 6: while a session tab shows, ⌘W stops showing
     /// it (back to the person's active tab, closing nothing) and the
     /// moves are no-ops (they would act on the hidden person tab).
     /// Owner screenshots 2026-10-11: the page's own row had no selected

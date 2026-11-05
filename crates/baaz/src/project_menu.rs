@@ -127,12 +127,12 @@ impl Harness {
         self.projects.sorted_available().into_iter().cloned().collect()
     }
 
-    /// The current project just changed: unpark any carried Browse tab and
-    /// drop the address field (its tabs, sessions and rows belong to the
-    /// old project). The window-free twin of the `set_mode` clearing, for
-    /// the adoption paths that own no window.
+    /// The current project just changed: drop the session tab the Browse
+    /// centre held and the address field (its tabs, sessions and rows belong
+    /// to the old project). Window-free, for the adoption paths that own no
+    /// window.
     pub(crate) fn note_project_changed(&mut self, cx: &mut Context<Self>) {
-        self.browser.centre_override = None;
+        self.browse_session_tab = None;
         self.drop_browse_address(cx);
         cx.notify();
     }

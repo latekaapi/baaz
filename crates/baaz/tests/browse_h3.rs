@@ -3,9 +3,8 @@
 //! Like `modes_h2.rs`, this suite cannot boot the app (baaz is a
 //! binary), so it pins the wiring in source text: the Browse tab
 //! actions and their root handlers, the `BaazBrowse` context the window
-//! wears in Browse mode, the `tab-pin:`, `tab-menu:` and
-//! `from-sessions:` step verbs with their doc rows, the two probe
-//! entries, and the tab menu's rows (with the later rows absent). Each
+//! wears in Browse mode, the `tab-pin:` and `tab-menu:` step verbs with
+//! their doc rows, the two probe entries, and the tab menu's rows (with the later rows absent). Each
 //! assertion fails on the pre-H3 code.
 
 use std::path::{Path, PathBuf};
@@ -53,13 +52,12 @@ fn browse_tab_actions_are_declared_and_handled() {
     }
 }
 
-/// `tab-pin:`, `tab-menu:` and `from-sessions:` are window verbs and
-/// are documented — the doc test enforces the table, this pins the
+/// `tab-pin:` and `tab-menu:` are window verbs and are documented — the doc test enforces the table, this pins the
 /// registration the captures rely on.
 #[test]
 fn browse_steps_are_window_verbs_and_documented() {
     let steps = source("steps.rs");
-    for verb in ["tab-pin", "tab-menu", "from-sessions"] {
+    for verb in ["tab-pin", "tab-menu"] {
         assert!(
             steps.contains(&format!("verb: \"{verb}\"")),
             "{verb}: is a window verb"
@@ -79,8 +77,8 @@ fn probe_entries_cover_the_browse_sidebar_and_its_menu() {
     assert!(probe.contains("\"browse-sidebar\":"), "uiprobe has a browse-sidebar entry");
     assert!(probe.contains("\"browse-tab-menu\":"), "uiprobe has a browse-tab-menu entry");
     assert!(
-        probe.contains("mode:browse;tab-new:https://example.com/;tab-new:https://rust-lang.org/;tab-pin:2;from-sessions:1"),
-        "browse-sidebar seeds person tabs, a pin and an expanded session group"
+        probe.contains("mode:browse;tab-new:https://example.com/;tab-new:https://rust-lang.org/;tab-pin:2"),
+        "browse-sidebar seeds person tabs, a pin and a task folder"
     );
     assert!(
         probe.contains("tab-menu:2"),

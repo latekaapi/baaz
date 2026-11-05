@@ -4,13 +4,13 @@
 //! [`WebBackend`](aui_webview::WebBackend) and what the pane knows about it.
 //! This module owns the tab registry — one live state per open tab, created
 //! lazily the first time the Browser kind shows that tab. The tab model
-//! itself ([`tabs`]) is pure: tabs belong to a space (a project) and to an
+//! itself ([`tabs`]) is pure: tabs belong to a space and to an
 //! owner (the person, or one session). Switching tabs hides the old tab's
 //! webview; a tab hidden long enough is discarded (its state dropped, its
 //! URL kept) and rebuilt on show.
 //!
 //! `browser_key` lookups mean "the active tab of the active session (or the
-//! person's active tab in the current project when no session is open)".
+//! person's active tab in the current space when no session is open)".
 //!
 //! Backend: [`WryBackend`](aui_webview::WryBackend) (a WKWebView child of the
 //! gpui window) in the normal app, [`FakeWebBackend`](aui_webview::FakeWebBackend)
@@ -48,7 +48,7 @@ mod sidebar_actions;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
 
-pub(crate) use tabs::{Owner, StripTab, TabId, Tabs};
+pub(crate) use tabs::{Owner, TabId, Tabs};
 pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
@@ -73,6 +73,9 @@ const BLANK: &str = "about:blank";
 /// All fields are positive facts about the frame; [`browser_visible`] ANDs
 /// the good ones and NANDs the covering ones. One struct so the call site in
 /// `render` names every input and the truth table below covers every input.
+/// Every cover is something gpui draws in the main window, under the page:
+/// what an overlay window draws (Browse's modals, right-click menus, the
+/// Field, toasts) sits above the live page and is no input here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BrowserVisibility {
     /// The right pane stands open.
@@ -88,35 +91,33 @@ pub(crate) struct BrowserVisibility {
     pub session_active: bool,
     /// The Settings page stands open.
     pub settings_open: bool,
-    /// The ⌘K palette (any list) stands open.
+    /// The ⌘K palette (any list) stands open in the main window: Sessions
+    /// only, Browse hosts it in an overlay window.
     pub palette_open: bool,
-    /// A menu stands open: composer/chip pickers, caret popovers, overflow,
-    /// view options, project menus.
+    /// A menu on the shared overlay stack stands open: composer/chip pickers,
+    /// caret popovers, overflow, view options, project menus.
     pub menu_open: bool,
     /// The composer's view-local `+` menu stands open. Plain view state,
-    /// never the shared overlay stack, so it gets its own input.
+    /// never the shared overlay stack, so it gets its own input. The pane's
+    /// only: Browse draws no composer.
     pub plus_open: bool,
-    /// A modal dialog stands open.
+    /// A modal dialog stands open in the main window: Sessions only, like
+    /// the palette.
     pub dialog_open: bool,
-    /// The file-drop overlay covers the window.
+    /// The file-drop overlay covers the session's column. The pane's only:
+    /// Browse mounts no drop target.
     pub drop_cover: bool,
     /// The feedback capture layer covers the window: true only while
     /// feedback is Active. Paused leaves the app usable, so pages stay
     /// live; obscured pages paint their screenshot stand-in under it.
     pub feedback_cover: bool,
-    /// The terminal dock covers the browser pane: open AND its laid-out
-    /// bounds intersect the pane's. The dock lives in the centre column
-    /// and the pane on the right, so with today's layout they never
-    /// intersect — an open dock leaves the page live. The input stays so
-    /// a future full-width dock still hides the page.
-    pub terminal_covering: bool,
-    /// The Browse omnibox suggestion list stands open. It drops down over
-    /// the page, so while it is open the page must be obscured (it shows
-    /// its screenshot stand-in, as with the palette).
+    /// The Browse omnibox suggestion list stands open in the main window:
+    /// the Field's rows draw there when it has no overlay window (the
+    /// sidebar closed). The page shows its screenshot stand-in under them.
     pub omnibox_open: bool,
-    /// A Browse chrome popover (downloads, extensions, ⋯) stands open. It
-    /// drops over the page, so while one is open the page must be
-    /// obscured, like the omnibox above.
+    /// A Browse chrome popover (downloads, extensions, ⋯) stands open. They
+    /// draw in the main window, over the page, so the page shows its
+    /// stand-in, like the omnibox above.
     pub chrome_popover_open: bool,
     /// The Baaz-drawn crashed page covers the page rect. The library
     /// reports no load-error event — only `Crashed` — so the error page
@@ -139,10 +140,25 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.dialog_open
         && !inputs.drop_cover
         && !inputs.feedback_cover
-        && !inputs.terminal_covering
         && !inputs.omnibox_open
         && !inputs.chrome_popover_open
         && !inputs.page_error_open
+}
+
+/// `base` as the Browse centre page reads it: its tab and liveness, its own
+/// chrome popovers, and neither the composer's `+` menu nor the file-drop
+/// overlay, which Browse never draws. Either flag can stand stale from
+/// Sessions (a drag that left the window, a switch with the menu open), and
+/// a stale cover would freeze the page under nothing.
+fn centre_visibility(base: BrowserVisibility, shown: bool, live: bool, chrome_popover_open: bool) -> BrowserVisibility {
+    BrowserVisibility {
+        centre_browse: shown,
+        session_active: live,
+        chrome_popover_open,
+        plus_open: false,
+        drop_cover: false,
+        ..base
+    }
 }
 
 /// The shell header's height in pixels: the columns — and the browser
@@ -246,42 +262,6 @@ pub(crate) fn browser_centre_bounds(
             content.size.height - gpui::px(HEADER_PX) - dock,
         ),
     }
-}
-
-/// The terminal dock's rectangle in window coordinates: the centre
-/// column's `[centre_left, centre_right)` run at the content box's
-/// bottom, `height` tall. Pure so tests can drive it.
-pub(crate) fn terminal_dock_bounds(
-    content: Bounds<Pixels>,
-    centre_left: Pixels,
-    centre_right: Pixels,
-    height: Pixels,
-) -> Bounds<Pixels> {
-    Bounds {
-        origin: Point {
-            x: centre_left,
-            y: content.origin.y + content.size.height - height,
-        },
-        size: gpui::size(centre_right - centre_left, height),
-    }
-}
-
-/// Whether the terminal dock covers the browser pane: only when the dock
-/// stands open AND its laid-out bounds intersect the pane's. The dock
-/// lives in the centre column and the pane on the right, so with today's
-/// layout the two never intersect and an open dock leaves the page live;
-/// the predicate keeps the input so a future full-width dock still hides
-/// the page. A missing rect (pane closed, dock unmounted) is no cover.
-/// Pure so the truth table below covers it.
-pub(crate) fn terminal_covers_browser(
-    terminal_open: bool,
-    dock: Option<Bounds<Pixels>>,
-    pane: Option<Bounds<Pixels>>,
-) -> bool {
-    terminal_open
-        && dock
-            .zip(pane)
-            .is_some_and(|(dock, pane)| dock.intersects(&pane))
 }
 
 /// Whether the frame shows the live browser: the right pane stands open
@@ -539,9 +519,8 @@ impl Harness {
         Some(if current.is_empty() { tabs::PERSONAL.to_owned() } else { current.clone() })
     }
 
-    /// The space an owner's active tab lives in: the current project for
-    /// the person's per-project tabs, nothing for a session (a session
-    /// already belongs to one project).
+    /// The space an owner's active tab lives in: the current space for the
+    /// person, nothing for a session (its tabs show in every space).
     fn owner_space(&self, owner: &Owner) -> Option<String> {
         match owner {
             Owner::Person => self.browse_space(),
@@ -763,21 +742,14 @@ impl Harness {
     }
 
     /// The Browse centre's shown tab, when Browse shows one (B2a-H2): the
-    /// carried session tab while one is parked (B2a-H4), else the current
-    /// project's person-tab page. `None` in Sessions mode, before the tabs
-    /// load, or with no tab yet.
+    /// session tab it holds, else the current space's person-tab page. `None`
+    /// in Sessions mode, before the tabs load, or with no tab yet.
     pub(crate) fn browse_centre_shown(&self) -> Option<TabId> {
         if self.mode != crate::layout::Mode::Browse || !self.browser.tabs_loaded {
             return None;
         }
-        if let Some(id) = self.browser.centre_override {
-            if self.browser.tabs.get(id).is_some() {
-                return Some(id);
-            }
-        }
-        // A From-sessions show (B2a-H3): a session-owned tab the sidebar
-        // asked the centre to hold — ownership never moves, and any
-        // person-tab select clears it back to the project's own tab.
+        // A session-owned tab the centre holds: ownership never moves, and
+        // any person-tab select clears it back to the space's own tab.
         if let Some(id) = self.browse_session_tab {
             if self.browser.tabs.get(id).is_some_and(|tab| matches!(tab.owner, Owner::Session(_))) {
                 return Some(id);
@@ -936,10 +908,9 @@ impl Harness {
 
     /// Open a blank person tab in the current project and select it, with
     /// the address focused: the Browse sidebar's "New tab" row and the
-    /// entering-Browse ensure share this one path. Clears any carried
-    /// session tab: ⌘T lands on the person's new tab, never the park.
+    /// entering-Browse ensure share this one path. Clears any held session
+    /// tab: ⌘T lands on the person's new tab.
     pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.centre_override = None;
         self.ensure_tabs_loaded(cx);
         let space = self.browse_space();
         let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
@@ -965,18 +936,14 @@ impl Harness {
     /// session-owned — `id` is a no-op, so a × click racing the row's
     /// own select never resurrects the tab. The selection moves first and
     /// the address drops after, so focus lands on the newly shown page
-    /// (or the root) — never the old page.
-    /// Selecting a person tab
-    /// clears a From-sessions show in the centre.
+    /// (or the root) — never the old page. Selecting a person tab clears a
+    /// session tab the centre held.
     pub(crate) fn select_browse_sidebar_tab(
         &mut self,
         id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Selecting a person tab unparks any carried session tab: the
-        // centre shows the person's tab from here on.
-        self.browser.centre_override = None;
         self.ensure_tabs_loaded(cx);
         if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
@@ -1013,7 +980,7 @@ impl Harness {
         Some(self.browse_space())
     }
 
-    /// ⌘W in Browse: while a From-sessions tab shows, stop showing it —
+    /// ⌘W in Browse: while a session tab shows, stop showing it —
     /// back to the person's active tab, closing nothing. Otherwise close
     /// the current project's active person tab, the model picking the
     /// display-order neighbour. A no-op outside Browse (where ⌘W keeps
@@ -1084,7 +1051,7 @@ impl Harness {
     }
 
     /// ⌥⌘↑/⌥⌘↓ in Browse: move the active person tab one display slot.
-    /// A no-op while a From-sessions tab shows (the moves act on the
+    /// A no-op while a session tab shows (the moves act on the
     /// person's hidden tab otherwise), at the edge, across the pinned
     /// boundary, or outside Browse.
     pub(crate) fn move_browse_shortcut(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
@@ -1133,8 +1100,8 @@ impl Harness {
 
     /// Reload the person tab `id` at its own URL and show it: the tab
     /// menu's Reload row, and what a crashed row's click does (the `!`
-    /// tile's promise is reload *and* select). Activating clears a
-    /// From-sessions show, like every person-tab select. When the tab has
+    /// tile's promise is reload *and* select). Activating clears a held
+    /// session tab, like every person-tab select. When the tab has
     /// no live page the ensure rebuilds it anyway. A closed or
     /// session-owned `id` is a no-op.
     pub(crate) fn reload_browse_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1160,65 +1127,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Hand the person tab `id` to another project: the tab menu's Move
-    /// to project row. The old project's active pointer falls back to
-    /// its newest remaining tab (or clears — an emptied old project
-    /// shows the empty state in Browse, never an auto-blank); the new
-    /// project's selects the arrival, and its page is ensured when the
-    /// arrival lands in the current project. A closed, session-owned or
-    /// already-there `id` (beyond the menu close) changes nothing.
-    pub(crate) fn move_browse_tab_to_project(
-        &mut self,
-        id: TabId,
-        project: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_tabs_loaded(cx);
-        let Some(tab) = self.browser.tabs.get(id).cloned() else {
-            self.tab_menu = None;
-        self.tab_menu_bounds = None;
-            cx.notify();
-            return;
-        };
-        self.tab_menu = None;
-        self.tab_menu_bounds = None;
-        if tab.owner != Owner::Person || tab.space == project {
-            cx.notify();
-            return;
-        }
-        let old_space = tab.space.clone();
-        if let Some(live) = self.browser.tabs.tabs.iter_mut().find(|live| live.id == id) {
-            live.space = project.clone();
-        }
-        self.browser.tabs.bump();
-        let owner = Owner::Person;
-        if self.browser.tabs.active_of(&owner, old_space.as_deref()) == Some(id) {
-            let fallback = self
-                .browser
-                .tabs
-                .ordered_tabs(&owner, old_space.as_deref())
-                .iter()
-                .rfind(|live| live.id != id)
-                .map(|live| live.id);
-            match fallback {
-                Some(next) => {
-                    self.browser.tabs.activate(next);
-                }
-                None => {
-                    self.browser.tabs.active.remove(&tabs::active_key(&owner, old_space.as_deref()));
-                }
-            }
-        }
-        self.browser.tabs.activate(id);
-        self.schedule_tabs_write(cx);
-        if project == self.current_project_id() && self.mode == crate::layout::Mode::Browse {
-            self.browse_session_tab = None;
-            self.ensure_tab_page(HOME_KEY, id, window, cx);
-        }
-        cx.notify();
-    }
-
     /// Close the open tab menu, if any: Escape and click-outside share
     /// this one path. Answers whether one stood open.
     pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1231,11 +1139,7 @@ impl Harness {
         }
     }
 
-    /// Show a session-owned tab in the Browse centre (From sessions):
-    /// the model activates it for its session and the centre builds its
-    /// page — ownership never moves. A closed or person-owned `id` is a
-    /// no-op.
-    /// Show a session-owned tab in the Browse centre (From sessions):
+    /// Show a session-owned tab in the Browse centre (a task-folder row):
     /// the model activates it for its session and the centre builds its
     /// page — ownership never moves. A closed or person-owned `id` is a
     /// no-op.
@@ -1253,14 +1157,12 @@ impl Harness {
             self.schedule_tabs_write(cx);
         }
         self.browse_session_tab = Some(id);
-        // One route at a time: a From-sessions show replaces any carried tab.
-        self.browser.centre_override = None;
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         cx.notify();
     }
 
     /// A Browse sidebar row's select or close, routed by the tab's owner:
-    /// person tabs through the person paths, From-sessions tabs through
+    /// person tabs through the person paths, task-folder tabs through
     /// [`Self::select_session_tab`] / [`Self::close_tab`] under their
     /// session's key. An unknown `id` is a no-op.
     pub(crate) fn browse_sidebar_tab(&mut self, id: TabId, close: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1507,6 +1409,11 @@ impl Harness {
         }
         let id = self.browser.tabs.open(space, owner.clone(), url, after);
         self.schedule_tabs_write(cx);
+        // In Browse the person's new tab is what the centre shows next, over
+        // any session tab it held.
+        if self.mode == crate::layout::Mode::Browse {
+            self.browse_session_tab = None;
+        }
         let key = match &owner {
             Owner::Person => HOME_KEY.to_owned(),
             Owner::Session(_) => self.browser_key(cx),
@@ -1668,30 +1575,6 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         self.browser.tabs.add_space(rest.trim());
         self.schedule_tabs_write(cx);
-        cx.notify();
-    }
-
-    /// `from-sessions:<n>`: expand the n-th From-sessions group of the
-    /// current project (1-based, first-seen order), collapsing the rest —
-    /// what the `browse-sidebar` probe seeds before its shot. Empty
-    /// collapses every group; unknown or out-of-range records a step
-    /// failure. Free.
-    pub(crate) fn step_from_sessions(&mut self, rest: &str, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        if rest.trim().is_empty() {
-            self.browse_from_expanded.clear();
-            cx.notify();
-            return;
-        }
-        let space = self.browse_space();
-        let groups = self.browser.tabs.session_tabs(space.as_deref());
-        let n: usize = rest.trim().parse().unwrap_or(0);
-        let Some((session, _)) = groups.get(n.saturating_sub(1)).filter(|_| n > 0) else {
-            crate::steps::record_step_failure(&format!("from-sessions:{rest}"));
-            return;
-        };
-        self.browse_from_expanded.clear();
-        self.browse_from_expanded.insert(session.clone());
         cx.notify();
     }
 
@@ -1961,27 +1844,6 @@ impl Harness {
         }
     }
 
-    /// The strip the pane draws: the shown owner's tabs with labels —
-    /// empty when the owner has no tabs, and the pane draws no strip then.
-    pub(crate) fn browser_strip(&self, cx: &gpui::App) -> Vec<StripTab> {
-        if !self.browser.tabs_loaded {
-            return Vec::new();
-        }
-        let owner = self.shown_tab_owner(cx);
-        let space = self.owner_space(&owner);
-        let active = self.browser.tabs.active_of(&owner, space.as_deref());
-        // One ordering for every owner: pinned first, then model order.
-        let rows = self.browser.tabs.ordered_tabs(&owner, space.as_deref());
-        rows.iter()
-            .map(|tab| StripTab {
-                id: tab.id,
-                title: tabs::tab_label(&tab.title, &tab.url),
-                initial: tabs::tab_initial(&tab.title, &tab.url),
-                active: Some(tab.id) == active,
-            })
-            .collect()
-    }
-
     /// Drop hidden tabs' live pages. On the frame (`force` false) only
     /// tabs idle past the timeout go; `tab-discard-now` forces every hidden
     /// page at once. Audible pages, pinned tabs and the agent's active
@@ -2088,16 +1950,7 @@ impl Harness {
             && !self.skills.open
     }
 
-    #[allow(clippy::too_many_arguments)] // one caller's five cover flags, threaded by hand
-    pub(crate) fn sync_browser(
-        &mut self,
-        overflow: bool,
-        view_options: bool,
-        project_menu: bool,
-        tab_menu: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn sync_browser(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         // Live pages report into their tabs — debounced to actual changes,
         // never one write per poll.
@@ -2226,14 +2079,10 @@ impl Harness {
         // covers nothing (`OverlayKind::Modal`).
         let modal_hosted = self.modal_overlay_wanted(cx);
         let palette_open = overlays.palette.is_some() && !modal_hosted;
-        // The Browse tab menu is pane state, never the overlay stack, so
-        // it arrives as its own flag — and, like every other menu, covers
-        // the native page while open.
-        let menu_open = menu_kind.is_some_and(|kind| kind != MenuKind::Account)
-            || overflow
-            || view_options
-            || project_menu
-            || tab_menu;
+        // Every menu on the stack draws in the main window, so it covers the
+        // page; the account menu stays inside the sidebar column. Browse's
+        // right-click menus live apart (`browse_menu`), in an overlay window.
+        let menu_open = menu_kind.is_some_and(|kind| kind != MenuKind::Account);
         let dialog_open = overlays.dialog.is_some() && !modal_hosted;
         // The composer's `+` menu is plain view state, never the overlay
         // stack — read it off the active view. Audit: caret popovers and
@@ -2246,31 +2095,7 @@ impl Harness {
             .as_ref()
             .is_some_and(|view| view.read(cx).plus_open());
         let kind = crate::layout::right_kind(&self.layout);
-        // Covering is geometric, not "the dock stands open": the dock
-        // lives in the centre column and the pane on the right, so their
-        // laid-out rects never intersect and an open dock leaves the page
-        // live. Both rects derive from the window's content box, so a
-        // future full-width dock intersects and hides the page again.
         let content = window_content_bounds(window);
-        let pane = self
-            .layout
-            .right_open
-            .then(|| browser_page_bounds(content, gpui::px(self.right_resize.width)));
-        let dock = self.layout.terminal_open.then(|| {
-            let left = content.origin.x
-                + (if self.sidebar_open {
-                    gpui::px(self.resize.width)
-                } else {
-                    gpui::px(0.0)
-                });
-            let right = content.origin.x + content.size.width
-                - (if self.layout.right_open {
-                    gpui::px(self.right_resize.width)
-                } else {
-                    gpui::px(0.0)
-                });
-            terminal_dock_bounds(content, left, right, self.open_dock_height_px(window))
-        });
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
         // must neither draw nor hit-test under the loading centre.
@@ -2303,13 +2128,9 @@ impl Harness {
             .iter()
             .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
             .collect();
-        // B2a-H5: the chrome popovers drop over the centre page and the
-        // Baaz-drawn crashed page covers its rect. The popover half is
-        // resolved honestly below, once the centre tab is known: raw
-        // flags blanked the page under popovers that render nothing, and
-        // leaked into Sessions mode. The pane side never sees them.
+        // The Baaz-drawn crashed page covers the centre page's rect. The
+        // chrome popovers are resolved below, once the centre tab is known.
         let in_browse = self.mode == crate::layout::Mode::Browse;
-        let chrome_popover_open = false;
         let page_error_open = self
             .browse_centre_shown()
             .and_then(|id| self.browser.states.get(&id))
@@ -2328,14 +2149,10 @@ impl Harness {
             // F2 Active only: Paused leaves the app usable, so its pages
             // stay live.
             feedback_cover: self.feedback.covers_app(),
-            terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
-            // The omnibox drops down over the page, so while it renders
-            // rows the page must be obscured (its screenshot stand-in, as
-            // with the palette) — gpui never paints over it.
             // The Field draws its rows in the overlay window, over the live
             // page: only the in-window dropdowns still cover it.
             omnibox_open: self.browse_omnibox_open(cx) && !self.field_overlay_wanted(cx),
-            chrome_popover_open,
+            chrome_popover_open: false,
             page_error_open,
             // No "window active" input: the page is a child window of
             // ours, ordered with it, so another window taking the keyboard
@@ -2360,14 +2177,10 @@ impl Harness {
         // nor paint behind the mode. The render path shows the Changes
         // fallback instead, and the sync hides every pane page here.
         let (shown, frame_live) = if in_browse { (None, false) } else { (shown, frame_live) };
-        // B2a-H2: in Browse the centre shows the current project's
-        // person-tab page under the same covering rules as the pane.
-        // The dock stacks below the centre in the same column — beside
-        // it, never over it — so no dock intersection can cover the
-        // page and `terminal_covering` stays false; the Skills page and
-        // a pending provider switch hide it exactly like the
-        // palette/menus/dialogs/settings do. The centre rect is stored
-        // for the mouse-down hand-back: the single source behind
+        // B2a-H2: in Browse the centre shows its tab's page under what the
+        // main window draws over it (see `centre_visibility`); the Skills
+        // page and a pending provider switch hide it too. The centre rect is
+        // stored for the mouse-down hand-back: the single source behind
         // placement and release.
         let centre_shown = self.browse_centre_shown();
         // B2a-H5: a switch dismisses the chrome popovers (they point at
@@ -2380,7 +2193,7 @@ impl Harness {
         let switched = self.browser.last_centre_shown.is_some() && self.browser.last_centre_shown != centre_shown;
         if switched {
             // Every route to a new centre tab (close, ⌘T, popup, omnibox,
-            // From sessions) — not only a sidebar click — moves find: the
+            // task folder) — not only a sidebar click — moves find: the
             // tab left stops highlighting, and the shared input picks up
             // the new tab's query on the next frame (`on_frame` holds the
             // mutable window that `set_value` needs).
@@ -2391,7 +2204,6 @@ impl Harness {
             self.browser.extensions_open = false;
             self.browser.downloads_rendered = false;
             self.browser.more_open = false;
-            self.browser.more_move_open = false;
         }
         self.browser.last_centre_shown = centre_shown;
         // B2a-H5: covering is honest — a popover covers the page only while
@@ -2416,7 +2228,6 @@ impl Harness {
         }
         if self.browser.more_open && !centre_has_state {
             self.browser.more_open = false;
-            self.browser.more_move_open = false;
         }
         let chrome_popover_open = in_browse
             && ((self.browser.downloads_open && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
@@ -2452,13 +2263,12 @@ impl Harness {
         // mark their rows while in Browse.
         self.revoke_stale_visit_grants();
         self.route_browse_permissions(centre_shown, in_browse, cx);
-        let centre_live = browser_visible(BrowserVisibility {
-            centre_browse: centre_shown.is_some(),
-            session_active: self.browse_centre_live(cx),
-            terminal_covering: false,
+        let centre_live = browser_visible(centre_visibility(
+            base,
+            centre_shown.is_some(),
+            self.browse_centre_live(cx),
             chrome_popover_open,
-            ..base
-        });
+        ));
         // Editing ends when the page takes the keyboard (B2a-H4 7b): a click
         // into a Chromium page moves no gpui focus, so the address input
         // never blurs and would keep its editing look. The per-frame sync
@@ -3143,14 +2953,10 @@ impl Harness {
     }
 
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.browser.downloads_open
-            || self.browser.extensions_open
-            || self.browser.more_open
-            || self.browser.more_move_open;
+        let open = self.browser.downloads_open || self.browser.extensions_open || self.browser.more_open;
         self.browser.downloads_open = false;
         self.browser.extensions_open = false;
         self.browser.more_open = false;
-        self.browser.more_move_open = false;
         self.browser.downloads_rendered = false;
         if open {
             cx.notify();
@@ -3406,11 +3212,10 @@ impl Harness {
 
 
 
-    /// The pane's "Browse" button (B2a-H4): the session's active tab shows
-    /// full-width in Browse mode with the ↩ chip. The tab stays
-    /// session-owned; the same `WebviewState` moves — no reload, the state
-    /// stays keyed by tab id and the centre renders it through
-    /// `browse_centre_page`.
+    /// The pane's "Open in Browse": the session's active tab shows
+    /// full-width in Browse mode. The tab stays session-owned; the same
+    /// `WebviewState` moves — no reload, the state stays keyed by tab id and
+    /// the centre renders it through `browse_centre_page`.
     pub(crate) fn carry_session_tab_to_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
@@ -3421,19 +3226,17 @@ impl Harness {
         let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
             return;
         };
-        // `set_mode` clears the park, so the carry parks after the switch.
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.centre_override = Some(id);
-        self.browse_session_tab = None;
+        self.browse_session_tab = Some(id);
         cx.notify();
     }
 
 
-    /// The session label behind the ↩ chip: the collapsed head label the
-    /// Sessions header wears, falling back to the id.
-    pub(crate) fn browse_chip_session_name(&self, session: &str, cx: &gpui::App) -> String {
+    /// A session's name for the downloads credit and feedback notes: the
+    /// collapsed head label the Sessions header wears.
+    pub(crate) fn session_display_name(&self, session: &str, cx: &gpui::App) -> String {
         // A session with no title yet (a draft) reads "New session" — never
-        // its raw id (found live: the chip read "local-draft-b0d3…").
+        // its raw id.
         self.collapsed_head_label(session, cx)
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| String::from("New session"))
@@ -3843,7 +3646,6 @@ impl Harness {
             return;
         }
         self.browser.more_open = true;
-        self.browser.more_move_open = false;
         self.browser.downloads_open = false;
         self.browser.extensions_open = false;
         cx.notify();
@@ -3883,10 +3685,8 @@ impl Harness {
         let tab_id = self.browser.tabs.open(space, Owner::Session(id), "https://example.com", None);
         self.schedule_tabs_write(cx);
         self.ensure_tab_page(HOME_KEY, tab_id, window, cx);
-        // `set_mode` clears the park, so the fixture parks after the switch.
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.centre_override = Some(tab_id);
-        self.browse_session_tab = None;
+        self.browse_session_tab = Some(tab_id);
         cx.notify();
     }
 
@@ -4172,12 +3972,6 @@ pub(crate) struct BrowserRegistry {
     /// The page the v3 holes were last cut through, so they are taken back
     /// when it stops being the centre.
     pub holes_on: Option<gpui::WeakEntity<WebviewState>>,
-    /// The session tab carried into Browse full-width (B2a-H4): the
-    /// pane's "Browse" button parks the session's active tab here and the
-    /// centre shows it — with the ↩ chip — instead of the project's
-    /// person tab. The tab stays session-owned; the chip clears this and
-    /// hands the same `WebviewState` back to the session's pane.
-    pub centre_override: Option<TabId>,
     /// One back/forward stack per tab (B2a-H4): the header toolbar tracks
     /// the URLs the sync reports, since the library exposes no back,
     /// forward or reload calls to drive.
@@ -4206,8 +4000,6 @@ pub(crate) struct BrowserRegistry {
     pub downloads_rendered: bool,
     /// The ⋯ page-actions menu stands open.
     pub more_open: bool,
-    /// The ⋯ menu's inline "Move tab to project" list, expanded or not.
-    pub more_move_open: bool,
     /// Scripted fake-backend events, queued by `--steps` verbs and consumed
     /// when the next scripted page builds (captures only; production never
     /// queues). The events drain through the real poll path, so captures
@@ -4243,7 +4035,6 @@ impl BrowserRegistry {
             centre_page_rect: None,
             progress_hole: Default::default(),
             holes_on: None,
-            centre_override: None,
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
@@ -4253,7 +4044,6 @@ impl BrowserRegistry {
             extensions_open: false,
             downloads_rendered: false,
             more_open: false,
-            more_move_open: false,
             fake_scripts: Vec::new(),
             download_started: HashMap::new(),
             last_centre_shown: None,
@@ -4268,7 +4058,7 @@ mod tests {
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
         browser_session_active, browser_visible, initial_url,
         should_release_keyboard_on_mouse_down, should_remember,
-        terminal_covers_browser, terminal_dock_bounds, Annotation,
+        Annotation,
         BrowserVisibility, FakeWebBackend, WebviewState,
     };
     use super::{Owner, TabId};
@@ -4300,7 +4090,6 @@ mod tests {
             dialog_open: false,
             drop_cover: false,
             feedback_cover: false,
-            terminal_covering: false,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -4322,7 +4111,6 @@ mod tests {
             dialog_open: false,
             drop_cover: false,
             feedback_cover: false,
-            terminal_covering: false,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -4353,6 +4141,23 @@ mod tests {
             browser_visible(centre_clear()),
             "the centre page needs no open pane and no Browser kind"
         );
+    }
+
+    #[test]
+    fn stale_sessions_covers_never_reach_the_browse_centre() {
+        let mut base = all_clear();
+        base.plus_open = true;
+        base.drop_cover = true;
+        assert!(!browser_visible(base), "both still cover the pane's page");
+        assert!(
+            browser_visible(super::centre_visibility(base, true, true, false)),
+            "Browse draws neither, so neither freezes its page"
+        );
+        // What the main window really draws over the centre still covers.
+        base.menu_open = true;
+        assert!(!browser_visible(super::centre_visibility(base, true, true, false)));
+        base.menu_open = false;
+        assert!(!browser_visible(super::centre_visibility(base, true, true, true)), "a chrome popover");
     }
 
     #[test]
@@ -4457,7 +4262,7 @@ mod tests {
 
     #[test]
     fn every_covering_input_hides_the_native_view() {
-        let cases: [(&str, VisibilityFlip); 10] = [
+        let cases: [(&str, VisibilityFlip); 9] = [
             ("closed pane", |mut inputs| {
                 inputs.pane_open = false;
                 inputs
@@ -4494,16 +4299,6 @@ mod tests {
                 inputs.drop_cover = true;
                 inputs
             }),
-            ("covering dock", |mut inputs| {
-                // The input now means "intersects", not "open": a
-                // full-width dock over the pane still hides the page.
-                inputs.terminal_covering = super::terminal_covers_browser(
-                    true,
-                    Some(full_width_dock_rect()),
-                    Some(overlapping_pane_rect()),
-                );
-                inputs
-            }),
         ];
         for (name, flip) in cases {
             assert!(
@@ -4513,16 +4308,7 @@ mod tests {
         }
     }
 
-    /// Laid-out rects for the geometry tests on a 1440x900 window: the
-    /// centre-column dock beside the right-edge pane.
-    fn dock_rect() -> gpui::Bounds<gpui::Pixels> {
-        gpui::Bounds {
-            origin: gpui::point(gpui::px(260.0), gpui::px(640.0)),
-            size: gpui::size(gpui::px(780.0), gpui::px(260.0)),
-        }
-    }
-
-    /// Today's layout: the pane hangs off the right edge, beside the dock.
+    /// A 1440x900 window's pane, hanging off the right edge.
     fn beside_pane_rect() -> gpui::Bounds<gpui::Pixels> {
         gpui::Bounds {
             origin: gpui::point(gpui::px(1040.0), gpui::px(44.0)),
@@ -4530,69 +4316,8 @@ mod tests {
         }
     }
 
-    /// A future full-width dock runs under the pane.
-    fn full_width_dock_rect() -> gpui::Bounds<gpui::Pixels> {
-        gpui::Bounds {
-            origin: gpui::point(gpui::px(0.0), gpui::px(640.0)),
-            size: gpui::size(gpui::px(1440.0), gpui::px(260.0)),
-        }
-    }
-
-    /// The pane a full-width dock runs under.
-    fn overlapping_pane_rect() -> gpui::Bounds<gpui::Pixels> {
-        gpui::Bounds {
-            origin: gpui::point(gpui::px(1040.0), gpui::px(44.0)),
-            size: gpui::size(gpui::px(400.0), gpui::px(700.0)),
-        }
-    }
-
     #[test]
-    fn open_dock_beside_the_pane_leaves_the_page_live() {
-        // The dock stands open in the centre column while the pane hangs
-        // off the right edge. Their rects never meet, so the page stays
-        // live: dock open + pane open, no overlap → visible.
-        let covering = terminal_covers_browser(true, Some(dock_rect()), Some(beside_pane_rect()));
-        assert!(
-            !covering,
-            "an open centre-column dock never covers the right pane"
-        );
-        let mut inputs = all_clear();
-        inputs.terminal_covering = covering;
-        assert!(
-            browser_visible(inputs),
-            "dock open + pane open, no overlap → the native view shows"
-        );
-    }
-
-    #[test]
-    fn full_width_dock_still_covers_the_page() {
-        assert!(
-            terminal_covers_browser(
-                true,
-                Some(full_width_dock_rect()),
-                Some(overlapping_pane_rect())
-            ),
-            "a dock under the pane keeps the input meaningful"
-        );
-        assert!(
-            !terminal_covers_browser(
-                false,
-                Some(full_width_dock_rect()),
-                Some(overlapping_pane_rect())
-            ),
-            "a closed dock covers nothing even where it would overlap"
-        );
-        assert!(
-            !terminal_covers_browser(true, None, Some(overlapping_pane_rect())),
-            "no laid-out dock rect is no cover"
-        );
-    }
-
-    #[test]
-    fn derived_centre_and_right_rects_never_share_pixels() {
-        // The sync path derives both rects from the content box: the dock
-        // fills the centre run (sidebar 260, pane 400 of a 1440 window),
-        // the pane hangs off the right edge under the 44 px header.
+    fn the_pane_page_is_the_second_sheet_off_the_right_edge() {
         let content = gpui::Bounds {
             origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
             size: gpui::size(gpui::px(1440.0), gpui::px(900.0)),
@@ -4601,13 +4326,6 @@ mod tests {
         assert_eq!(f32::from(pane.origin.x), 1040.0);
         assert_eq!(f32::from(pane.origin.y), 6.0 + 44.0, "v3: the second sheet, its header inside it");
         assert_eq!(f32::from(pane.size.width), 394.0);
-        let dock =
-            terminal_dock_bounds(content, gpui::px(260.0), gpui::px(1040.0), gpui::px(260.0));
-        assert_eq!(f32::from(dock.origin.y), 640.0);
-        assert!(
-            !terminal_covers_browser(true, Some(dock), Some(pane)),
-            "centre dock vs right pane: structurally disjoint"
-        );
     }
 
     #[test]
@@ -5156,7 +4874,7 @@ mod tests {
     /// tab's page is unobscured; the agent registration follows the active
     /// tab across a switch; and forcing discard drops the hidden page but
     /// keeps its tab for a rebuild.
-    /// D3: a Browse sidebar row routes by owner — a From-sessions tab
+    /// D3: a Browse sidebar row routes by owner — a task-folder tab
     /// selects into the centre and closes under its session's key (the
     /// person paths refuse it), a person tab still takes the person path.
     #[gpui::test]

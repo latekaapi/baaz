@@ -329,7 +329,8 @@ pub(crate) struct Suggestion {
 pub(crate) enum OmniTarget {
     /// Ask the agent about the query text.
     Ask(String),
-    /// Show this tab (a person tab: select it; a session tab: carry it).
+    /// Show this tab (a person tab: select it; a session tab: open its
+    /// session).
     Tab(super::TabId),
     /// Show this session (Sessions mode, session selected).
     Session(String),

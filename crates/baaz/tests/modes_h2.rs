@@ -135,15 +135,12 @@ fn browse_centre_has_its_own_visibility_and_bounds() {
     );
 }
 
-/// The mode and its per-mode memory persist in `layout.json`, defaulting
-/// to sessions.
+/// The mode and the sidebar's one state persist in `layout.json`, the
+/// mode defaulting to sessions.
 #[test]
-fn mode_and_memory_persist_with_sessions_default() {
+fn mode_and_sidebar_persist_with_sessions_default() {
     let layout = source("layout.rs");
     assert!(layout.contains("#[serde(rename = \"mode\", default)]"), "the mode persists");
-    assert!(
-        layout.contains("#[serde(rename = \"modeMemory\", default"),
-        "the per-mode memory persists"
-    );
-    assert!(layout.contains("pub fn switch(&mut self, from: Mode,"), "switching saves then restores");
+    assert!(layout.contains("#[serde(rename = \"sidebarOpen\", default"), "the sidebar's state persists");
+    assert!(!layout.contains("modeMemory\", default"), "no mode keeps a layout of its own");
 }
