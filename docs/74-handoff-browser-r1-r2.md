@@ -163,6 +163,14 @@ library, in parallel, merging at R3. The owner asked for a clickable prototype i
 
 Alternative the owner may pick instead: D7/D8 (Skills page, dialogs, app chrome) — the tracker's "Next" list.
 
+### 1c. Status of §1b (5 Nov)
+
+- **Superseded in docs/27 §5:** the approved sidebar (docs/40 §2) replaces the drawn sidebar there, and closed means nothing over
+  the page plus the corner/edge peek, not the 28 px strip.
+- **Prototype:** agentic-ui `a9bd40f` puts `screens/browse` on the real `aui::screens::sidebar`, driven through the same
+  `BrowseIntent`s Baaz raises. Waits for the owner. Not proven: blur over a live page (needs an unlocked screen).
+- **R2:** starts in the library with `PageAutomation` (calls + bounded events over the in-process DevTools channel).
+
 ## 2. Rules that bit (carry over)
 
 - New UI → a board on the "Baaz v3" canvas and owner approval before building (feedback: mock first); FF values are the
