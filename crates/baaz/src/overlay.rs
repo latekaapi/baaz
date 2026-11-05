@@ -44,6 +44,8 @@ pub(crate) enum OverlayKind {
     /// The site-information panel (the shield): connection and certificate,
     /// under the address line, over the live page.
     SiteInfo,
+    /// The sidebar's downloads list, under its button, over the live page.
+    Downloads,
     /// Browse's modals — the ⌘K palettes and the dialogs — with their scrim,
     /// over the whole window and the live page. Drawn in the main window
     /// they could only cover the page with a picture of it, which arrived
@@ -256,6 +258,15 @@ impl Harness {
             let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
             return Some((OverlayKind::SiteInfo, Bounds::new(origin, gpui::size(gpui::px(SITE_INFO_WIDTH) + pad * 2.0, height))));
+        }
+        if self.downloads_overlay_wanted(cx) {
+            // Under the button, inside a clear rect like the Field's.
+            let anchor = self.browser.downloads_anchor?;
+            let pad = gpui::px(SHADOW_PAD);
+            let origin = window.bounds().origin + gpui::point(anchor.left() - pad, anchor.bottom() + gpui::px(6.0) - pad);
+            let room = window.bounds().size.height - anchor.bottom() - gpui::px(12.0);
+            let size = gpui::size(gpui::px(320.0) + pad * 2.0, room.min(gpui::px(420.0)) + pad * 2.0);
+            return Some((OverlayKind::Downloads, Bounds::new(origin, size)));
         }
         let menu = self.browse_menu.as_ref()?;
         let space = self.browse_space().unwrap_or_default();
@@ -852,6 +863,22 @@ impl Harness {
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
+            OverlayKind::Downloads => {
+                self.hosting_overlay = true;
+                let list = self.render_browse_downloads(window, cx);
+                self.hosting_overlay = false;
+                let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+                    this.dismiss_browse_popovers(cx);
+                });
+                Some(
+                    div()
+                        .size_full()
+                        .p(gpui::px(SHADOW_PAD))
+                        .on_mouse_down(gpui::MouseButton::Left, leave)
+                        .children(list)
+                        .into_any_element(),
+                )
+            }
             OverlayKind::Corner => {
                 self.hosting_overlay = true;
                 let stack = self.render_corner_stack(cx);
@@ -949,6 +976,7 @@ impl Harness {
                 // rule), so each kind keeps its own label.
                 crate::browser::SuggestKind::Ask => "Ask",
                 crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session => "Switch to",
+                crate::browser::SuggestKind::Command => "Commands",
                 crate::browser::SuggestKind::History => "History",
                 crate::browser::SuggestKind::Search => "Search",
             };
@@ -963,6 +991,7 @@ impl Harness {
             let glyph = match row.suggestion.kind {
                 crate::browser::SuggestKind::Ask => IconName::Sparkle,
                 crate::browser::SuggestKind::Search => IconName::Search,
+                crate::browser::SuggestKind::Command => IconName::Terminal,
                 crate::browser::SuggestKind::Session => IconName::List,
                 _ => IconName::Globe,
             };
@@ -1180,6 +1209,9 @@ impl Harness {
             OverlayKind::SiteInfo => {
                 self.site_info_open = false;
                 cx.notify();
+            }
+            OverlayKind::Downloads => {
+                self.dismiss_browse_popovers(cx);
             }
             OverlayKind::Modal => {
                 self.overlays.update(cx, |overlays, _| overlays.palette = None);

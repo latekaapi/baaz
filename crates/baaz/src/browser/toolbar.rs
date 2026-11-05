@@ -301,6 +301,8 @@ pub(crate) enum SuggestKind {
     Tab,
     /// A session whose name matches.
     Session,
+    /// A command by name (docs/27 §4.4).
+    Command,
     /// History and pages read (omitted until B2b fills it).
     History,
     /// The default "search with <engine>" row, always last.
@@ -334,6 +336,8 @@ pub(crate) enum OmniTarget {
     Tab(super::TabId),
     /// Show this session (Sessions mode, session selected).
     Session(String),
+    /// Run this command palette row.
+    Command(String),
     /// Load this history URL.
     History(String),
     /// Load this search URL.
@@ -351,6 +355,7 @@ pub(crate) struct OmniRow {
 
 const MAX_TAB_SUGGESTIONS: usize = 5;
 const MAX_SESSION_SUGGESTIONS: usize = 5;
+const MAX_COMMAND_SUGGESTIONS: usize = 3;
 const MAX_HISTORY_SUGGESTIONS: usize = 4;
 
 /// How `needle` matches `haystack`: a prefix beats a word start, which
@@ -388,6 +393,7 @@ pub(crate) fn rank_omnibox(
     query: &str,
     tabs: &[(super::TabId, String, String, u64)],
     sessions: &[(String, String, u64)],
+    commands: &[(String, String)],
     history: &[(String, String, u64)],
     engine: SearchEngine,
 ) -> Vec<OmniRow> {
@@ -449,6 +455,17 @@ pub(crate) fn rank_omnibox(
     for (_, _, row) in session_rows.into_iter().take(MAX_SESSION_SUGGESTIONS) {
         rows.push(row);
     }
+    let mut command_rows: Vec<(u8, OmniRow)> = commands
+        .iter()
+        .filter_map(|(id, title)| {
+            let tier = match_tier(title, &needle)?;
+            let suggestion =
+                Suggestion { kind: SuggestKind::Command, title: title.clone(), hint: String::new(), complete: None };
+            Some((tier, OmniRow { suggestion, target: OmniTarget::Command(id.clone()) }))
+        })
+        .collect();
+    command_rows.sort_by_key(|(tier, _)| *tier);
+    rows.extend(command_rows.into_iter().take(MAX_COMMAND_SUGGESTIONS).map(|(_, row)| row));
     let mut history_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
     for (title, url, recency) in history {
         if let Some(tier) = best_tier(&[title, url], &needle) {
@@ -665,6 +682,18 @@ mod tests {
 
 
     #[test]
+    fn commands_are_found_by_name_between_tabs_and_search() {
+        let commands = [("find".to_owned(), "Find in page".to_owned()), ("devtools".to_owned(), "Developer tools".to_owned())];
+        let rows = rank_omnibox("find", &[], &[], &commands, &[], SearchEngine::Google);
+        let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
+        assert_eq!(kinds, vec![SuggestKind::Ask, SuggestKind::Command, SuggestKind::Search]);
+        assert_eq!(rows[1].target, OmniTarget::Command("find".to_owned()));
+        assert_eq!(rows[1].suggestion.complete, None, "Tab leaves a command alone");
+        let none = rank_omnibox("zzz", &[], &[], &commands, &[], SearchEngine::Google);
+        assert!(!none.iter().any(|row| row.suggestion.kind == SuggestKind::Command));
+    }
+
+    #[test]
     fn enter_decides_url_vs_search() {
         assert_eq!(
             classify_address_input_with("example.com", SearchEngine::Google),
@@ -722,7 +751,7 @@ mod tests {
             ("s-2".to_owned(), "Recharts spike".to_owned(), 0),
         ];
         let history = vec![("Recharts gallery".to_owned(), "https://recharts.org/gallery".to_owned(), 0)];
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &history, SearchEngine::Google);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &history, SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(
             kinds,
@@ -736,15 +765,15 @@ mod tests {
         assert_eq!(rows[3].target, OmniTarget::History("https://recharts.org/gallery".to_owned()));
         assert!(rows.last().is_some_and(|row| row.suggestion.kind == SuggestKind::Search));
         // Non-matching tabs and sessions drop out; Ask and Search stay.
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], SearchEngine::Google);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &[], SearchEngine::Google);
         assert!(
             !rows.iter().any(|row| row.suggestion.kind == SuggestKind::History),
             "the history section is omitted when empty"
         );
-        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &history, SearchEngine::Google);
+        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &[], &history, SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(kinds, vec![SuggestKind::Ask, SuggestKind::Search]);
-        assert!(rank_omnibox("   ", &tabs, &sessions, &history, SearchEngine::Google).is_empty(), "empty query suggests nothing");
+        assert!(rank_omnibox("   ", &tabs, &sessions, &[], &history, SearchEngine::Google).is_empty(), "empty query suggests nothing");
     }
 
     #[test]
@@ -861,7 +890,7 @@ mod tests {
             (TabId(2), "The best apiary".to_owned(), "https://hive.example/2".to_owned(), 20),
             (TabId(3), "Apiary".to_owned(), "https://hive.example/3".to_owned(), 10),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("api", &tabs, &[], &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -875,7 +904,7 @@ mod tests {
             (TabId(1), "Apiary one".to_owned(), "https://hive.example/1".to_owned(), 10),
             (TabId(2), "Apiary two".to_owned(), "https://hive.example/2".to_owned(), 50),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("api", &tabs, &[], &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -891,7 +920,7 @@ mod tests {
         use super::super::TabId;
         let tabs = vec![(TabId(7), "Ledger".to_owned(), "https://ledger.example/".to_owned(), 0)];
         let sessions = vec![("s-9".to_owned(), "Ledger fix".to_owned(), 0)];
-        let rows = rank_omnibox("ledger", &tabs, &sessions, &[], SearchEngine::Google);
+        let rows = rank_omnibox("ledger", &tabs, &sessions, &[], &[], SearchEngine::Google);
         let tab = rows.iter().find(|row| row.suggestion.kind == SuggestKind::Tab).expect("a tab row");
         assert_eq!(tab.suggestion.complete.as_deref(), Some("https://ledger.example/"), "Tab completes the URL");
         let session =
@@ -1006,7 +1035,7 @@ mod tests {
     /// loads its URL.
     #[test]
     fn omnibox_engine_row_names_the_settings_engine() {
-        let rows = rank_omnibox("ledger", &[], &[], &[], SearchEngine::DuckDuckGo);
+        let rows = rank_omnibox("ledger", &[], &[], &[], &[], SearchEngine::DuckDuckGo);
         let last = rows.last().expect("a query always ranks the engine row");
         assert_eq!(last.suggestion.title, "Search with DuckDuckGo for ledger");
         assert_eq!(last.target, OmniTarget::Search("https://duckduckgo.com/?q=ledger".to_owned()));

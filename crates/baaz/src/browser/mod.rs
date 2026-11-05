@@ -2232,7 +2232,7 @@ impl Harness {
             self.browser.more_open = false;
         }
         let chrome_popover_open = in_browse
-            && ((self.browser.downloads_open && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
+            && ((self.browser.downloads_open && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
                 || (self.browser.extensions_open && centre_shown.is_some())
                 || (self.browser.more_open && centre_has_state));
         // A crashed page hides the find strip: the highlight stops and the
@@ -2954,6 +2954,15 @@ impl Harness {
         cx.notify();
     }
 
+    /// Whether the sidebar's downloads popover wants its overlay window: opened
+    /// from the button, with something to list.
+    pub(crate) fn downloads_overlay_wanted(&self, cx: &gpui::App) -> bool {
+        self.mode == crate::layout::Mode::Browse
+            && self.browser.downloads_open
+            && self.browser.downloads_anchor.is_some()
+            && !self.browse_downloads(cx).is_empty()
+    }
+
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
         let open = self.browser.downloads_open || self.browser.extensions_open || self.browser.more_open;
         self.browser.downloads_open = false;
@@ -3333,7 +3342,9 @@ impl Harness {
             .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
             .map(|entry| (entry.id.clone(), entry.label.clone(), recency_ms(&entry.updated)))
             .collect();
-        toolbar::rank_omnibox(&query, &tabs, &sessions, &[], self.layout.search_engine)
+        let commands: Vec<(String, String)> =
+            FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &[], self.layout.search_engine)
     }
 
     /// Move the omnibox highlight by `delta`, wrapping over the rows the
@@ -3412,6 +3423,12 @@ impl Harness {
     ) {
         match target {
             OmniTarget::Ask(query) => self.browse_ask(&query, window, cx),
+            OmniTarget::Command(id) => {
+                self.leave_browse_address(window, cx);
+                if let Some((_, _, action)) = FIELD_COMMANDS.iter().find(|(command, _, _)| *command == id) {
+                    self.browse_page_action(*action, window, cx);
+                }
+            }
             OmniTarget::Tab(id) => {
                 let owner = self.browser.tabs.get(id).map(|tab| tab.owner.clone());
                 match owner {
@@ -4056,6 +4073,18 @@ impl BrowserRegistry {
         }
     }
 }
+
+/// What the Field finds by name (docs/27 §4.4): the page's own commands.
+const FIELD_COMMANDS: [(&str, &str, aui::screens::sidebar::PageAction); 8] = [
+    ("new-tab", "New tab", aui::screens::sidebar::PageAction::NewTab),
+    ("find", "Find in page", aui::screens::sidebar::PageAction::Find),
+    ("copy-link", "Copy link", aui::screens::sidebar::PageAction::CopyLink),
+    ("safari", "Open in Safari", aui::screens::sidebar::PageAction::OpenInSafari),
+    ("annotate", "Annotate page", aui::screens::sidebar::PageAction::Annotate),
+    ("screenshot", "Take a screenshot", aui::screens::sidebar::PageAction::Screenshot),
+    ("devtools", "Developer tools", aui::screens::sidebar::PageAction::DevTools),
+    ("settings", "Browser settings", aui::screens::sidebar::PageAction::Settings),
+];
 
 impl Harness {
     /// Answers the agent's `browser_tabs` (docs/27 §6.1): only ever this session's
