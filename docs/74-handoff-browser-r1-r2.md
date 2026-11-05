@@ -163,13 +163,43 @@ library, in parallel, merging at R3. The owner asked for a clickable prototype i
 
 Alternative the owner may pick instead: D7/D8 (Skills page, dialogs, app chrome) — the tracker's "Next" list.
 
-### 1c. Status of §1b (5 Nov)
+### 1c. Status of §1b (5 Nov): built, live check owed, nothing pushed
 
-- **Superseded in docs/27 §5:** the approved sidebar (docs/40 §2) replaces the drawn sidebar there, and closed means nothing over
-  the page plus the corner/edge peek, not the 28 px strip.
-- **Prototype:** agentic-ui `a9bd40f` puts `screens/browse` on the real `aui::screens::sidebar`, driven through the same
-  `BrowseIntent`s Baaz raises. Waits for the owner. Not proven: blur over a live page (needs an unlocked screen).
-- **R2:** starts in the library with `PageAutomation` (calls + bounded events over the in-process DevTools channel).
+| Repo | Head | State |
+|---|---|---|
+| harness | `eadd0a5` (5 commits on 33a555c) | not pushed; `.cargo/config.toml` patch ON; `Cargo.lock` and the helper's lock modified, **do not commit** |
+| agentic-ui | `d7e2505` (2 commits on v0.6.4) | not pushed, not tagged |
+
+**Owner approved the prototype 5 Nov** ("Approved, wire it"). Four open questions on the tracker: "From sessions" heading, dot vs
+faces, line under the card, Field's position (I kept the approved Oct board).
+
+**As built.** docs/40 §2's sidebar supersedes docs/27 §5. R1: cut list deleted (b6a0e19: −983 lines), downloads in an overlay, Field
+commands, menus close on a mode switch (eadd0a5). R2: docs/15 has the table (0674cc4); `crates/baaz/src/browser/automation/` plus
+`terminal/service.rs` `RunningJob`; each tool is an async job, testable with `script::run_deciding`.
+
+**Proven:** `scripts/agent-live-check.py` on a real Chromium page, screen locked, no model: snapshot, console, uncaught error, failed
+request, trusted fill, click diff, `since: last_action`, Pay waits and clicks nothing, screenshot, phone viewport, a second tab read
+in the background.
+
+**Not seen, and owed before calling R1/R2 done:**
+1. The line and its approval card on screen (`render_agent_line` has never been looked at); Take over / Hand back / Allow by real
+   clicks. Its window's card height (124) is a guess until seen.
+2. ⌘Q on a real window with a page open cleans its clone.
+3. Downloads overlay placement. Blur over a live page was never proven (the spike ran locked).
+4. A real provider session using the tools (announce it: a turn costs money). No real-model run has happened.
+
+**Known gaps:** `browser_ask` is not answerable except through the line; `browse_ask` stays until R3; still covering a Browse page for
+gpui UI: Settings and its sheets, the ⋯ and extensions popovers (steps only), the Field's rows with the sidebar closed, feedback, the
+crash page. Dead but left, for the owner: ⋯/extensions popovers, `MenuKind::BackHistory`. Behaviour the deletion changed is listed in
+the b6a0e19 report: a held tab survives a mode switch, ⌘W with one showing stops showing it, relaunch in Browse then Sessions opens
+no session.
+
+**At "push":** tag agentic-ui v0.6.5 and push; set every `aui*` pin (also `crates/baaz-cef-helper/Cargo.toml`); park the patch
+(`mv .cargo/config.toml ~/.baaz-dev/harness-cargo-config-patch.toml`); `cargo update -p aui` in both workspaces; regenerate
+`right-files` and `right-files-reveal` baselines with the patch off, in their own commit; run the gates; commit locks + pins; push both.
+
+**A gate trap from this run:** in zsh an unquoted `$E` does not split, so `relay_visual.py $E` exits 2 having tested nothing; run it
+under bash. `cmd && git commit` after a piped test run does not gate on the test: check the failure count.
 
 ## 2. Rules that bit (carry over)
 
@@ -189,6 +219,7 @@ Alternative the owner may pick instead: D7/D8 (Skills page, dialogs, app chrome)
   anything that signs in; no Muse turns unless announced.
 - Disk: keep ≥ 25 GB free; `target/debug` grows to 40+ GB — delete it when it does. `$(dirname "$TMPDIR")/X/` is the other place to look (§1).
 - Don't push until the owner says "push"; library changes ship as an agentic-ui tag + repin.
+- Gate builds use `scripts/baaz-check.sh build`, not `bundle.sh`, while the owner's Baaz may quit mid-chain.
 
 ## 3. Prompt for the next session
 
