@@ -33,6 +33,36 @@ fn trace(what: impl std::fmt::Display) {
     }
 }
 
+/// The key window and its first responder, for `BAAZ_OVERLAY_TRACE` lines.
+#[cfg(target_os = "macos")]
+pub(crate) fn key_window_desc() -> String {
+    use objc2::{msg_send, runtime::AnyObject};
+    // SAFETY: plain AppKit getters on the main thread; nil is checked.
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        let key: *mut AnyObject = msg_send![app, keyWindow];
+        if key.is_null() {
+            return String::from("key=none");
+        }
+        let name = |object: *mut AnyObject| -> String {
+            if object.is_null() {
+                return String::from("nil");
+            }
+            let class: *mut AnyObject = msg_send![object, className];
+            let utf8: *const std::os::raw::c_char = msg_send![class, UTF8String];
+            std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        };
+        let responder: *mut AnyObject = msg_send![key, firstResponder];
+        let number: isize = msg_send![key, windowNumber];
+        format!("key={}#{number} responder={}", name(key), name(responder))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn key_window_desc() -> String {
+    String::new()
+}
+
 /// What an overlay window shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
@@ -103,7 +133,7 @@ const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
 /// Every overlay window goes through here, whatever it shows.
 #[cfg(target_os = "macos")]
 fn drop_native_chrome(window: &Window, kind: OverlayKind) {
-    use objc2::{msg_send, runtime::AnyObject};
+    use objc2::{msg_send, runtime::{AnyObject, Bool}};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -132,6 +162,11 @@ fn drop_native_chrome(window: &Window, kind: OverlayKind) {
             const FULL_SIZE_CONTENT: usize = 1 << 15;
             const NON_ACTIVATING_PANEL: usize = 1 << 7;
             let _: () = msg_send![ns_window, setStyleMask: FULL_SIZE_CONTENT | NON_ACTIVATING_PANEL];
+            // Changing the style mask leaves the panel itself first responder,
+            // so keystrokes stopped at the window and never reached gpui's view:
+            // nothing typed in the Field landed and its arrows did nothing
+            // (owner 2026-11-06). The modal keeps its mask and was never hit.
+            let _: Bool = msg_send![ns_window, makeFirstResponder: view];
         }
     }
 }
@@ -200,6 +235,19 @@ impl Render for OverlayView {
                 }
             }
         }
+        // The Field's keyboard: the shared address input, held focused here in
+        // the panel on every render, as the modal's query field is.
+        if kind == OverlayKind::Field {
+            let input = self.baaz.read_with(cx, |baaz, _| baaz.browse_address.clone()).ok().flatten();
+            if let Some(input) = input {
+                let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
+                trace(format_args!("field input focused={}", handle.is_focused(window)));
+                if !handle.is_focused(window) {
+                    window.focus(&handle, cx);
+                }
+            }
+        }
+        trace(format_args!("{}", key_window_desc()));
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);

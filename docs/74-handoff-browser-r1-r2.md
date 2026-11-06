@@ -192,10 +192,12 @@ Five defects found and fixed in the same pass (stale folder word and label, card
 the launch sweep's `lsof` crashing a forked child; see the commit after bfe8a1c).
 
 **Still owed:**
-1. **Typing after ⌘L from a clicked page landed nowhere** (owner confirmed 6 Nov in their own 33a555c, so it predates this
-   milestone). Cause: ⌘L, unlike ⌘F, never took the keyboard back from the page, so the page kept every keystroke while the Field
-   opened over it. Fixed (the commit after f065241, with a test that fails without it). **Not yet seen live:** the screen locked
-   before the check; try it on the check build.
+1. ~~Typing in the ⌘L Field landed nowhere~~ **fixed and seen live 6 Nov** (owner confirmed it broken in 33a555c too). Cause:
+   `drop_native_chrome` turns every non-modal overlay into a borderless panel with `setStyleMask`, which left the panel itself
+   first responder, so keystrokes never reached gpui's view (traced: `responder=GPUIPanel` vs `GPUIView`); the ⌘K modal keeps its
+   mask, which is why it typed fine. Now the view is made first responder again. 0c6fcc0's message names a different cause (the
+   page keeping the keyboard); that change stays, as it is harmless and matches find, but was not the fix. Seen: typing, ↓, and
+   Enter on "Find in page" (the find bar opens). `BAAZ_OVERLAY_TRACE=1` now logs the key window and first responder.
 2. A real provider session using the tools (announce it: a turn costs money).
 3. Blur over a live page was never proven (the overlay windows draw solid).
 
