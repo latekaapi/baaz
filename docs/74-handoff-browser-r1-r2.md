@@ -214,6 +214,27 @@ no session.
 **A gate trap from this run:** in zsh an unquoted `$E` does not split, so `relay_visual.py $E` exits 2 having tested nothing; run it
 under bash. `cmd && git commit` after a piped test run does not gate on the test: check the failure count.
 
+### 1d. The owner's copy-paste test, 7 Nov: "I don't think anything works"
+
+| Reported | Cause | Fix |
+|---|---|---|
+| The agent listed only `browser_open/read/screenshot/click/type/links` | The owner's Baaz was the **4 Nov build** (pid launched 5 Nov 10:50 from `target/bundle`, built before R1/R2): the copy-paste prompts were run against the old tools | New build parked at `target/bundle/next`; quit Baaz, `scripts/bundle.sh --swap` |
+| An Allow/Deny card for `AskUserQuestion` under Full access | The CLI hands **every** AskUserQuestion to the host as `can_use_tool`, in every mode; the adapter showed it as a tool approval. `Questions` was marked `Unavailable` ("asks in prose"), which was wrong | 5ecc073: one question card per question, the plain tool card held back while cards show; answers go back as `allow` + `updatedInput.answers` (question text → label). **Executed live** (claude 2.1.276, Haiku, $0.07): the CLI read the pick back and the model answered with it; fixture `ask-user-question.jsonl`; `Questions` is now Native |
+| No screenshot visible anywhere | The image went to the model only | b07d5d4: kept as `<support>/agent-shots/shot-*.png` (newest 200), the result carries a `file://` link the agent is told to cite in backticks; a `file://` link decodes `%20`; an image link opens the image view |
+
+**Not seen:** a real provider session in the app answering a question card and opening a screenshot link. The auto-mode classifier
+refused to start an agent turn from this session three times (Full access → "Create Unsafe Agents"; a page with a Pay button →
+"Real-World Transactions", twice). The pieces are proven separately: the CLI round trip (live, above), the fold's reply equal
+byte for byte to the one the CLI accepted (test), the screenshot file on real Chromium (`agent-live-check.py`). The scripted run
+is `scratchpad/realturn.py` (onboarding marker pre-set; `new;setprovider:claude-code;setmodel:haiku;setmode:OnRequest;send:…;
+wait:…;answer:Next`).
+
+**Gates on b07d5d4:** 2,289 tests, clippy clean, Tier V 45 entries with 0 changed regions (one finding: `idle.cpu_pct` 1.4 > 0.5,
+the display-link wake from docs/73 §5, untouched here), `agent-live-check.py` passed with the new kept-PNG check. Both bundles
+rebuilt: `target/check` and the owner's parked at `target/bundle/next` (the running Baaz untouched).
+
+**Trap:** `cargo fmt --all` rewrote 225 files here (the repo is not rustfmt-clean) and broke source-reading tests. Never run it.
+
 ## 2. Rules that bit (carry over)
 
 - New UI → a board on the "Baaz v3" canvas and owner approval before building (feedback: mock first); FF values are the
