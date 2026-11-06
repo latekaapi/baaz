@@ -75,7 +75,7 @@ fn serve(path: &std::path::Path, script: &Script) -> std::thread::JoinHandle<()>
                         let result = if tool == "browser_screenshot" {
                             // base64("fake-png"): the service's PNG bytes,
                             // stood in for by eight ASCII bytes here.
-                            json!({"image_base64": "ZmFrZS1wbmc="})
+                            json!({"image_base64": "ZmFrZS1wbmc=", "path": "/shots/shot-1.png", "url": "file:///shots/shot-1.png"})
                         } else {
                             json!({"tool": tool, "params": params})
                         };
@@ -214,6 +214,8 @@ fn the_screenshot_answer_renders_as_an_mcp_image_block() {
         Some(&json!("ZmFrZS1wbmc=")),
         "the service's PNG bytes travel untouched: {block}"
     );
+    let saved = result_of(&replies[0]).pointer("/content/1/text").and_then(Value::as_str).unwrap_or_default();
+    assert!(saved.contains("`file:///shots/shot-1.png`"), "the kept file's link follows the image: {saved:?}");
     script.shutdown.store(true, Ordering::Release);
     worker.join().expect("server stops");
 }
