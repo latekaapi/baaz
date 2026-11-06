@@ -2466,11 +2466,14 @@ impl Harness {
         self.browse_completed_text = None;
         self.browse_address_page_focus =
             self.browse_centre_state().is_some_and(|state| state.read(cx).holds_keyboard());
-        // A page that holds the keyboard keeps every keystroke, whatever field
-        // opens over it (owner, 6 Nov: typing after ⌘L from a clicked page landed
-        // nowhere). Find releases it the same way.
+        // The page lets go of the keyboard as the field opens, as find does: a
+        // page left key would take the keystrokes back the moment the Field's
+        // panel closes.
         if let Some(state) = self.browse_centre_state() {
             state.update(cx, |state, _| state.release_keyboard());
+        }
+        if std::env::var("BAAZ_OVERLAY_TRACE").as_deref() == Ok("1") {
+            eprintln!("overlay: address focus asked; {}", crate::overlay::key_window_desc());
         }
         let text = text.to_owned();
         match self.browse_address.clone() {
