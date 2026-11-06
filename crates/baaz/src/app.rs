@@ -8227,6 +8227,34 @@ mod tests {
         restore_state(state);
     }
 
+    /// ⌘L from a page that holds the keyboard: the page lets go, so typing
+    /// reaches the Field (owner 2026-11-06: it landed nowhere).
+    #[gpui::test]
+    fn the_field_takes_the_keyboard_from_the_page(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = hermetic_state("field-keyboard");
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        let page = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.browse_space();
+                let id = h.browser.tabs.open(space, crate::browser::Owner::Person, "https://example.com/", None);
+                h.browser.tabs.activate(id);
+                h.browse_centre_page(window, cx).expect("the shown tab has a page")
+            })
+        });
+        // A click into the page: it holds the keyboard.
+        vc.update(|_, cx| page.update(cx, |page, _| page.seed_pins(&[((1.0, 1.0), "")])));
+        assert!(vc.update(|_, cx| page.read(cx).holds_keyboard()), "the click gave the page the keyboard");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.focus_browser_address(window, cx)));
+        assert!(!vc.update(|_, cx| page.read(cx).holds_keyboard()), "⌘L takes the keyboard back");
+        restore_state(state);
+    }
+
     /// B2a-H4d(5): Tab remembers the completed ROW, not an index. Completing
     /// a tab row then re-ranking the list (the completion's own write does)
     /// still opens that row on Enter — and a stale highlight clamps to the

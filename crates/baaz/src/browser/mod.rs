@@ -2466,6 +2466,12 @@ impl Harness {
         self.browse_completed_text = None;
         self.browse_address_page_focus =
             self.browse_centre_state().is_some_and(|state| state.read(cx).holds_keyboard());
+        // A page that holds the keyboard keeps every keystroke, whatever field
+        // opens over it (owner, 6 Nov: typing after ⌘L from a clicked page landed
+        // nowhere). Find releases it the same way.
+        if let Some(state) = self.browse_centre_state() {
+            state.update(cx, |state, _| state.release_keyboard());
+        }
         let text = text.to_owned();
         match self.browse_address.clone() {
             Some(input) => {
