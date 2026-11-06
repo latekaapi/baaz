@@ -129,7 +129,6 @@ impl SessionView {
     }
 
     /// Whether the question lane may be attempted here: `Unavailable`
-    /// (Claude Code asks in prose — there is no question id to answer)
     /// refuses with the registry's own reason, so a stray press banners
     /// instead of sending a command the seam refuses.
     fn check_questions_gate(&mut self, cx: &mut Context<Self>) -> bool {

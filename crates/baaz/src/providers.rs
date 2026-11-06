@@ -1669,13 +1669,11 @@ mod tests {
         assert!(gate(ProviderId::Codex, Capability::SteerTurn).is_none());
         assert!(gate(ProviderId::ClaudeCode, Capability::TurnControl).is_some());
         assert!(gate(ProviderId::Codex, Capability::TurnControl).is_none());
-        // Questions: Unavailable on Claude Code (refused, with the prose
-        // reason), Unverified on Codex (attempted, marked) — different
-        // states, different text, never averaged into one.
-        let claude = gate(ProviderId::ClaudeCode, Capability::Questions).expect("gated");
+        // Questions: Native on Claude Code (AskUserQuestion, executed live),
+        // Unverified on Codex (attempted, marked) — never averaged into one.
+        assert!(gate(ProviderId::ClaudeCode, Capability::Questions).is_none());
         let codex = gate(ProviderId::Codex, Capability::Questions).expect("gated");
-        assert_ne!(claude, codex);
-        assert!(claude.contains("prose"));
+        assert!(codex.contains("Unverified"), "{codex}");
     }
 
     #[test]
@@ -1684,8 +1682,6 @@ mod tests {
         // Unavailable carries the provider's own reason.
         let marked = gate(ProviderId::ClaudeCode, Capability::SteerTurn).unwrap();
         assert!(marked.contains("Unverified"));
-        let refused = gate(ProviderId::ClaudeCode, Capability::Questions).unwrap();
-        assert!(!refused.contains("Unverified"));
     }
 
     /// The registry's properties are where a provider's own features are

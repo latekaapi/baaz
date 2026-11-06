@@ -1056,6 +1056,36 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Answer or decline one `AskUserQuestion` card: settle the card at once,
+    /// and send the call's `control_response` when it is complete. Nothing is
+    /// claimed twice: the fold removes the call as it builds the line.
+    fn settle_ask(
+        &self,
+        session_id: &str,
+        question: &str,
+        act: impl FnOnce(&mut ClaudeFold) -> Option<fold::AskStep>,
+    ) -> Result<Ack, ProviderError> {
+        self.check_session(session_id)?;
+        let step = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            act(&mut fold).ok_or_else(|| ProviderError::Rejected {
+                reason: format!("no question is waiting on {question}"),
+            })?
+        };
+        if let Some(line) = step.line.as_deref() {
+            match self.child.lock().expect("child mutex").as_mut() {
+                Some(running) => running.send_line(line).map_err(|error| ProviderError::Unavailable {
+                    reason: format!("the session child is unreachable: {error}"),
+                })?,
+                None => return Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
+            }
+        }
+        if !step.deltas.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id: Some(session_id.to_owned()), deltas: step.deltas });
+        }
+        Ok(Ack::Accepted)
+    }
+
     /// Whether any queue holds `approval`: known or unknown-subtype.
     fn has_pending(&self, approval: &str) -> bool {
         let fold = self.fold.lock().expect("fold mutex");
@@ -1941,23 +1971,32 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                             stage_token: None,
                         })
                         .collect(),
-                    questions: Vec::new(),
+                    questions: fold
+                        .pending_asks()
+                        .into_iter()
+                        .map(|(id, headline)| provider::PendingQuestion { id, session_id: session_id.clone(), headline })
+                        .collect(),
                 })
             }
-            // Unreachable through the gate (Questions is Unavailable);
-            // refused here too, so the raw dispatch can never spell it Ok.
-            Command::AnswerQuestion { .. } => Err(ProviderError::unsupported(
-                "answer-question",
-                "Claude Code asks in prose; there is no question id to answer",
-            )),
-            Command::DismissQuestion { .. } => Err(ProviderError::unsupported(
-                "dismiss-question",
-                "Claude Code asks in prose; there is no question id to answer",
-            )),
-            Command::ClarifyQuestion { .. } => Err(ProviderError::unsupported(
-                "clarify-question",
-                "Claude Code asks in prose; there is no question id to answer",
-            )),
+            Command::AnswerQuestion { session_id, question, answers, .. } => {
+                let answer = answers.into_iter().next().ok_or_else(|| ProviderError::Rejected {
+                    reason: format!("no answer given for {question}"),
+                })?;
+                let reply = match (answer.selected_labels, answer.selected_label, answer.free_text) {
+                    (Some(labels), _, _) if !labels.is_empty() => fold::AskReply::Picked(labels),
+                    (_, Some(label), _) => fold::AskReply::Picked(vec![label]),
+                    (_, _, Some(text)) if !text.trim().is_empty() => fold::AskReply::Text(text),
+                    _ => return Err(ProviderError::Rejected { reason: format!("an empty answer for {question}") }),
+                };
+                self.settle_ask(&session_id, &question, |fold| fold.answer_ask(&question, reply))
+            }
+            Command::DismissQuestion { session_id, question, reason, .. } => {
+                let message = reason.unwrap_or_else(|| String::from("The user chose not to answer."));
+                self.settle_ask(&session_id, &question, |fold| fold.dismiss_ask(&question, &message))
+            }
+            Command::ClarifyQuestion { session_id, question, text, .. } => {
+                self.settle_ask(&session_id, &question, |fold| fold.answer_ask(&question, fold::AskReply::Text(text)))
+            }
             Command::PageTranscript { session_id, after, limit, backward } => {
                 let deltas = self.stored_deltas(&session_id)?;
                 let len = deltas.len();

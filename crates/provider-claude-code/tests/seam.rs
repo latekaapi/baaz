@@ -24,13 +24,14 @@ fn answer_command() -> Command {
 }
 
 #[test]
-fn questions_are_refused_by_the_gate_never_spelled_ok() {
-    // Questions is Unavailable: Provider::send refuses before dispatch runs.
+fn a_question_for_no_live_session_is_never_spelled_ok() {
+    // Questions is Unverified (AskUserQuestion folds to cards): the gate
+    // lets the answer through, and with no child the adapter refuses it —
+    // an answer that reached nobody is never Ok.
     let adapter = ClaudeCodeAdapter::new("claude");
     let provider = Provider::new(adapter);
-    let error = provider.send(answer_command()).expect_err("questions must not succeed");
-    assert!(error.is_unsupported());
-    assert_eq!(error.capability(), Some("answer-question"));
+    let error = provider.send(answer_command()).expect_err("no child, no answer");
+    assert!(!error.is_unsupported(), "the gate lets questions through now: {error:?}");
 }
 
 #[test]

@@ -1,8 +1,9 @@
 //! The declared set, exactly as doc §6 declares it.
 //!
 //! Anything without evidence is `Unverified` — honest ignorance, still
-//! attempted — except `Questions`, which is `Unavailable` with its reason:
-//! Claude Code asks in prose and there is no question id to answer.
+//! attempted. `Questions` is `AskUserQuestion`: the CLI hands every call to the
+//! host as a `can_use_tool` request, in every permission mode, and the answers
+//! go back as the tool's input.
 //!
 //! Doc §8's caveat, cell by cell: `ForkSession` was read off `--help`
 //! and has since been executed for real (fixture `fork.jsonl`: resuming
@@ -57,12 +58,11 @@ pub fn capabilities() -> CapabilitySet {
         // served catalog.
         (Capability::ModelCatalog, CapabilityState::Native),
         (Capability::Approvals, CapabilityState::Native),
-        (
-            Capability::Questions,
-            CapabilityState::Unavailable {
-                reason: "Claude Code asks in prose; there is no question id to answer".into(),
-            },
-        ),
+        // `AskUserQuestion` reaches the host as a `can_use_tool` request in every
+        // permission mode; its answers go back as the tool's input. Native:
+        // executed live 2026-11-07 on 2.1.276 (fixture `ask-user-question.jsonl`
+        // — the CLI read the pick back and the model answered with it).
+        (Capability::Questions, CapabilityState::Native),
         (Capability::Transcript, CapabilityState::Native),
         (Capability::Account, CapabilityState::Native),
         (Capability::ClientTools, CapabilityState::Native),
@@ -93,11 +93,8 @@ mod tests {
         assert_eq!(set.state(C::TurnControl), &S::Unverified);
         assert_eq!(set.state(C::ModelCatalog), &S::Native);
         assert_eq!(set.state(C::Approvals), &S::Native);
-        assert!(matches!(
-            set.state(C::Questions),
-            S::Unavailable { reason }
-            if reason == "Claude Code asks in prose; there is no question id to answer"
-        ));
+        // NOT Native until a fixture records the CLI taking the answers.
+        assert_eq!(set.state(C::Questions), &S::Native);
         assert_eq!(set.state(C::Transcript), &S::Native);
         assert_eq!(set.state(C::Account), &S::Native);
         assert_eq!(set.state(C::ClientTools), &S::Native);

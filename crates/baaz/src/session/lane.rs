@@ -2866,12 +2866,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unavailable_questions_refuse_with_the_registry_reason(cx: &mut gpui::TestAppContext) {
+    fn claude_code_question_cards_answer_on_the_lane(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        // Claude Code asks in prose: the registry marks Questions
-        // `Unavailable`, so even a stray question card banners instead of
-        // sending a command the seam refuses.
+        // Claude Code's AskUserQuestion folds to a card (Questions is
+        // `Native`): a press leaves the lane as one
+        // AnswerQuestion carrying the picked label, and no banner.
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, _| {
@@ -2889,12 +2889,10 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(handle.question_commands().is_empty(), "nothing leaves an Unavailable lane");
-            assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("prose")),
-                "the refusal carries the registry's own reason, drew {:?}",
-                view.banner
-            );
+            let sent = handle.question_commands();
+            assert_eq!(sent.len(), 1, "one answer leaves the lane, drew {sent:?}");
+            assert!(matches!(sent[0], provider::Command::AnswerQuestion { .. }), "drew {sent:?}");
+            assert!(view.banner.is_none(), "an attempted lane does not banner, drew {:?}", view.banner);
         });
     }
 
@@ -3704,31 +3702,6 @@ mod tests {
                 view.history_model
             );
             assert_eq!(view.model().as_ref(), "Haiku", "the chip reads the Haiku pick");
-        });
-    }
-
-    /// X4: no always-on strip — the refusal lives at the point of use.
-    /// Claude Code's questions ask in prose (the one `Unavailable` cell),
-    /// and a stray answer press banners the registry's own reason instead
-    /// of sending a command the seam refuses. "Answer questions" has no
-    /// control, so it otherwise simply disappears.
-    #[gpui::test]
-    fn questions_refuse_at_the_point_of_use(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (adapter, _handle) = RecordingProvider::new();
-        let (claude, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
-        vc.update(|_, cx| {
-            claude.update(cx, |view, cx| view.answer_question("no-such-question".to_owned(), cx));
-        });
-        vc.run_until_parked();
-        vc.update(|_, cx| {
-            let view = claude.read(cx);
-            assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("prose")),
-                "the refusal's reason reaches the banner, drew {:?}",
-                view.banner
-            );
         });
     }
 
