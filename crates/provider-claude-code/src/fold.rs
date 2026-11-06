@@ -765,6 +765,13 @@ pub struct ClaudeFold {
     /// `tool_use` ids of todo-list calls (TaskCreate/TaskUpdate/TodoWrite):
     /// their results refine the turn's todo card, never a tool card.
     todo_tool_ids: HashSet<String>,
+    /// `AskUserQuestion` tool uses held back from the transcript: the live
+    /// question cards say it. Tool-use id → (turn id, input), so a call that
+    /// never got cards (a stored history) still draws its tool card at the
+    /// result.
+    ask_tool_uses: HashMap<String, (String, serde_json::Value)>,
+    /// Tool-use ids whose questions got live cards.
+    carded_asks: HashSet<String>,
     /// Turn id → its todo card, while the turn is open. Ordered, so two
     /// concurrent todo cards resolve deterministically: a `HashMap` here
     /// made the fallback lookup (and the result fan-out below) pick
@@ -805,6 +812,11 @@ pub struct ClaudeFold {
     /// adapter answers on its own, because an unanswered child waits
     /// silently and an auto-answered one would bypass the person.
     pending: Vec<ApprovalRequest>,
+    /// `AskUserQuestion` requests waiting on the person's answers: one
+    /// question card each, answered back as the tool's input, never as an
+    /// Allow/Deny approval (Claude Code hands every one to the host, in every
+    /// permission mode).
+    asks: Vec<AskPrompt>,
     /// Requests already answered through `DecideApproval`, by `request_id`.
     /// The card stays up until the settling frames arrive, and settling
     /// rebuilds the card from the request — so the request lives here
@@ -1433,6 +1445,7 @@ impl ClaudeFold {
             // A permission decision the child is suspended on. Queued as
             // pending and carded — never folded away, or the turn hangs
             // forever with no timeout to save it.
+            Frame::ControlRequest(request) if request.tool_name == ASK_TOOL => self.apply_ask(request),
             Frame::ControlRequest(request) => self.apply_approval(request),
             // An unrecognised control subtype: recorded and carded, never
             // dropped and never panicked on. The next subtype must be
@@ -1608,39 +1621,52 @@ impl ClaudeFold {
                         // result routes to the card, not to a card update.
                         self.todo_tool_ids.insert(id.clone());
                         self.apply_todo_call(turn_id, block_index, id, name, input, &mut deltas);
+                    } else if name == ASK_TOOL {
+                        // The live question cards say it (see `apply_ask`).
+                        self.ask_tool_uses.insert(id.clone(), (turn_id.to_owned(), input.clone()));
                     } else {
-                        let site = tool_card(id, name, input);
-                        if site.kind == ToolKind::SubAgent {
-                            self.agents.insert(id.clone(), AgentCard {
-                                turn_id: turn_id.to_owned(),
-                                block_index,
-                                status: ToolStatus::Running,
-                                blocks: Vec::new(),
-                                nested_tools: HashMap::new(),
-                                flushed: false,
-                            });
-                        }
-                        self.tools.insert(id.clone(), ToolSite {
-                            turn_id: turn_id.to_owned(),
-                            block_index,
-                            kind: site.kind.clone(),
-                            verb: site.verb.clone(),
-                            target: site.target.clone(),
-                            name: name.clone(),
-                            params: site.params.clone(),
-                            started: Instant::now(),
-                        });
-                        deltas.push(Delta::BlockAdded {
-                            turn_id: turn_id.to_owned(),
-                            block: site.block,
-                        });
-                        self.emitted.insert(turn_id.to_owned(), block_index + 1);
+                        self.add_tool_site(turn_id, block_index, id, name, input, &mut deltas);
                     }
                 }
                 ContentBlock::Other { .. } => {}
             }
         }
         deltas
+    }
+
+    /// One tool card at `block_index` of `turn_id`, with its site.
+    fn add_tool_site(
+        &mut self,
+        turn_id: &str,
+        block_index: usize,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        deltas: &mut Vec<Delta>,
+    ) {
+        let site = tool_card(id, name, input);
+        if site.kind == ToolKind::SubAgent {
+            self.agents.insert(id.to_owned(), AgentCard {
+                turn_id: turn_id.to_owned(),
+                block_index,
+                status: ToolStatus::Running,
+                blocks: Vec::new(),
+                nested_tools: HashMap::new(),
+                flushed: false,
+            });
+        }
+        self.tools.insert(id.to_owned(), ToolSite {
+            turn_id: turn_id.to_owned(),
+            block_index,
+            kind: site.kind.clone(),
+            verb: site.verb.clone(),
+            target: site.target.clone(),
+            name: name.to_owned(),
+            params: site.params.clone(),
+            started: Instant::now(),
+        });
+        deltas.push(Delta::BlockAdded { turn_id: turn_id.to_owned(), block: site.block });
+        self.emitted.insert(turn_id.to_owned(), block_index + 1);
     }
 
     /// The session's model from stored history: the last stored
@@ -1873,6 +1899,17 @@ impl ClaudeFold {
     fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Vec<Delta> {
         if self.todo_tool_ids.contains(&result.tool_use_id) {
             return self.apply_todo_result(result).into_iter().collect();
+        }
+        if let Some((turn_id, input)) = self.ask_tool_uses.remove(&result.tool_use_id) {
+            if self.carded_asks.remove(&result.tool_use_id) {
+                return Vec::new();
+            }
+            // No live cards (a stored history): the plain tool card, settled.
+            let mut deltas = Vec::new();
+            let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
+            self.add_tool_site(&turn_id, block_index, &result.tool_use_id, ASK_TOOL, &input, &mut deltas);
+            deltas.extend(self.apply_result(result));
+            return deltas;
         }
         let Some(site) = self.tools.get(&result.tool_use_id).cloned() else { return Vec::new() };
         let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
@@ -2347,6 +2384,108 @@ impl ClaudeFold {
     /// The turn hosting a control-channel card: the running assistant turn
     /// when one is open, else a fresh turn keyed by `key` (announced in
     /// `deltas`) so the card lands somewhere the transcript owns.
+    /// Card an `AskUserQuestion` call: one question card per question, in the
+    /// running turn. A call carrying no questions falls back to the approval
+    /// card, so the child is never left waiting on nothing.
+    fn apply_ask(&mut self, request: &ApprovalRequest) -> Vec<Delta> {
+        if self.asks.iter().any(|ask| ask.request.request_id == request.request_id) {
+            return Vec::new();
+        }
+        let questions = ask_questions(&request.input);
+        if questions.is_empty() {
+            return self.apply_approval(request);
+        }
+        let mut deltas = Vec::new();
+        let turn_id = self.control_turn(&request.request_id, &mut deltas);
+        let mut sites = Vec::with_capacity(questions.len());
+        for (index, question) in questions.iter().enumerate() {
+            let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
+            deltas.push(Delta::BlockAdded { turn_id: turn_id.clone(), block: ask_block(request, index, question, None) });
+            self.emitted.insert(turn_id.clone(), block_index + 1);
+            sites.push((turn_id.clone(), block_index));
+        }
+        self.carded_asks.insert(request.tool_use_id.clone());
+        self.asks.push(AskPrompt { request: request.clone(), questions, answers: BTreeMap::new(), sites });
+        deltas
+    }
+
+    /// The question cards still waiting, as `(block id, headline)`.
+    pub fn pending_asks(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for ask in &self.asks {
+            for (index, question) in ask.questions.iter().enumerate() {
+                if !ask.answers.contains_key(&index) {
+                    out.push((ask_block_id(&ask.request.request_id, index), question.text.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Answer one question card. Its card settles now; once every question of
+    /// the call has an answer the call's `control_response` comes back to send
+    /// (`answers` keyed by question text, several picks joined by ", ", as the
+    /// CLI expects). `None` when no waiting card has this id.
+    pub fn answer_ask(&mut self, block_id: &str, reply: AskReply) -> Option<AskStep> {
+        let (at, index) = self.asks.iter().enumerate().find_map(|(at, ask)| {
+            (0..ask.questions.len()).find(|index| ask_block_id(&ask.request.request_id, *index) == block_id).map(|index| (at, index))
+        })?;
+        let ask = &mut self.asks[at];
+        let question = ask.questions[index].clone();
+        let (text, answer) = match reply {
+            AskReply::Picked(labels) => {
+                let selected: Vec<usize> =
+                    labels.iter().filter_map(|label| question.options.iter().position(|(l, _)| l == label)).collect();
+                (labels.join(", "), aui_protocol::Answer { selected, other: None })
+            }
+            AskReply::Text(words) => (words.clone(), aui_protocol::Answer { selected: Vec::new(), other: Some(words) }),
+        };
+        ask.answers.insert(index, text);
+        let (turn_id, block_index) = ask.sites[index].clone();
+        let mut step = AskStep::default();
+        step.deltas.push(Delta::BlockUpdated {
+            turn_id,
+            block_index,
+            block: ask_block(&ask.request, index, &question, Some(answer)),
+        });
+        if ask.answers.len() == ask.questions.len() {
+            let ask = self.asks.remove(at);
+            let answers: serde_json::Map<String, serde_json::Value> = ask
+                .questions
+                .iter()
+                .enumerate()
+                .map(|(index, question)| {
+                    (question.text.clone(), serde_json::Value::String(ask.answers.get(&index).cloned().unwrap_or_default()))
+                })
+                .collect();
+            let mut input = ask.request.input.clone();
+            input["answers"] = serde_json::Value::Object(answers);
+            step.line = Some(crate::frame::encode_control_allow_with(&ask.request.request_id, input));
+        }
+        Some(step)
+    }
+
+    /// Decline a question card: the whole call is refused with `message`, and
+    /// every card of it settles as declined.
+    pub fn dismiss_ask(&mut self, block_id: &str, message: &str) -> Option<AskStep> {
+        let at = self.asks.iter().position(|ask| {
+            (0..ask.questions.len()).any(|index| ask_block_id(&ask.request.request_id, index) == block_id)
+        })?;
+        let ask = self.asks.remove(at);
+        let mut step = AskStep::default();
+        for (index, question) in ask.questions.iter().enumerate() {
+            let (turn_id, block_index) = ask.sites[index].clone();
+            let answer = aui_protocol::Answer { selected: Vec::new(), other: Some(String::from("Declined")) };
+            step.deltas.push(Delta::BlockUpdated {
+                turn_id,
+                block_index,
+                block: ask_block(&ask.request, index, question, Some(answer)),
+            });
+        }
+        step.line = Some(crate::frame::encode_control_deny(&ask.request.request_id, message));
+        Some(step)
+    }
+
     fn control_turn(&mut self, key: &str, deltas: &mut Vec<Delta>) -> String {
         if let Some(open) = self.assistant_turn.clone() {
             return open;
@@ -2365,6 +2504,108 @@ impl ClaudeFold {
             },
         });
         key.to_owned()
+    }
+}
+
+/// Claude Code's question tool.
+pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// One question of an `AskUserQuestion` call.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskQuestion {
+    /// The question text: what the answers map is keyed by.
+    pub text: String,
+    /// The short chip label above it.
+    pub header: String,
+    /// Several options may be picked.
+    pub multi: bool,
+    /// `(label, description)` per option, in order.
+    pub options: Vec<(String, String)>,
+}
+
+/// An `AskUserQuestion` call waiting on the person.
+#[derive(Clone, Debug)]
+pub struct AskPrompt {
+    /// The request its answers go back on.
+    pub request: ApprovalRequest,
+    /// The questions, in order.
+    pub questions: Vec<AskQuestion>,
+    /// Answers gathered so far, by question index: the text sent back.
+    pub answers: BTreeMap<usize, String>,
+    /// Each question's card, by question index.
+    pub sites: Vec<(String, usize)>,
+}
+
+/// One question card's block id: `ask-<request>-<index>`. No `:`: the app
+/// splits block keys on it.
+pub fn ask_block_id(request_id: &str, index: usize) -> String {
+    format!("ask-{}-{index}", request_id.replace(':', "_"))
+}
+
+/// The questions an `AskUserQuestion` input carries; empty when it carries none.
+pub fn ask_questions(input: &serde_json::Value) -> Vec<AskQuestion> {
+    let text = |value: &serde_json::Value, key: &str| value.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+    input
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .map(|question| AskQuestion {
+                    text: text(question, "question"),
+                    header: text(question, "header"),
+                    multi: question.get("multiSelect").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                    options: question
+                        .get("options")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|options| options.iter().map(|option| (text(option, "label"), text(option, "description"))).collect())
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the person gave for one question card.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AskReply {
+    /// Option labels picked (one for a single-pick question).
+    Picked(Vec<String>),
+    /// Their own words.
+    Text(String),
+}
+
+/// What answering one card does.
+#[derive(Debug, Default)]
+pub struct AskStep {
+    /// The card's settled face.
+    pub deltas: Vec<Delta>,
+    /// The `control_response` to send, once every question has an answer.
+    pub line: Option<String>,
+}
+
+/// One question card of an `AskUserQuestion` call.
+fn ask_block(request: &ApprovalRequest, index: usize, question: &AskQuestion, answer: Option<aui_protocol::Answer>) -> Block {
+    Block::Question {
+        id: ask_block_id(&request.request_id, index),
+        header: question.header.clone(),
+        prompt: question.text.clone(),
+        subtitle: String::new(),
+        options: question
+            .options
+            .iter()
+            .enumerate()
+            .map(|(at, (label, description))| aui_protocol::QuestionOption {
+                label: label.clone(),
+                description: description.clone(),
+                key: (at + 1).to_string(),
+                preview: None,
+            })
+            .collect(),
+        multi: question.multi,
+        allow_other: false,
+        answer,
+        timeout_ms: None,
     }
 }
 
@@ -3056,6 +3297,13 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     // owed. Nothing here answers it — answering is an explicit
     // `DecideApproval` carrying one of the card's own choices.
     let tap = match &frame {
+        Frame::ControlRequest(request) if request.tool_name == ASK_TOOL && !ask_questions(&request.input).is_empty() => {
+            Some(ProviderEvent::QuestionRaised {
+                session_id: session_id.clone().unwrap_or_default(),
+                question_id: ask_block_id(&request.request_id, 0),
+                headline: ask_questions(&request.input).first().map(|q| q.text.clone()).unwrap_or_default(),
+            })
+        }
         Frame::ControlRequest(request) => Some(ProviderEvent::ApprovalRequested {
             session_id: session_id.clone().unwrap_or_default(),
             approval_id: request.request_id.clone(),
@@ -5563,6 +5811,172 @@ mod tests {
 
     /// `step_line` announces the alias before the deltas that carry the
     /// streamed id, so the app maps the ack's id first.
+    fn ask_request_line(request_id: &str, questions: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"questions": questions},
+                "tool_use_id": "toolu_ask",
+            },
+        })
+        .to_string()
+    }
+
+    fn two_questions() -> serde_json::Value {
+        serde_json::json!([
+            {"question": "Which database?", "header": "DB", "multiSelect": false,
+             "options": [{"label": "SQLite", "description": "One file"}, {"label": "Postgres", "description": "A server"}]},
+            {"question": "Which extras?", "header": "Extras", "multiSelect": true,
+             "options": [{"label": "Auth", "description": ""}, {"label": "Search", "description": ""}]}
+        ])
+    }
+
+    /// Claude Code hands AskUserQuestion to the host in every permission mode
+    /// (owner 2026-11-07: an Allow/Deny card under Full access). It is a question
+    /// card per question, raised as a question, never an approval.
+    #[test]
+    fn ask_user_question_is_question_cards_not_an_approval() {
+        let mut fold = ClaudeFold::new();
+        fold.set_session_id("s");
+        let mut events = Vec::new();
+        step_line(&mut fold, &ask_request_line("req-1", two_questions()), &mut |event| events.push(event));
+        assert!(fold.pending_approvals().is_empty(), "no approval is queued");
+        let blocks: Vec<&Block> = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::Deltas { deltas, .. } => Some(deltas),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block, .. } => Some(block),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert!(matches!(blocks[0], Block::Question { prompt, multi: false, options, .. } if prompt == "Which database?" && options.len() == 2));
+        assert!(matches!(blocks[1], Block::Question { multi: true, .. }));
+        assert!(events.iter().any(|event| matches!(event, ProviderEvent::QuestionRaised { .. })));
+        assert!(!events.iter().any(|event| matches!(event, ProviderEvent::ApprovalRequested { .. })));
+        assert_eq!(fold.pending_asks().len(), 2);
+    }
+
+    /// A stored history has no control request, so no cards: the call keeps
+    /// its plain tool card, settled by its result.
+    #[test]
+    fn an_ask_without_live_cards_keeps_its_tool_card() {
+        let mut fold = ClaudeFold::new();
+        let mut blocks = Vec::new();
+        let mut updated = 0;
+        for line in fixture_lines("ask-user-question.jsonl") {
+            if line.contains("\"control_request\"") || line.contains("\"control_response\"") {
+                continue;
+            }
+            step_line(&mut fold, &line, &mut |event| {
+                if let ProviderEvent::Deltas { deltas, .. } = event {
+                    for delta in deltas {
+                        match delta {
+                            Delta::BlockAdded { block, .. } => blocks.push(block),
+                            Delta::BlockUpdated { .. } => updated += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            });
+        }
+        assert!(matches!(&blocks[0], Block::Generic { kind, .. } if kind == ASK_TOOL), "{blocks:?}");
+        assert!(updated >= 1, "the result settles the card");
+    }
+
+    /// The live record (claude 2.1.276, 7 Nov 2026, `ask-user-question.jsonl`):
+    /// the card's answer is byte-for-byte the reply the CLI accepted — its
+    /// tool result reads the pick back and the model answers with it.
+    #[test]
+    fn the_live_ask_record_answers_the_way_the_cli_accepted() {
+        let lines = fixture_lines("ask-user-question.jsonl");
+        let mut fold = ClaudeFold::new();
+        let mut accepted = None;
+        let mut sent = None;
+        let mut blocks = Vec::new();
+        for line in &lines {
+            let value: serde_json::Value = serde_json::from_str(line).expect("json");
+            if value["type"] == "control_response" {
+                accepted = Some(value);
+                continue;
+            }
+            step_line(&mut fold, line, &mut |event| {
+                if let ProviderEvent::Deltas { deltas, .. } = event {
+                    for delta in deltas {
+                        if let Delta::BlockAdded { block, .. } = delta {
+                            blocks.push(block);
+                        }
+                    }
+                }
+            });
+            if value["type"] == "control_request" {
+                let request = value["request_id"].as_str().expect("id");
+                let step = fold
+                    .answer_ask(&ask_block_id(request, 0), AskReply::Picked(vec!["Blue".into()]))
+                    .expect("the card answers");
+                sent = step.line;
+            }
+        }
+        let sent: serde_json::Value = serde_json::from_str(&sent.expect("one reply line")).expect("json");
+        assert_eq!(Some(sent), accepted, "the reply is the one the CLI accepted");
+        assert!(fold.pending_asks().is_empty(), "nothing left open");
+        let kinds: Vec<String> = blocks.iter().map(|b| format!("{b:?}").chars().take(90).collect()).collect();
+        assert_eq!(blocks.len(), 2, "one question card and the reply, no tool card: {kinds:#?}");
+        assert!(matches!(blocks[0], Block::Question { .. }), "{kinds:#?}");
+    }
+
+    /// Answers go back once, together, as the tool's input: keyed by question
+    /// text, several picks joined by ", ".
+    #[test]
+    fn the_answers_go_back_together_as_the_tools_input() {
+        let mut fold = ClaudeFold::new();
+        fold.set_session_id("s");
+        step_line(&mut fold, &ask_request_line("req-1", two_questions()), &mut |_| {});
+        let first = fold.answer_ask(&ask_block_id("req-1", 0), AskReply::Picked(vec!["Postgres".into()])).unwrap();
+        assert!(first.line.is_none(), "one of two answered: nothing sent yet");
+        assert!(matches!(&first.deltas[0], Delta::BlockUpdated { block: Block::Question { answer: Some(a), .. }, .. } if a.selected == vec![1]));
+        let second =
+            fold.answer_ask(&ask_block_id("req-1", 1), AskReply::Picked(vec!["Auth".into(), "Search".into()])).unwrap();
+        let line: serde_json::Value = serde_json::from_str(second.line.as_deref().expect("complete: sent")).unwrap();
+        let response = &line["response"]["response"];
+        assert_eq!(line["response"]["request_id"], "req-1");
+        assert_eq!(response["behavior"], "allow");
+        assert_eq!(response["updatedInput"]["answers"]["Which database?"], "Postgres");
+        assert_eq!(response["updatedInput"]["answers"]["Which extras?"], "Auth, Search");
+        assert_eq!(response["updatedInput"]["questions"], two_questions(), "the questions ride back unchanged");
+        assert!(fold.pending_asks().is_empty());
+        assert!(fold.answer_ask(&ask_block_id("req-1", 0), AskReply::Picked(vec!["SQLite".into()])).is_none(), "answered once");
+    }
+
+    /// Declining refuses the whole call, and every card says so.
+    #[test]
+    fn declining_refuses_the_call() {
+        let mut fold = ClaudeFold::new();
+        fold.set_session_id("s");
+        step_line(&mut fold, &ask_request_line("req-2", two_questions()), &mut |_| {});
+        let step = fold.dismiss_ask(&ask_block_id("req-2", 1), "No thanks").unwrap();
+        assert_eq!(step.deltas.len(), 2);
+        let line: serde_json::Value = serde_json::from_str(step.line.as_deref().unwrap()).unwrap();
+        assert_eq!(line["response"]["response"]["behavior"], "deny");
+        assert_eq!(line["response"]["response"]["message"], "No thanks");
+    }
+
+    /// A call with no questions in it still reaches the person, as an approval.
+    #[test]
+    fn an_ask_with_no_questions_falls_back_to_an_approval() {
+        let mut fold = ClaudeFold::new();
+        fold.set_session_id("s");
+        step_line(&mut fold, &ask_request_line("req-3", serde_json::json!([])), &mut |_| {});
+        assert_eq!(fold.pending_approvals().len(), 1);
+    }
+
     #[test]
     fn step_line_announces_the_streamed_turn_before_its_deltas() {
         let mut fold = ClaudeFold::new();

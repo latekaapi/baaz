@@ -307,7 +307,7 @@ which is honest ignorance and is still attempted.
 | `TurnControl` | Unverified | interrupt/cancel over stdin not probed |
 | `ModelCatalog` | Native | the adapter sends `initialize` after every spawn and answers `ListModels` from the answer's `models[]` (`value` = id, `displayName` = label, description + `resolvedModel` = detail, `supportedEffortLevels` per row; fixture `permission.jsonl`; probed live 2026-09-28). Baaz's supplied alias list stays as the offline/failure fallback |
 | `Approvals` | Native | `--permission-prompts host --permission-prompt-tool <tool>`; `result.permission_denials[]` exists and was empty |
-| `Questions` | Unavailable | Claude Code has no question channel distinct from the transcript. Reason: "Claude Code asks in prose; there is no question id to answer" |
+| `Questions` | Native | (7 Nov 2026, executed live on 2.1.276, fixture `ask-user-question.jsonl`) `AskUserQuestion` reaches the host as a `can_use_tool` control request in every permission mode. The adapter folds it to question cards and answers with `allow` + `updatedInput.answers` (question text → label). Was `Unavailable` ("asks in prose") until then — wrong: the tool call was shown as an approval |
 | `Transcript` | Native | `stream_event` + `assistant`, plus the stored `.jsonl` (§3) |
 | `Account` | Native | `rate_limit_event` (§5) |
 | `ClientTools` | Native | `mcp.jsonl` **and** `mcp-rust.jsonl` — the latter drives Baaz's own bridge binary end to end (§4). Native only once the tool is allowed; see the permission gate in §4 |

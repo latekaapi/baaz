@@ -482,6 +482,21 @@ pub fn encode_control_allow(request_id: &str) -> String {
     .to_string()
 }
 
+/// An allow carrying a rewritten input: `AskUserQuestion` takes the person's
+/// answers this way (`{"questions": …, "answers": {question: label}}`), the
+/// one tool whose call is completed by the host rather than run unchanged.
+pub fn encode_control_allow_with(request_id: &str, updated_input: serde_json::Value) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {"behavior": "allow", "updatedInput": updated_input},
+        },
+    })
+    .to_string()
+}
+
 /// The deny message sent when the person gave no reason.
 pub const DENY_WITHOUT_REASON: &str = "The user denied this tool call.";
 
