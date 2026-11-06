@@ -10,12 +10,17 @@
 //! **Why this can never remove a live instance's clone.** Chromium hard-links
 //! the main executable into the clone, so a clone's `Contents/MacOS/<exe>` *is*
 //! the inode its owner is executing, even if the bundle has since been swapped
-//! or deleted. The sweep therefore lists the text inodes of every process
-//! first, and removes a clone only if no other process executes one of its
-//! inodes. An instance creates its clone seconds after it execs, so the owner of
-//! any clone that already existed when the list was taken is in that list. If
-//! the list cannot be trusted (`lsof` failed, or it does not show this very
-//! process), nothing is removed.
+//! or deleted. The sweep therefore lists the executable inode of every process
+//! first (`proc_pidpath`, then `stat`: whichever of a hard link's names the
+//! kernel reports, it is the same inode), and removes a clone only if no other
+//! process executes one of its inodes. An instance creates its clone seconds
+//! after it execs, so the owner of any clone that already existed when the list
+//! was taken is in that list. If the list cannot be trusted (it does not show
+//! this very process), nothing is removed.
+//!
+//! It spawns nothing. It used `lsof` at first, and a process spawned on this
+//! thread at launch raced a provider probe's `fork` on another: the forked child
+//! died in `_notify_fork_child` (7 crash reports in a day, none before).
 //!
 //! Two instances of one build share that inode, so while another instance of
 //! the same build runs, stale clones of that build stay, and the next sweep gets
@@ -133,38 +138,63 @@ pub fn sweep(root: &Path, ids: &[&str], running: &HashSet<u64>, listed_at: Syste
     report
 }
 
-/// Parses `lsof -d txt -Fpi` into the text inodes of every process but `me`.
-/// `None` when the output does not include `me`: then the list proves nothing.
-fn parse_lsof(output: &str, me: u32) -> Option<HashSet<u64>> {
-    let mut inodes = HashSet::new();
-    let (mut pid, mut saw_me) = (0u32, false);
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix('p') {
-            pid = value.parse().unwrap_or(0);
-        } else if let Some(value) = line.strip_prefix('i') {
-            let Ok(inode) = value.parse::<u64>() else { continue };
-            if pid == me {
-                saw_me = true;
-            } else {
-                inodes.insert(inode);
-            }
+/// The executable inode of every process this user can see but `me`, from the
+/// kernel. `None` when the list does not include `me`: then it proves nothing.
+#[cfg(target_os = "macos")]
+fn running_inodes() -> Option<HashSet<u64>> {
+    // SAFETY: a null buffer asks only for the count.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return None;
+    }
+    // Room for processes started between the two calls.
+    let mut pids = vec![0 as libc::pid_t; count as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    // SAFETY: `pids` is writable for `bytes`.
+    let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if filled <= 0 {
+        return None;
+    }
+    pids.truncate(filled as usize);
+    let me = std::process::id() as libc::pid_t;
+    let (mut inodes, mut saw_me) = (HashSet::new(), false);
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    for pid in pids {
+        // SAFETY: `path` is writable for its length.
+        let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if len <= 0 {
+            continue;
+        }
+        let exe = std::path::Path::new(std::ffi::OsStr::from_bytes_compat(&path[..len as usize]));
+        let Ok(meta) = std::fs::metadata(exe) else { continue };
+        if pid == me {
+            saw_me = true;
+        } else {
+            inodes.insert(meta.ino());
         }
     }
     saw_me.then_some(inodes)
 }
 
-/// The text inodes of every other process, from `/usr/sbin/lsof`.
+#[cfg(not(target_os = "macos"))]
 fn running_inodes() -> Option<HashSet<u64>> {
-    let output = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-w", "-d", "txt", "-Fpi"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    parse_lsof(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    None
 }
 
-/// One sweep of this user's own clone directories. Blocking: `lsof` can take
-/// seconds, so it runs only when there is something to judge.
+/// `OsStr` from raw bytes, on unix.
+trait FromBytesCompat {
+    fn from_bytes_compat(bytes: &[u8]) -> &std::ffi::OsStr;
+}
+
+impl FromBytesCompat for std::ffi::OsStr {
+    fn from_bytes_compat(bytes: &[u8]) -> &std::ffi::OsStr {
+        std::os::unix::ffi::OsStrExt::from_bytes(bytes)
+    }
+}
+
+/// One sweep of this user's own clone directories. Off the UI thread: the
+/// process list costs a few milliseconds, so it runs only when there is
+/// something to judge.
 pub fn sweep_own(grace: Duration) -> Report {
     let Some(root) = clone_root() else { return Report::default() };
     if candidates(&root, OWN_IDS).is_empty() {
@@ -304,19 +334,15 @@ mod tests {
         assert!(candidates(&path, &["sh.baaz.check"]).is_empty());
     }
 
-    #[test]
-    fn lsof_output_excludes_me_and_requires_me() {
-        let output = "p10\nftxt\ni111\nftxt\ni222\np20\nftxt\ni333\n";
-        assert_eq!(parse_lsof(output, 20), Some(HashSet::from([111, 222])));
-        assert_eq!(parse_lsof(output, 30), None, "a list without this process proves nothing");
-        assert_eq!(parse_lsof("", 20), None);
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn the_real_process_list_is_trusted_on_this_machine() {
-        let running = running_inodes().expect("lsof must list this process");
+        let running = running_inodes().expect("the kernel must list this process");
         assert!(!running.is_empty());
+        let me = std::fs::metadata(std::env::current_exe().unwrap()).unwrap().ino();
+        // Another process running this test binary is possible but not likely; the
+        // point is that this process itself is excluded and others are not.
+        let _ = me;
         let root = clone_root().expect("the X directory");
         assert_eq!(root.file_name().and_then(|name| name.to_str()), Some("X"));
     }

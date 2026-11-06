@@ -1413,6 +1413,20 @@ impl TerminalService {
         Some(rest.split('/').next().unwrap_or("").to_owned())
     }
 
+    /// A fingerprint of every session's page work: who works, who asks, who is
+    /// held. What a cached view keys on to follow it.
+    pub fn activity_print(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for job in self.jobs.borrow().iter() {
+            (&job.session, &job.label, job.asking.is_some()).hash(&mut hasher);
+        }
+        let mut held: Vec<String> = self.held.borrow().iter().cloned().collect();
+        held.sort();
+        held.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// The first session waiting on the person, wherever its page is.
     pub fn session_asking(&self) -> Option<String> {
         self.jobs.borrow().iter().find(|job| job.asking.is_some()).map(|job| job.session.clone())
@@ -1444,6 +1458,25 @@ impl TerminalService {
         for job in self.jobs.borrow_mut().iter_mut().filter(|job| job.session == session) {
             job.deadline = Instant::now() + self.job_timeout();
         }
+    }
+
+    /// `params` with `ref` swapped for the element's name from the last snapshot,
+    /// so the line says "clicking “Pay 97”" rather than "clicking “e5”".
+    fn with_ref_name(&self, session: &str, tab: Option<u64>, params: &Value) -> Value {
+        let mut out = params.clone();
+        let Some(reference) = params.get("ref").and_then(Value::as_str) else { return out };
+        let Ok(Some(view)) = self.page_for(session, tab) else { return out };
+        let agent = self.tab_handle(&view);
+        let marker = format!("[ref={reference}]");
+        let name = agent.borrow().last_snapshot.iter().find(|line| line.contains(&marker)).and_then(|line| {
+            let start = line.find('"')?;
+            let end = line[start + 1..].find('"')? + start + 1;
+            Some(line[start + 1..end].to_owned())
+        });
+        if let Some(name) = name {
+            out["ref"] = Value::String(name);
+        }
+        out
     }
 
     /// How long a job may run, not counting time waiting on the person: a navigation
@@ -1659,8 +1692,8 @@ impl TerminalService {
         // browser — and so the pane hook below sees the lane's current id.
         let session = self.resolve_session(session);
         let session = session.as_str();
-        let label = browser_activity_label(tool, params);
         let tab = params.get("tab").and_then(Value::as_u64);
+        let label = browser_activity_label(tool, &self.with_ref_name(session, tab, params));
         let args = params.clone();
         let start: JobStart = match tool {
             "browser_tabs" => {

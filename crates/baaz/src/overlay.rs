@@ -582,10 +582,11 @@ impl Harness {
             if !ask.approval {
                 return LineState::NeedsYou { text: ask.detail.clone().into() };
             }
-            let title = if ask.detail.is_empty() {
-                format!("{name} wants to go ahead")
-            } else {
-                format!("{name} wants to: {}", ask.detail)
+            let title = match (ask.kind.as_str(), ask.detail.trim()) {
+                (_, "") => format!("{name} wants to go ahead"),
+                ("Run a script", _) => format!("{name} wants to run a script on this page"),
+                ("Upload", files) => format!("{name} wants to upload {files}"),
+                (_, target) => format!("{name} wants to press \u{201C}{target}\u{201D}"),
             };
             return LineState::Approval(ApprovalData {
                 title: title.into(),
