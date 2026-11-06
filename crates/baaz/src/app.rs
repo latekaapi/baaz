@@ -1899,7 +1899,13 @@ impl Harness {
                     _ => cx.background_executor().timer(std::time::Duration::from_millis(15)).await,
                 }
                 let alive = this.update(cx, |this, cx| {
+                    let before = this.terminal_service.activity_print();
                     this.terminal_service.drain(cx);
+                    // The line and the task folders follow the agent's page work:
+                    // a window at rest draws nothing until told.
+                    if this.terminal_service.activity_print() != before {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     return;
@@ -5289,6 +5295,11 @@ impl Harness {
                     if !matches!(last_kind, Some(crate::browser::SuggestKind::Tab) | Some(crate::browser::SuggestKind::Session)) =>
                 {
                     Some("Tabs and sessions")
+                }
+                crate::browser::SuggestKind::Command
+                    if !matches!(last_kind, Some(crate::browser::SuggestKind::Command)) =>
+                {
+                    Some("Commands")
                 }
                 crate::browser::SuggestKind::History
                     if !matches!(last_kind, Some(crate::browser::SuggestKind::History)) =>

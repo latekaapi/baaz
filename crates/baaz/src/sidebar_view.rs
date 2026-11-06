@@ -322,6 +322,8 @@ pub(crate) struct SidebarKey {
     plan: Option<String>,
     /// The usage cards tick while the account menu is open: the minute.
     usage_minute: i64,
+    /// What agents are doing on pages: a task folder's word and dot follow it.
+    agent_work: u64,
 }
 
 /// One person tab the Browse sidebar draws, with the live page facts
@@ -498,6 +500,7 @@ impl SidebarKey {
             pinned_open: baaz.pinned_open,
             view_menu_open: baaz.overlays.read(cx).is_open(MenuKind::ViewOptions),
             account_menu_open,
+            agent_work: baaz.terminal_service.activity_print(),
             view_options: (
                 baaz.show_empty,
                 baaz.show_hidden,

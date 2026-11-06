@@ -121,9 +121,11 @@ replaces the bundle. Listed size and real cost converge exactly because Baaz is 
 - `crates/baaz/src/browser/clone_sweep.rs`: sweep at launch, off the UI thread, and `baaz --sweep-clones`. In-use test:
   Chromium hard-links the main executable into the clone, so the clone's `Contents/MacOS/*` inode *is* what its owner runs,
   even after the bundle is swapped or deleted (confirmed: `ls -i` shows the same inode, and `lsof +D` shows the running
-  process holding it and nothing else). Text inodes of every other process come from `lsof -d txt`, taken **before** the
-  clone list; an instance clones seconds after it execs, so the owner of any listed clone is in the list. `lsof` failing, or
-  its output not including this very process, removes nothing. Two instances of one build share the inode, so while another
+  process holding it and nothing else). Every other process's executable inode comes from the kernel (`proc_listallpids`,
+  `proc_pidpath`, `stat`; spawns nothing), taken **before** the clone list; an instance clones seconds after it execs, so
+  the owner of any listed clone is in the list. A list that does not include this very process removes nothing. (The first
+  version spawned `lsof` at launch; it raced a provider probe's `fork` and the forked child crashed in `_notify_fork_child`:
+  7 crash reports on 5–6 Nov, a Problem Reporter window seen live on 6 Nov. Fixed 6 Nov.) Two instances of one build share the inode, so while another
   runs, stale clones of that build wait for a later sweep: the safe direction. Exact directory names (`OWN_IDS`), no glob,
   no symlinks, only `code_sign_clone.XXXXXX`; `other_apps_and_unexpected_names_are_out_of_reach` tests that.
 - `shot.rs`: a failed-steps exit shuts CEF down first.
@@ -181,12 +183,20 @@ commands, menus close on a mode switch (eadd0a5). R2: docs/15 has the table (067
 request, trusted fill, click diff, `since: last_action`, Pay waits and clicks nothing, screenshot, phone viewport, a second tab read
 in the background.
 
-**Not seen, and owed before calling R1/R2 done:**
-1. The line and its approval card on screen (`render_agent_line` has never been looked at); Take over / Hand back / Allow by real
-   clicks. Its window's card height (124) is a guess until seen.
-2. ⌘Q on a real window with a page open cleans its clone.
-3. Downloads overlay placement. Blur over a live page was never proven (the spike ran locked).
-4. A real provider session using the tools (announce it: a turn costs money). No real-model run has happened.
+**Seen live on 6 Nov** (check build, computer use, a real Chromium checkout page driven over the socket, no model): the approval
+card over the live page in Browse; Don't allow (the tool answered `stopped`, nothing clicked); Pay (clicked, `window.paid` true);
+"needs you" on the task folder; the line's label following the job ("waiting for the page"); Take over → "You're driving · The agent is
+waiting"; Hand back (the wait finished); the agent's click on a download link and the downloads list over the live page
+("report.csv · Done · saved by Live"); ⌘T's field finding "Find in page"; quit from the menu with a page open (exit 0, 0 clones).
+Five defects found and fixed in the same pass (stale folder word and label, card wording, "e5" in the label, a stale `navigated`, and
+the launch sweep's `lsof` crashing a forked child; see the commit after bfe8a1c).
+
+**Still owed:**
+1. **Typing in the ⌘L Field did not land** through computer use, on a tab the agent never touched too (the page kept the keyboard,
+   `document.hasFocus()` true). Either a real regression or the tool's key events not reaching the overlay panel. **Ask the owner to
+   try ⌘L + typing in their own Baaz (33a555c)**: if it works there, test the check build by hand.
+2. A real provider session using the tools (announce it: a turn costs money).
+3. Blur over a live page was never proven (the overlay windows draw solid).
 
 **Known gaps:** `browser_ask` is not answerable except through the line; `browse_ask` stays until R3; still covering a Browse page for
 gpui UI: Settings and its sheets, the ⋯ and extensions popovers (steps only), the Field's rows with the sidebar closed, feedback, the

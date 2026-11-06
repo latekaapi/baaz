@@ -303,7 +303,12 @@ pub async fn act(ctx: Ctx, params: Value) -> Result<Value, String> {
             return Ok(stopped);
         }
     }
-    ctx.tab.borrow_mut().log.mark_action();
+    {
+        // What the action did is judged from here: an earlier navigation is not its own.
+        let mut agent = ctx.tab.borrow_mut();
+        agent.log.take_navigated();
+        agent.log.mark_action();
+    }
     match action.as_str() {
         "click" => {
             let (x, y) = point_of(&ctx, node, &params).await?;
@@ -748,6 +753,15 @@ mod tests {
         let outcome = run_deciding(Job::new(agent, |ctx| act(ctx, json!({"action":"press","key":"Enter"}))), form, |_| false);
         assert_eq!(outcome.asks[0].kind, "Pay");
         assert!(!outcome.calls.iter().any(|(method, _)| method == "Input.dispatchKeyEvent"));
+    }
+
+    #[test]
+    fn a_navigation_before_the_action_is_not_the_actions_effect() {
+        let agent = tab();
+        let _ = run_job(Job::new(agent.clone(), |ctx| snapshot(ctx, json!({}))), page);
+        agent.borrow_mut().log.absorb("Page.frameNavigated", &json!({"frame": {"id": "main"}}));
+        let (_, result) = run_job(Job::new(agent, |ctx| act(ctx, json!({"action":"hover","ref":"e2"}))), page);
+        assert_eq!(result.unwrap()["navigated"], false);
     }
 
     #[test]
