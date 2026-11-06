@@ -165,7 +165,7 @@ library, in parallel, merging at R3. The owner asked for a clickable prototype i
 
 Alternative the owner may pick instead: D7/D8 (Skills page, dialogs, app chrome) — the tracker's "Next" list.
 
-### 1c. Status of §1b (5 Nov): built, live check owed, nothing pushed
+### 1c. Status of §1b: built, seen live, PUSHED 7 Nov (agentic-ui v0.6.5, harness pinned; patch parked)
 
 | Repo | Head | State |
 |---|---|---|
