@@ -192,9 +192,10 @@ Five defects found and fixed in the same pass (stale folder word and label, card
 the launch sweep's `lsof` crashing a forked child; see the commit after bfe8a1c).
 
 **Still owed:**
-1. **Typing in the ⌘L Field did not land** through computer use, on a tab the agent never touched too (the page kept the keyboard,
-   `document.hasFocus()` true). Either a real regression or the tool's key events not reaching the overlay panel. **Ask the owner to
-   try ⌘L + typing in their own Baaz (33a555c)**: if it works there, test the check build by hand.
+1. **Typing after ⌘L from a clicked page landed nowhere** (owner confirmed 6 Nov in their own 33a555c, so it predates this
+   milestone). Cause: ⌘L, unlike ⌘F, never took the keyboard back from the page, so the page kept every keystroke while the Field
+   opened over it. Fixed (the commit after f065241, with a test that fails without it). **Not yet seen live:** the screen locked
+   before the check; try it on the check build.
 2. A real provider session using the tools (announce it: a turn costs money).
 3. Blur over a live page was never proven (the overlay windows draw solid).
 
