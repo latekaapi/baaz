@@ -177,6 +177,11 @@ def main():
 
         shot = tools.call("browser_screenshot")
         check("a screenshot comes back", len(shot.get("image_base64", "")) > 1000)
+        kept = pathlib.Path(shot.get("path", ""))
+        check(
+            "the screenshot is kept as a PNG file the transcript can open",
+            kept.is_file() and kept.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n",
+        )
         tools.call("browser_emulate", device="phone")
         width = tools.call("browser_run", code="return innerWidth")
         check("the phone viewport applies", "390" in width["result"], width)

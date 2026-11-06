@@ -462,7 +462,70 @@ pub async fn screenshot(ctx: Ctx, params: Value) -> Result<Value, String> {
     if unchanged && params.get("if_changed").and_then(Value::as_bool).unwrap_or(false) {
         return Ok(json!({"unchanged": true}));
     }
-    Ok(json!({"image_base64": data}))
+    // The person sees what the agent saw: the picture is kept as a file the
+    // transcript can link to (an image path opens the image view). The
+    // provider's own transcript keeps no image a person can open.
+    let saved = save_shot(&crate::store::support_dir().join(SHOT_DIR), data);
+    let mut result = json!({"image_base64": data});
+    if let Some(path) = saved {
+        result["url"] = json!(file_url(&path));
+        result["path"] = json!(path.to_string_lossy());
+    }
+    Ok(result)
+}
+
+/// `path` as a `file://` URL: the support dir has a space (`Application
+/// Support`), and the transcript only links a path with no whitespace in it.
+pub fn file_url(path: &std::path::Path) -> String {
+    let mut url = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
+/// Where agent screenshots are kept, under the support dir. Not the
+/// person's screenshot dir, which is cleared at quit.
+pub const SHOT_DIR: &str = "agent-shots";
+/// How many agent screenshots are kept; the oldest go first.
+pub const SHOTS_KEPT: usize = 200;
+
+/// Write one base64 PNG into `dir` as `shot-<ms>.png` and prune the dir to
+/// [`SHOTS_KEPT`] files. `None` when the data or the write fails: the image
+/// still reaches the agent, only the link is missing.
+pub fn save_shot(dir: &std::path::Path, data: &str) -> Option<std::path::PathBuf> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let mut path = dir.join(format!("shot-{ms}.png"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("shot-{ms}-{n}.png"));
+        n += 1;
+    }
+    std::fs::write(&path, bytes).ok()?;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut shots: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("shot-"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        if shots.len() > SHOTS_KEPT {
+            shots.sort();
+            let extra = shots.len() - SHOTS_KEPT;
+            for (_, old) in shots.into_iter().take(extra) {
+                if old != path {
+                    let _ = std::fs::remove_file(old);
+                }
+            }
+        }
+    }
+    Some(path)
 }
 
 /// `browser_wait`: `ms`, `text`, `selector`, or `idle` (no requests in flight).
@@ -821,6 +884,25 @@ mod tests {
         assert_eq!(remote.asks[0].kind, "Run a script");
         assert_eq!(remote.result.unwrap()["stopped"], "needs_approval");
     }
+
+    #[test]
+    fn a_saved_shot_is_a_file_and_the_dir_stays_bounded() {
+        let dir = std::env::temp_dir().join(format!("baaz-shots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            file_url(std::path::Path::new("/Users/a/Library/Application Support/baaz/shot-1.png")),
+            "file:///Users/a/Library/Application%20Support/baaz/shot-1.png"
+        );
+        let first = save_shot(&dir, "QUJD").expect("saved");
+        assert_eq!(std::fs::read(&first).unwrap(), b"ABC");
+        assert!(save_shot(&dir, "not base64!").is_none(), "bad data writes nothing");
+        for _ in 0..SHOTS_KEPT + 5 {
+            save_shot(&dir, "QUJD").expect("saved");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), SHOTS_KEPT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
     fn a_screenshot_says_unchanged_only_when_asked_and_only_when_it_is() {

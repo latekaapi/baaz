@@ -107,7 +107,7 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "browser_screenshot",
-            "The page as a PNG: the viewport, the full page, or one element. Read-only.",
+            "The page as a PNG: the viewport, the full page, or one element. Read-only. The image is also kept as a file; the result names its path, which the person can open from the transcript.",
             with_tab(json!({"type": "object", "properties": {
                 "full": {"type": "boolean"},
                 "ref": {"type": "string"},
@@ -214,10 +214,16 @@ pub fn forward_browser_call(
         if let Some(text) = block.text.as_deref() {
             if let Ok(result) = serde_json::from_str::<Value>(text) {
                 if let Some(png) = result.get("image_base64").and_then(Value::as_str) {
-                    return Ok(ToolOutcome {
-                        content: vec![crate::ContentBlock::image(png, "image/png")],
-                        is_error: false,
-                    });
+                    let mut content = vec![crate::ContentBlock::image(png, "image/png")];
+                    // The kept file: the transcript shows this line, and an
+                    // image path there opens Baaz's image view.
+                    if let Some(path) = result.get("path").and_then(Value::as_str) {
+                        let link = result.get("url").and_then(Value::as_str).unwrap_or(path);
+                        content.push(crate::ContentBlock::text(format!(
+                            "Saved as {path}. To show the person, write the link `{link}` (in backticks): it opens the picture."
+                        )));
+                    }
+                    return Ok(ToolOutcome { content, is_error: false });
                 }
             }
         }

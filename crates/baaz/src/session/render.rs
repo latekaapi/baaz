@@ -1428,6 +1428,12 @@ impl SessionView {
                 let highlight = parse_link_lines(&path);
                 let workspace = PathBuf::from(&self.workspace);
                 let abs = resolve_link_path(&workspace, &path);
+                // A picture opens in the image view (an agent's screenshot
+                // lives outside the workspace, where Files cannot show it).
+                if crate::right::is_image_path(&abs.to_string_lossy()) && abs.is_file() {
+                    cx.emit(SessionEvent::OpenImage(abs));
+                    return;
+                }
                 cx.emit(SessionEvent::RevealPath { abs, highlight });
             }
         }
@@ -2875,6 +2881,26 @@ pub(crate) fn parse_link_lines(raw: &str) -> Option<std::ops::Range<u32>> {
     line.map(|start| start..start.saturating_add(1))
 }
 
+/// `%XX` escapes decoded; anything malformed stays as written.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3).filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()));
+            if let Some(byte) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
 /// Resolve a markdown link target to a filesystem path, without touching the
 /// filesystem: accept `file://`, strip the `#L…` fragment and the trailing
 /// `:line` viewer hint (see [`parse_link_lines`]), take an absolute path
@@ -2882,7 +2908,16 @@ pub(crate) fn parse_link_lines(raw: &str) -> Option<std::ops::Range<u32>> {
 /// workspace, and normalise `..` lexically. Whether anything opens is the
 /// caller's decision: only an existing path ever does.
 pub(crate) fn resolve_link_path(workspace: &Path, raw: &str) -> PathBuf {
-    let no_scheme = raw.strip_prefix("file://").unwrap_or(raw);
+    // A `file://` URL is percent-encoded (an agent screenshot under
+    // `Application Support` is `…/Application%20Support/…`); a bare path is not.
+    let decoded;
+    let no_scheme = match raw.strip_prefix("file://") {
+        Some(url) => {
+            decoded = percent_decode(url);
+            decoded.as_str()
+        }
+        None => raw,
+    };
     let base = no_scheme.split_once('#').map(|(base, _)| base).unwrap_or(no_scheme);
     let mut path_part = base;
     for _ in 0..2 {
@@ -3495,6 +3530,13 @@ mod tests {
             resolve_link_path(&workspace(), "src/main.rs:42:3"),
             PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
         );
+        // An agent screenshot's link: the URL's escapes decode, a bare path's do not.
+        assert_eq!(
+            resolve_link_path(&workspace(), "file:///Users/someone/Library/Application%20Support/baaz/agent-shots/shot-1.png"),
+            PathBuf::from("/Users/someone/Library/Application Support/baaz/agent-shots/shot-1.png")
+        );
+        assert_eq!(resolve_link_path(&workspace(), "file:///a/b%2"), PathBuf::from("/a/b%2"));
+        assert_eq!(resolve_link_path(&workspace(), "/a/100%20"), PathBuf::from("/a/100%20"));
     }
 
     /// B9: the line highlight each suffix form carries (end exclusive).
