@@ -255,6 +255,11 @@ line root sets `ink`; the title takes the transcript approval's 13 px semibold `
 text to stand in for a bare host window. Sizes measured on the owner's screenshot are the design system's (buttons ≈ 26 pt);
 "scaled up" was the overflow. New build parked at `target/bundle/next`.
 
+**PUSHED 7 Nov evening** on the owner's "push": agentic-ui **v0.6.6** (f44799c), Baaz pinned (dcf4f9e, helper too), patch
+parked. Gates with the patch off: 2,289 tests, clippy, Tier V 45 entries all 0 changed regions (idle.cpu_pct 1.5, the known
+wake), perf 0 missed, clones and agent-live-check passed. Still not seen by me in the app: question cards, screenshot links,
+the recoloured card (the owner saw the fitted card, with the black title, on 652d998).
+
 **Trap:** `cargo fmt --all` rewrote 225 files here (the repo is not rustfmt-clean) and broke source-reading tests. Never run it.
 
 ## 2. Rules that bit (carry over)
