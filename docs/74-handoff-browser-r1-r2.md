@@ -1,6 +1,7 @@
 # 74 — Handoff: next milestone, the clone leak (step 0), then the browser (R1 re-shell ∥ R2 agent core)
 
-Written 31 Oct 2026, at the close of "close both tracks" (docs/69–73). Read this first in the next session.
+Written 31 Oct 2026, at the close of "close both tracks" (docs/69–73). **CLOSED 7 Nov 2026; the next handoff is
+docs/75 (Browser R3).**
 
 ## 0. Where things stand
 
