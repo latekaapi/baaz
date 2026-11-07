@@ -606,8 +606,15 @@ impl Harness {
         let activity = self.terminal_service.agent_activity(&session)?;
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
-        let width = gpui::px(f32::min(640.0, f32::from(rect.size.width) - 24.0)) + pad * 2.0;
-        let body = if activity.asking.as_ref().is_some_and(|ask| ask.approval) { 124.0 } else { 48.0 };
+        let inner = f32::min(640.0, f32::from(rect.size.width) - 24.0);
+        let width = gpui::px(inner) + pad * 2.0;
+        // The approval card's own height at this width: in a narrow side pane it
+        // stacks (title on two lines, buttons on their own row). A fixed 124 cut
+        // its buttons off there, and the agent waited on a click nobody could make.
+        let body = match Self::line_approval(&session, &activity, self, cx) {
+            Some(data) => aui::browse::agent_window::approval_height(&data, Self::line_compact(inner), cx),
+            None => 48.0,
+        };
         let height = gpui::px(body) + pad * 2.0;
         let bottom = rect.bottom() - gpui::px(16.0) + pad;
         let left = rect.left() + (rect.size.width - width) / 2.0;
@@ -618,6 +625,26 @@ impl Harness {
         activity.held.hash(&mut h);
         format!("{:?}", activity.asking).hash(&mut h);
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
+    }
+
+    /// Whether a line `inner` px wide (shadow pad excluded) lays out narrow.
+    fn line_compact(inner: f32) -> bool {
+        inner < aui::browse::agent_window::APPROVAL_COMPACT_BELOW
+    }
+
+    /// The approval `session`'s line shows, if it is asking for one.
+    fn line_approval(
+        session: &str,
+        activity: &crate::terminal::service::AgentActivity,
+        this: &Self,
+        cx: &App,
+    ) -> Option<aui::browse::agent_window::ApprovalData> {
+        let name = this.session_lane_provider(session).label();
+        let host = this.terminal_service.page_host(session, cx).unwrap_or_default();
+        match Self::agent_line_state(activity, name, &host) {
+            aui::browse::agent_window::LineState::Approval(data) => Some(data),
+            _ => None,
+        }
     }
 
     /// What the line says for `session`'s `activity`.
@@ -792,7 +819,8 @@ impl Harness {
         let state = Self::agent_line_state(&activity, name, &host);
         let input = self.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone();
         let baaz = cx.weak_entity();
-        let line = aui::browse::agent_window::agent_line("page-float-line", &state, &input).on_intent(move |intent, _, cx| {
+        let inner = f32::from(window.bounds().size.width) - SHADOW_PAD * 2.0;
+        let line = aui::browse::agent_window::agent_line("page-float-line", &state, &input).compact(Self::line_compact(inner)).on_intent(move |intent, _, cx| {
             use aui::browse::agent_window::LineIntent;
             let session = session.clone();
             let _ = baaz.update(cx, |this, cx| {
@@ -807,7 +835,9 @@ impl Harness {
                 cx.notify();
             });
         });
-        Some(div().p(gpui::px(SHADOW_PAD)).w_full().child(line).into_any_element())
+        // Seated on the window's foot, next to the page's: a one-line title
+        // leaves the spare row above the card, not between it and the page.
+        Some(div().p(gpui::px(SHADOW_PAD)).size_full().flex().flex_col().justify_end().child(line).into_any_element())
     }
 
     /// A fingerprint of what the corner shows: the toasts, and the

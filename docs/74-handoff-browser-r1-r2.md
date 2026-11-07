@@ -233,6 +233,22 @@ wait:…;answer:Next`).
 the display-link wake from docs/73 §5, untouched here), `agent-live-check.py` passed with the new kept-PNG check. Both bundles
 rebuilt: `target/check` and the owner's parked at `target/bundle/next` (the running Baaz untouched).
 
+### 1e. The owner's second test, 7 Nov afternoon: the Pay card
+
+| Reported | Cause | Fix |
+|---|---|---|
+| The page approval ("Claude Code wants to press “Pay €97”") looks scaled up, its text unreadable, not in the design system's style | The agent line and its approval card had a **560 px floor** (`LINE_MIN_W`, sized for Browse's centre page). In the Sessions side pane (owner's `rightWidth` 400 → a ~356 px line) the card laid out at 560 and its window cut it: a giant card, title clipped, the **Don't allow / Pay buttons outside the window** | agentic-ui `agent_window.rs`: no floor; `AgentLine::compact` (below `APPROVAL_COMPACT_BELOW` = 480) stacks the card: title on up to two lines, no pill, hint on its own row, buttons right-aligned under it; key hints dropped from the narrow working rows; the empty host line is omitted. `approval_height(data, compact)` is exact (fixed line heights + the 1 px border); harness `overlay.rs` sizes the float window with it and seats the card on the window's foot |
+| "Nothing seems to happen after the last few messages" | Not a hang: the turn waited on that Pay approval, which nobody could click; the owner's next three messages queued behind it. An unanswered page ask denies after `ASK_TIMEOUT` (10 min) | Same fix. The card's window is screen-only in the owner's screenshot tool (a window capture omits it), which is why the second screenshot shows no card |
+
+Test: `a_narrow_approval_keeps_both_buttons_inside_its_window` (clicks only inside 260 × `approval_height`; fails with the 560
+floor restored, checked). Gallery: `browse/line-narrow` (each card in a frame exactly `approval_height` tall; seen, fits).
+**Gates (patch ON, aui 4821902):** 2,289 tests, clippy clean, perf 0 missed, clone check and `agent-live-check.py` passed.
+Tier V: 0 changed regions except `right-files`/`right-files-reveal` (the patch's `.cargo/` row, docs/73 §0, expected while the
+patch is on) and one `login-device` repaint on the "Open in browser" button (the owner was at the machine; untouched code).
+**Not seen in the app:** the screen locked twice before the live run (`scratchpad/line_demo2.py <sp> 400`: BaazCheck at a 400 pt
+pane, the real Pay ask through Baaz's socket, no model) could be captured. **At push:** this changes the library: tag
+agentic-ui **v0.6.6**, repin, park the patch (`.cargo/config.toml` is ON now).
+
 **Trap:** `cargo fmt --all` rewrote 225 files here (the repo is not rustfmt-clean) and broke source-reading tests. Never run it.
 
 ## 2. Rules that bit (carry over)
