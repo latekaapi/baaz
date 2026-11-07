@@ -249,6 +249,12 @@ patch is on) and one `login-device` repaint on the "Open in browser" button (the
 pane, the real Pay ask through Baaz's socket, no model) could be captured. **At push:** this changes the library: tag
 agentic-ui **v0.6.6**, repin, park the patch (`.cargo/config.toml` is ON now).
 
+**Owner re-test on the swapped build (16:18):** the card fit the pane, but its title drew **black** on the dark card. The float
+window has no themed root and the title set no colour (the gallery's root supplies white, which hid it). aui f44799c: every
+line root sets `ink`; the title takes the transcript approval's 13 px semibold `ink`; the gallery's narrow strip sets black
+text to stand in for a bare host window. Sizes measured on the owner's screenshot are the design system's (buttons ≈ 26 pt);
+"scaled up" was the overflow. New build parked at `target/bundle/next`.
+
 **Trap:** `cargo fmt --all` rewrote 225 files here (the repo is not rustfmt-clean) and broke source-reading tests. Never run it.
 
 ## 2. Rules that bit (carry over)
