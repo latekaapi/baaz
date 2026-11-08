@@ -290,12 +290,14 @@ impl SessionView {
                     // will ever settle it, so it leaves here too rather
                     // than staying armed for the next key.
                     if error.is_unknown_approval() {
+                        crate::baaz_log!("external approval {approval}: the provider holds no such approval: {error}");
                         this.drop_gone_approval(&approval, cx);
                         return;
                     }
                     // The decision never landed: re-park the card so the
                     // press can be tried again, and banner the reason —
                     // an `Unsupported` refusal shows it verbatim.
+                    crate::baaz_log!("external approval {approval}: the decision did not land: {error}");
                     this.external_approvals.repark(&approval);
                     this.report_provider_error(&error, cx);
                 }

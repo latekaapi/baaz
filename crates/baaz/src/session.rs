@@ -2175,6 +2175,70 @@ impl SessionView {
                 || !self.external_approvals.pending().is_empty())
     }
 
+    /// The approval waiting on the person, as one line for the agent card
+    /// (R3): a provider's own headline, or a plain ask for the server's.
+    pub(crate) fn pending_approval_line(&self) -> Option<String> {
+        if let Some(approval) = self.external_approvals.pending().last() {
+            // What it would do, not just the tool's name ("Bash (Bash)" told
+            // the person nothing, seen live 8 Nov): the approval block's own
+            // command, when its card carries one.
+            let command = self.store.session().and_then(|session| {
+                session.turns.iter().rev().flat_map(|turn| turn.blocks().iter()).find_map(|block| match block {
+                    // The block carries the provider's request id, not the
+                    // tap's tool id: the newest still-pending block is it.
+                    aui_protocol::Block::Approval { command, state: aui_protocol::ApprovalState::Pending, .. } if !command.trim().is_empty() => {
+                        Some(command.trim().to_owned())
+                    }
+                    _ => None,
+                })
+            });
+            return Some(match command {
+                Some(command) => {
+                    let short: String = if command.chars().count() > 200 { format!("{}…", command.chars().take(199).collect::<String>()) } else { command };
+                    format!("{} — {short}", approval.headline)
+                }
+                None if !approval.reason.trim().is_empty() => format!("{} — {}", approval.headline, approval.reason.trim()),
+                None => approval.headline.clone(),
+            });
+        }
+        self.newest_pending_approval().map(|_| "This action needs your OK".to_owned())
+    }
+
+    /// The provider's pending approvals, `(id, headline)`, oldest first.
+    pub(crate) fn pending_external_approvals(&self) -> Vec<(String, String)> {
+        self.external_approvals.pending().iter().map(|a| (a.id.clone(), a.headline.clone())).collect()
+    }
+
+    /// Answer the provider's pending approval `id` (the agent card's
+    /// question names the newest; a browser chat auto-accepts its own
+    /// browser tools).
+    pub(crate) fn answer_external(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
+        use aui_protocol::ApprovalDecision as D;
+        // The approval's own choices, as its card offers them (Claude Code
+        // offers `allow`/`deny`; the generic Accept/Decline ids are Codex's
+        // words, and Claude Code refused them, seen live 8 Nov).
+        let own = self.store.session().and_then(|session| {
+            session.turns.iter().rev().flat_map(|turn| turn.blocks().iter()).find_map(|block| match block {
+                aui_protocol::Block::Approval { id: block_id, choices, .. } if block_id == id => choices
+                    .iter()
+                    .find(|c| if allow { matches!(c.decision, D::Once | D::ApprovedForSession) } else { matches!(c.decision, D::Deny) })
+                    .map(|c| c.id.clone()),
+                _ => None,
+            })
+        });
+        match own {
+            Some(choice_id) => self.decide_provider_approval(id.to_owned(), choice_id, None, cx),
+            None if self.provider_kind() == ProviderId::ClaudeCode => {
+                let choice_id = if allow { "allow" } else { "deny" };
+                self.decide_provider_approval(id.to_owned(), choice_id.to_owned(), None, cx);
+            }
+            None => {
+                let choice = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
+                self.decide_external_approval(id.to_owned(), choice, None, cx);
+            }
+        }
+    }
+
     /// ⏎ on an empty composer with an approval pending (D4, the card's
     /// `⏎ allow` hint): the approving choice — the server's first Once /
     /// for-the-session choice, or a provider's Accept. Returns whether it

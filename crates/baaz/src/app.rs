@@ -851,6 +851,9 @@ pub struct Harness {
     pub(crate) task_done_at: std::collections::HashMap<String, u64>,
     /// Wakes the window when the next done task folder is due to close.
     pub(crate) task_done_timer: Option<gpui::Task<()>>,
+    /// Provider prompts a browser chat already accepted for its own
+    /// browser tools (each once).
+    pub(crate) auto_accepted: std::collections::HashSet<String>,
     /// One unsent draft session per project, by project id: what ⌘N returns
     /// to while nothing has been sent. A draft has no sidebar row; the entry
     /// leaves the map the moment its first turn is accepted (`turn/started`).
@@ -1694,6 +1697,7 @@ impl Harness {
             browser_chat_pages: std::collections::HashMap::new(),
             task_done_at: std::collections::HashMap::new(),
             task_done_timer: None,
+            auto_accepted: std::collections::HashSet::new(),
             drafts: HashMap::new(),
             unsent: HashSet::new(),
             turns_admitted: HashSet::new(),
@@ -1905,7 +1909,13 @@ impl Harness {
             let harness = browser_harness.clone();
             cx.defer(move |cx| {
                 harness.update(cx, |harness, cx| {
-                    harness.show_browser_for_agent(&session, cx);
+                    // A browser chat browses in tabs of its own, in Browse
+                    // (its task folder), never in a Sessions pane (R3).
+                    if harness.is_browser_chat(&session) {
+                        harness.run_on_main(cx, move |harness, window, cx| harness.open_browser_chat_tab(&session, window, cx));
+                    } else {
+                        harness.show_browser_for_agent(&session, cx);
+                    }
                 });
             });
         });

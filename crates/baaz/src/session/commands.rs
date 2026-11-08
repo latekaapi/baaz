@@ -99,6 +99,20 @@ impl SessionView {
         self.submit(text, cx);
     }
 
+    /// Send `text` now, or — while the session is still starting — queue it
+    /// to go the moment the start lands (`start_landed`), as the composer's
+    /// Enter does. A browser chat sends its first ask before its provider
+    /// has answered (R3; seen live: the ask was dropped).
+    pub(crate) fn send_or_queue(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(queue) = self.start_queue() {
+            queue.sends.push(text);
+            self.submitting = true;
+            cx.notify();
+            return;
+        }
+        self.submit(text, cx);
+    }
+
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
         // No session stands behind the view (its start failed): nothing may
         // arm the busy state — it would never clear, and the send button
@@ -321,6 +335,17 @@ impl SessionView {
             parts.push(provider::SubmissionPart::Text(String::new()));
         }
         parts
+    }
+
+    /// The agent card's ↩ (R3): steer `text` into the running turn, or send
+    /// it as the next turn when nothing runs (queued while the session
+    /// starts).
+    pub(crate) fn steer_or_send(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            self.steer_text(text, cx);
+        } else {
+            self.send_or_queue(text, cx);
+        }
     }
 
     /// ⌘↩: interject into the running turn instead of queueing behind it.
