@@ -73,6 +73,16 @@ Also design work that is new and so needs a board and approval before it is buil
 
 Check the gallery first. Only draw what is missing, as boards on the "Baaz v3" canvas.
 
+### 1c. Owner answers, 8 Nov (the four §1b questions)
+
+1. "From sessions" heading: **drop it**, hairline only.
+2. Task folders: **round faces + word**.
+3. The line **stays under the floating card** (Take over stays on the line).
+4. The Field: **switch to the prototype's centred Field** (gallery `browse/field`), replacing the October anchored board.
+
+Boards for the undrawn pieces (inline answer, draft in page, handoff picker, Settings › Browser › Assistant) are on
+"Baaz v3" v64 as `R3Agent` (generator `docs/34-refs/v3-redo/canvas/gen_r3.py`), awaiting approval.
+
 ## 2. Rules that bit (carry over; docs/74 §2 has the full list)
 
 - New UI: a board, then owner approval, then build. FF values are the spec. Count the concepts (≤ 6).
