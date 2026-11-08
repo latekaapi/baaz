@@ -41,6 +41,8 @@ use crate::app::Harness;
 use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
+pub(crate) mod agents;
+pub(crate) mod assistant;
 pub(crate) mod chrome;
 pub(crate) mod favicons;
 pub(crate) mod automation;
@@ -860,7 +862,14 @@ impl Harness {
         // column and the right sheet; the dock below it inside the column.
         if !self.settings_open() {
             let sidebar = if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
-            let right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(2.0 * PAGE_CARD_INSET) } else { gpui::px(0.0) };
+            let mut right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(2.0 * PAGE_CARD_INSET) } else { gpui::px(0.0) };
+            // The docked agent column takes its strip beside the page (R3):
+            // the page gives it up rather than sitting under it.
+            if self.mode == crate::layout::Mode::Browse && self.card_ui == crate::app::agent_window::CardUi::Column {
+                // `sheet_page_rect` reads a zero `right` as the plain inset.
+                let base = if right > gpui::px(0.0) { right } else { gpui::px(PAGE_CARD_INSET) };
+                right = base + gpui::px(crate::app::agent_window::COLUMN_W + 6.0);
+            }
             return sheet_page_rect(content, sidebar, right, self.open_dock_height_px(window));
         }
         let page = self.browse_centre_content_rect(content, window);
@@ -2314,6 +2323,10 @@ impl Harness {
         // Long-hidden pages drop their native views (but keep their tabs);
         // the shown tabs are never candidates.
         self.discard_hidden_tabs(false, shown, centre_shown, cx);
+        // Task folders done for 15 minutes close their tabs (R3).
+        if self.browser.tabs_loaded {
+            self.close_done_task_tabs(centre_shown.or(shown), window, cx);
+        }
         if tabs_dirty {
             self.schedule_tabs_write(cx);
         }
