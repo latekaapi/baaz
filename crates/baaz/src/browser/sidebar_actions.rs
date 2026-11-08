@@ -66,7 +66,7 @@ impl Harness {
     /// Close `ids`, each through its owner's path (a person tab's close
     /// picks the neighbour; closing the space's last one leaves a fresh
     /// blank tab, as the × always has).
-    fn close_tabs(&mut self, ids: Vec<TabId>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tabs(&mut self, ids: Vec<TabId>, window: &mut Window, cx: &mut Context<Self>) {
         for id in ids {
             self.browse_sidebar_tab(id, true, window, cx);
         }
@@ -303,6 +303,13 @@ impl Harness {
     pub(crate) fn browse_task_folder_action(&mut self, session: &str, action: TaskFolderAction, window: &mut Window, cx: &mut Context<Self>) {
         self.browse_menu = None;
         match action {
+            // A browser chat opens in its card, over the page (R3); a
+            // project session opens in Sessions.
+            TaskFolderAction::OpenChat if self.is_browser_chat(session) && self.show_browser_chat(session, cx) => {
+                if self.card_ui == crate::app::agent_window::CardUi::Closed {
+                    self.card_ui = crate::app::agent_window::CardUi::Card;
+                }
+            }
             TaskFolderAction::OpenChat => {
                 self.set_mode(crate::layout::Mode::Sessions, window, cx);
                 self.resume_quiet(session.to_owned(), window, cx);

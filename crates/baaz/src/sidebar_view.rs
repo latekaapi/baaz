@@ -708,6 +708,9 @@ impl Harness {
                     .iter()
                     .find(|entry| entry.id == *session)
                     .map(|entry| entry.label.clone())
+                    // A browser chat is hidden from the list: its folder
+                    // takes the card's title (R3).
+                    .or_else(|| self.is_browser_chat(session).then(|| self.browser_chat_title_for(session, cx)))
                     .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
                 let rows = tabs
                     .iter()
