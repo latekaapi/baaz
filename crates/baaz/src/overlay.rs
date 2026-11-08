@@ -14,7 +14,7 @@
 //! run on the main window's next frame: focus, pages and the rename editor
 //! all live there, never in the panel.
 
-use aui::interact::{menu_surface, Shape};
+use aui::interact::menu_surface;
 use aui::screens::sidebar::{browse_menu, browse_menu_size, SidebarIntent};
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
@@ -102,7 +102,30 @@ type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
 const SITE_INFO_WIDTH: f32 = scale::SP_7 * 10.0;
 
 /// The Field panel's width (canvas board "Field", 2026-10-11): 600.
-const FIELD_WIDTH: f32 = scale::SP_7 * 18.75;
+/// The order the Field draws Baaz's ranked rows in: the caption-less rows
+/// (Ask, Search, open) first, then each captioned group in the order its
+/// first row ranked. Returns indices into `rows`.
+fn field_display_order(rows: &[aui::browse::field::FieldRow]) -> Vec<usize> {
+    use aui::browse::field::FieldRowKind;
+    let group = |kind: &FieldRowKind| match kind {
+        FieldRowKind::Tab { .. } => 1,
+        FieldRowKind::History { .. } => 2,
+        FieldRowKind::Command { .. } => 3,
+        _ => 0,
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| group(&rows[i].kind));
+    order
+}
+
+/// The Field's measure: the library component's 640 (aui `browse/field`).
+const FIELD_WIDTH: f32 = 640.0;
+/// The Field's top edge in the window: the prototype's 40 px under the
+/// 28 px traffic-light strip.
+const FIELD_TOP: f32 = 68.0;
+/// The tallest the Field's window gets: the input row, the 512 px body and
+/// the footer.
+const FIELD_MAX_H: f32 = 46.0 + 512.0 + 32.0 + 2.0;
 
 /// The clear margin around every overlay panel inside its window: room for
 /// FF's shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which
@@ -286,17 +309,18 @@ impl Harness {
             return Some((OverlayKind::Modal, window.bounds()));
         }
         if self.field_overlay_wanted(cx) {
-            // One fixed transparent rect from the address line down: the
-            // panel draws at its top and grows inside it, so typing never
-            // resizes the window; a click on the clear part is outside.
-            let metrics = cx.aui().metrics;
-            let top = metrics.header + metrics.item_px / 2.0;
-            // The panel sits at (item_px, top); the window reaches the
-            // shadow margin past it on every side.
+            // One fixed transparent rect, centred on the window near its top
+            // (the prototype's Field, owner 8 Nov): the panel draws at its top
+            // and grows inside it, so typing never resizes the window; a
+            // click on the clear part is outside.
             let pad = gpui::px(SHADOW_PAD);
-            let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
-            let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
-            return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(gpui::px(FIELD_WIDTH) + pad * 2.0, height))));
+            let win = window.bounds().size;
+            let top = gpui::px(FIELD_TOP);
+            let width = gpui::px(FIELD_WIDTH).min(win.width - gpui::px(32.0)) + pad * 2.0;
+            let left = (win.width - width) / 2.0;
+            let origin = window.bounds().origin + gpui::point(left, top - pad);
+            let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
+            return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(width, height))));
         }
         if self.site_info_open && self.sidebar_open && self.browse_centre_state().is_some() {
             // Under the address line, inside a clear rect like the Field's.
@@ -976,139 +1000,88 @@ impl Harness {
         }
     }
 
-    /// The Field panel (canvas board "Field"): FF's dropdown chrome, the
-    /// address input pinned on top (FF InputField focused: `ring-border`),
-    /// then the ranked rows in groups — open tabs, then search and ask —
-    /// on 36 px rows, the highlighted one on the hover overlay. ↑/↓ move,
-    /// Tab completes, Enter opens, ⌘↵ asks, Escape leaves.
+    /// The Field (docs/27 §4.4): the library's `browse/field` component the
+    /// owner approved on 5 Nov, centred near the window's top (owner 8 Nov:
+    /// "centred, as prototype"). Baaz keeps its own ranking and activation;
+    /// the rows only borrow the component's kinds for their glyph and group.
+    /// ↑/↓ move, Tab completes, Enter opens, Escape leaves.
     fn render_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use aui::browse::field::{field, FieldIntent, FieldModel, FieldRow, FieldRowKind};
         let p = cx.aui().colors;
-        let metrics = cx.aui().metrics;
-        let rows = self.browse_suggestions(cx);
-        let selected = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
-        let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| match event.keystroke.key.as_str() {
-            "up" => this.move_omnibox(-1, cx),
-            "down" => this.move_omnibox(1, cx),
+        let omni = self.browse_suggestions(cx);
+        let selected = self.browse_omnibox_selected.min(omni.len().saturating_sub(1));
+        let rows: Vec<FieldRow> = omni
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let kind = match row.suggestion.kind {
+                    crate::browser::SuggestKind::Ask => FieldRowKind::Ask,
+                    crate::browser::SuggestKind::Search => FieldRowKind::Search,
+                    crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session => FieldRowKind::Tab { id: index.to_string().into() },
+                    crate::browser::SuggestKind::Command => FieldRowKind::Command { id: index.to_string().into() },
+                    crate::browser::SuggestKind::History => FieldRowKind::History { url: row.suggestion.complete.clone().unwrap_or_default().into() },
+                };
+                // Every row confirms with ↩ unless Baaz names another key; an
+                // empty hint drew an empty keycap.
+                let hint = if row.suggestion.hint.is_empty() { "↩".to_string() } else { row.suggestion.hint.clone() };
+                FieldRow { kind, title: row.suggestion.title.clone().into(), detail: None, hint: hint.into() }
+            })
+            .collect();
+        // The component groups by caption, and the caption-less rows (Ask,
+        // Search) lead, as the prototype draws them; activation still maps
+        // each row back to Baaz's own index.
+        let order = field_display_order(&rows);
+        let query = self.browse_address_text(cx);
+        let mut model = FieldModel::new(query, order.iter().map(|&i| rows[i].clone()).collect());
+        model.selected = order.iter().position(|&i| i == selected).unwrap_or(0);
+        let walk = order.clone();
+        let keys = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, window, cx| match event.keystroke.key.as_str() {
+            "up" | "down" => {
+                // Walk the rows as drawn, not in Baaz's ranking order.
+                let step: isize = if event.keystroke.key == "up" { -1 } else { 1 };
+                let at = walk.iter().position(|&i| i == this.browse_omnibox_selected).unwrap_or(0) as isize;
+                let next = (at + step).clamp(0, walk.len().saturating_sub(1) as isize) as usize;
+                if let Some(&index) = walk.get(next) {
+                    this.browse_omnibox_selected = index;
+                    cx.notify();
+                }
+            }
             "tab" => this.complete_omnibox(window, cx),
             "escape" => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             _ => {}
         });
         let input = self.browse_address.clone().map(|input| {
-            aui::a11y_text::a11y_text_input("field-input", "Search or type a URL", &input, cx).flex_1().min_w(gpui::px(0.0)).into_any_element()
+            aui::a11y_text::a11y_text_input("field-input", "Search or type a URL", &input, cx).flex_1().min_w(gpui::px(0.0)).text_color(p.ink).into_any_element()
         });
-        // FF `DropdownSearch` (dropdown-search.tsx): the field is a row of
-        // the popup, not a box inside it — full bleed through the 4 px
-        // padding (`-mx-1 -mt-1`), 36 tall, no ring, a `border/60` divider
-        // under it and 2 px (`mb-0.5`) before the first row; its icon is lit
-        // (foreground, stroke 2) while it holds focus, which is always here.
-        // Adaptation: the leading slot keeps the rows' 24 px icon axis, so
-        // the icon and text line up with the rows below.
-        // With no rows (an empty field) the input is the whole panel: no
-        // divider, no gap, bleeding through the bottom padding too — a
-        // divider over nothing read as a double edge (owner 2026-10-11).
-        let inset = metrics.item_px / 2.0;
-        let alone = rows.is_empty();
-        let field = h_flex()
-            .id("field-row")
-            .h(metrics.control)
-            .mx(-inset)
-            .mt(-inset)
-            .when(alone, |d| d.mb(-inset))
-            .when(!alone, |d| {
-                d.mb(gpui::px(2.0)).border_b_1().border_color({
-                    let mut line = p.line;
-                    line.a *= 0.6;
-                    line
-                })
+        let baaz = cx.entity().downgrade();
+        let hover = baaz.clone();
+        let index_of = move |row: &FieldRow| rows.iter().position(|r| r == row);
+        let mut panel = field("browse-field", &model)
+            .placeholder("Search or type a URL")
+            .on_hover(move |shown, _, cx| {
+                let Some(&index) = order.get(shown) else { return };
+                let _ = hover.update(cx, |this, cx| {
+                    if this.browse_omnibox_selected != index {
+                        this.browse_omnibox_selected = index;
+                        cx.notify();
+                    }
+                });
             })
-            .pl(inset)
-            .pr(metrics.item_px + inset)
-            .items_center()
-            .gap(metrics.gap)
-            .text_color(p.fg)
-            .text_role_in(TextRole::Body, Density::Standard)
-            .on_key_down(keys)
-            .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(IconName::Search).size(metrics.icon).color(p.fg).lit(true)))
-            .children(input)
-            .child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("esc"));
-        // FF DropdownSearch: one fluid highlight the pointer and the arrows
-        // both drive; a hover moves the selection (it was keyboard-only).
-        let report = cx.entity().downgrade();
-        let mut rows_list = aui::interact::fluid_list("field-rows", aui::interact::Axis::Y)
-            .label("Suggestions")
-            .gap(gpui::px(0.0))
-            .highlighted(Some(selected))
-            .on_highlight(move |index, _, cx| {
-                if let Some(index) = index {
-                    let _ = report.update(cx, |this, cx| {
-                        if this.browse_omnibox_selected != index {
-                            this.browse_omnibox_selected = index;
-                            cx.notify();
+            .on_intent(move |intent, _, cx| {
+                let _ = baaz.update(cx, |this, cx| match intent {
+                    FieldIntent::Open(row) | FieldIntent::Background(row) => {
+                        if let Some(index) = index_of(&row) {
+                            this.run_on_main(cx, move |this, window, cx| this.activate_omnibox_row(index, window, cx));
                         }
-                    });
-                }
+                    }
+                    FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
+                    FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
+                    FieldIntent::SearchExact(_) => {}
+                });
             });
-        let mut last: Option<&'static str> = None;
-        for (index, row) in rows.iter().enumerate() {
-            let group = match row.suggestion.kind {
-                // The ranking puts Ask first and Search last (the omnibox
-                // rule), so each kind keeps its own label.
-                crate::browser::SuggestKind::Ask => "Ask",
-                crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session => "Switch to",
-                crate::browser::SuggestKind::Command => "Commands",
-                crate::browser::SuggestKind::History => "History",
-                crate::browser::SuggestKind::Search => "Search",
-            };
-            if last != Some(group) {
-                rows_list = rows_list.item_static(
-                    Harness::OMNI_HEADER_BASE + index,
-                    div().h(metrics.control_md).mt(metrics.item_px / 2.0).px(metrics.item_px).flex().items_center().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(group),
-                );
-                last = Some(group);
-            }
-            let lit = index == selected;
-            let glyph = match row.suggestion.kind {
-                crate::browser::SuggestKind::Ask => IconName::Sparkle,
-                crate::browser::SuggestKind::Search => IconName::Search,
-                crate::browser::SuggestKind::Command => IconName::Terminal,
-                crate::browser::SuggestKind::Session => IconName::List,
-                _ => IconName::Globe,
-            };
-            let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-                this.run_on_main(cx, move |this, window, cx| this.activate_omnibox_row(index, window, cx));
-            });
-            let mut item = h_flex()
-                .h(metrics.control)
-                .w_full()
-                .items_center()
-                .gap(metrics.gap)
-                .pr(metrics.item_px)
-                .child(div().flex_none().w(metrics.item_px + metrics.icon).flex().justify_center().child(icon(glyph).size(metrics.icon).color(if lit { p.fg } else { p.fg_muted }).lit(lit)))
-                .child(
-                    div()
-                        .flex_shrink(1.0)
-                        .min_w(gpui::px(0.0))
-                        .truncate()
-                        .text_role_in(TextRole::Body, Density::Standard)
-                        .text_color(if lit { p.fg } else { p.fg_muted })
-                        .child(row.suggestion.title.clone()),
-                )
-                .child(div().flex_1());
-            if !row.suggestion.hint.is_empty() {
-                item = item.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(row.suggestion.hint.clone()));
-            }
-            rows_list = rows_list.item(
-                index,
-                div()
-                    .id(("field-row", index))
-                    .role(gpui::Role::ListBoxOption)
-                    .aria_label(row.suggestion.title.clone())
-                    .cursor_pointer()
-                    .on_mouse_down(gpui::MouseButton::Left, press)
-                    .child(Shape::Item.rounded(item)),
-            );
+        if let Some(input) = input {
+            panel = panel.query_slot(input);
         }
-        let list = v_flex().w_full().gap(gpui::px(0.0)).child(field).child(rows_list);
         let _ = window;
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
             this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx));
@@ -1118,14 +1091,19 @@ impl Harness {
             .size_full()
             .flex()
             .flex_col()
+            .items_center()
             .p(gpui::px(SHADOW_PAD))
+            .text_color(p.ink)
             .on_mouse_down(gpui::MouseButton::Left, leave)
             .child(
                 div()
-                    .w_full()
+                    .id("field-panel")
                     .occlude()
+                    .role(gpui::Role::Dialog)
+                    .aria_label("Open a page, switch tab or ask")
+                    .on_key_down(keys)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(menu_surface(div().id("field-panel").w_full().p(metrics.item_px / 2.0).role(gpui::Role::Dialog).aria_label("Open a page, switch tab or ask").child(list))),
+                    .child(panel),
             )
             .into_any_element()
     }
@@ -1306,5 +1284,27 @@ impl Harness {
     /// focus and pages live) once this event has finished.
     pub(crate) fn queue_sidebar_intent(&mut self, intent: SidebarIntent, cx: &mut Context<Self>) {
         self.run_on_main(cx, move |baaz, window, cx| baaz.sidebar_intent(intent, window, cx));
+    }
+}
+
+#[cfg(test)]
+mod field_order_tests {
+    use super::field_display_order;
+    use aui::browse::field::{FieldRow, FieldRowKind};
+
+    fn row(kind: FieldRowKind) -> FieldRow {
+        FieldRow { kind, title: "t".into(), detail: None, hint: "↩".into() }
+    }
+
+    #[test]
+    fn captionless_rows_lead_and_groups_keep_their_rank() {
+        let rows = vec![
+            row(FieldRowKind::Ask),
+            row(FieldRowKind::Tab { id: "1".into() }),
+            row(FieldRowKind::Command { id: "2".into() }),
+            row(FieldRowKind::Tab { id: "3".into() }),
+            row(FieldRowKind::Search),
+        ];
+        assert_eq!(field_display_order(&rows), vec![0, 4, 1, 3, 2]);
     }
 }
