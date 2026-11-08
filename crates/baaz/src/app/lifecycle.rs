@@ -2512,7 +2512,7 @@ impl Harness {
         OpenExtras { model_provider: Some(model_provider), mode }
     }
 
-    fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
+    pub(super) fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
         self.args
             .approval_mode
             .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
@@ -2953,6 +2953,23 @@ impl Harness {
         crate::log::boot_mark("new-draft-shown");
         crate::log::trace_mark("new-draft-shown");
         crate::log::trace_arm_first_frame();
+        self.spawn_provider_open(provider_id, project, workspace, request_id, mode, cx);
+    }
+
+    /// The background half of a provider draft's open: run the provider's
+    /// open off the UI thread, land it on the view keyed `request_id`
+    /// wherever that view is ([`Self::land_provider_draft`]) or fail it, and
+    /// fail it visibly past [`PROVIDER_OPEN_TIMEOUT`]. Shared by the centre's
+    /// drafts and browser chats.
+    pub(super) fn spawn_provider_open(
+        &mut self,
+        provider_id: ProviderId,
+        project: Option<String>,
+        workspace: String,
+        request_id: String,
+        mode: aui_protocol::PermissionMode,
+        cx: &mut Context<Self>,
+    ) {
         let factory = self.provider_factory.clone();
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
@@ -5089,6 +5106,9 @@ impl Harness {
             if view.read(cx).session_id == session_id {
                 return Some(view);
             }
+        }
+        if let Some(view) = self.browser_chat.clone().filter(|view| view.read(cx).session_id == session_id) {
+            return Some(view);
         }
         self.session_cache.iter().find(|(id, _)| id == session_id).map(|(_, view)| view.clone())
     }

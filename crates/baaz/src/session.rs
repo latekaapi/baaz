@@ -1981,7 +1981,20 @@ impl SessionView {
         self.last_tick_secs = None;
     }
 
-    pub fn busy(&self) -> bool {
+    /// Load a canned transcript into a read-only view (the
+    /// `browser-chat-fixture` step: the agent card and line with no turn).
+    pub(crate) fn load_fixture(&mut self, session: aui_protocol::Session, cx: &mut Context<Self>) {
+        self.store.load(session);
+        cx.notify();
+    }
+
+    /// The transcript this view renders, when its session has loaded: what
+    /// the agent card maps onto the library's card (R3).
+    pub(crate) fn transcript_session(&self) -> Option<&aui_protocol::Session> {
+        self.store.session()
+    }
+
+        pub fn busy(&self) -> bool {
         self.running.is_some() || self.submitting
     }
 
