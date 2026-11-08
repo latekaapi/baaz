@@ -1057,17 +1057,13 @@ impl Harness {
                 let asking = page_work.as_ref().is_some_and(|work| work.asking.is_some());
                 let running = entry.is_some_and(|entry| entry.running) || page_work.is_some();
                 let waiting = asking || entry.is_some_and(|entry| !entry.attention.is_empty() || entry.approval_command.is_some() || entry.pending_question.is_some());
-                let (state, status) = if waiting {
-                    (AgentState::Waiting, "needs you")
-                } else if running {
-                    (AgentState::Running, "working")
-                } else {
-                    (AgentState::Idle, "")
-                };
+                let held = page_work.as_ref().is_some_and(|work| work.held);
+                let typing = page_work.as_ref().is_some_and(|work| crate::browser::face_types(&work.label));
+                let (state, face) = task_face_for(waiting, held, running, typing);
                 BrowseFolder {
                     id: session.into(),
                     name: label.into(),
-                    kind: FolderKind::Task { state, status: status.into(), needs_you: waiting },
+                    kind: FolderKind::Task { state, face, status: face.status_word().into(), needs_you: waiting },
                     open: true,
                     // A session's tabs load in its own pane; their rows keep
                     // the favicon (the groups key carries no page facts).
@@ -3652,5 +3648,40 @@ mod footer_identity_tests {
         assert_eq!(footer_identity(&statuses, "muse", String::new).0, "No provider connected");
         let checking = [ProviderStatus::checking(ProviderId::Muse), ProviderStatus::checking(ProviderId::Codex)];
         assert_eq!(footer_identity(&checking, "muse", String::new).0, "Checking providers…");
+    }
+}
+
+
+/// A task folder's state and face (docs/27 §4.3, owner 8 Nov: round faces
+/// with the word): needs you, then paused while the person drives, then
+/// typing or reading while it works, else done.
+pub(crate) fn task_face_for(waiting: bool, held: bool, running: bool, typing: bool) -> (AgentState, aui::browse::TaskFace) {
+    use aui::browse::TaskFace;
+    if waiting {
+        (AgentState::Waiting, TaskFace::NeedsYou)
+    } else if held {
+        (AgentState::Running, TaskFace::Paused)
+    } else if running && typing {
+        (AgentState::Running, TaskFace::Typing)
+    } else if running {
+        (AgentState::Running, TaskFace::Reading)
+    } else {
+        (AgentState::Idle, TaskFace::Done)
+    }
+}
+
+#[cfg(test)]
+mod task_face_tests {
+    use super::task_face_for;
+    use aui::browse::TaskFace;
+
+    #[test]
+    fn needs_you_wins_then_paused_then_work_then_done() {
+        assert_eq!(task_face_for(true, true, true, true).1, TaskFace::NeedsYou);
+        assert_eq!(task_face_for(false, true, true, true).1, TaskFace::Paused);
+        assert_eq!(task_face_for(false, false, true, true).1, TaskFace::Typing);
+        assert_eq!(task_face_for(false, false, true, false).1, TaskFace::Reading);
+        assert_eq!(task_face_for(false, false, false, false).1, TaskFace::Done);
+        assert_eq!(TaskFace::Done.status_word(), "done");
     }
 }

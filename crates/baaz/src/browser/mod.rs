@@ -4193,6 +4193,13 @@ impl Harness {
     }
 }
 
+
+/// Whether the line's activity `label` is the agent typing into the page
+/// (the face looks down at the keys), from `browser_activity_label`'s words.
+pub(crate) fn face_types(label: &str) -> bool {
+    label.starts_with("typing") || label.starts_with("pressing")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
