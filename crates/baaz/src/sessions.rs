@@ -94,6 +94,11 @@ pub struct SessionMeta {
     /// only recognition.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub side_session: bool,
+    /// A browser chat (docs/27 §6, R3): a session of kind `browser` in the
+    /// hidden browser workspace, reached from the line, the card and its
+    /// task folder, never from the Sessions sidebar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser_chat: bool,
     /// Pinned to the top of the sidebar's date view, in its own group.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -158,6 +163,7 @@ impl SessionMeta {
             && self.generated_title.is_none()
             && !self.title_attempted
             && !self.side_session
+            && !self.browser_chat
             && !self.pinned
             && !self.archived
             && self.last_summary.is_none()

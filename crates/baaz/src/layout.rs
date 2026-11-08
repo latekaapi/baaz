@@ -369,6 +369,23 @@ pub struct Layout {
     /// holds for every file and across launches.
     #[serde(rename = "codeWrap", default = "default_true")]
     pub code_wrap: bool,
+    /// Settings › Browser › Assistant (docs/27 §6, R3): the provider and
+    /// model a browser chat starts with. Empty is the default.
+    #[serde(rename = "assistant", default, skip_serializing_if = "crate::layout::is_default_assistant")]
+    pub assistant: crate::browser::assistant::AssistantPrefs,
+    /// Settings › Browser › Agents (docs/27 §6.2, R3).
+    #[serde(rename = "agents", default, skip_serializing_if = "crate::layout::is_default_agents")]
+    pub agents: crate::browser::agents::AgentsPrefs,
+}
+
+/// Whether the Agents block is at its defaults (nothing stored).
+fn is_default_agents(prefs: &crate::browser::agents::AgentsPrefs) -> bool {
+    *prefs == crate::browser::agents::AgentsPrefs::default()
+}
+
+/// Whether the assistant pick is the default (nothing stored).
+fn is_default_assistant(prefs: &crate::browser::assistant::AssistantPrefs) -> bool {
+    *prefs == crate::browser::assistant::AssistantPrefs::default()
 }
 
 /// The folder downloads land in when nothing was ever chosen:
@@ -463,6 +480,8 @@ impl Default for Layout {
             search_engine: crate::browser::toolbar::SearchEngine::Google,
             download_dir: None,
             code_wrap: true,
+            assistant: Default::default(),
+            agents: Default::default(),
         }
     }
 }
@@ -641,6 +660,8 @@ mod tests {
             search_engine: crate::browser::toolbar::SearchEngine::Kagi,
             download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
             code_wrap: false,
+            assistant: Default::default(),
+            agents: Default::default(),
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
