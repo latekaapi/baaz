@@ -232,7 +232,7 @@ over title + first prompt + search text.
 | Approval or question choice | 1–9; Enter confirms; Esc collapses |
 | Command palette | ⌘K |
 | Sidebar | ⌘B; ⌘N new session; ⌘⇧F search sessions |
-| Model / effort / mode menus | ⌘⇧M / ⌘⇧E / ⌘⇧P |
+| Model / effort / mode menus | ⌘⇧M / ⌃⌘E / ⌘⇧P |
 | Compact | via `/compact` and the context meter |
 
 ### 3.10 Slash commands (client-side)

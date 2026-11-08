@@ -120,8 +120,14 @@ actions!(
         TogglePlan,
         /// Open the model picker (⌘⇧M).
         OpenModelMenu,
-        /// Open the reasoning-effort picker (⌘⇧E).
+        /// Open the reasoning-effort picker (⌃⌘E; ⌘⇧E docks the agent column).
         OpenEffortMenu,
+        /// Browse: open or close the ⌘J agent line (docs/27 §4.5).
+        ToggleAgentLine,
+        /// Browse: open or close the ⌘E agent card.
+        ToggleAgentCard,
+        /// Browse: dock the card as a column, or undock it (⌘⇧E).
+        ToggleAgentColumn,
         /// Open the approval-mode picker (⌘⇧P).
         OpenModeMenu,
         /// Move the open menu's selection up.
@@ -160,7 +166,7 @@ actions!(
         RightBack,
         /// Show Changes in the right pane (⌘⇧D).
         ShowRightChanges,
-        /// Show Files in the right pane (⌘⌥E; ⌘⇧E is the effort picker).
+        /// Show Files in the right pane (⌘⌥E).
         ShowRightFiles,
         /// Show Browser in the right pane (⌘⇧B).
         ShowRightBrowser,
@@ -556,6 +562,9 @@ pub fn set_menus(cx: &mut App) {
     ]);
 }
 
+pub(crate) mod agent_window;
+mod browser_chat;
+mod browser_handoff;
 mod find;
 pub(crate) mod lifecycle;
 mod list;
@@ -715,6 +724,8 @@ pub struct Harness {
     pub(crate) muse_sheet: bool,
     /// The connect screen's footer picker menu is open.
     pub(crate) connect_menu_open: bool,
+    /// Settings › Browser › Assistant's model menu stands open.
+    pub(crate) assistant_menu_open: bool,
     /// Settings provider cards whose Details are open (closed by default).
     pub(crate) provider_details_open: HashSet<ProviderId>,
     /// Provider cards waiting on something the person pressed (Re-check,
@@ -804,6 +815,42 @@ pub struct Harness {
     /// fold, scroll position and draft kept); reopening shows it at once and
     /// tops it up from its last cursor.
     session_cache: Vec<(String, Entity<SessionView>)>,
+    /// The browser chat the line and the card show (docs/27 §6, R3): a
+    /// hidden `browser` session's view, never the centre's. `find_view`
+    /// searches it, so its open lands here like a parked draft's.
+    pub(crate) browser_chat: Option<Entity<SessionView>>,
+    /// The ⌘J line's own state (R3), when no agent drives the tab on screen.
+    pub(crate) line_ui: agent_window::LineUi,
+    /// Where the agent card stands: closed, floating, or docked.
+    pub(crate) card_ui: agent_window::CardUi,
+    /// The line's float wants the keyboard (its ask row is open).
+    pub(crate) line_wants_keys: bool,
+    /// The line's "This page" chip stands (× removes it until reopened).
+    pub(crate) line_page_chip: bool,
+    /// One quiet sentence the line shows instead of asking (no provider).
+    pub(crate) line_notice: Option<String>,
+    /// The card's steering input.
+    pub(crate) agent_card_input: Option<Entity<gpui_kit::base::input::TextareaState>>,
+    /// The card's float window, and the bounds it is opening at.
+    pub(crate) card_float: Option<crate::overlay::Overlay>,
+    pub(crate) card_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
+    /// The handoff picker over the card (R3 board 3a): open, its query and
+    /// its highlighted row.
+    pub(crate) handoff_picker_open: bool,
+    pub(crate) handoff_query: Option<Entity<gpui_kit::base::input::TextareaState>>,
+    pub(crate) handoff_selected: usize,
+    /// Browser chats handed off (R3 board 3b), by chat id: the target
+    /// session's id, its label and the card row's detail line.
+    pub(crate) browser_handoffs: std::collections::HashMap<String, (String, String, String)>,
+    /// Done closes tabs (docs/27 §4.3): sessions this run saw working, and
+    /// when each task folder went done.
+    pub(crate) task_seen_working: std::collections::HashSet<String>,
+    /// The person's pages each browser chat was asked about ("This page"):
+    /// `(title, url)` by chat id, for the handoff's "Pages it used".
+    pub(crate) browser_chat_pages: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub(crate) task_done_at: std::collections::HashMap<String, u64>,
+    /// Wakes the window when the next done task folder is due to close.
+    pub(crate) task_done_timer: Option<gpui::Task<()>>,
     /// One unsent draft session per project, by project id: what ⌘N returns
     /// to while nothing has been sent. A draft has no sidebar row; the entry
     /// leaves the map the moment its first turn is accepted (`turn/started`).
@@ -1607,6 +1654,7 @@ impl Harness {
             codex_generation: 0,
             muse_sheet: false,
             connect_menu_open: false,
+            assistant_menu_open: false,
             provider_details_open: HashSet::new(),
             provider_busy: HashMap::new(),
             setup_sheet: None,
@@ -1629,6 +1677,23 @@ impl Harness {
             sidebar_pane,
             sidebar_key: None,
             session_cache: Vec::new(),
+            browser_chat: None,
+            line_ui: agent_window::LineUi::Closed,
+            card_ui: agent_window::CardUi::Closed,
+            line_wants_keys: false,
+            line_page_chip: true,
+            line_notice: None,
+            agent_card_input: None,
+            card_float: None,
+            card_float_pending: None,
+            handoff_picker_open: false,
+            handoff_query: None,
+            handoff_selected: 0,
+            browser_handoffs: std::collections::HashMap::new(),
+            task_seen_working: std::collections::HashSet::new(),
+            browser_chat_pages: std::collections::HashMap::new(),
+            task_done_at: std::collections::HashMap::new(),
+            task_done_timer: None,
             drafts: HashMap::new(),
             unsent: HashSet::new(),
             turns_admitted: HashSet::new(),
@@ -1731,6 +1796,7 @@ impl Harness {
             layout: {
                 let layout = layout::read();
                 crate::sidebar::set_compact_rows(layout.compact_rows);
+                crate::browser::agents::set_current(&layout.agents);
                 layout
             },
             shortcuts_cache: crate::keymap::effective_bindings(),
@@ -2672,6 +2738,7 @@ impl Harness {
     /// stays a no-op under `BAAZ_DETERMINISTIC=1`.
     pub(crate) fn persist_layout(&mut self) {
         self.layout.sidebar_open = self.sidebar_open;
+        crate::browser::agents::set_current(&self.layout.agents);
         layout::write(&self.layout);
     }
 
@@ -4937,7 +5004,17 @@ impl Harness {
         // black ring) and this fills it; the native page's rect and radius
         // match (`browse_centre_page_rect`, `set_corner_radius`). The loading
         // line rides the sheet's top edge.
-        div().size_full().relative().child(centre).children(self.render_page_progress(cx)).into_any_element()
+        // The docked agent column (R3) takes a strip on the sheet's right:
+        // the page narrows beside it (its own window covers the strip), and
+        // `browse_centre_page_rect` agrees.
+        let column = if self.card_ui == agent_window::CardUi::Column { agent_window::COLUMN_W + 6.0 } else { 0.0 };
+        div()
+            .size_full()
+            .relative()
+            .pr(px(column))
+            .child(centre)
+            .children(self.render_page_progress(cx))
+            .into_any_element()
     }
 
     /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
@@ -6933,6 +7010,9 @@ impl Render for Harness {
                 ))
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentLine, _, cx| this.toggle_agent_line(cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentCard, _, cx| this.toggle_agent_card(cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                     if this.feedback.blocks_chrome_action() {
@@ -7220,7 +7300,7 @@ impl Harness {
         }
     }
 
-    /// ⌘⇧M / ⌘⇧E / ⌘⇧P: the same toggle the chip's own click does.
+    /// ⌘⇧M / ⌃⌘E / ⌘⇧P: the same toggle the chip's own click does.
     fn open_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         self.with_session(cx, |view, cx| view.toggle_picker(kind, cx));
     }

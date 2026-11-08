@@ -93,7 +93,13 @@ pub(crate) enum OverlayKind {
     /// the agent pill while the agent acts, the notes panel while
     /// annotating. Never takes the keyboard, like the corner.
     PageFloat,
+    /// R3 (docs/27 §4.5): the agent card floating over the page, or the
+    /// same card docked as a column beside it. Takes the keyboard (its
+    /// steering input); hides with Baaz like the page float.
+    AgentCard,
 }
+
+mod card;
 
 /// A notes-panel click, run on the main window.
 type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
@@ -118,6 +124,22 @@ fn field_display_order(rows: &[aui::browse::field::FieldRow]) -> Vec<usize> {
     order
 }
 
+/// The frame to ask for so an R3 float's content box is `bounds`. Measured
+/// live (8 Nov): a non-modal float comes out 6 px in from its requested frame
+/// on every side once `drop_native_chrome` swaps its style mask — the Field
+/// asked 664 wide and got 652, the line 355 tall and got 343 — so the line
+/// wrapped at a width it was not measured at and its edge was cut.
+pub(crate) fn r3_frame(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    let inset = gpui::px(FRAME_LOSS);
+    Bounds::new(bounds.origin - gpui::point(inset, inset), bounds.size + gpui::size(inset * 2.0, inset * 2.0))
+}
+
+/// What a non-modal float loses from its requested frame, per side.
+const FRAME_LOSS: f32 = 6.0;
+
+/// Spare height above the line in its float window (see `wanted_agent_line`).
+const LINE_SLACK: f32 = 0.0;
+
 /// The Field's measure: the library component's 640 (aui `browse/field`).
 const FIELD_WIDTH: f32 = 640.0;
 /// The Field's top edge in the window: the prototype's 40 px under the
@@ -133,7 +155,7 @@ const FIELD_MAX_H: f32 = 46.0 + 512.0 + 32.0 + 2.0;
 /// window draws none of its own ([`drop_native_chrome`]). 6 px: `SP_1` is
 /// 2 px, and the 2 px margin it was clipped the drop (and the dropdown's
 /// 4 px enter slide).
-const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
+pub(crate) const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
 
 /// Take macOS's own chrome off an overlay window, and keep it from ever
 /// becoming the main window.
@@ -173,7 +195,7 @@ fn drop_native_chrome(window: &Window, kind: OverlayKind) {
             return;
         }
         let _: () = msg_send![ns_window, setHasShadow: false];
-        if matches!(kind, OverlayKind::Corner | OverlayKind::PageFloat) {
+        if matches!(kind, OverlayKind::Corner | OverlayKind::PageFloat | OverlayKind::AgentCard) {
             // The corner never closes on a resign, so it must not float
             // over other apps: it hides with Baaz and returns with it.
             let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
@@ -248,6 +270,17 @@ pub(crate) struct OverlayView {
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
+        // The R3 floats draw library components sized in rems: give them
+        // the main window's rem (its gpui-kit Root sets the body size), not
+        // gpui's 16 px default, so they match the approved gallery and the
+        // height functions the windows are sized by.
+        let r3_float = matches!(kind, OverlayKind::PageFloat | OverlayKind::AgentCard | OverlayKind::Field);
+        if r3_float {
+            // What gpui-kit's Root does for the main window: the theme's rem
+            // and, on the wrapper below, its font family.
+            window.set_rem_size(gpui_kit::component::ActiveTheme::theme(&**cx).font_size);
+        }
+        let font = gpui_kit::component::ActiveTheme::theme(&**cx).font_family.clone();
         let content = self.baaz.update(cx, |baaz, cx| baaz.overlay_content(kind, window, cx)).ok().flatten();
         // The hosted modal's keyboard: its query field, the palette or the
         // dialog, focused here in the panel (the main window never draws it).
@@ -278,12 +311,33 @@ impl Render for OverlayView {
         if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_cache.page_menu && !baaz.pane_page_covered(cx)).unwrap_or(false) {
             return div().size_full().children(content);
         }
+        // The agent window's keys work while its own float holds the
+        // keyboard (the main window's Browse bindings cannot see it): ⌘J
+        // the line, ⌘E the card, ⌘⇧E the column, Escape closes.
+        let agent_keys = {
+            let baaz = self.baaz.clone();
+            move |event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut App| {
+                let k = &event.keystroke;
+                let cmd = k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt;
+                let _ = baaz.update(cx, |baaz, cx| match (cmd, k.modifiers.shift, k.key.as_str()) {
+                    (true, false, "j") => baaz.toggle_agent_line(cx),
+                    (true, false, "e") => baaz.toggle_agent_card(cx),
+                    (true, true, "e") => baaz.toggle_agent_column(cx),
+                    (false, false, "escape") => baaz.escape_agent_window(kind, cx),
+                    _ => {}
+                });
+            }
+        };
         if kind == OverlayKind::PageFloat {
-            return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_center().children(content);
+            return div().size_full().font_family(font).p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_center().on_key_down(agent_keys).children(content);
+        }
+        if kind == OverlayKind::AgentCard {
+            return div().size_full().font_family(font).track_focus(&self.focus).on_key_down(agent_keys).children(content);
         }
         let baaz = self.baaz.clone();
         div()
             .size_full()
+            .when(r3_float, |d| d.font_family(font))
             .track_focus(&self.focus)
             .on_key_down(move |event: &gpui::KeyDownEvent, _, cx: &mut App| {
                 if event.keystroke.key == "escape" {
@@ -397,7 +451,7 @@ impl Harness {
                     show: true,
                     kind: WindowKind::PopUp,
                     is_movable: false,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(WindowBounds::Windowed(if kind == OverlayKind::Field { r3_frame(bounds) } else { bounds })),
                     window_background: WindowBackgroundAppearance::Transparent,
                     ..Default::default()
                 };
@@ -621,54 +675,79 @@ impl Harness {
         shown
             .filter(|session| self.terminal_service.agent_activity(session).is_some())
             .or_else(|| self.terminal_service.session_asking())
+            // A browser chat working on the person's tab (its grant) drives
+            // the line too (R3).
+            .or_else(|| {
+                (self.mode == crate::layout::Mode::Browse)
+                    .then(|| self.browser_chat_id(cx))
+                    .flatten()
+                    .filter(|session| self.terminal_service.agent_activity(session).is_some())
+            })
+    }
+
+    /// What the line shows now: the driving bar for a session acting on the
+    /// tab on screen (R2), else the line's own state (R3) in Browse. The
+    /// session is `Some` for the driving bar.
+    fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, Option<String>)> {
+        if let Some(session) = self.line_session(cx) {
+            if let Some(activity) = self.terminal_service.agent_activity(&session) {
+                let name = self.session_lane_provider(&session).label();
+                let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
+                return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
+            }
+        }
+        if self.mode != crate::layout::Mode::Browse || self.settings_open() {
+            return None;
+        }
+        self.own_line_state(cx).map(|state| (state, None))
     }
 
     /// The line's window over `rect`, a page's rect: centred on its foot, as wide as
     /// the line's measure allows, tall enough for the card it grows into.
     fn wanted_agent_line(&self, rect: Bounds<Pixels>, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
-        let session = self.line_session(cx)?;
-        let activity = self.terminal_service.agent_activity(&session)?;
+        let (state, session) = self.line_view(cx)?;
+        trace(format_args!("line wanted: {:?} driving={}", std::mem::discriminant(&state), session.is_some()));
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
         let inner = f32::min(640.0, f32::from(rect.size.width) - 24.0);
         let width = gpui::px(inner) + pad * 2.0;
-        // The approval card's own height at this width: in a narrow side pane it
-        // stacks (title on two lines, buttons on their own row). A fixed 124 cut
-        // its buttons off there, and the agent waited on a click nobody could make.
-        let body = match Self::line_approval(&session, &activity, self, cx) {
-            Some(data) => aui::browse::agent_window::approval_height(&data, Self::line_compact(inner), cx),
-            None => 48.0,
-        };
-        let height = gpui::px(body) + pad * 2.0;
+        // The state's own height at this width (the library's exact
+        // function): in a narrow pane the approval stacks and an answer
+        // wraps longer. A fixed height cut the approval's buttons off once,
+        // and the agent waited on a click nobody could make.
+        let body = aui::browse::agent_window::line_height(&state, Self::line_compact(inner), inner, window, cx);
+        if let aui::browse::agent_window::LineState::Answer { answer: Some(answer), .. } = &state {
+            trace(format_args!(
+                "line answer: inner={inner} lines={} body={body} rem={:?}",
+                aui::browse::agent_window::answer_lines(answer, inner, window, cx),
+                window.rem_size()
+            ));
+        }
+        // A little room above the measured height (seen live: the inline
+        // answer came out ~12 px taller than measured and its foot was cut).
+        // The line sits on the window's foot and never shrinks, so any spare
+        // is transparent space above it.
+        let height = gpui::px(body + LINE_SLACK) + pad * 2.0;
         let bottom = rect.bottom() - gpui::px(16.0) + pad;
         let left = rect.left() + (rect.size.width - width) / 2.0;
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         session.hash(&mut h);
-        activity.label.hash(&mut h);
-        activity.held.hash(&mut h);
-        format!("{:?}", activity.asking).hash(&mut h);
+        format!("{state:?}").hash(&mut h);
+        self.line_wants_keys.hash(&mut h);
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
+    }
+
+    /// The top of the line's float in screen space, without its shadow pad,
+    /// while it shows (or is opening).
+    pub(crate) fn page_float_top(&self) -> Option<Pixels> {
+        let bounds = self.page_float.as_ref().map(|o| o.bounds).or(self.page_float_pending)?;
+        Some(bounds.top() + gpui::px(SHADOW_PAD))
     }
 
     /// Whether a line `inner` px wide (shadow pad excluded) lays out narrow.
     fn line_compact(inner: f32) -> bool {
         inner < aui::browse::agent_window::APPROVAL_COMPACT_BELOW
-    }
-
-    /// The approval `session`'s line shows, if it is asking for one.
-    fn line_approval(
-        session: &str,
-        activity: &crate::terminal::service::AgentActivity,
-        this: &Self,
-        cx: &App,
-    ) -> Option<aui::browse::agent_window::ApprovalData> {
-        let name = this.session_lane_provider(session).label();
-        let host = this.terminal_service.page_host(session, cx).unwrap_or_default();
-        match Self::agent_line_state(activity, name, &host) {
-            aui::browse::agent_window::LineState::Approval(data) => Some(data),
-            _ => None,
-        }
     }
 
     /// What the line says for `session`'s `activity`.
@@ -682,6 +761,9 @@ impl Harness {
                 return LineState::NeedsYou { text: ask.detail.clone().into() };
             }
             let title = match (ask.kind.as_str(), ask.detail.trim()) {
+                // Ask mode (Settings › Browser › Agents): any action asks, so
+                // the title says which, from the line's own words.
+                ("Act", _) => format!("{name} asks before {}", activity.label),
                 (_, "") => format!("{name} wants to go ahead"),
                 ("Run a script", _) => format!("{name} wants to run a script on this page"),
                 ("Upload", files) => format!("{name} wants to upload {files}"),
@@ -692,10 +774,12 @@ impl Harness {
                 host: page_host.to_owned().into(),
                 line: page_host.to_owned().into(),
                 kind_pill: ask.kind.clone().into(),
-                hint: format!("{} always asks", ask.kind).into(),
+                hint: if ask.kind == "Act" { "Ask is on in Settings › Browser › Agents".into() } else { format!("{} always asks", ask.kind).into() },
                 deny: "Don't allow".into(),
-                allow: ask.kind.clone().into(),
-                allow_always: None,
+                allow: if ask.kind == "Act" { "Allow".into() } else { ask.kind.clone().into() },
+                // A known host can be trusted for good (Settings › Browser ›
+                // Agents › Sites, R3); `a` takes it.
+                allow_always: (!page_host.is_empty()).then(|| "Always on this site".to_owned()),
             });
         }
         LineState::from_task(aui::browse::TaskFace::Reading, format!("{name} is {}", activity.label))
@@ -703,6 +787,19 @@ impl Harness {
 
     /// Open, move or close the Page float window (the corner's dance).
     pub(crate) fn sync_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settle_agent_line(cx);
+        // The line's input lives here, so the float that opens for the ask
+        // row can take the keyboard on its first frame.
+        if self.agent_line_input.is_none() {
+            self.agent_line_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx)));
+        }
+        self.sync_line_float(window, cx);
+        // The card seats itself above the line's window, so it follows it.
+        self.sync_card_float(window, cx);
+    }
+
+    /// The line's (and the right pane's page) float window.
+    fn sync_line_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.wanted_page_float(window, cx);
         let current = self.page_float.as_ref().map(|o| o.bounds).or(self.page_float_pending);
         if wanted.map(|w| w.0) == current {
@@ -730,21 +827,32 @@ impl Harness {
         #[cfg(target_os = "macos")]
         never_main_panels();
         let baaz = cx.entity().downgrade();
+        // The ask row types: its float takes the keyboard (R3). Every other
+        // state leaves it with the page.
+        let keys = self.line_wants_keys && self.mode == crate::layout::Mode::Browse;
+        let input = keys.then(|| self.agent_line_input.clone()).flatten();
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 let options = WindowOptions {
                     titlebar: None,
-                    focus: false,
+                    focus: keys,
                     show: true,
                     kind: WindowKind::PopUp,
                     is_movable: false,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(WindowBounds::Windowed(r3_frame(bounds))),
                     window_background: WindowBackgroundAppearance::Transparent,
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
                     drop_native_chrome(window, OverlayKind::PageFloat);
-                    cx.new(|cx| OverlayView { baaz, kind: OverlayKind::PageFloat, focus: cx.focus_handle(), seen_active: false })
+                    cx.new(|cx| {
+                        let focus = cx.focus_handle();
+                        if let Some(input) = input {
+                            window.focus(&focus, cx);
+                            input.update(cx, |input, cx| input.focus(window, cx));
+                        }
+                        OverlayView { baaz, kind: OverlayKind::PageFloat, focus, seen_active: false }
+                    })
                 })
             });
             let _ = this.update(cx, |this, cx| {
@@ -833,14 +941,7 @@ impl Harness {
     /// grows into when the person must decide. Clicks run on the main thread's
     /// service, which owns the waiting tool.
     fn render_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let session = self.line_session(cx)?;
-        let activity = self.terminal_service.agent_activity(&session)?;
-        let name = self.session_lane_provider(&session).label();
-        let host = self
-            .terminal_service
-            .page_host(&session, cx)
-            .unwrap_or_default();
-        let state = Self::agent_line_state(&activity, name, &host);
+        let (state, session) = self.line_view(cx)?;
         let input = self.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone();
         let baaz = cx.weak_entity();
         let inner = f32::from(window.bounds().size.width) - SHADOW_PAD * 2.0;
@@ -848,20 +949,33 @@ impl Harness {
             use aui::browse::agent_window::LineIntent;
             let session = session.clone();
             let _ = baaz.update(cx, |this, cx| {
-                let service = &this.terminal_service;
-                match intent {
-                    LineIntent::TakeOver => service.take_over(&session),
-                    LineIntent::HandBack => service.hand_back(&session),
-                    LineIntent::Allow | LineIntent::AllowAlways | LineIntent::Done => service.answer_person(&session, true),
-                    LineIntent::Deny => service.answer_person(&session, false),
-                    _ => {}
+                match (session, intent) {
+                    // The driving bar: the waiting tool is the service's.
+                    (Some(session), LineIntent::TakeOver) => this.terminal_service.take_over(&session),
+                    (Some(session), LineIntent::HandBack) => this.terminal_service.hand_back(&session),
+                    (Some(session), LineIntent::AllowAlways) => {
+                        if let Some(host) = this.terminal_service.page_host(&session, cx).filter(|h| !h.is_empty()) {
+                            this.layout.agents.set_site(&host, Some(crate::browser::agents::SiteRule::Always));
+                            this.persist_layout();
+                        }
+                        this.terminal_service.answer_person(&session, true);
+                    }
+                    (Some(session), LineIntent::Allow | LineIntent::Done) => this.terminal_service.answer_person(&session, true),
+                    (Some(session), LineIntent::Deny) => this.terminal_service.answer_person(&session, false),
+                    (Some(_), LineIntent::Expand) => {
+                        this.card_ui = crate::app::agent_window::CardUi::Card;
+                    }
+                    (Some(_), _) => {}
+                    // The line's own states run on the main window.
+                    (None, intent) => this.run_on_main(cx, move |this, window, cx| this.own_line_intent(intent, window, cx)),
                 }
                 cx.notify();
             });
         });
-        // Seated on the window's foot, next to the page's: a one-line title
-        // leaves the spare row above the card, not between it and the page.
-        Some(div().p(gpui::px(SHADOW_PAD)).size_full().flex().flex_col().justify_end().child(line).into_any_element())
+        // Seated on the window's foot, next to the page's. Float windows have
+        // no themed root: the wrapper sets the ink.
+        let ink = cx.aui().colors.ink;
+        Some(div().p(gpui::px(SHADOW_PAD)).size_full().flex().flex_col().justify_end().text_color(ink).child(div().flex_none().w_full().child(line)).into_any_element())
     }
 
     /// A fingerprint of what the corner shows: the toasts, and the
@@ -989,6 +1103,7 @@ impl Harness {
                 stack
             }
             OverlayKind::PageFloat => self.render_page_float(window, cx),
+            OverlayKind::AgentCard => self.render_agent_card(window, cx),
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
@@ -1043,6 +1158,9 @@ impl Harness {
                 let next = (at + step).clamp(0, walk.len().saturating_sub(1) as isize) as usize;
                 if let Some(&index) = walk.get(next) {
                     this.browse_omnibox_selected = index;
+                    // Enter opens the highlighted row once the arrows moved
+                    // it (`commit_browse_address`), not the typed text.
+                    this.browse_omnibox_moved = true;
                     cx.notify();
                 }
             }
@@ -1260,7 +1378,7 @@ impl Harness {
         trace(format_args!("close {kind:?}"));
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
-            OverlayKind::Corner | OverlayKind::PageFloat => {}
+            OverlayKind::Corner | OverlayKind::PageFloat | OverlayKind::AgentCard => {}
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {

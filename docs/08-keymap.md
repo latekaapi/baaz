@@ -68,7 +68,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘K | The command palette: every `/` command and every session operation — the six window commands among them act with no session open |
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧O | The Projects palette: adopted projects to switch to, recent Muse workspaces to adopt |
-| ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
+| ⌘⇧M / ⌃⌘E / ⌘⇧P | Model / reasoning effort / approval mode |
 | ⌘W | Close the window (File → Close Window): probe cleanup, then the app hides; the Dock icon or ⌘-Tab brings the same window and session back |
 | ⌘Q | Quit (Baaz → Quit Baaz; probe cleanup first; asks first when a terminal command is running, naming it) |
 | ⌘M | Minimize the window |

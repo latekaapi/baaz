@@ -161,6 +161,11 @@
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
 //! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names record a step failure, free |
 //! | `page-focus` | give the active browser page the keyboard, free |
+//! | `agent-line` | Browse: open or close the ⌘J agent line on the page on screen (R3), free |
+//! | `agent-card` | Browse: open or close the ⌘E agent card (R3), free |
+//! | `agent-column` | Browse: dock the card as a column, or undock it (⌘⇧E, R3), free |
+//! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the line's chat — `answer` lands the inline answer, `steps` opens the card, `draft` the landed draft (R3), free: no turn |
+//! | `handoff-picker` | open the agent card's handoff picker (R3 board 3a), free |
 //! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for records a step failure, free |
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
@@ -432,6 +437,16 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "key", run: |this, rest, _, _| this.step_key(rest) },
     WindowVerb { verb: "page-focus", run: |this, _, window, cx| this.step_page_focus(window, cx) },
+    // R3, free (no turn, no wire): the agent window over a Browse page.
+    // `agent-line` / `agent-card` / `agent-column` toggle as ⌘J / ⌘E / ⌘⇧E
+    // do; `browser-chat-fixture:<answer|steps|draft>` makes a read-only
+    // browser chat with a canned transcript and points the line at it;
+    // `handoff-picker` opens the card's picker.
+    WindowVerb { verb: "agent-line", run: |this, _, _, cx| this.toggle_agent_line(cx) },
+    WindowVerb { verb: "agent-card", run: |this, _, _, cx| this.toggle_agent_card(cx) },
+    WindowVerb { verb: "agent-column", run: |this, _, _, cx| this.toggle_agent_column(cx) },
+    WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
+    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.handoff_picker_open = true; cx.notify(); } },
     // D5 providers: the setup sheet (`setup:<provider>:<install|signin|update>`)
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
