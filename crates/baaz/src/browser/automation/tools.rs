@@ -258,8 +258,23 @@ async fn inspect(ctx: &Ctx, node: Option<i64>, snapshot_name: &str) -> Target {
 }
 
 /// Stops for the person when `reason` applies. `Ok(None)` means go on.
+///
+/// Settings › Browser › Agents (R3) shapes it: a site's Never refuses
+/// outright and its Always never asks; under Ask every action asks, under
+/// Auto only the always-ask kinds (docs/27 §6.2).
 async fn gate(ctx: &Ctx, target: &Target) -> Option<Value> {
-    let reason = policy::classify(target)?;
+    let prefs = crate::browser::agents::current();
+    let host = page_url(ctx).await.map(|url| policy::host_of(&url)).unwrap_or_default();
+    match prefs.site(&host) {
+        Some(crate::browser::agents::SiteRule::Never) => return Some(policy::refused_answer(&host)),
+        Some(crate::browser::agents::SiteRule::Always) => return None,
+        None => {}
+    }
+    let reason = match policy::classify(target) {
+        Some(reason) => reason,
+        None if prefs.act == crate::browser::agents::ActMode::Ask => policy::Reason::Act,
+        None => return None,
+    };
     let allowed = ask(ctx, reason, &target.name).await;
     (!allowed).then(|| policy::stopped_answer(reason, target))
 }
@@ -564,8 +579,14 @@ pub async fn wait(ctx: Ctx, params: Value) -> Result<Value, String> {
 pub async fn run(ctx: Ctx, params: Value) -> Result<Value, String> {
     let code = params.get("code").and_then(Value::as_str).ok_or("browser_run needs code")?.to_owned();
     let url = page_url(&ctx).await?;
-    if !policy::is_local(&url) && !ask(&ctx, Reason::Script, &url).await {
-        return Ok(policy::stopped_answer(Reason::Script, &Target { name: url, ..Target::default() }));
+    let host = policy::host_of(&url);
+    match crate::browser::agents::current().site(&host) {
+        Some(crate::browser::agents::SiteRule::Never) => return Ok(policy::refused_answer(&host)),
+        Some(crate::browser::agents::SiteRule::Always) => {}
+        None if !policy::is_local(&url) && !ask(&ctx, Reason::Script, &url).await => {
+            return Ok(policy::stopped_answer(Reason::Script, &Target { name: url, ..Target::default() }));
+        }
+        None => {}
     }
     let answer = ctx
         .call(

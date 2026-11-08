@@ -107,7 +107,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
-        "browser" => "How Baaz browses: tabs, search, downloads.",
+        "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
@@ -1217,6 +1217,232 @@ impl Harness {
 
     /// The Downloads group: the current folder and its Change row,
     /// which opens the same folder panel Add project uses.
+    /// Settings › Browser › Assistant (R3 board 4a/4b): the provider and
+    /// model a browser chat starts with, as one chip — the provider's mark,
+    /// the model's name, a chevron — whose menu lists every usable
+    /// provider's models, the cheapest marked. The default (nothing
+    /// stored) is the first connected provider's cheapest model.
+    fn settings_browser_assistant_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        use aui::composer::{model_menu, PickerRow};
+        let p = cx.aui().colors;
+        let statuses = crate::provider_status::live_statuses();
+        let current = self.assistant_choice();
+        let mut anchor = div().relative().flex_none();
+        let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
+        let mut chip = h_flex()
+            .id("settings-assistant-model")
+            .debug_selector(|| "settings-assistant-model".into())
+            .flex_none()
+            .h(px(28.0))
+            .pl(px(6.0))
+            .pr(px(8.0))
+            .gap(px(7.0))
+            .items_center()
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_4)
+            .shadow(p.edge())
+            .cursor_pointer()
+            .text_color(p.ink)
+            .ui(scale::FS_13)
+            .role(gpui::Role::Button)
+            .aria_label(format!("Assistant model, {chip_label}. Change"))
+            .hover(|s| s.bg(p.surface_5))
+            .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.assistant_menu_open = !this.assistant_menu_open;
+                cx.notify();
+            }));
+        if let Some(choice) = current.as_ref() {
+            chip = chip.child(aui_icons::provider_mark(choice.provider.icon()).size(px(16.0)));
+        }
+        chip = chip.child(chip_label).child(aui_icons::icon(aui_icons::IconName::ChevronDown).size(px(12.0)).color(p.ink_2));
+        anchor = anchor.child(chip);
+        if self.assistant_menu_open {
+            let choices: Vec<crate::browser::assistant::ModelChoice> = ProviderId::all()
+                .into_iter()
+                .filter(|id| crate::settings_providers::usable_provider(&statuses, *id))
+                .flat_map(crate::browser::assistant::model_choices)
+                .collect();
+            let rows: Vec<PickerRow> = choices
+                .iter()
+                .map(|c| {
+                    let row = PickerRow::new(format!("{}/{}", c.provider.as_str(), c.model), c.label, c.provider.label()).mark(c.provider.icon());
+                    if c.cheapest { row.badge("cheapest") } else { row }
+                })
+                .collect();
+            let selected = current
+                .as_ref()
+                .and_then(|cur| choices.iter().position(|c| c.provider == cur.provider && c.model == cur.model))
+                .unwrap_or(0);
+            let pick = cx.entity().downgrade();
+            let close = pick.clone();
+            anchor = anchor.child(
+                model_menu("settings-assistant-menu", rows, selected, true)
+                    .align_end(true)
+                    .drop_down(true)
+                    .title("Browser chats start on")
+                    .on_pick(move |row, _, cx| {
+                        let (provider, model) = row.split_once('/').unwrap_or((row.as_ref(), ""));
+                        let (provider, model) = (provider.to_owned(), model.to_owned());
+                        let _ = pick.update(cx, |this, cx| {
+                            this.layout.assistant = crate::browser::assistant::AssistantPrefs { provider: Some(provider), model: Some(model) };
+                            this.assistant_menu_open = false;
+                            this.persist_layout();
+                            cx.notify();
+                        });
+                    })
+                    .on_close(move |_, cx| {
+                        let _ = close.update(cx, |this, cx| {
+                            this.assistant_menu_open = false;
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        let row = h_flex()
+            .id("settings-browser-assistant")
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Provider and model".to_string()))
+                    .child(
+                        div()
+                            .text_color(p.ink_3)
+                            .ui(scale::FS_12)
+                            .child("Used by ⌘J, the card and Ask in the Field. New chats start with it; an open chat keeps its model.".to_string()),
+                    ),
+            )
+            .child(anchor);
+        self.settings_group("Assistant", vec![row.into_any_element()], cx)
+    }
+
+    /// Settings › Browser › Agents (docs/27 §6.2, R3 board 4a; owner 8 Nov:
+    /// built in R3): Ask or Auto before acting on a page, what a chat may do
+    /// with your own tabs, and the per-site rules — each rule one row with
+    /// its remove button. "Always on this site" on an approval adds one.
+    fn settings_browser_agents_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::browser::agents::{ActMode, SiteRule, YourTabs};
+        let p = cx.aui().colors;
+        let row = |id: &'static str, label: &'static str, detail: &'static str, control: AnyElement| -> AnyElement {
+            h_flex()
+                .id(id)
+                .w_full()
+                .items_center()
+                .gap(px(scale::SP_3))
+                .py(px(scale::SP_2))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(div().text_color(p.ink).ui(scale::FS_13).child(label.to_string()))
+                        .child(div().text_color(p.ink_3).ui(scale::FS_12).child(detail.to_string())),
+                )
+                .child(div().flex_none().child(control))
+                .into_any_element()
+        };
+        let agents = self.layout.agents.clone();
+        let act_index = match agents.act {
+            ActMode::Ask => 0,
+            ActMode::Auto => 1,
+        };
+        let act = aui::workbench::segmented("settings-agents-act", vec!["Ask".into(), "Auto".into()], act_index)
+            .accessibility_label("Before acting on a page")
+            .on_select({
+                let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+                    this.layout.agents.act = if *index == 0 { ActMode::Ask } else { ActMode::Auto };
+                    this.persist_layout();
+                    cx.notify();
+                });
+                move |index, w, cx| set(&index, w, cx)
+            });
+        let tabs_index = match agents.your_tabs {
+            YourTabs::Yes => 0,
+            YourTabs::AskFirst => 1,
+            YourTabs::ReadOnly => 2,
+        };
+        let tabs = aui::workbench::segmented("settings-agents-tabs", vec!["Yes".into(), "Ask first".into(), "Read only".into()], tabs_index)
+            .accessibility_label("Your own tabs")
+            .on_select({
+                let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+                    this.layout.agents.your_tabs = match *index {
+                        0 => YourTabs::Yes,
+                        1 => YourTabs::AskFirst,
+                        _ => YourTabs::ReadOnly,
+                    };
+                    this.persist_layout();
+                    cx.notify();
+                });
+                move |index, w, cx| set(&index, w, cx)
+            });
+        let mut rows = vec![
+            row(
+                "settings-agents-act-row",
+                "Before acting on a page",
+                "Auto still asks before Send, Pay, Delete, Upload and signing in.",
+                act.into_any_element(),
+            ),
+            row(
+                "settings-agents-tabs-row",
+                "Your own tabs",
+                "Whether a chat may use tabs you opened, not just its own. \u{201C}This page\u{201D} on the line lends the one you're on.",
+                tabs.into_any_element(),
+            ),
+        ];
+        let sites = h_flex()
+            .id("settings-agents-sites")
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Sites".to_string()))
+                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(if agents.sites.is_empty() {
+                        agents.sites_summary()
+                    } else {
+                        // The rows below name every rule; the line says what
+                        // removing one does.
+                        "Remove a rule to be asked again on that site.".to_owned()
+                    })),
+            );
+        rows.push(sites.into_any_element());
+        for (index, (host, rule)) in agents.sites.iter().enumerate() {
+            let word = match rule {
+                SiteRule::Always => "Always here",
+                SiteRule::Never => "Never here",
+            };
+            let host_owned = host.clone();
+            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.layout.agents.set_site(&host_owned, None);
+                this.persist_layout();
+                cx.notify();
+            });
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("settings-agents-site-{index}")))
+                    .w_full()
+                    .items_center()
+                    .gap(px(scale::SP_3))
+                    .py(px(scale::SP_1))
+                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).ui(scale::FS_13).mono(scale::FS_12).child(host.clone()))
+                    .child(div().flex_none().text_color(p.ink_2).ui(scale::FS_12).child(word))
+                    .child(
+                        button(SharedString::from(format!("settings-agents-site-remove-{index}")), "Remove")
+                            .accessibility_label(SharedString::from(format!("Remove the rule for {host}")))
+                            .on_click(move |e, w, cx| remove(e, w, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        self.settings_group("Agents", rows, cx)
+    }
+
     fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let dir = browser_download_dir(&self.layout);
@@ -1350,6 +1576,8 @@ impl Harness {
         let mut page = v_flex()
             .w_full()
             .gap(px(scale::SP_4))
+            .child(self.settings_browser_assistant_group(cx))
+            .child(self.settings_browser_agents_group(cx))
             .child(self.settings_browser_search_group(cx))
             .child(self.settings_browser_downloads_group(cx));
         if cfg!(feature = "cef") {
@@ -2185,7 +2413,7 @@ mod tests {
             settings_breadcrumb("browser"),
             vec!["Settings".to_owned(), "Browser".to_owned()]
         );
-        assert_eq!(settings_blurb("browser"), "How Baaz browses: tabs, search, downloads.");
+        assert_eq!(settings_blurb("browser"), "How Baaz browses: the assistant, tabs, search, downloads.");
         assert_eq!(setting_home("search-engine"), Some("browser"));
         assert_eq!(setting_home("download-dir"), Some("browser"));
     }
