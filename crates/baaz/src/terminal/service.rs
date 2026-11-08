@@ -271,6 +271,10 @@ struct Shared {
     /// A tab belongs to the session stored with it; another session's id is
     /// refused.
     tab_pages: Mutex<HashMap<u64, (String, Entity<WebviewState>)>>,
+    /// Tabs a session may use although it does not own them (docs/27 §6.2,
+    /// R3): the person's page a browser chat was asked about. By tab id:
+    /// `(session, page, read_only)`. A read-only grant reads and never acts.
+    tab_grants: Mutex<HashMap<u64, Vec<TabGrant>>>,
     /// What the harness does for `browser_tabs`.
     browser_tabs: Mutex<Option<BrowserTabsHook>>,
     /// One live webview per session id, registered by the harness when the
@@ -447,6 +451,7 @@ impl TerminalService {
             browser_timeout: Mutex::new(BROWSER_TIMEOUT),
             browser_open: Mutex::new(None),
             tab_pages: Mutex::new(HashMap::new()),
+            tab_grants: Mutex::new(HashMap::new()),
             browser_tabs: Mutex::new(None),
             session_aliases: Mutex::new(HashMap::new()),
         });
@@ -559,9 +564,38 @@ impl TerminalService {
         self.shared.tab_pages.lock().expect("tab pages").insert(tab, (session.to_owned(), state));
     }
 
-    /// Forgets a closed tab's page.
+    /// Forgets a closed tab's page, and every grant on it.
     pub fn unregister_tab_page(&self, tab: u64) {
         self.shared.tab_pages.lock().expect("tab pages").remove(&tab);
+        self.shared.tab_grants.lock().expect("tab grants").remove(&tab);
+    }
+
+    /// Lets `session` use the person's tab `tab` (its page `state`) through
+    /// the `browser_*` tools' `tab` argument (R3: the line's "This page").
+    /// `read_only` lets it read and never act. A second grant replaces the
+    /// first for the same session.
+    pub fn grant_tab(&self, session: &str, tab: u64, state: Entity<WebviewState>, read_only: bool) {
+        let key = self.resolve_session(session);
+        let mut grants = self.shared.tab_grants.lock().expect("tab grants");
+        let list = grants.entry(tab).or_default();
+        list.retain(|(who, _, _)| *who != key);
+        list.push((key, state, read_only));
+    }
+
+    /// Takes back every grant `session` holds (its chat closed or handed off).
+    pub fn revoke_grants(&self, session: &str) {
+        let key = self.resolve_session(session);
+        let mut grants = self.shared.tab_grants.lock().expect("tab grants");
+        for list in grants.values_mut() {
+            list.retain(|(who, _, _)| *who != key);
+        }
+        grants.retain(|_, list| !list.is_empty());
+    }
+
+    /// The page and read-only flag of `session`'s grant on `tab`, if any.
+    fn granted(&self, session_key: &str, tab: u64) -> Option<(Entity<WebviewState>, bool)> {
+        let grants = self.shared.tab_grants.lock().expect("tab grants");
+        grants.get(&tab)?.iter().find(|(who, _, _)| who == session_key).map(|(_, state, read_only)| (state.clone(), *read_only))
     }
 
     /// What the harness does for `browser_tabs`. Same re-entrancy rule as
@@ -1346,6 +1380,9 @@ impl TerminalService {
     }
 }
 
+/// One session's use of a tab it does not own: who, the page, read-only.
+type TabGrant = (String, Entity<WebviewState>, bool);
+
 /// The six browser tools (Z7b). Each runs on the UI thread, inside `drain`,
 /// and acts only on the calling session's own webview: `session` is the
 /// registered id from [`TerminalService::register_session`], and the
@@ -1508,10 +1545,16 @@ impl TerminalService {
         let key = self.resolve_session(session);
         if let Some(tab) = tab {
             let pages = self.shared.tab_pages.lock().expect("tab pages");
-            return match pages.get(&tab) {
-                Some((owner, state)) if *owner == key => Ok(Some(state.clone())),
-                _ => Err(format!("no tab {tab} in this session: browser_tabs lists them")),
-            };
+            if let Some((owner, state)) = pages.get(&tab) {
+                if *owner == key {
+                    return Ok(Some(state.clone()));
+                }
+            }
+            drop(pages);
+            if let Some((state, _)) = self.granted(&key, tab) {
+                return Ok(Some(state));
+            }
+            return Err(format!("no tab {tab} in this session: browser_tabs lists them"));
         }
         Ok(self.shared.browsers.lock().expect("browser registry").get(&key).cloned())
     }
@@ -1750,6 +1793,14 @@ impl TerminalService {
                 return;
             }
         };
+        if let Some(tab) = tab {
+            let key = self.resolve_session(session);
+            let owned = self.shared.tab_pages.lock().expect("tab pages").get(&tab).is_some_and(|(owner, _)| *owner == key);
+            if !owned && self.granted(&key, tab).is_some_and(|(_, read_only)| read_only) && !read_only_tool(tool) {
+                send(&reply, job_id, false, json!({"error": format!("tab {tab} is the person's and read-only for you: read it, or open your own tab with browser_tabs")}));
+                return;
+            }
+        }
         if tool != "browser_navigate" {
             match self.page_for(session, tab) {
                 Ok(Some(_)) => {}
@@ -1765,6 +1816,14 @@ impl TerminalService {
         }
         self.start_job(session, tab, label, job_id, reply, start);
     }
+}
+
+/// Whether `tool` only reads a page: what a read-only tab grant allows.
+pub(crate) fn read_only_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "browser_snapshot" | "browser_read" | "browser_screenshot" | "browser_wait" | "browser_console" | "browser_network" | "browser_errors"
+    )
 }
 
 /// Whether `browser_navigate` takes `url`: `http`, `https`, `file`, or
@@ -3192,6 +3251,25 @@ mod tests {
         assert_eq!(result(&bcall(cx, &fx, "sb-a", "browser_read", json!({"tab": 1})))["url"], "https://a.example/");
         let refused = err_text(&bcall(cx, &fx, "sb-a", "browser_read", json!({"tab": 2})));
         assert!(refused.contains("no tab 2"), "{refused}");
+    }
+
+    /// A browser chat reaches the person's tab only through a grant (R3: the
+    /// line's "This page"): read-only grants read and refuse acting, a full
+    /// grant acts, and revoking takes it back.
+    #[gpui::test]
+    fn a_granted_person_tab_is_reachable_and_read_only_refuses_acting(cx: &mut gpui::TestAppContext) {
+        let (fx, person) = scripted_fixture(cx, "person-key", "https://shop.example/returns");
+        fx.service.register_tab_page("person-key", 7, person.clone());
+        fx.service.register_session("chat", fx.root.clone());
+        let refused = err_text(&bcall(cx, &fx, "chat", "browser_read", json!({"tab": 7})));
+        assert!(refused.contains("no tab 7"), "{refused}");
+        fx.service.grant_tab("chat", 7, person.clone(), true);
+        assert_eq!(result(&bcall(cx, &fx, "chat", "browser_read", json!({"tab": 7})))["url"], "https://shop.example/returns");
+        let acting = err_text(&bcall(cx, &fx, "chat", "browser_act", json!({"tab": 7, "action": "click", "ref": "e1"})));
+        assert!(acting.contains("read-only"), "{acting}");
+        fx.service.revoke_grants("chat");
+        let gone = err_text(&bcall(cx, &fx, "chat", "browser_read", json!({"tab": 7})));
+        assert!(gone.contains("no tab 7"), "{gone}");
     }
 
     /// The alias a Codex lane keeps calling with reaches the lane's page.

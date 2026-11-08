@@ -704,7 +704,15 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
         // A capture renders at the display's top-left, away from the
         // pointer, so no hover state leaks into the PNG.
         Some(_) => Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H))),
-        None => Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx),
+        None => {
+            // `BAAZ_WINDOW_SIZE=<w>x<h>`: a check run at another size (the
+            // agent line in a narrow window, R3). Unset: the usual window.
+            let (w, h) = std::env::var("BAAZ_WINDOW_SIZE")
+                .ok()
+                .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))))
+                .unwrap_or((WINDOW_W, WINDOW_H));
+            Bounds::centered(None, size(px(w.max(WINDOW_MIN_W)), px(h.max(WINDOW_MIN_H))), cx)
+        }
     };
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),

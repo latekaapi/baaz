@@ -78,7 +78,7 @@ session's real cumulative counters. Everything else in every capture came off th
 `aui::composer::{model_menu, effort_menu, mode_menu}` are one component with
 three data sets, anchored to the chip that opened them through
 `Composer::chip_menu(ComposerChipAnchor, …)` and painted on
-`aui::overlay::popover_layer`. ⌘⇧M / ⌘⇧E / ⌘⇧P open them; ↑/↓ move, Enter picks,
+`aui::overlay::popover_layer`. ⌘⇧M / ⌃⌘E / ⌘⇧P open them; ↑/↓ move, Enter picks,
 Escape closes; `/model`, `/effort` and `/mode` open the same three.
 
 - **Model** rows come from `model/list { sessionId }`, fetched on every open —

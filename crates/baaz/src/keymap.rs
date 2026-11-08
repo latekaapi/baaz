@@ -103,7 +103,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "NewSession", keystroke: "cmd-n", context: Some(aui::keys::ROOT_CONTEXT), category: "session", label: "New session" },
     KeymapEntry { action: "AddProject", keystroke: "cmd-shift-o", context: Some(aui::keys::ROOT_CONTEXT), category: "project", label: "Add project" },
     KeymapEntry { action: "OpenModelMenu", keystroke: "cmd-shift-m", context: Some(aui::keys::ROOT_CONTEXT), category: "picker", label: "Open model picker" },
-    KeymapEntry { action: "OpenEffortMenu", keystroke: "cmd-shift-e", context: Some(aui::keys::ROOT_CONTEXT), category: "picker", label: "Open reasoning-effort picker" },
+    KeymapEntry { action: "OpenEffortMenu", keystroke: "ctrl-cmd-e", context: Some(aui::keys::ROOT_CONTEXT), category: "picker", label: "Open reasoning-effort picker" },
     KeymapEntry { action: "OpenModeMenu", keystroke: "cmd-shift-p", context: Some(aui::keys::ROOT_CONTEXT), category: "picker", label: "Open approval-mode picker" },
     KeymapEntry { action: "FocusSearch", keystroke: "cmd-shift-f", context: Some(aui::keys::ROOT_CONTEXT), category: "search", label: "Focus sidebar search" },
     KeymapEntry { action: "CloseWindow", keystroke: "cmd-w", context: Some(aui::keys::ROOT_CONTEXT), category: "window", label: "Close window" },
@@ -118,6 +118,9 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
+    KeymapEntry { action: "ToggleAgentLine", keystroke: "cmd-j", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Ask about this page (the agent line)" },
+    KeymapEntry { action: "ToggleAgentCard", keystroke: "cmd-e", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Open the agent card" },
+    KeymapEntry { action: "ToggleAgentColumn", keystroke: "cmd-shift-e", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Dock the agent card as a column" },
     KeymapEntry { action: "ToggleBrowseMode", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Switch between Sessions and Browse" },
     KeymapEntry { action: "NewBrowserTab", keystroke: "cmd-t", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "New browser tab" },
     KeymapEntry { action: "CloseBrowseTab", keystroke: "cmd-w", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Close tab" },
@@ -268,6 +271,9 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "AddProject" => Some(gpui::KeyBinding::new(keystroke, crate::app::AddProject, context)),
         "OpenModelMenu" => Some(gpui::KeyBinding::new(keystroke, crate::app::OpenModelMenu, context)),
         "OpenEffortMenu" => Some(gpui::KeyBinding::new(keystroke, crate::app::OpenEffortMenu, context)),
+        "ToggleAgentLine" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleAgentLine, context)),
+        "ToggleAgentCard" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleAgentCard, context)),
+        "ToggleAgentColumn" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleAgentColumn, context)),
         "OpenModeMenu" => Some(gpui::KeyBinding::new(keystroke, crate::app::OpenModeMenu, context)),
         "FocusSearch" => Some(gpui::KeyBinding::new(keystroke, crate::app::FocusSearch, context)),
         "CloseWindow" => Some(gpui::KeyBinding::new(keystroke, crate::app::CloseWindow, context)),
@@ -1337,7 +1343,7 @@ mod tests {
     }
 
     /// B8: the three right-pane shortcuts are registered — ⌘⇧D Changes,
-    /// ⌘⌥E Files (⌘⇧E was already the effort picker), ⌘⇧B Browser — each on
+    /// ⌘⌥E Files (⌘⇧E docks the agent column in Browse, owner 8 Nov), ⌘⇧B Browser — each on
     /// its own free chord in the root context, so they list in Settings →
     /// Shortcuts and none of them collides with an existing row.
     #[test]
@@ -1358,9 +1364,10 @@ mod tests {
             let claims = KEYMAP.iter().filter(|row| row.keystroke == keystroke).count();
             assert_eq!(claims, 1, "{keystroke:?} is claimed {claims} times");
         }
-        // ⌘⇧E stays the effort picker: the reason Files rides ⌘⌥E instead.
+        // The effort picker moved to ⌃⌘E (owner 8 Nov) so ⌘⇧E docks the
+        // agent column (docs/27 §9).
         let effort = KEYMAP.iter().find(|row| row.action == "OpenEffortMenu").expect("effort row");
-        assert_eq!(effort.keystroke, "cmd-shift-e");
+        assert_eq!(effort.keystroke, "ctrl-cmd-e");
     }
 
     /// The Settings-stage metadata is filled in for every row, so no
