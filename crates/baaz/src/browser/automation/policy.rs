@@ -14,6 +14,8 @@ pub enum Reason {
     SignIn,
     /// A script on a page that is not this machine's: it could do any of the others.
     Script,
+    /// Any action on a page, under Settings › Browser › Agents › Ask (R3).
+    Act,
 }
 
 impl Reason {
@@ -26,6 +28,7 @@ impl Reason {
             Reason::Upload => "Upload",
             Reason::SignIn => "Sign in",
             Reason::Script => "Run a script",
+            Reason::Act => "Act",
         }
     }
 }
@@ -128,13 +131,29 @@ pub fn target_from(value: &Value, snapshot_name: &str) -> Target {
     }
 }
 
+/// The host of `url` (`shop.example`), lower case; empty for none.
+pub fn host_of(url: &str) -> String {
+    url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").to_lowercase()
+}
+
+/// The tool's answer when a site rule refuses agents (Never here).
+pub fn refused_answer(host: &str) -> Value {
+    json!({
+        "stopped": "site_refused",
+        "message": format!("The person does not let agents act on {host} (Settings › Browser › Agents › Sites). Nothing was done."),
+    })
+}
+
 /// The tool's answer when an action is stopped for the person.
 pub fn stopped_answer(reason: Reason, target: &Target) -> Value {
     json!({
         "stopped": "needs_approval",
         "reason": reason.word(),
         "target": target.name,
-        "message": format!("{} always asks the person. Nothing was done.", reason.word()),
+        "message": match reason {
+            Reason::Act => "The person asked to approve actions on this page and declined this one. Nothing was done.".to_owned(),
+            _ => format!("{} always asks the person. Nothing was done.", reason.word()),
+        },
     })
 }
 
