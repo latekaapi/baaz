@@ -181,6 +181,30 @@ impl Harness {
         };
         let _ = model;
         let mut transcript = transcript;
+        // The provider's own approval (a tool, a file write) waits in the
+        // input's place, as the card's questions do (docs/27 §4.5).
+        let asking = self.browser_chat.as_ref().and_then(|view| {
+            let view = view.read(cx);
+            // Its own browser tools are accepted for it (`auto_accept_browser_tools`).
+            match view.pending_external_approvals().last() {
+                Some((_, headline)) if headline.contains("mcp__baaz__browser_") => None,
+                Some((_, headline)) => {
+                    let line = view.pending_approval_line().unwrap_or_else(|| headline.clone());
+                    // No detail on the provider's card: the waiting call's own.
+                    match view.transcript_session().and_then(crate::app::agent_window::pending_call_detail) {
+                        Some(detail) if !line.contains(" — ") => Some(format!("{line} — {detail}")),
+                        _ => Some(line),
+                    }
+                }
+                None => view.pending_approval_line(),
+            }
+        });
+        if let Some(line) = asking {
+            transcript.items.push(aui::browse::agent_window::AgentItem::Question {
+                text: format!("Allow: {line}?").into(),
+                choices: vec!["Allow".into(), "Don't allow".into()],
+            });
+        }
         if let Some((_, label, detail)) = self.browser_chat_id(cx).and_then(|id| self.browser_handoffs.get(&id).cloned()) {
             transcript.items.push(aui::browse::agent_window::AgentItem::HandedOff { title: label.into(), detail: detail.into() });
         }

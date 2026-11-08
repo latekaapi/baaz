@@ -118,6 +118,11 @@ pub fn is_side_workspace_root(root: &str) -> bool {
     // Through the run's memo: this runs per row on every rejoin, on the UI
     // thread, and asked the disk three times a row (2026-10-31).
     let root = crate::projects::canonical_cached(root);
+    // A browser chats' workspace from any state dir (a check run's own
+    // included) reads as one too.
+    if std::path::Path::new(&root).file_name().is_some_and(|name| name == crate::browser::assistant::BROWSER_CHATS_DIR) {
+        return true;
+    }
     [crate::store::support_dir(), crate::store::default_support_dir()]
         .iter()
         .map(|dir| crate::projects::canonical_cached(&dir.join(SIDE_WORKSPACE_DIR_NAME).to_string_lossy()))
@@ -129,7 +134,13 @@ pub fn is_side_workspace_root(root: &str) -> bool {
 /// truncation-safe: the wire's `first_user_prompt` is a preview and may
 /// cut the tail, never the head.
 pub fn is_side_prompt(text: &str) -> bool {
-    text.starts_with(TITLE_PROMPT_PREFIX)
+    // A browser chat's asks open with its page preamble (R3): it is
+    // reached from the line, the card and its task folder, never the list —
+    // also when its record is gone (another state dir; Muse lists it from
+    // the server).
+    text.starts_with("I'm looking at tab ")
+        || text.starts_with("Browse with the Baaz browser tools")
+        || text.starts_with(TITLE_PROMPT_PREFIX)
         || text.starts_with(crate::handoff::SUMMARY_PROMPT_PREFIX)
         || text.starts_with(crate::byline::REWRITE_PROMPT_PREFIX)
 }
@@ -439,6 +450,16 @@ mod tests {
     fn an_overlong_title_is_cut_the_rows_own_way() {
         let title = clean_title(&"word ".repeat(100)).expect("a long reply still titles");
         assert_eq!(title, crate::sidebar::one_line(&"word ".repeat(100)));
+    }
+
+
+    #[test]
+    fn browser_chats_read_as_side_sessions_from_the_wire() {
+        assert!(super::is_side_prompt("I'm looking at tab 3 in my browser: \u{201C}x\u{201D} (u). …\n\nhi"));
+        assert!(super::is_side_prompt("Browse with the Baaz browser tools (…)\n\nresearch"));
+        assert!(!super::is_side_prompt("Fix the login page"));
+        assert!(super::is_side_workspace_root("/tmp/some-state/browser-chats"));
+        assert!(!super::is_side_workspace_root("/tmp/some-state/browser-chats-old"));
     }
 
 }

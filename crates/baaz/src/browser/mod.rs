@@ -1438,7 +1438,7 @@ impl Harness {
 
     /// Build (or reuse) the live page for `id` and register it under `key`.
     /// Showing a discarded tab again recreates its page at its URL.
-    fn ensure_tab_page(
+    pub(crate) fn ensure_tab_page(
         &mut self,
         key: &str,
         id: TabId,

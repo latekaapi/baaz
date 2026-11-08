@@ -58,11 +58,15 @@ pub(crate) const SITE_ACTIONS: [(&str, &str); 2] = [("sum", "Sum it up"), ("draf
 /// The prompt that tells a browser chat which page the person means, ahead
 /// of their words. The tab is theirs: the grant lets the chat use it.
 pub(crate) fn page_prompt(ask: &str, page: Option<(u64, &str, &str)>) -> String {
+    // Browse where the person can see it: Baaz's own tabs land in this
+    // chat's task folder; WebFetch and WebSearch pages are never shown
+    // (seen live: Haiku reached for WebFetch on a research ask).
+    let how = "Browse with the Baaz browser tools (browser_tabs to open each site in its own tab, then browser_read) so I can see the pages; don't use WebFetch or WebSearch.";
     match page {
         Some((tab, title, url)) => format!(
-            "I'm looking at tab {tab} in my browser: \u{201C}{title}\u{201D} ({url}). Use the browser tools with tab={tab} to read it; open tabs of your own with browser_tabs for anything else.\n\n{ask}"
+            "I'm looking at tab {tab} in my browser: \u{201C}{title}\u{201D} ({url}). Use the browser tools with tab={tab} to read it. {how}\n\n{ask}"
         ),
-        None => ask.to_owned(),
+        None => format!("{how}\n\n{ask}"),
     }
 }
 
@@ -89,8 +93,16 @@ pub(crate) fn settled_answer(session: &aui_protocol::Session, busy: bool) -> Opt
         return None;
     }
     let turn = session.turns.iter().rev().find(|turn| matches!(turn, aui_protocol::Turn::Assistant { .. }))?;
-    let text: Vec<&str> = turn
-        .blocks()
+    // The answer is what follows the turn's last tool call; earlier text is
+    // narration (the card folds it into the steps; seen live: a handoff draft
+    // carried "Let me try…" lines).
+    let blocks = turn.blocks();
+    let after = blocks
+        .iter()
+        .rposition(|b| matches!(b, aui_protocol::Block::ToolCall { .. } | aui_protocol::Block::ToolGroup { .. }))
+        .map(|at| at + 1)
+        .unwrap_or(0);
+    let text: Vec<&str> = blocks[after..]
         .iter()
         .filter_map(|block| match block {
             aui_protocol::Block::Text { text, .. } => Some(text.as_str()),
@@ -137,7 +149,21 @@ pub(crate) fn agent_transcript(
                 let running = busy && index == last;
                 let mut steps = Vec::new();
                 let mut answer = String::new();
-                for block in blocks {
+                // Text written before the turn's last tool call is narration
+                // ("Let me read the page…"): it folds into the steps, and only
+                // what follows the last call is the answer (docs/27 §4.5:
+                // steps collapse above the answer).
+                let last_tool = blocks.iter().rposition(|b| matches!(b, aui_protocol::Block::ToolCall { .. } | aui_protocol::Block::ToolGroup { .. }));
+                for (at, block) in blocks.iter().enumerate() {
+                    if let (aui_protocol::Block::Text { text, .. }, Some(last_tool)) = (block, last_tool) {
+                        if at < last_tool {
+                            let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+                            if !line.is_empty() {
+                                steps.push(Step::new(line.to_owned(), StepState::Done));
+                            }
+                            continue;
+                        }
+                    }
                     match block {
                         aui_protocol::Block::ToolCall { verb, target, status, .. } => {
                             steps.push(Step::new(step_text(verb, target), step_state(status)));
@@ -183,7 +209,8 @@ pub(crate) fn agent_transcript(
 /// A user turn without the page preamble [`page_prompt`] put in front; a
 /// site action's ask reads as the action's own name.
 pub(crate) fn strip_page_prompt(text: &str) -> &str {
-    let rest = match text.strip_prefix("I'm looking at tab ").and_then(|_| text.split_once("\n\n")) {
+    let preamble = text.starts_with("I'm looking at tab ") || text.starts_with("Browse with the Baaz browser tools");
+    let rest = match preamble.then(|| text.split_once("\n\n")).flatten() {
         Some((_, rest)) => rest,
         None => text,
     };
@@ -194,9 +221,28 @@ pub(crate) fn strip_page_prompt(text: &str) -> &str {
         .unwrap_or(rest)
 }
 
+/// One step row: the verb and its target on one line, short — a long shell
+/// command wrapped over the rows below it (seen live 8 Nov).
 fn step_text(verb: &str, target: &str) -> String {
-    let target = target.trim();
-    if target.is_empty() { verb.to_owned() } else { format!("{verb} {target}") }
+    let target = target.lines().next().unwrap_or("").trim();
+    let text = if target.is_empty() { verb.to_owned() } else { format!("{verb} {target}") };
+    // One line in the steps card's narrow header, whatever the command.
+    if text.chars().count() > 48 { format!("{}…", text.chars().take(47).collect::<String>()) } else { text }
+}
+
+/// What the newest waiting tool call would do, one line: the detail an
+/// approval question shows when the provider's own card carries none
+/// (Claude Code's Bash card names only the tool).
+pub(crate) fn pending_call_detail(session: &aui_protocol::Session) -> Option<String> {
+    session.turns.iter().rev().flat_map(|turn| turn.blocks().iter().rev()).find_map(|block| match block {
+        aui_protocol::Block::ToolCall { target, status: aui_protocol::ToolStatus::Pending | aui_protocol::ToolStatus::Running, .. }
+            if !target.trim().is_empty() =>
+        {
+            let line = target.lines().next().unwrap_or("").trim().to_owned();
+            Some(if line.chars().count() > 160 { format!("{}…", line.chars().take(159).collect::<String>()) } else { line })
+        }
+        _ => None,
+    })
 }
 
 fn step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::StepState {
@@ -290,10 +336,19 @@ impl Harness {
         }
         let page = if self.line_page_chip { self.page_on_screen(cx) } else { None };
         let prompt = page_prompt(ask, page.as_ref().map(|(tab, title, url)| (*tab, title.as_str(), url.as_str())));
-        let reuse = self.browser_chat.clone().filter(|view| !view.read(cx).busy() && !view.read(cx).is_starting());
+        // The open chat continues while it is idle and still on the
+        // Assistant's provider; after a change in Settings the next ask
+        // starts a fresh chat there (seen live: a Muse chat kept taking
+        // asks after Claude Haiku was picked).
+        let provider = self.assistant_choice().map(|choice| choice.provider);
+        let reuse = self
+            .browser_chat
+            .clone()
+            .filter(|view| !view.read(cx).busy() && !view.read(cx).is_starting())
+            .filter(|view| Some(view.read(cx).provider_kind()) == provider);
         let session = match reuse {
             Some(view) => {
-                view.update(cx, |view, cx| view.send_text(prompt, cx));
+                view.update(cx, |view, cx| view.send_or_queue(prompt, cx));
                 Some(view.read(cx).session_id.clone())
             }
             None => self.start_browser_chat(prompt, window, cx),
@@ -326,17 +381,46 @@ impl Harness {
         cx.notify();
     }
 
+    /// A browser chat's own browser tools need no second ask from its
+    /// provider: Baaz's page gate (docs/27 §6.2, Settings › Browser ›
+    /// Agents) already stops Send, Pay, Delete, Upload and sign-in, and any
+    /// action under Ask. So the provider's prompt for `mcp__baaz__browser_*`
+    /// is accepted here, once per prompt; every other tool (files, shell)
+    /// still asks in the card.
+    pub(crate) fn auto_accept_browser_tools(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.browser_chat.clone() else { return };
+        let due: Vec<String> = view
+            .read(cx)
+            .pending_external_approvals()
+            .into_iter()
+            .filter(|(id, headline)| headline.contains("mcp__baaz__browser_") && !self.auto_accepted.contains(id))
+            .map(|(id, _)| id)
+            .collect();
+        for id in due {
+            self.auto_accepted.insert(id.clone());
+            view.update(cx, |view, cx| view.answer_external(&id, true, cx));
+        }
+    }
+
     /// Per frame, before the floats sync: an inline ask whose turn grew past
     /// [`INLINE_MAX_STEPS`] moves to the card; a draft whose turn settled
     /// lands as Drafted.
     pub(crate) fn settle_agent_line(&mut self, cx: &mut Context<Self>) {
+        self.auto_accept_browser_tools(cx);
         let Some(view) = self.browser_chat.clone() else { return };
-        let (busy, id, steps) = {
+        let (busy, id, steps, asks) = {
             let view = view.read(cx);
-            (view.busy() || view.is_starting(), view.session_id.clone(), view.transcript_session().map(last_turn_steps).unwrap_or(0))
+            (
+                view.busy() || view.is_starting(),
+                view.session_id.clone(),
+                view.transcript_session().map(last_turn_steps).unwrap_or(0),
+                view.pending_external_approvals().iter().any(|(_, h)| !h.contains("mcp__baaz__browser_")) || (view.pending_external_approvals().is_empty() && view.pending_approval_line().is_some()),
+            )
         };
         match self.line_ui.clone() {
-            LineUi::Answer { session, .. } if session == id && steps > INLINE_MAX_STEPS => {
+            // Past a few steps, or waiting on the person's OK, the ask moves
+            // to the card, where the steps and the question show.
+            LineUi::Answer { session, .. } if session == id && (steps > INLINE_MAX_STEPS || asks) => {
                 self.line_ui = LineUi::Closed;
                 if self.card_ui == CardUi::Closed {
                     self.card_ui = CardUi::Card;
@@ -447,9 +531,23 @@ impl Harness {
     /// One card (or column) intent.
     pub(crate) fn card_intent(&mut self, intent: aui::browse::agent_window::CardIntent, window: &mut Window, cx: &mut Context<Self>) {
         use aui::browse::agent_window::CardIntent;
+        let queue = matches!(intent, CardIntent::Queue(_));
         match intent {
+            // The card talks to its own chat: ↩ steers the running turn (or
+            // sends the next), ⌘↩ queues behind it. Only with no chat yet does
+            // it start one (seen live: a steer through the line's reuse rule
+            // started a second chat).
             CardIntent::Send(text) | CardIntent::Queue(text) => {
-                self.ask_browser_chat(&text, false, false, window, cx);
+                match self.browser_chat.clone() {
+                    Some(view) => view.update(cx, |view, cx| {
+                        if queue {
+                            view.send_or_queue(text, cx);
+                        } else {
+                            view.steer_or_send(text, cx);
+                        }
+                    }),
+                    None => self.ask_browser_chat(&text, false, false, window, cx),
+                }
                 if let Some(input) = self.agent_card_input.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
@@ -470,7 +568,26 @@ impl Harness {
                 }
             }
             CardIntent::OpenHandoff => self.open_handoff_target(window, cx),
-            CardIntent::Choose(_) | CardIntent::Plus => {}
+            // The card's question block: a pending approval's Allow (0) or
+            // Don't allow (1).
+            CardIntent::Choose(index) => {
+                if let Some(view) = self.browser_chat.clone() {
+                    view.update(cx, |view, cx| {
+                        // The question names the newest provider approval:
+                        // answer that one, by id.
+                        match view.pending_external_approvals().last().map(|(id, _)| id.clone()) {
+                            Some(id) => view.answer_external(&id, index == 0, cx),
+                            None if index == 0 => {
+                                view.allow_pending(window, cx);
+                            }
+                            None => {
+                                view.deny_pending(window, cx);
+                            }
+                        }
+                    });
+                }
+            }
+            CardIntent::Plus => {}
         }
         cx.notify();
     }
@@ -643,6 +760,27 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// A browser chat's first page of its own: a tab in its task folder with
+    /// a live page the tools can drive (R3). Its later tabs come through
+    /// `browser_tabs`. Nothing when it already has one.
+    pub(crate) fn open_browser_chat_tab(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded(cx);
+        let owner = crate::browser::Owner::Session(session.to_owned());
+        let tab = match self.browser.tabs.tabs_of(&owner).first().map(|tab| tab.id) {
+            Some(tab) => tab,
+            None => {
+                let space = self.browse_space();
+                let tab = self.browser.tabs.open(space, owner, crate::browser::tabs::BLANK, None);
+                self.schedule_tabs_write(cx);
+                tab
+            }
+        };
+        self.ensure_tab_page(session, tab, window, cx);
+        cx.notify();
+    }
+}
+
 /// The "This page" chip.
 fn page_chip() -> aui::composer::ComposerChip {
     aui::composer::ComposerChip {
@@ -665,7 +803,7 @@ mod tests {
         let prompt = page_prompt("what's the refund window?", Some((7, "Returns", "https://shop.example/returns")));
         assert!(prompt.contains("tab=7"));
         assert_eq!(strip_page_prompt(&prompt), "what's the refund window?");
-        assert_eq!(page_prompt("hi", None), "hi");
+        assert_eq!(strip_page_prompt(&page_prompt("hi", None)), "hi");
         assert_eq!(strip_page_prompt("plain ask"), "plain ask");
         let draft = page_prompt(site_action_ask("draft").unwrap(), Some((1, "t", "u")));
         assert_eq!(strip_page_prompt(&draft), "Draft a reply");

@@ -60,7 +60,7 @@ impl Harness {
         if !choice.model.is_empty() {
             view.update(cx, |view, cx| view.set_model(choice.model, cx));
         }
-        view.update(cx, |view, cx| view.send_text(ask, cx));
+        view.update(cx, |view, cx| view.send_or_queue(ask, cx));
         // One chat at a time on the line; the one it replaces keeps its
         // record and its task folder.
         self.browser_chat = Some(view);
