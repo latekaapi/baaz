@@ -65,7 +65,6 @@
 
 use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1905,7 +1904,36 @@ fn probe_command(muse: &str) -> std::process::Command {
 /// A `muse` TUI on the far side of a pty, and the master side to talk to it.
 struct Pty {
     master: RawFd,
-    child: std::process::Child,
+    child: PtyChild,
+}
+
+/// The probe's child by pid: it is spawned with `posix_spawn`, never
+/// through `std::process::Child` (see [`Pty::spawn`]).
+struct PtyChild {
+    pid: u32,
+    exited: bool,
+}
+
+impl PtyChild {
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// `Some(())` once the child has exited (reaped here or by the drop).
+    fn try_wait(&mut self) -> std::io::Result<Option<()>> {
+        if self.exited {
+            return Ok(Some(()));
+        }
+        let mut status = 0;
+        // SAFETY: waits on our own child; `status` is a valid out-pointer.
+        let rc = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if rc == 0 {
+            return Ok(None);
+        }
+        // Reaped now, or already reaped (ECHILD): either way it is gone.
+        self.exited = true;
+        Ok(Some(()))
+    }
 }
 
 impl Pty {
@@ -1932,7 +1960,7 @@ impl Pty {
     /// the slave as its controlling terminal — which is what makes a TUI draw
     /// rather than refuse for want of a tty. The probe and the SIGKILL unit
     /// test share this path, so the test exercises the real kill.
-    fn spawn(mut command: std::process::Command) -> Result<Self, String> {
+    fn spawn(command: std::process::Command) -> Result<Self, String> {
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
         let mut size =
             libc::winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
@@ -1943,33 +1971,46 @@ impl Pty {
         if rc != 0 {
             return Err("no pseudo-terminal was available".to_owned());
         }
-        // SAFETY: `slave` is open and each `dup` hands one owned fd to one
-        // `Stdio`, which closes it.
-        let (stdin, stdout, stderr) = unsafe {
-            (
-                std::process::Stdio::from_raw_fd(libc::dup(slave)),
-                std::process::Stdio::from_raw_fd(libc::dup(slave)),
-                std::process::Stdio::from_raw_fd(libc::dup(slave)),
-            )
+        // The child opens the slave by path as fd 0 (then 1 and 2): opened by
+        // a session leader with no terminal, it becomes the controlling
+        // terminal — no TIOCSCTTY. Spawned with `posix_spawn` and Apple's
+        // SETSID, never `pre_exec(setsid + TIOCSCTTY)`: that made std fork
+        // Baaz, and a forked child of this many-threaded process can die in
+        // libSystem's at-fork handlers before it execs (the PATH probe did,
+        // 9 Nov — see `provider::session_spawn`).
+        // SAFETY: `slave` is open; `ttyname` returns a C string we copy at once.
+        let tty = unsafe {
+            let name = libc::ttyname(slave);
+            if name.is_null() {
+                libc::close(slave);
+                libc::close(master);
+                return Err("no pseudo-terminal was available".to_owned());
+            }
+            std::ffi::OsStr::from_bytes(std::ffi::CStr::from_ptr(name).to_bytes()).to_owned()
         };
-        command.stdin(stdin).stdout(stdout).stderr(stderr);
-        // SAFETY: `setsid` and `ioctl` are async-signal-safe, which is the
-        // whole contract `pre_exec` asks for.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = command.spawn().map_err(|e| format!("muse could not be started: {e}"))?;
-        // SAFETY: the parent's copy of the slave is done with; the child holds
-        // its own three.
+        use provider::session_spawn::{command_env, spawn_in_new_session, FileAction};
+        use std::os::unix::ffi::OsStrExt as _;
+        let spawned = spawn_in_new_session(
+            command.get_program(),
+            &command.get_args().map(|arg| arg.to_owned()).collect::<Vec<_>>(),
+            &command_env(&command),
+            &[
+                FileAction::Open { fd: 0, path: tty, flags: libc::O_RDWR },
+                FileAction::Dup2 { from: 0, to: 1 },
+                FileAction::Dup2 { from: 0, to: 2 },
+            ],
+        );
+        // SAFETY: the parent's slave is done with: the child opened its own.
         unsafe { libc::close(slave) };
+        let pid = match spawned {
+            Ok(pid) => pid,
+            Err(e) => {
+                // SAFETY: ours, unused.
+                unsafe { libc::close(master) };
+                return Err(format!("muse could not be started: {e}"));
+            }
+        };
+        let child = PtyChild { pid: pid as u32, exited: false };
         // Non-blocking, so a pump that has nothing to read returns instead of
         // parking a thread on a TUI that has finished drawing.
         // SAFETY: `master` is open and `F_SETFL` takes an int.
@@ -2079,9 +2120,7 @@ impl Drop for Pty {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Sync `Child`'s state without blocking: already reaped above, or
-        // still running (left for init).
-        let _ = self.child.try_wait();
+        self.child.exited = reaped;
         // Always de-registered, reaped or not, so no exit path ever waits on
         // this pid again.
         if let Ok(mut live) = LIVE_PROBES.lock() {
@@ -3142,6 +3181,34 @@ mod tests {
         assert_eq!(plain.resets_at_ms, None);
         let plain_value = serde_json::to_value(&plain).expect("a plain clause serialises");
         assert_eq!(plain_value, serde_json::Value::String("Resets at 5:17 PM".into()));
+    }
+
+    /// No Baaz spawn may fork through `Command::pre_exec`: forking this
+    /// many-threaded process let its children die in libSystem's at-fork
+    /// handlers before exec (9 Nov). New sessions go through
+    /// `provider::session_spawn`.
+    #[test]
+    fn no_spawn_forks_through_pre_exec() {
+        fn walk(dir: &Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("src dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("source");
+                    for (number, line) in text.lines().enumerate() {
+                        let code = line.split("//").next().unwrap_or("");
+                        // Split, so this test's own source never matches.
+                        if code.contains(&[".pre", "_exec("].concat()) {
+                            hits.push(format!("{}:{}", path.display(), number + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
+        assert!(hits.is_empty(), "pre_exec forks Baaz: {hits:?}");
     }
 
     /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same

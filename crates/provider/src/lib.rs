@@ -47,6 +47,8 @@ mod error;
 mod event;
 pub mod facts;
 pub mod scripted;
+#[cfg(target_os = "macos")]
+pub mod session_spawn;
 pub mod stderr_tail;
 mod traits;
 pub mod usage;
