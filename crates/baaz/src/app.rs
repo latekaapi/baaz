@@ -7690,6 +7690,35 @@ mod tests {
         restore_state(state);
     }
 
+    /// Owner 9 Nov: a person's tab closed by hand (⌘W, ✕) must release its
+    /// page — the agent tools' registry kept it alive, so the closed page
+    /// never parked its native view and stayed on screen over the next tab.
+    #[gpui::test]
+    fn closing_a_tab_by_hand_releases_its_page(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browser-close-release");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let (id, weak) = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                // Load the saved tabs first, as the app does before any tab
+                // exists: `close_tab` loads them on first use otherwise,
+                // replacing the tab opened here.
+                h.ensure_tabs_loaded(cx);
+                let space = h.browse_space();
+                let id = h.browser.tabs.open(space, crate::browser::tabs::Owner::Person, "about:blank", None);
+                let page = h.ensure_tab_page("home", id, window, cx);
+                (id, page.downgrade())
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.close_tab("home", id, window, cx)));
+        draw_shell(&mut *vc, &baaz);
+        assert!(weak.upgrade().is_none(), "the closed tab's page is still held, so its view stays on screen");
+        restore_state(state);
+    }
+
     /// Z7a2: a restore onto Browser creates the webview (lazy, on show)
     /// without moving focus off the composer.
     #[gpui::test]
