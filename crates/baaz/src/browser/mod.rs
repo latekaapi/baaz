@@ -1906,6 +1906,9 @@ impl Harness {
         }
         for id in &dropped {
             self.browser.states.remove(id);
+            // The tools' registry would keep the discarded page alive (and
+            // on screen, and uncollected) — see `close_tab`.
+            self.terminal_service.unregister_tab_page(id.0);
         }
         // A discarded page can never stay registered with the agent tools:
         // agent tabs are spared above, so this fires only if that ever
@@ -2038,7 +2041,7 @@ impl Harness {
         // tabs (foreground ones select, so the centre follows),
         // downloads stamp their start for the popover's estimates, and
         // closed tabs drop their find strips.
-        self.drain_browse_popups(cx);
+        let _ = self.drain_browse_popups(cx);
         self.stamp_browse_downloads(cx);
         let live: HashSet<TabId> = self.browser.tabs.tabs.iter().map(|tab| tab.id).collect();
         self.browser.find_strips.retain(&live);
@@ -2901,7 +2904,17 @@ impl Harness {
     /// fresh tab at that URL for open requests. Only the shown tab's
     /// popups may take the centre: a foreground ask from a background
     /// opener lands in the background instead.
-    fn drain_browse_popups(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Answers whether any tab was placed. The render calls this BEFORE it
+    /// re-arms the cached sidebar (`sync_sidebar_pane`): drained after it,
+    /// a new tab's row waited for the next frame, and a quiet window takes
+    /// none until the next input — ⌘-click and the menu's "Open Link in New
+    /// Tab" showed nothing until the person clicked again (owner, 9 Nov).
+    pub(crate) fn drain_browse_popups(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.browser.tabs_loaded {
+            return false;
+        }
+        let mut placed_any = false;
         let shown = self.browse_centre_shown();
         let openers: Vec<TabId> = self.browser.states.keys().copied().collect();
         for opener in openers {
@@ -2914,17 +2927,28 @@ impl Harness {
                 self.browser.states.insert(id, page);
                 self.browser.find_strips.remove(id);
                 self.schedule_tabs_write(cx);
+                placed_any = true;
                 cx.notify();
             }
             let opens = state.update(cx, |state, _| state.take_open_requests());
             for (url, foreground) in opens {
+                let asked = foreground;
                 let foreground = chrome::popup_foreground(foreground, opener, shown);
-                if chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground).is_some() {
+                let before = self.browser.tabs.get(opener).and_then(|tab| self.browser.tabs.active_of(&tab.owner, tab.space.as_deref()));
+                let placed = chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground);
+                let after = self.browser.tabs.get(opener).and_then(|tab| self.browser.tabs.active_of(&tab.owner, tab.space.as_deref()));
+                crate::baaz_log!(
+                    "browse: open request {url} from tab {} (asked foreground={asked}, shown={:?}) → tab {:?}, active {:?} → {:?}",
+                    opener.0, shown.map(|id| id.0), placed.map(|id| id.0), before.map(|id| id.0), after.map(|id| id.0)
+                );
+                if placed.is_some() {
                     self.schedule_tabs_write(cx);
+                    placed_any = true;
                     cx.notify();
                 }
             }
         }
+        placed_any
     }
 
     /// Every download's latest state across the live tabs, with the tab
@@ -2965,6 +2989,7 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let Some(id) = self.browse_centre_shown() else { return false };
         self.browser.states.remove(&id);
+        self.terminal_service.unregister_tab_page(id.0);
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         true
     }

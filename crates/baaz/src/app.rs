@@ -6286,6 +6286,13 @@ impl Harness {
         // it, and a quiet window may take no frame for seconds (a page load's
         // `loading` key painted only after the load had ended): ask for the
         // next one so the re-armed pane draws now.
+        // New tabs from ⌘-click, middle-click and the page menu's "Open Link
+        // in New Tab" join the model before the sidebar re-arms, so their
+        // rows draw in this frame (see `drain_browse_popups`).
+        if self.drain_browse_popups(cx) {
+            self.sidebar_pane.update(cx, |_, cx| cx.notify());
+            aui_motion::request_frame(window);
+        }
         if self.sync_sidebar_pane(cx) {
             aui_motion::request_frame(window);
         }
