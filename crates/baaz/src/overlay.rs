@@ -195,11 +195,13 @@ fn drop_native_chrome(window: &Window, kind: OverlayKind) {
             return;
         }
         let _: () = msg_send![ns_window, setHasShadow: false];
-        if matches!(kind, OverlayKind::Corner | OverlayKind::PageFloat | OverlayKind::AgentCard) {
-            // The corner never closes on a resign, so it must not float
-            // over other apps: it hides with Baaz and returns with it.
-            let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
-        }
+        // No float may draw over other apps: each hides with Baaz and
+        // returns with it. The corner, line and card never close on a
+        // resign; the Field, menus and modals do — but only after they have
+        // held the keyboard (`seen_active`), so one that opened while Baaz
+        // was not frontmost stayed up over every app, Chrome included
+        // (owner, 9 Nov: the Field over the whole screen).
+        let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
         if kind != OverlayKind::Modal {
             // Borderless (no titled bit), keeping the two bits gpui's panel
             // relies on: full-size content (its frame maths) and
