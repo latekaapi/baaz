@@ -183,15 +183,145 @@ fn version_key(name: &str) -> Option<(u64, u64, u64)> {
 /// between the markers, or `None` on any failure, timeout, or unparseable
 /// output — rc noise outside the markers is ignored.
 fn shell_path_dirs(shell: &Path, timeout: Duration) -> Option<Vec<PathBuf>> {
+    let mut child = spawn_probe(shell)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(true)) => {
+                let mut output = Vec::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    use std::io::Read as _;
+                    let _ = pipe.read_to_end(&mut output);
+                }
+                return parse_shell_output(&String::from_utf8_lossy(&output))
+                    .map(|value| split_os_paths(OsStr::new(value)));
+            }
+            Ok(Some(false)) => return None,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                child.kill();
+                return None;
+            }
+        }
+    }
+}
+
+/// The running probe shell: its pid (which is also its session and group
+/// id) and the read end of its stdout. Dropping it unreaped kills the group.
+struct ProbeChild {
+    pid: libc::pid_t,
+    stdout: Option<std::fs::File>,
+    reaped: bool,
+}
+
+impl ProbeChild {
+    /// `Some(true)` once it exited 0, `Some(false)` once it ended any other
+    /// way, `None` while it runs.
+    fn try_wait(&mut self) -> std::io::Result<Option<bool>> {
+        if self.reaped {
+            return Ok(Some(false));
+        }
+        let mut status = 0;
+        // SAFETY: waits on our own child; `status` is a valid out-pointer.
+        let rc = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        match rc {
+            0 => Ok(None),
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => {
+                self.reaped = true;
+                Ok(Some(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0))
+            }
+        }
+    }
+
+    /// SIGKILL the whole session's group — whatever the rc files started
+    /// goes with the shell — then reap the shell.
+    fn kill(&mut self) {
+        if self.reaped {
+            return;
+        }
+        if let Ok(pid) = u32::try_from(self.pid) {
+            kill_group(pid);
+        }
+        let mut status = 0;
+        // SAFETY: plain syscalls on our own child.
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+            libc::waitpid(self.pid, &mut status, 0);
+        }
+        self.reaped = true;
+    }
+}
+
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Start `shell -ilc <probe>` in a NEW SESSION, stdin and stderr on
+/// `/dev/null`, stdout on a pipe.
+///
+/// Why a session (not just a process group): the probe shell leads its own
+/// group, so a timeout kills whatever the rc files started along with the
+/// shell (killing only the leader left a `sleep` orphaned); and it has no
+/// controlling terminal, so an interactive shell run from a terminal launch
+/// cannot be stopped by SIGTTOU/SIGTTIN for touching a tty whose foreground
+/// group it is not in (a bare `process_group(0)` stopped it and every
+/// terminal launch hit the timeout).
+///
+/// Why no `Command::pre_exec(setsid)`: it makes std fork Baaz, whose child
+/// crashed in libSystem's at-fork handlers — see [`crate::session_spawn`].
+#[cfg(target_os = "macos")]
+fn spawn_probe(shell: &Path) -> Option<ProbeChild> {
+    use crate::session_spawn::{spawn_in_new_session, FileAction};
+    use std::os::fd::FromRawFd as _;
+
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` holds two ints for `pipe` to fill; the fcntl calls take
+    // the two fds it just returned.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return None;
+        }
+        // Close-on-exec in Baaz, so no other spawn inherits the pipe.
+        libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    let (read_end, write_end) = (fds[0], fds[1]);
+    let spawned = spawn_in_new_session(
+        shell.as_os_str(),
+        &[OsString::from("-ilc"), OsString::from(SHELL_PROBE)],
+        &std::env::vars_os().collect::<Vec<_>>(),
+        &[
+            FileAction::Open { fd: 0, path: OsString::from("/dev/null"), flags: libc::O_RDONLY },
+            FileAction::Dup2 { from: write_end, to: 1 },
+            FileAction::Open { fd: 2, path: OsString::from("/dev/null"), flags: libc::O_WRONLY },
+        ],
+    );
+    // SAFETY: the write end is the child's now (or nobody's); ours closes.
+    unsafe { libc::close(write_end) };
+    let Ok(pid) = spawned else {
+        // SAFETY: the read end is ours and unused.
+        unsafe { libc::close(read_end) };
+        return None;
+    };
+    // SAFETY: `read_end` is an open fd owned by nothing else.
+    let stdout = unsafe { std::fs::File::from_raw_fd(read_end) };
+    Some(ProbeChild { pid, stdout: Some(stdout), reaped: false })
+}
+
+/// Elsewhere (no `POSIX_SPAWN_SETSID`): the session through `pre_exec`.
+#[cfg(not(target_os = "macos"))]
+fn spawn_probe(shell: &Path) -> Option<ProbeChild> {
     use std::os::unix::process::CommandExt as _;
     let mut command = std::process::Command::new(shell);
-    // A new SESSION (not just a process group): the probe shell leads its
-    // own group, so a timeout kills whatever the rc files started along
-    // with the shell (killing only the leader left a `sleep` orphaned); and
-    // it has no controlling terminal, so an interactive shell run from a
-    // terminal launch cannot be stopped by SIGTTOU/SIGTTIN for touching a
-    // tty whose foreground group it is not in (a bare `process_group(0)`
-    // stopped it and every terminal launch hit the timeout).
     // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
     unsafe {
         command.pre_exec(|| {
@@ -209,40 +339,11 @@ fn shell_path_dirs(shell: &Path, timeout: Duration) -> Option<Vec<PathBuf>> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                let mut output = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    use std::io::Read as _;
-                    let _ = pipe.read_to_end(&mut output);
-                }
-                let _ = child.wait();
-                return parse_shell_output(&String::from_utf8_lossy(&output))
-                    .map(|value| split_os_paths(OsStr::new(value)));
-            }
-            Ok(Some(_)) => {
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    kill_group(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => {
-                kill_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
+    let stdout = child.stdout.take().map(|pipe| std::fs::File::from(std::os::fd::OwnedFd::from(pipe)));
+    let pid = libc::pid_t::try_from(child.id()).ok()?;
+    // The pid is reaped through `ProbeChild` from here on.
+    std::mem::forget(child);
+    Some(ProbeChild { pid, stdout, reaped: false })
 }
 
 /// SIGKILL every process in the group `pgid` (the probe shell leads its own
@@ -399,6 +500,32 @@ mod tests {
         assert_eq!(parse_path_helper_output(output), Some("/usr/bin:/bin:/usr/sbin:/sbin"));
         assert_eq!(parse_path_helper_output("nothing here"), None);
         assert_eq!(parse_path_helper_output("PATH=\"\"; export PATH;"), None);
+    }
+
+    /// The probe shell leads its own session with no controlling terminal
+    /// (made by `posix_spawn` + `POSIX_SPAWN_SETSID`, never a fork with
+    /// `pre_exec`): its process group is its own pid and `ps` shows no tty.
+    /// Its stdin is /dev/null and its stdout reaches the parser.
+    #[test]
+    fn the_probe_shell_leads_its_own_session_without_a_terminal() {
+        let dir = temp_root("session-shell");
+        let shell = dir.join("session-sh");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\nread -r line && exit 3\nprintf '__BAAZ_PATH__/%s:/%s:/%s__BAAZ_PATH__' \"$$\" \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$(ps -o tty= -p $$ | tr -d ' ')\"\n",
+        )
+        .expect("fake shell");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = std::fs::metadata(&shell).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&shell, perms).expect("executable");
+        }
+        let dirs = shell_path_dirs(&shell, Duration::from_secs(10)).expect("the probe prints its markers");
+        assert_eq!(dirs.len(), 3, "pid, group and tty: {dirs:?}");
+        assert_eq!(dirs[0], dirs[1], "the shell leads its own group (and session)");
+        assert_eq!(dirs[2], PathBuf::from("/??"), "the shell has no controlling terminal");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
