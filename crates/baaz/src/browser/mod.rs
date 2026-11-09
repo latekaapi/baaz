@@ -1673,6 +1673,12 @@ impl Harness {
             == Some(id);
         let next = self.browser.tabs.close(id);
         self.browser.states.remove(&id);
+        // The agent tools' registry holds every tab's page (R2's `tab`
+        // argument, R3's grants). Left there, a tab the person closed (⌘W,
+        // ✕) kept its page alive: the page parks its native view only when
+        // dropped, so the closed page stayed on screen over the next tab and
+        // read as a frozen window (owner, 9 Nov). Whoever closes, it goes.
+        self.terminal_service.unregister_tab_page(id.0);
         self.schedule_tabs_write(cx);
         // B2a-H2b: closing the current project's last person tab while
         // in Browse opens a fresh blank one — entering Browse and this
