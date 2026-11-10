@@ -45,6 +45,7 @@ pub(crate) mod agents;
 pub(crate) mod assistant;
 pub(crate) mod chrome;
 pub(crate) mod favicons;
+pub(crate) mod history;
 pub(crate) mod automation;
 pub mod clone_sweep;
 mod sidebar_actions;
@@ -1970,6 +1971,80 @@ impl Harness {
             && !self.skills.open
     }
 
+    /// R4 history (docs/27 §7): every person tab's page becomes a visit, a
+    /// late title updates it, and the page in front gives up its words once
+    /// it has stayed [`history::DWELL_MS`]. A session's tabs never record.
+    /// Runs from the sync, so it must stay cheap: map lookups, and a write
+    /// only when a page or title changed.
+    fn record_history(&mut self, live: &[(TabId, String, String, Option<String>)], cx: &mut Context<Self>) {
+        let now = tabs::now_ms();
+        let front = self.browser.last_centre_shown;
+        let mut changed = false;
+        let mut want: Vec<(TabId, String, String)> = Vec::new();
+        for (id, url, title, _) in live {
+            let person = matches!(self.browser.tabs.get(*id).map(|tab| &tab.owner), Some(Owner::Person));
+            let before = self.browser.recorder.url_of(*id).map(str::to_owned);
+            let db = self.browser.db.get_or_init(history::BrowserDb::open);
+            let note = self.browser.recorder.observe(db, *id, person, url, title, front == Some(*id), now);
+            if before.as_deref() != Some(url.as_str()) && person {
+                changed = true;
+            }
+            if note == history::Note::WantText {
+                want.push((*id, url.clone(), title.clone()));
+            }
+        }
+        if changed {
+            self.browser.history_changed();
+        }
+        self.browser.recorder.retain(|id| live.iter().any(|(tab, ..)| *tab == id));
+        for (id, url, title) in want {
+            let Some(state) = self.browser.states.get(&id).cloned() else { continue };
+            let request = self.browser.next_text_read;
+            self.browser.next_text_read += 1;
+            self.browser.text_reads.insert(request, (id, url, title));
+            state.update(cx, |state, _| state.eval_with_result(request, history::PAGE_TEXT_JS));
+        }
+        // Answers: keep the words if the tab is still on that page.
+        if !self.browser.text_reads.is_empty() {
+            let states: Vec<(TabId, Entity<WebviewState>)> =
+                self.browser.states.iter().map(|(id, state)| (*id, state.clone())).collect();
+            for (id, state) in states {
+                if !self.browser.text_reads.values().any(|(tab, _, _)| *tab == id) {
+                    continue;
+                }
+                let answers = state.update(cx, |state, _| state.take_eval_results());
+                for (request, answer) in answers {
+                    let Some((tab, url, title)) = self.browser.text_reads.remove(&request) else { continue };
+                    if tab != id || self.browser.recorder.url_of(id) != Some(url.as_str()) {
+                        continue;
+                    }
+                    if let Ok(text) = answer {
+                        let text: String = serde_json::from_str(&text).unwrap_or(text);
+                        self.browser.db().set_text(&url, &title, &text);
+                        self.browser.history_changed();
+                    }
+                }
+            }
+        }
+        // A quiet window takes no frame: wake once when the page in front
+        // has stayed long enough, so its words are kept without input.
+        if let Some(id) = front {
+            let url = live.iter().find(|(tab, ..)| *tab == id).map(|(_, url, ..)| url.clone());
+            if let Some(url) = url.filter(|url| history::recordable(url)) {
+                if self.browser.dwell_armed.as_ref() != Some(&(id, url.clone())) {
+                    self.browser.dwell_armed = Some((id, url));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(history::DWELL_MS + 250))
+                            .await;
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                }
+            }
+        }
+    }
+
     pub(crate) fn sync_browser(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         // Live pages report into their tabs — debounced to actual changes,
@@ -2028,6 +2103,7 @@ impl Harness {
         if tabs_dirty {
             self.schedule_tabs_write(cx);
         }
+        self.record_history(&live, cx);
         // The header toolbar's back/forward stacks follow every live page:
         // whatever the page reports becomes the stack's current URL, so an
         // outside navigation (a link) lands here and clears the forward
@@ -3353,8 +3429,8 @@ impl Harness {
     }
 
     /// The omnibox rows for the field's current text: this project's open
-    /// tabs (person tabs plus session tabs) and its sessions — history
-    /// stays empty until B2b fills it, which omits the section. Sessions
+    /// tabs (person tabs plus session tabs), its sessions, commands and
+    /// history from `browser.db` (R4). Sessions
     /// stay inside this project and out of the hidden list.
     pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
         let query = self.browse_address_text(cx);
@@ -3397,7 +3473,84 @@ impl Harness {
             .collect();
         let commands: Vec<(String, String)> =
             FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
-        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &[], self.layout.search_engine)
+        let history = self.history_hits(&query);
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, self.layout.search_engine)
+    }
+
+    /// History pages for the Field's query, from `browser.db`, cached per
+    /// query (render, arrows and Enter all re-rank).
+    pub(crate) fn history_hits(&self, query: &str) -> Vec<toolbar::HistoryHit> {
+        let query = query.trim().to_owned();
+        if let Some((cached, hits)) = self.browser.history_cache.borrow().as_ref() {
+            if *cached == query {
+                return hits.clone();
+            }
+        }
+        let now = tabs::now_ms();
+        let hits: Vec<toolbar::HistoryHit> = self
+            .browser
+            .db()
+            .search(&query, 12)
+            .into_iter()
+            .map(|visit| toolbar::HistoryHit {
+                ago: history::ago(visit.last_ms, now),
+                title: visit.title,
+                url: visit.url,
+                last_ms: visit.last_ms,
+                snippet: visit.snippet,
+            })
+            .collect();
+        *self.browser.history_cache.borrow_mut() = Some((query, hits.clone()));
+        hits
+    }
+
+    /// "Never remember this site": the shown page's site leaves history
+    /// (what was kept of it too) and is never recorded again. Settings ›
+    /// Browser › Your data lists it, with a way back.
+    pub(crate) fn forget_shown_site(&mut self, cx: &mut Context<Self>) {
+        let url = self
+            .browse_centre_shown()
+            .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+            .unwrap_or_default();
+        let site = history::host_of(&url);
+        if !history::recordable(&url) || site.is_empty() {
+            self.overlays.update(cx, |o, _| o.toast("Nothing to forget", "This page is not kept in history."));
+            cx.notify();
+            return;
+        }
+        self.browser.db().exclude(&site);
+        self.browser.history_changed();
+        self.overlays.update(cx, |o, _| {
+            o.toast(format!("{site} won’t be remembered"), "Its history is gone. Undo in Settings › Browser.")
+        });
+        cx.notify();
+    }
+
+    /// Clear history: asks first, since it cannot be undone.
+    pub(crate) fn ask_clear_history(&mut self, cx: &mut Context<Self>) {
+        let pages = self.browser.db().len();
+        self.set_dialog(
+            cx,
+            crate::overlays::Dialog {
+                title: "Clear all browsing history?".to_owned(),
+                detail: format!(
+                    "{} and the words kept for search. Bookmarks, open tabs and sign-ins stay. This can’t be undone.",
+                    if pages == 1 { "1 page".to_owned() } else { format!("{pages} pages") }
+                ),
+                kind: aui::overlay::DialogKind::Warning,
+                primary: "Clear history",
+                action: crate::overlays::DialogAction::ClearHistory,
+                archive_target: None,
+            },
+        );
+    }
+
+    /// Clear history now (confirmed).
+    pub(crate) fn clear_history_now(&mut self, cx: &mut Context<Self>) {
+        self.browser.db().clear_since(0);
+        self.browser.history_changed();
+        self.overlays.update(cx, |o, _| o.toast("History cleared", ""));
+        cx.notify();
     }
 
     /// Move the omnibox highlight by `delta`, wrapping over the rows the
@@ -3478,8 +3631,11 @@ impl Harness {
             OmniTarget::Ask(query) => self.browse_ask(&query, window, cx),
             OmniTarget::Command(id) => {
                 self.leave_browse_address(window, cx);
-                if let Some((_, _, action)) = FIELD_COMMANDS.iter().find(|(command, _, _)| *command == id) {
-                    self.browse_page_action(*action, window, cx);
+                match FIELD_COMMANDS.iter().find(|(command, _, _)| *command == id).map(|(_, _, action)| *action) {
+                    Some(FieldAction::Page(action)) => self.browse_page_action(action, window, cx),
+                    Some(FieldAction::ForgetSite) => self.forget_shown_site(cx),
+                    Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
+                    None => {}
                 }
             }
             OmniTarget::Tab(id) => {
@@ -3608,6 +3764,25 @@ impl Harness {
     /// `omnibox:<text>`: focus the Browse address field and type `text` —
     /// the `browse-omnibox` capture aid. The dropdown stays open on the
     /// typed text. Free: no turn, no wire.
+    pub(crate) fn step_history(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let mut parts = rest.splitn(4, '|');
+        let url = parts.next().unwrap_or("").trim().to_owned();
+        let title = parts.next().unwrap_or("").trim().to_owned();
+        let days: u64 = parts.next().and_then(|d| d.trim().parse().ok()).unwrap_or(0);
+        let words = parts.next().unwrap_or("").trim().to_owned();
+        let when = tabs::now_ms().saturating_sub(days * 86_400_000);
+        if !self.browser.db().record_visit(&url, &title, when) {
+            crate::steps::record_step_failure(&format!("history:{rest}"));
+            return;
+        }
+        if !words.is_empty() {
+            self.browser.db().set_text(&url, &title, &words);
+        }
+        self.browser.history_changed();
+        cx.notify();
+    }
+
+    /// `omnibox:<text>`: focus the address field and type `text`.
     pub(crate) fn step_omnibox(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.ensure_tabs_loaded(cx);
@@ -4090,6 +4265,31 @@ pub(crate) struct BrowserRegistry {
     pub last_centre_shown: Option<TabId>,
     /// A centre switch waiting for find to follow it: (left, shown).
     pub find_resync: Option<(Option<TabId>, Option<TabId>)>,
+    /// R4 `browser.db`: history (and bookmarks), opened on first use.
+    pub db: std::cell::OnceCell<history::BrowserDb>,
+    /// Which page each person tab was recorded at, and its dwell.
+    pub recorder: history::Recorder,
+    /// The Field's last history lookup: `(query, hits)`, so a render, an
+    /// arrow or Enter never runs the same search twice.
+    pub history_cache: std::cell::RefCell<Option<(String, Vec<toolbar::HistoryHit>)>>,
+    /// Page-word reads in flight: request id → (tab, url, title).
+    pub text_reads: HashMap<u64, (TabId, String, String)>,
+    /// The next page-word request id (a range no other caller uses).
+    pub next_text_read: u64,
+    /// A wake-up is armed for the shown tab's dwell, at this page.
+    pub dwell_armed: Option<(TabId, String)>,
+}
+
+impl BrowserRegistry {
+    /// The history store, opened on first use.
+    pub(crate) fn db(&self) -> &history::BrowserDb {
+        self.db.get_or_init(history::BrowserDb::open)
+    }
+
+    /// History changed: the Field's cached lookup is stale.
+    pub(crate) fn history_changed(&self) {
+        self.history_cache.borrow_mut().take();
+    }
 }
 
 impl BrowserRegistry {
@@ -4123,20 +4323,39 @@ impl BrowserRegistry {
             download_started: HashMap::new(),
             last_centre_shown: None,
             find_resync: None,
+            db: std::cell::OnceCell::new(),
+            recorder: history::Recorder::default(),
+            history_cache: std::cell::RefCell::new(None),
+            text_reads: HashMap::new(),
+            next_text_read: 1 << 62,
+            dwell_armed: None,
         }
     }
 }
 
+/// What a Field command does: one of the page's own actions, or an R4
+/// history command Baaz owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldAction {
+    Page(aui::screens::sidebar::PageAction),
+    /// Never record the shown page's site again, and forget it.
+    ForgetSite,
+    /// Clear all browsing history (asks first).
+    ClearHistory,
+}
+
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, aui::screens::sidebar::PageAction); 8] = [
-    ("new-tab", "New tab", aui::screens::sidebar::PageAction::NewTab),
-    ("find", "Find in page", aui::screens::sidebar::PageAction::Find),
-    ("copy-link", "Copy link", aui::screens::sidebar::PageAction::CopyLink),
-    ("safari", "Open in Safari", aui::screens::sidebar::PageAction::OpenInSafari),
-    ("annotate", "Annotate page", aui::screens::sidebar::PageAction::Annotate),
-    ("screenshot", "Take a screenshot", aui::screens::sidebar::PageAction::Screenshot),
-    ("devtools", "Developer tools", aui::screens::sidebar::PageAction::DevTools),
-    ("settings", "Browser settings", aui::screens::sidebar::PageAction::Settings),
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 10] = [
+    ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
+    ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
+    ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
+    ("safari", "Open in Safari", FieldAction::Page(aui::screens::sidebar::PageAction::OpenInSafari)),
+    ("annotate", "Annotate page", FieldAction::Page(aui::screens::sidebar::PageAction::Annotate)),
+    ("screenshot", "Take a screenshot", FieldAction::Page(aui::screens::sidebar::PageAction::Screenshot)),
+    ("devtools", "Developer tools", FieldAction::Page(aui::screens::sidebar::PageAction::DevTools)),
+    ("settings", "Browser settings", FieldAction::Page(aui::screens::sidebar::PageAction::Settings)),
+    ("forget-site", "Never remember this site", FieldAction::ForgetSite),
+    ("clear-history", "Clear history…", FieldAction::ClearHistory),
 ];
 
 impl Harness {

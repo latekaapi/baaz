@@ -67,6 +67,8 @@ pub enum DialogAction {
     /// Delete the browser space in `archive_target` and close the tabs it
     /// holds (the space-chip menu asks first when it has any).
     DeleteSpace,
+    /// Clear all browsing history (R4): confirmed, it cannot be undone.
+    ClearHistory,
     /// Move Baaz's own provider sessions into Baaz's homes (B4M): the
     /// one-time prompt's Move. The plan runs through the journaling
     /// executor; dismissing any other way moves nothing.

@@ -206,6 +206,11 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:http://localhost:5173/overview"]},
     "browse-omnibox":       {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;omnibox:example"]},
+    # R4: history from browser.db in the Field's rows — a title match, a
+    # words-only match with its line, and an open tab that hides its own
+    # history row (sidebar hidden, so the rows draw in the main window).
+    "field-history":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;sidebar;tab-new:https://example.com;history:https://tokio.rs/tokio/tutorial/spawning|Tokio tutorial · Spawning|2|;history:https://without.boats/blog/pin/|Pin and suffering|9|Self-referential futures in Rust need Pin to stay put.;history:https://example.com/|Example Domain|1|;omnibox:rust"]},
     "browse-newtab":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;tab-new:about:blank"]},
     "browse-from-session":  {"shot": ["--no-connect", "--login", "signed-in",
