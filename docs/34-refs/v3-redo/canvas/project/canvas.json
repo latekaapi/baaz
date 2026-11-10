@@ -365,6 +365,20 @@
    "w": 1440,
    "h": 2900,
    "title": "P7 · Import — earlier Claude Code and Codex sessions — APPROVED (2026-10-30)"
+  },
+  "R3Agent.dc.html": {
+   "x": 0,
+   "y": 37860,
+   "w": 1440,
+   "h": 2720,
+   "title": "R3 · The agent window — the four new pieces — APPROVED (2026-11-08)"
+  },
+  "R4Daily.dc.html": {
+   "x": 0,
+   "y": 40900,
+   "w": 1440,
+   "h": 4760,
+   "title": "R4 · The daily driver — bookmarks, Chrome import, Spaces sign-ins, footer — APPROVED (2026-11-11)"
   }
  },
  "createdOnFiles": {
@@ -581,6 +595,34 @@
    "w": 440,
    "fill": "green",
    "text": "DECIDED (owner, 30 Oct): board APPROVED as drawn. 1 · In place: records + search words; files stay in ~/.claude / ~/.codex, resuming continues the same session the CLI sees. 2 · Once, with \"Import more…\" on the card (no automatic listing). 3 · Keep Undo in the toast (removes the records, never the files)."
+  },
+  "t11": {
+   "x": 0,
+   "y": 37620,
+   "text": "R3 · The agent window (8 Nov): inline answer, draft in page, handoff, Assistant",
+   "kind": "title1",
+   "maxW": 1440
+  },
+  "n19": {
+   "x": 1540,
+   "y": 37960,
+   "w": 420,
+   "fill": "green",
+   "text": "DECIDED (owner, 8 Nov): \"Approved, wire it\" — board approved as drawn: a one-shot answer opens no task folder until ⌘E; Undo + Done on the draft line, posting is yours; ↗ handoff in the card header, the chat stays usable after. Still open: whether the Agents block (Ask/Auto, your tabs, sites) is R3 or R4."
+  },
+  "t12": {
+   "x": 0,
+   "y": 40660,
+   "text": "R4 · The daily driver (11 Nov): bookmarks, Chrome import, Spaces with own sign-ins, footer",
+   "kind": "title1",
+   "maxW": 1440
+  },
+  "n20": {
+   "x": 1540,
+   "y": 41000,
+   "w": 420,
+   "fill": "green",
+   "text": "DECIDED (owner, 11 Nov): \"Approved, wire it\". ⇧-click = Peek, ⌥-click = Split (gallery, wired not redrawn). Import tested on bookmarks + history only. Extensions and password import depend on a CEF spike; a failed spike comes back to the owner."
   }
  },
  "order": [
@@ -635,7 +677,9 @@
   "D6PageRecent.dc.html",
   "D6OneBar.dc.html",
   "D5Providers.dc.html",
-  "P7Import.dc.html"
+  "P7Import.dc.html",
+  "R3Agent.dc.html",
+  "R4Daily.dc.html"
  ],
  "pages": [],
  "title": "Baaz v3"
