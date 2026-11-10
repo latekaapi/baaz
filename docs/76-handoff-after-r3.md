@@ -109,5 +109,5 @@ nothing then (steps stall, captures stale) — `caffeinate -d -i -u -t 7200` (ow
 
 ## 5. Next
 
-The owner tries R3 on their own build (after "push" and the swap), then Browser **R4 — daily driver** (docs/27 §8:
-history + bookmarks in the Field, Chrome import, adblock, Peek, Split, Spaces with own sign-ins).
+**Superseded by docs/77** (10 Nov): R3 was pushed (v0.6.7) and six owner-found bugs were fixed and pushed after it
+(v0.6.8, v0.6.9, baaz 3e5bdd2). docs/77 has those, the lessons, and the prompt for Browser **R4, the daily driver**.
