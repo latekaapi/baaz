@@ -162,6 +162,7 @@
 //! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names record a step failure, free |
 //! | `page-focus` | give the active browser page the keyboard, free |
 //! | `agent-line` | Browse: open or close the ⌘J agent line on the page on screen (R3), free |
+//! | `page-theme-changed` | Browse: send Chromium's theme-changed notification to every page window (as a macOS appearance or display change does), free |
 //! | `agent-card` | Browse: open or close the ⌘E agent card (R3), free |
 //! | `agent-column` | Browse: dock the card as a column, or undock it (⌘⇧E, R3), free |
 //! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the line's chat — `answer` lands the inline answer, `steps` opens the card, `draft` the landed draft (R3), free: no turn |
@@ -447,6 +448,14 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "agent-column", run: |this, _, _, cx| this.toggle_agent_column(cx) },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
     WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.handoff_picker_open = true; cx.notify(); } },
+    // Chromium's theme-change notification on every page window, as macOS
+    // sends on an appearance or display change: the page ground must stay
+    // white through it (owner 9 Nov: dark margins on Hacker News). Free.
+    WindowVerb { verb: "page-theme-changed", run: |_, _, _, cx| {
+        #[cfg(feature = "cef")]
+        aui_cef::notify_theme_changed();
+        cx.notify();
+    } },
     // D5 providers: the setup sheet (`setup:<provider>:<install|signin|update>`)
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
