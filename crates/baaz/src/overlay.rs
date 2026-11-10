@@ -1141,7 +1141,7 @@ impl Harness {
                 // Every row confirms with ↩ unless Baaz names another key; an
                 // empty hint drew an empty keycap.
                 let hint = if row.suggestion.hint.is_empty() { "↩".to_string() } else { row.suggestion.hint.clone() };
-                FieldRow { kind, title: row.suggestion.title.clone().into(), detail: None, hint: hint.into() }
+                FieldRow { kind, title: row.suggestion.title.clone().into(), detail: row.suggestion.detail.clone().map(Into::into), hint: hint.into() }
             })
             .collect();
         // The component groups by caption, and the caption-less rows (Ask,

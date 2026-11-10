@@ -5430,6 +5430,12 @@ impl Harness {
                         .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(row.suggestion.title.clone()),
                 );
+            // A history row's address, or the line its words matched (R4).
+            if let Some(detail) = row.suggestion.detail.clone() {
+                item = item.child(
+                    div().flex_shrink(1.0).min_w(px(0.0)).max_w(gpui::relative(0.5)).truncate().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(detail),
+                );
+            }
             if !row.suggestion.hint.is_empty() {
                 item = item.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(row.suggestion.hint.clone()));
             }

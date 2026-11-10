@@ -101,6 +101,7 @@
 //! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range records a step failure, free |
 //! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
+//! | `history:<url>\|<title>\|<days ago>\|<words>` | seed one page into the (in-memory, capture-only) history, visited `days ago`, with the page's `words` kept for search when given; free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
 //! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty records a step failure, free |
 //! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds record a step failure, free |
@@ -357,6 +358,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, _, window, cx| this.step_tab_discard_now(window, cx),
     },
     WindowVerb { verb: "omnibox", run: |this, rest, window, cx| this.step_omnibox(rest, window, cx) },
+    WindowVerb { verb: "history", run: |this, rest, _, cx| this.step_history(rest, cx) },
     WindowVerb { verb: "find", run: |this, rest, window, cx| this.step_find(rest, window, cx) },
     WindowVerb { verb: "permission", run: |this, rest, window, cx| this.step_permission(rest, window, cx) },
     WindowVerb { verb: "download", run: |this, rest, window, cx| this.step_download(rest, window, cx) },

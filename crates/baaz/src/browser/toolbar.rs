@@ -322,6 +322,9 @@ pub(crate) struct Suggestion {
     /// session's title, the history URL — `None` for Ask and Search rows,
     /// which are not completable.
     pub complete: Option<String>,
+    /// The faint second text: a history row's address, or the line of the
+    /// page's words that matched (R4).
+    pub detail: Option<String>,
 }
 
 /// What an omnibox row activates: the tab or session to show, the URL to
@@ -382,6 +385,26 @@ fn best_tier(fields: &[&str], needle: &str) -> Option<u8> {
     fields.iter().filter_map(|field| match_tier(field, needle)).min()
 }
 
+/// One history page the Field may show (R4 `browser.db`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HistoryHit {
+    pub title: String,
+    pub url: String,
+    /// Last visit, ms since the epoch: newer first among equals.
+    pub last_ms: u64,
+    /// `2 days ago`: the row's right-hand word.
+    pub ago: String,
+    /// The matching line of the page's words, when only they matched.
+    pub snippet: Option<String>,
+}
+
+/// An address as a row shows it: no scheme, no `www.`, no trailing `/`.
+pub(crate) fn display_url(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    rest.strip_suffix('/').unwrap_or(rest).to_owned()
+}
+
 /// Rank the omnibox rows for `query` over this project's open tabs
 /// (`(id, title, url, recency_ms)`), sessions (`(id, name, recency_ms)`)
 /// and read history (`(title, url, recency_ms)`): Ask first, then matching
@@ -394,7 +417,7 @@ pub(crate) fn rank_omnibox(
     tabs: &[(super::TabId, String, String, u64)],
     sessions: &[(String, String, u64)],
     commands: &[(String, String)],
-    history: &[(String, String, u64)],
+    history: &[HistoryHit],
     engine: SearchEngine,
 ) -> Vec<OmniRow> {
     let q = query.trim();
@@ -408,6 +431,7 @@ pub(crate) fn rank_omnibox(
             title: format!("Ask: {q}"),
             hint: "⌘↵".to_owned(),
             complete: None,
+            detail: None,
         },
         target: OmniTarget::Ask(q.to_owned()),
     }];
@@ -423,6 +447,7 @@ pub(crate) fn rank_omnibox(
                         title: title.clone(),
                         hint: String::new(),
                         complete: Some(url.clone()),
+                        detail: None,
                     },
                     target: OmniTarget::Tab(*id),
                 },
@@ -445,6 +470,7 @@ pub(crate) fn rank_omnibox(
                         title: name.clone(),
                         hint: String::new(),
                         complete: Some(name.clone()),
+                        detail: None,
                     },
                     target: OmniTarget::Session(id.clone()),
                 },
@@ -460,33 +486,44 @@ pub(crate) fn rank_omnibox(
         .filter_map(|(id, title)| {
             let tier = match_tier(title, &needle)?;
             let suggestion =
-                Suggestion { kind: SuggestKind::Command, title: title.clone(), hint: String::new(), complete: None };
+                Suggestion { kind: SuggestKind::Command, title: title.clone(), hint: String::new(), complete: None, detail: None };
             Some((tier, OmniRow { suggestion, target: OmniTarget::Command(id.clone()) }))
         })
         .collect();
     command_rows.sort_by_key(|(tier, _)| *tier);
     rows.extend(command_rows.into_iter().take(MAX_COMMAND_SUGGESTIONS).map(|(_, row)| row));
     let mut history_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
-    for (title, url, recency) in history {
-        if let Some(tier) = best_tier(&[title, url], &needle) {
+    for hit in history {
+        // A page whose words matched (not its title or address) ranks after
+        // every title match, and shows the line it matched.
+        let tier = best_tier(&[&hit.title, &hit.url], &needle).or(hit.snippet.as_ref().map(|_| 3));
+        if let Some(tier) = tier {
+            let detail = match &hit.snippet {
+                Some(line) if best_tier(&[&hit.title, &hit.url], &needle).is_none() => format!("“{line}”"),
+                _ => display_url(&hit.url),
+            };
             history_rows.push((
                 tier,
-                *recency,
+                hit.last_ms,
                 OmniRow {
                     suggestion: Suggestion {
                         kind: SuggestKind::History,
-                        title: title.clone(),
-                        hint: String::new(),
-                        complete: Some(url.clone()),
+                        title: if hit.title.is_empty() { display_url(&hit.url) } else { hit.title.clone() },
+                        hint: hit.ago.clone(),
+                        complete: Some(hit.url.clone()),
+                        detail: Some(detail),
                     },
-                    target: OmniTarget::History(url.clone()),
+                    target: OmniTarget::History(hit.url.clone()),
                 },
             ));
         }
     }
     history_rows.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
     for (_, _, row) in history_rows.into_iter().take(MAX_HISTORY_SUGGESTIONS) {
-        rows.push(row);
+        // A page already open as a tab shows once, as the tab.
+        if !rows.iter().any(|seen| seen.suggestion.kind == SuggestKind::Tab && seen.suggestion.complete == row.suggestion.complete) {
+            rows.push(row);
+        }
     }
     rows.push(OmniRow {
         suggestion: Suggestion {
@@ -494,6 +531,7 @@ pub(crate) fn rank_omnibox(
             title: format!("Search with {} for {q}", engine.name()),
             hint: "↵".to_owned(),
             complete: None,
+            detail: None,
         },
         target: OmniTarget::Search(engine.search_url(q)),
     });
@@ -750,7 +788,7 @@ mod tests {
             ("s-1".to_owned(), "Fix ledger chart".to_owned(), 0),
             ("s-2".to_owned(), "Recharts spike".to_owned(), 0),
         ];
-        let history = vec![("Recharts gallery".to_owned(), "https://recharts.org/gallery".to_owned(), 0)];
+        let history = vec![HistoryHit { title: "Recharts gallery".to_owned(), url: "https://recharts.org/gallery".to_owned(), ..Default::default() }];
         let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &history, SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(

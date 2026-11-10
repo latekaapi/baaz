@@ -1095,7 +1095,8 @@ impl Harness {
                 || modal.action == DialogAction::QuitWithRunningTerminal
                 || modal.action == DialogAction::CloseTerminalTab
                 || modal.action == DialogAction::ProviderSignOut
-                || modal.action == DialogAction::DeleteSpace;
+                || modal.action == DialogAction::DeleteSpace
+                || modal.action == DialogAction::ClearHistory;
             (
                 modal.title.clone(),
                 modal.detail.clone(),
@@ -1149,6 +1150,11 @@ impl Harness {
                 }
                 return;
             }
+            if action == DialogAction::ClearHistory {
+                this.close_dialog(cx);
+                this.clear_history_now(cx);
+                return;
+            }
             // Confirmed through its own path, like Archive: the tab id rode
             // the dialog, so closing any other way already dropped it.
             if action == DialogAction::CloseTerminalTab {
@@ -1190,6 +1196,8 @@ impl Harness {
                 DialogAction::MigrateSessions => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::DeleteSpace => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::ClearHistory => {}
             }
             cx.notify();
         });

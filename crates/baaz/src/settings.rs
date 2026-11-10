@@ -1443,6 +1443,77 @@ impl Harness {
         self.settings_group("Agents", rows, cx)
     }
 
+    /// R4 "Your data" (board R4Daily 2a): history's size and Clear…, and
+    /// the sites history never records, each with Remove. (Import from
+    /// Chrome joins this group.)
+    fn settings_browser_data_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let db = self.browser.db();
+        let pages = db.len();
+        let summary = format!(
+            "{} · kept {} days · never from an agent’s tabs",
+            if pages == 1 { "1 page".to_owned() } else { format!("{pages} pages") },
+            crate::browser::history::KEEP_DAYS
+        );
+        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.ask_clear_history(cx));
+        let mut rows = vec![h_flex()
+            .id("settings-browser-history")
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("History".to_string()))
+                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(summary)),
+            )
+            .child(
+                button("settings-history-clear", "Clear…")
+                    .accessibility_label("Clear browsing history")
+                    .on_click(move |e, w, cx| clear(e, w, cx)),
+            )
+            .into_any_element()];
+        let sites = db.excluded();
+        rows.push(
+            v_flex()
+                .id("settings-browser-forgotten")
+                .w_full()
+                .py(px(scale::SP_2))
+                .child(div().text_color(p.ink).ui(scale::FS_13).child("Never remembered".to_string()))
+                .child(div().text_color(p.ink_3).ui(scale::FS_12).child(if sites.is_empty() {
+                    "None. “Never remember this site” in the Field (⌘L) adds the page you’re on.".to_owned()
+                } else {
+                    "History never records these sites. Remove one to record it again.".to_owned()
+                }))
+                .into_any_element(),
+        );
+        for (index, site) in sites.into_iter().enumerate() {
+            let owned = site.clone();
+            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.browser.db().include(&owned);
+                cx.notify();
+            });
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("settings-forgotten-{index}")))
+                    .w_full()
+                    .items_center()
+                    .gap(px(scale::SP_3))
+                    .py(px(scale::SP_1))
+                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).mono(scale::FS_12).child(site.clone()))
+                    .child(
+                        button(SharedString::from(format!("settings-forgotten-remove-{index}")), "Remove")
+                            .accessibility_label(SharedString::from(format!("Record {site} again")))
+                            .on_click(move |e, w, cx| remove(e, w, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        self.settings_group("Your data", rows, cx)
+    }
+
     fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let dir = browser_download_dir(&self.layout);
@@ -1576,6 +1647,7 @@ impl Harness {
         let mut page = v_flex()
             .w_full()
             .gap(px(scale::SP_4))
+            .child(self.settings_browser_data_group(cx))
             .child(self.settings_browser_assistant_group(cx))
             .child(self.settings_browser_agents_group(cx))
             .child(self.settings_browser_search_group(cx))
