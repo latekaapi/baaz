@@ -211,6 +211,13 @@ ENTRIES = {
     # history row (sidebar hidden, so the rows draw in the main window).
     "field-history":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;sidebar;tab-new:https://example.com;history:https://tokio.rs/tokio/tutorial/spawning|Tokio tutorial · Spawning|2|;history:https://without.boats/blog/pin/|Pin and suffering|9|Self-referential futures in Rust need Pin to stay put.;history:https://example.com/|Example Domain|1|;omnibox:rust"]},
+    # R4 bookmarks: an unscoped query shows Bookmarks between tabs and
+    # history (a bookmarked page's history row folds into it), and the
+    # scoped view lists folders, then recently added.
+    "field-bookmarks":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;sidebar;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;history:https://doc.rust-lang.org/book/|The Rust Programming Language|1|;history:https://without.boats/blog/pin/|Pin and suffering|9|Rust needs Pin.;omnibox:rust"]},
+    "field-bookmarks-scope": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;sidebar;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://news.ycombinator.com/|Hacker News|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;bookmarks"]},
     "browse-newtab":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;tab-new:about:blank"]},
     "browse-from-session":  {"shot": ["--no-connect", "--login", "signed-in",

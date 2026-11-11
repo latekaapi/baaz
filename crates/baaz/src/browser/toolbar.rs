@@ -303,8 +303,12 @@ pub(crate) enum SuggestKind {
     Session,
     /// A command by name (docs/27 §4.4).
     Command,
-    /// History and pages read (omitted until B2b fills it).
+    /// History and pages read (R4 `browser.db`).
     History,
+    /// A bookmark (R4).
+    Bookmark,
+    /// A bookmarks folder, in the scoped Bookmarks view (R4).
+    Folder,
     /// The default "search with <engine>" row, always last.
     Search,
 }
@@ -341,8 +345,10 @@ pub(crate) enum OmniTarget {
     Session(String),
     /// Run this command palette row.
     Command(String),
-    /// Load this history URL.
+    /// Load this history (or bookmark) URL.
     History(String),
+    /// Open this bookmarks folder in the scoped view.
+    Folder(i64),
     /// Load this search URL.
     Search(String),
 }
@@ -360,6 +366,8 @@ const MAX_TAB_SUGGESTIONS: usize = 5;
 const MAX_SESSION_SUGGESTIONS: usize = 5;
 const MAX_COMMAND_SUGGESTIONS: usize = 3;
 const MAX_HISTORY_SUGGESTIONS: usize = 4;
+/// The most bookmark rows an unscoped query shows (the board's 3).
+const MAX_BOOKMARK_SUGGESTIONS: usize = 3;
 
 /// How `needle` matches `haystack`: a prefix beats a word start, which
 /// beats a mid-word substring. `None` is no match at all.
@@ -398,6 +406,53 @@ pub(crate) struct HistoryHit {
     pub snippet: Option<String>,
 }
 
+/// One bookmark the Field may show (R4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BookmarkHit {
+    pub title: String,
+    pub url: String,
+    /// Its folder's path (`Other › Learning`): the row's right-hand word.
+    pub folder: String,
+}
+
+/// The rows of the scoped Bookmarks view: with no query, the folders at
+/// this level then the bookmarks in it (the top level: recently added);
+/// with a query, matching bookmarks anywhere.
+pub(crate) fn rank_bookmarks_scope(
+    query: &str,
+    folders: &[(i64, String, u64)],
+    marks: &[BookmarkHit],
+) -> Vec<OmniRow> {
+    let mut rows = Vec::new();
+    if query.trim().is_empty() {
+        for (id, name, count) in folders {
+            rows.push(OmniRow {
+                suggestion: Suggestion {
+                    kind: SuggestKind::Folder,
+                    title: name.clone(),
+                    hint: count.to_string(),
+                    complete: None,
+                    detail: None,
+                },
+                target: OmniTarget::Folder(*id),
+            });
+        }
+    }
+    for mark in marks {
+        rows.push(OmniRow {
+            suggestion: Suggestion {
+                kind: SuggestKind::Bookmark,
+                title: if mark.title.is_empty() { display_url(&mark.url) } else { mark.title.clone() },
+                hint: mark.folder.clone(),
+                complete: Some(mark.url.clone()),
+                detail: Some(display_url(&mark.url)),
+            },
+            target: OmniTarget::History(mark.url.clone()),
+        });
+    }
+    rows
+}
+
 /// An address as a row shows it: no scheme, no `www.`, no trailing `/`.
 pub(crate) fn display_url(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -418,6 +473,7 @@ pub(crate) fn rank_omnibox(
     sessions: &[(String, String, u64)],
     commands: &[(String, String)],
     history: &[HistoryHit],
+    bookmarks: &[BookmarkHit],
     engine: SearchEngine,
 ) -> Vec<OmniRow> {
     let q = query.trim();
@@ -492,6 +548,31 @@ pub(crate) fn rank_omnibox(
         .collect();
     command_rows.sort_by_key(|(tier, _)| *tier);
     rows.extend(command_rows.into_iter().take(MAX_COMMAND_SUGGESTIONS).map(|(_, row)| row));
+    let mut bookmark_rows: Vec<(u8, OmniRow)> = Vec::new();
+    for mark in bookmarks {
+        if let Some(tier) = best_tier(&[&mark.title, &mark.url], &needle) {
+            bookmark_rows.push((
+                tier,
+                OmniRow {
+                    suggestion: Suggestion {
+                        kind: SuggestKind::Bookmark,
+                        title: if mark.title.is_empty() { display_url(&mark.url) } else { mark.title.clone() },
+                        hint: mark.folder.clone(),
+                        complete: Some(mark.url.clone()),
+                        detail: Some(display_url(&mark.url)),
+                    },
+                    target: OmniTarget::History(mark.url.clone()),
+                },
+            ));
+        }
+    }
+    bookmark_rows.sort_by_key(|(tier, _)| *tier);
+    for (_, row) in bookmark_rows.into_iter().take(MAX_BOOKMARK_SUGGESTIONS) {
+        // A page already open as a tab shows once, as the tab.
+        if !rows.iter().any(|seen| seen.suggestion.kind == SuggestKind::Tab && seen.suggestion.complete == row.suggestion.complete) {
+            rows.push(row);
+        }
+    }
     let mut history_rows: Vec<(u8, u64, OmniRow)> = Vec::new();
     for hit in history {
         // A page whose words matched (not its title or address) ranks after
@@ -520,8 +601,10 @@ pub(crate) fn rank_omnibox(
     }
     history_rows.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
     for (_, _, row) in history_rows.into_iter().take(MAX_HISTORY_SUGGESTIONS) {
-        // A page already open as a tab shows once, as the tab.
-        if !rows.iter().any(|seen| seen.suggestion.kind == SuggestKind::Tab && seen.suggestion.complete == row.suggestion.complete) {
+        // A page already open as a tab, or bookmarked, shows once, as that.
+        if !rows.iter().any(|seen| {
+            matches!(seen.suggestion.kind, SuggestKind::Tab | SuggestKind::Bookmark) && seen.suggestion.complete == row.suggestion.complete
+        }) {
             rows.push(row);
         }
     }
@@ -722,12 +805,12 @@ mod tests {
     #[test]
     fn commands_are_found_by_name_between_tabs_and_search() {
         let commands = [("find".to_owned(), "Find in page".to_owned()), ("devtools".to_owned(), "Developer tools".to_owned())];
-        let rows = rank_omnibox("find", &[], &[], &commands, &[], SearchEngine::Google);
+        let rows = rank_omnibox("find", &[], &[], &commands, &[], &[], SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(kinds, vec![SuggestKind::Ask, SuggestKind::Command, SuggestKind::Search]);
         assert_eq!(rows[1].target, OmniTarget::Command("find".to_owned()));
         assert_eq!(rows[1].suggestion.complete, None, "Tab leaves a command alone");
-        let none = rank_omnibox("zzz", &[], &[], &commands, &[], SearchEngine::Google);
+        let none = rank_omnibox("zzz", &[], &[], &commands, &[], &[], SearchEngine::Google);
         assert!(!none.iter().any(|row| row.suggestion.kind == SuggestKind::Command));
     }
 
@@ -789,7 +872,7 @@ mod tests {
             ("s-2".to_owned(), "Recharts spike".to_owned(), 0),
         ];
         let history = vec![HistoryHit { title: "Recharts gallery".to_owned(), url: "https://recharts.org/gallery".to_owned(), ..Default::default() }];
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &history, SearchEngine::Google);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &history, &[], SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(
             kinds,
@@ -803,15 +886,15 @@ mod tests {
         assert_eq!(rows[3].target, OmniTarget::History("https://recharts.org/gallery".to_owned()));
         assert!(rows.last().is_some_and(|row| row.suggestion.kind == SuggestKind::Search));
         // Non-matching tabs and sessions drop out; Ask and Search stay.
-        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("recharts", &tabs, &sessions, &[], &[], &[], SearchEngine::Google);
         assert!(
             !rows.iter().any(|row| row.suggestion.kind == SuggestKind::History),
             "the history section is omitted when empty"
         );
-        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &[], &history, SearchEngine::Google);
+        let rows = rank_omnibox("zzz-no-match", &tabs, &sessions, &[], &history, &[], SearchEngine::Google);
         let kinds: Vec<SuggestKind> = rows.iter().map(|row| row.suggestion.kind).collect();
         assert_eq!(kinds, vec![SuggestKind::Ask, SuggestKind::Search]);
-        assert!(rank_omnibox("   ", &tabs, &sessions, &[], &history, SearchEngine::Google).is_empty(), "empty query suggests nothing");
+        assert!(rank_omnibox("   ", &tabs, &sessions, &[], &history, &[], SearchEngine::Google).is_empty(), "empty query suggests nothing");
     }
 
     #[test]
@@ -928,7 +1011,7 @@ mod tests {
             (TabId(2), "The best apiary".to_owned(), "https://hive.example/2".to_owned(), 20),
             (TabId(3), "Apiary".to_owned(), "https://hive.example/3".to_owned(), 10),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("api", &tabs, &[], &[], &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -942,7 +1025,7 @@ mod tests {
             (TabId(1), "Apiary one".to_owned(), "https://hive.example/1".to_owned(), 10),
             (TabId(2), "Apiary two".to_owned(), "https://hive.example/2".to_owned(), 50),
         ];
-        let rows = rank_omnibox("api", &tabs, &[], &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("api", &tabs, &[], &[], &[], &[], SearchEngine::Google);
         let ids: Vec<TabId> = rows
             .iter()
             .filter_map(|row| match row.target {
@@ -958,7 +1041,7 @@ mod tests {
         use super::super::TabId;
         let tabs = vec![(TabId(7), "Ledger".to_owned(), "https://ledger.example/".to_owned(), 0)];
         let sessions = vec![("s-9".to_owned(), "Ledger fix".to_owned(), 0)];
-        let rows = rank_omnibox("ledger", &tabs, &sessions, &[], &[], SearchEngine::Google);
+        let rows = rank_omnibox("ledger", &tabs, &sessions, &[], &[], &[], SearchEngine::Google);
         let tab = rows.iter().find(|row| row.suggestion.kind == SuggestKind::Tab).expect("a tab row");
         assert_eq!(tab.suggestion.complete.as_deref(), Some("https://ledger.example/"), "Tab completes the URL");
         let session =
@@ -1073,9 +1156,48 @@ mod tests {
     /// loads its URL.
     #[test]
     fn omnibox_engine_row_names_the_settings_engine() {
-        let rows = rank_omnibox("ledger", &[], &[], &[], &[], SearchEngine::DuckDuckGo);
+        let rows = rank_omnibox("ledger", &[], &[], &[], &[], &[], SearchEngine::DuckDuckGo);
         let last = rows.last().expect("a query always ranks the engine row");
         assert_eq!(last.suggestion.title, "Search with DuckDuckGo for ledger");
         assert_eq!(last.target, OmniTarget::Search("https://duckduckgo.com/?q=ledger".to_owned()));
+    }
+
+    #[test]
+    fn bookmarks_rank_between_tabs_and_history_and_each_page_shows_once() {
+        let tabs = vec![(super::super::TabId(1), "Open rust tab".to_owned(), "https://open.example/".to_owned(), 0)];
+        let marks = vec![
+            BookmarkHit { title: "Rust book".to_owned(), url: "https://doc.rust-lang.org/book/".to_owned(), folder: "Bookmarks bar".to_owned() },
+            BookmarkHit { title: "Open rust tab".to_owned(), url: "https://open.example/".to_owned(), folder: "Other".to_owned() },
+        ];
+        let history = vec![
+            HistoryHit { title: "Rust book".to_owned(), url: "https://doc.rust-lang.org/book/".to_owned(), ..Default::default() },
+            HistoryHit { title: "Rust blog".to_owned(), url: "https://blog.rust-lang.org/".to_owned(), ..Default::default() },
+        ];
+        let rows = rank_omnibox("rust", &tabs, &[], &[], &history, &marks, SearchEngine::Google);
+        let kinds: Vec<(SuggestKind, String)> = rows.iter().map(|r| (r.suggestion.kind, r.suggestion.title.clone())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (SuggestKind::Ask, "Ask: rust".to_owned()),
+                (SuggestKind::Tab, "Open rust tab".to_owned()),
+                (SuggestKind::Bookmark, "Rust book".to_owned()),
+                (SuggestKind::History, "Rust blog".to_owned()),
+                (SuggestKind::Search, "Search with Google for rust".to_owned()),
+            ],
+            "the bookmarked page's history row folds into the bookmark; a bookmark open as a tab shows as the tab"
+        );
+        assert_eq!(rows[2].suggestion.hint, "Bookmarks bar");
+    }
+
+    #[test]
+    fn the_scoped_view_lists_folders_then_bookmarks_and_a_query_drops_folders() {
+        let folders = vec![(1, "Bookmarks bar".to_owned(), 2), (2, "Other".to_owned(), 0)];
+        let marks = vec![BookmarkHit { title: "HN".to_owned(), url: "https://news.ycombinator.com/".to_owned(), folder: "Bookmarks bar".to_owned() }];
+        let rows = rank_bookmarks_scope("", &folders, &marks);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].target, OmniTarget::Folder(1));
+        assert_eq!(rows[0].suggestion.hint, "2");
+        assert_eq!(rows[2].target, OmniTarget::History("https://news.ycombinator.com/".to_owned()));
+        assert_eq!(rank_bookmarks_scope("hn", &folders, &marks).len(), 1);
     }
 }

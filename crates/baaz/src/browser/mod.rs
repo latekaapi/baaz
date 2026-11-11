@@ -44,6 +44,7 @@ use crate::overlays::MenuKind;
 pub(crate) mod agents;
 pub(crate) mod assistant;
 pub(crate) mod chrome;
+pub(crate) mod bookmarks;
 pub(crate) mod favicons;
 pub(crate) mod history;
 pub(crate) mod automation;
@@ -2001,8 +2002,19 @@ impl Harness {
             let Some(state) = self.browser.states.get(&id).cloned() else { continue };
             let request = self.browser.next_text_read;
             self.browser.next_text_read += 1;
+            crate::baaz_log!("history: reading the words of {url}");
             self.browser.text_reads.insert(request, (id, url, title));
             state.update(cx, |state, _| state.eval_with_result(request, history::PAGE_TEXT_JS));
+            // The answer lands on the page's poll, which takes no frame on
+            // its own in a quiet window: wake twice to collect it while the
+            // tab is still on that page.
+            cx.spawn(async move |this, cx| {
+                for wait in [300u64, 1200] {
+                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .detach();
         }
         // Answers: keep the words if the tab is still on that page.
         if !self.browser.text_reads.is_empty() {
@@ -2015,11 +2027,17 @@ impl Harness {
                 let answers = state.update(cx, |state, _| state.take_eval_results());
                 for (request, answer) in answers {
                     let Some((tab, url, title)) = self.browser.text_reads.remove(&request) else { continue };
-                    if tab != id || self.browser.recorder.url_of(id) != Some(url.as_str()) {
+                    // The words were asked for while the tab showed `url`;
+                    // a navigation since does not make them another page's.
+                    if tab != id {
                         continue;
+                    }
+                    if let Err(error) = &answer {
+                        crate::baaz_log!("history: no words for {url} ({error})");
                     }
                     if let Ok(text) = answer {
                         let text: String = serde_json::from_str(&text).unwrap_or(text);
+                        crate::baaz_log!("history: kept {} characters of {url}", text.len());
                         self.browser.db().set_text(&url, &title, &text);
                         self.browser.history_changed();
                     }
@@ -2585,7 +2603,7 @@ impl Harness {
             None => {
                 let input = cx.new(|cx| InputState::new(window, cx));
                 input.update(cx, |input, cx| {
-                    input.set_placeholder("Search, open a page, or ask", window, cx);
+                    input.set_placeholder(FIELD_PLACEHOLDER, window, cx);
                     input.set_value(text, window, cx);
                     input.select_all(window, cx);
                     input.focus(window, cx);
@@ -2645,6 +2663,8 @@ impl Harness {
     /// [`Self::leave_browse_address`], for the project-adoption paths that
     /// own no window.
     pub(crate) fn drop_browse_address(&mut self, cx: &mut Context<Self>) {
+        self.browser.field_scope = None;
+        self.browser.placeholder_scoped = false;
         if self.browse_address.is_some() {
             self.browse_address = None;
             self.browse_address_sub = None;
@@ -3303,8 +3323,13 @@ impl Harness {
         if let Some(target) = self.browse_completed.clone() {
             return self.activate_omnibox_target(target, window, cx);
         }
-        if self.browse_omnibox_moved {
+        // In the Bookmarks scope ↩ always opens the highlighted row (a
+        // folder or a bookmark): the typed text only filters there.
+        if self.browse_omnibox_moved || self.browser.field_scope.is_some() {
             let rows = self.browse_suggestions(cx);
+            if rows.is_empty() {
+                return;
+            }
             let index = self.browse_omnibox_selected.min(rows.len().saturating_sub(1));
             return self.activate_omnibox_row(index, window, cx);
         }
@@ -3434,6 +3459,9 @@ impl Harness {
     /// stay inside this project and out of the hidden list.
     pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
         let query = self.browse_address_text(cx);
+        if let Some(folder) = self.browser.field_scope {
+            return self.bookmark_scope_rows(&query, folder);
+        }
         if query.trim().is_empty() || !self.browser.tabs_loaded {
             return Vec::new();
         }
@@ -3474,7 +3502,64 @@ impl Harness {
         let commands: Vec<(String, String)> =
             FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
         let history = self.history_hits(&query);
-        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, self.layout.search_engine)
+        let marks = self.bookmark_hits(&query);
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, &marks, self.layout.search_engine)
+    }
+
+    /// Bookmarks for the Field's query, cached per query.
+    pub(crate) fn bookmark_hits(&self, query: &str) -> Vec<toolbar::BookmarkHit> {
+        let query = query.trim().to_owned();
+        if let Some((cached, hits)) = self.browser.bookmark_cache.borrow().as_ref() {
+            if *cached == query {
+                return hits.clone();
+            }
+        }
+        let conn = self.browser.db().conn();
+        let all = bookmarks::folders(conn);
+        let hits: Vec<toolbar::BookmarkHit> = bookmarks::search(conn, &query, 12)
+            .into_iter()
+            .map(|mark| toolbar::BookmarkHit { folder: bookmarks::folder_path(&all, mark.folder), title: mark.title, url: mark.url })
+            .collect();
+        *self.browser.bookmark_cache.borrow_mut() = Some((query, hits.clone()));
+        hits
+    }
+
+    /// The scoped Bookmarks view's rows (board 1c): folders at this level,
+    /// then this folder's bookmarks (the top level: recently added); a
+    /// query searches every bookmark.
+    fn bookmark_scope_rows(&self, query: &str, folder: Option<i64>) -> Vec<OmniRow> {
+        let conn = self.browser.db().conn();
+        let all = bookmarks::folders(conn);
+        let folders: Vec<(i64, String, u64)> =
+            all.iter().filter(|f| f.parent == folder).map(|f| (f.id, f.name.clone(), f.count)).collect();
+        let marks = if !query.trim().is_empty() {
+            bookmarks::search(conn, query, 50)
+        } else if let Some(folder) = folder {
+            bookmarks::in_folder(conn, folder)
+        } else {
+            bookmarks::recent(conn, 8)
+        };
+        let marks: Vec<toolbar::BookmarkHit> = marks
+            .into_iter()
+            .map(|mark| toolbar::BookmarkHit { folder: bookmarks::folder_path(&all, mark.folder), title: mark.title, url: mark.url })
+            .collect();
+        toolbar::rank_bookmarks_scope(query, &folders, &marks)
+    }
+
+    /// ⌫ on an empty query in the scoped view: up one folder, or out of
+    /// the scope at the top. Returns whether it did anything.
+    pub(crate) fn field_scope_up(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(folder) = self.browser.field_scope else { return false };
+        self.browser.field_scope = match folder {
+            Some(id) => {
+                let parent = bookmarks::folders(self.browser.db().conn()).into_iter().find(|f| f.id == id).and_then(|f| f.parent);
+                Some(parent)
+            }
+            None => None,
+        };
+        self.browse_omnibox_selected = 0;
+        cx.notify();
+        true
     }
 
     /// History pages for the Field's query, from `browser.db`, cached per
@@ -3635,8 +3720,23 @@ impl Harness {
                     Some(FieldAction::Page(action)) => self.browse_page_action(action, window, cx),
                     Some(FieldAction::ForgetSite) => self.forget_shown_site(cx),
                     Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
+                    Some(FieldAction::Bookmark) => self.bookmark_shown_page(window, cx),
+                    Some(FieldAction::Bookmarks) => {
+                        // Back into the Field, scoped (the leave above closed it).
+                        self.browser.field_scope = Some(None);
+                        self.focus_browse_address_with("", window, cx);
+                        self.browser.field_scope = Some(None);
+                    }
                     None => {}
                 }
+            }
+            OmniTarget::Folder(id) => {
+                self.browser.field_scope = Some(Some(id));
+                self.browse_omnibox_selected = 0;
+                if let Some(input) = self.browse_address.clone() {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                cx.notify();
             }
             OmniTarget::Tab(id) => {
                 let owner = self.browser.tabs.get(id).map(|tab| tab.owner.clone());
@@ -3779,6 +3879,42 @@ impl Harness {
             self.browser.db().set_text(&url, &title, &words);
         }
         self.browser.history_changed();
+        cx.notify();
+    }
+
+    pub(crate) fn step_bookmark(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let mut parts = rest.splitn(3, '|');
+        let url = parts.next().unwrap_or("").trim().to_owned();
+        let title = parts.next().unwrap_or("").trim().to_owned();
+        let folder_name = parts.next().unwrap_or("").trim().to_owned();
+        let conn = self.browser.db().conn();
+        let folder = if folder_name.is_empty() {
+            bookmarks::BAR
+        } else {
+            bookmarks::folders(conn)
+                .into_iter()
+                .find(|f| f.name == folder_name)
+                .map(|f| f.id)
+                .or_else(|| bookmarks::add_folder(conn, &folder_name, None, "baaz"))
+                .unwrap_or(bookmarks::BAR)
+        };
+        if !history::recordable(&url) || bookmarks::add(conn, &url, &title, folder, tabs::now_ms()).is_none() {
+            crate::steps::record_step_failure(&format!("bookmark:{rest}"));
+            return;
+        }
+        self.browser.bookmarks_changed();
+        cx.notify();
+    }
+
+    pub(crate) fn step_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.ensure_tabs_loaded(cx);
+        if self.browse_centre_page(window, cx).is_none() {
+            crate::steps::record_step_failure("bookmarks");
+            return;
+        }
+        self.focus_browse_address_with("", window, cx);
+        self.browser.field_scope = Some(None);
         cx.notify();
     }
 
@@ -4278,6 +4414,16 @@ pub(crate) struct BrowserRegistry {
     pub next_text_read: u64,
     /// A wake-up is armed for the shown tab's dwell, at this page.
     pub dwell_armed: Option<(TabId, String)>,
+    /// Whether the shown page is bookmarked: `(url, yes)`, so the sidebar's
+    /// ★ never queries per frame.
+    pub bookmarked_cache: std::cell::RefCell<Option<(String, bool)>>,
+    /// The Field's scope (R4 board 1c): `Some(folder)` while it shows only
+    /// bookmarks, `None` inside means the top level.
+    pub field_scope: Option<Option<i64>>,
+    /// The Field's input wears the scoped placeholder.
+    pub placeholder_scoped: bool,
+    /// The Field's last bookmark lookup: `(query, hits)`.
+    pub bookmark_cache: std::cell::RefCell<Option<(String, Vec<toolbar::BookmarkHit>)>>,
 }
 
 impl BrowserRegistry {
@@ -4289,6 +4435,24 @@ impl BrowserRegistry {
     /// History changed: the Field's cached lookup is stale.
     pub(crate) fn history_changed(&self) {
         self.history_cache.borrow_mut().take();
+    }
+
+    /// Bookmarks changed: the ★ and the Field's lookups are stale.
+    pub(crate) fn bookmarks_changed(&self) {
+        self.bookmarked_cache.borrow_mut().take();
+        self.bookmark_cache.borrow_mut().take();
+    }
+
+    /// Whether `url` is bookmarked (cached for the shown page).
+    pub(crate) fn is_bookmarked(&self, url: &str) -> bool {
+        if let Some((cached, yes)) = self.bookmarked_cache.borrow().as_ref() {
+            if cached == url {
+                return *yes;
+            }
+        }
+        let yes = history::recordable(url) && bookmarks::find(self.db().conn(), url).is_some();
+        *self.bookmarked_cache.borrow_mut() = Some((url.to_owned(), yes));
+        yes
     }
 }
 
@@ -4329,9 +4493,16 @@ impl BrowserRegistry {
             text_reads: HashMap::new(),
             next_text_read: 1 << 62,
             dwell_armed: None,
+            bookmarked_cache: std::cell::RefCell::new(None),
+            bookmark_cache: std::cell::RefCell::new(None),
+            field_scope: None,
+            placeholder_scoped: false,
         }
     }
 }
+
+/// The Field's input placeholder outside the Bookmarks scope.
+pub(crate) const FIELD_PLACEHOLDER: &str = "Search, open a page, or ask";
 
 /// What a Field command does: one of the page's own actions, or an R4
 /// history command Baaz owns.
@@ -4342,10 +4513,14 @@ pub(crate) enum FieldAction {
     ForgetSite,
     /// Clear all browsing history (asks first).
     ClearHistory,
+    /// ⌘D: bookmark the shown page.
+    Bookmark,
+    /// Browse bookmarks in the Field (the scoped view).
+    Bookmarks,
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 10] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 12] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -4356,6 +4531,8 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 10] = [
     ("settings", "Browser settings", FieldAction::Page(aui::screens::sidebar::PageAction::Settings)),
     ("forget-site", "Never remember this site", FieldAction::ForgetSite),
     ("clear-history", "Clear history…", FieldAction::ClearHistory),
+    ("bookmark", "Bookmark this page", FieldAction::Bookmark),
+    ("bookmarks", "Bookmarks", FieldAction::Bookmarks),
 ];
 
 impl Harness {

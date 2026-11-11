@@ -128,9 +128,15 @@ impl BrowserDb {
              CREATE TABLE IF NOT EXISTS excluded(host TEXT PRIMARY KEY);",
         )?;
         let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+        super::bookmarks::ensure_schema(&conn)?;
         let db = Self { conn };
         db.prune(crate::browser::tabs::now_ms());
         Ok(db)
+    }
+
+    /// The connection, for the tables that share the file (bookmarks).
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     fn excluded_host(&self, host: &str) -> bool {
@@ -431,7 +437,7 @@ impl Recorder {
 }
 
 /// The script that reads a page's words for history.
-pub(crate) const PAGE_TEXT_JS: &str = "(document.body && document.body.innerText || '').slice(0, 200000)";
+pub(crate) const PAGE_TEXT_JS: &str = "return (document.body && document.body.innerText || '').slice(0, 200000)";
 
 #[cfg(test)]
 mod tests {

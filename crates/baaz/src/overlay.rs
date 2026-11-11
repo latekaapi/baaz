@@ -76,6 +76,9 @@ pub(crate) enum OverlayKind {
     SiteInfo,
     /// The sidebar's downloads list, under its button, over the live page.
     Downloads,
+    /// R4: the bookmark popover (⌘D, the ★), under the address line. It
+    /// types (the name), so it takes the keyboard like the Field.
+    Bookmark,
     /// Browse's modals — the ⌘K palettes and the dialogs — with their scrim,
     /// over the whole window and the live page. Drawn in the main window
     /// they could only cover the page with a picture of it, which arrived
@@ -99,7 +102,9 @@ pub(crate) enum OverlayKind {
     AgentCard,
 }
 
+mod bookmark;
 mod card;
+pub(crate) use bookmark::BookmarkEdit;
 
 /// A notes-panel click, run on the main window.
 type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
@@ -115,8 +120,10 @@ fn field_display_order(rows: &[aui::browse::field::FieldRow]) -> Vec<usize> {
     use aui::browse::field::FieldRowKind;
     let group = |kind: &FieldRowKind| match kind {
         FieldRowKind::Tab { .. } => 1,
-        FieldRowKind::History { .. } => 2,
-        FieldRowKind::Command { .. } => 3,
+        FieldRowKind::Folder { .. } => 2,
+        FieldRowKind::Bookmark { .. } => 3,
+        FieldRowKind::History { .. } => 4,
+        FieldRowKind::Command { .. } => 5,
         _ => 0,
     };
     let mut order: Vec<usize> = (0..rows.len()).collect();
@@ -295,6 +302,16 @@ impl Render for OverlayView {
         }
         // The Field's keyboard: the shared address input, held focused here in
         // the panel on every render, as the modal's query field is.
+        // The bookmark popover's keyboard: its name input.
+        if kind == OverlayKind::Bookmark {
+            let input = self.baaz.read_with(cx, |baaz, _| baaz.bookmark_edit.as_ref().map(|e| e.name.clone())).ok().flatten();
+            if let Some(input) = input {
+                let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
+                if !handle.is_focused(window) {
+                    window.focus(&handle, cx);
+                }
+            }
+        }
         if kind == OverlayKind::Field {
             let input = self.baaz.read_with(cx, |baaz, _| baaz.browse_address.clone()).ok().flatten();
             if let Some(input) = input {
@@ -377,6 +394,14 @@ impl Harness {
             let origin = window.bounds().origin + gpui::point(left, top - pad);
             let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(width, height))));
+        }
+        if self.bookmark_edit.is_some() && self.sidebar_open && self.browse_centre_state().is_some() {
+            let metrics = cx.aui().metrics;
+            let pad = gpui::px(SHADOW_PAD);
+            let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
+            let origin = window.bounds().origin + gpui::point(metrics.item_px - pad, top - pad);
+            let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(460.0)) + pad;
+            return Some((OverlayKind::Bookmark, Bounds::new(origin, gpui::size(gpui::px(bookmark::BOOKMARK_W) + pad * 2.0, height))));
         }
         if self.site_info_open && self.sidebar_open && self.browse_centre_state().is_some() {
             // Under the address line, inside a clear rect like the Field's.
@@ -1004,6 +1029,9 @@ impl Harness {
         format!("{:?}", self.browse_menu).hash(&mut hasher);
         self.browser.tabs.generation.hash(&mut hasher);
         self.site_info_open.hash(&mut hasher);
+        if let Some(edit) = self.bookmark_edit.as_ref() {
+            (edit.id, edit.folder, edit.folders_open).hash(&mut hasher);
+        }
         self.browse_centre_shown().hash(&mut hasher);
         if self.browse_address.is_some() {
             self.browse_address_text(cx).hash(&mut hasher);
@@ -1082,6 +1110,7 @@ impl Harness {
             }
             OverlayKind::Field => Some(self.render_field(window, cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
+            OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.hosting_overlay = true;
                 let list = self.render_browse_downloads(window, cx);
@@ -1137,6 +1166,8 @@ impl Harness {
                     crate::browser::SuggestKind::Tab | crate::browser::SuggestKind::Session => FieldRowKind::Tab { id: index.to_string().into() },
                     crate::browser::SuggestKind::Command => FieldRowKind::Command { id: index.to_string().into() },
                     crate::browser::SuggestKind::History => FieldRowKind::History { url: row.suggestion.complete.clone().unwrap_or_default().into() },
+                    crate::browser::SuggestKind::Bookmark => FieldRowKind::Bookmark { url: row.suggestion.complete.clone().unwrap_or_default().into() },
+                    crate::browser::SuggestKind::Folder => FieldRowKind::Folder { id: index.to_string().into() },
                 };
                 // Every row confirms with ↩ unless Baaz names another key; an
                 // empty hint drew an empty keycap.
@@ -1176,8 +1207,17 @@ impl Harness {
         let baaz = cx.entity().downgrade();
         let hover = baaz.clone();
         let index_of = move |row: &FieldRow| rows.iter().position(|r| r == row);
+        let scoped = self.browser.field_scope.is_some();
+        if scoped != self.browser.placeholder_scoped {
+            self.browser.placeholder_scoped = scoped;
+            if let Some(input) = self.browse_address.clone() {
+                let text = if scoped { "Search bookmarks" } else { crate::browser::FIELD_PLACEHOLDER };
+                input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
+            }
+        }
         let mut panel = field("browse-field", &model)
-            .placeholder("Search or type a URL")
+            .scope(scoped.then(|| gpui::SharedString::from("Bookmarks")))
+            .placeholder(if scoped { "Search bookmarks" } else { "Search or type a URL" })
             .on_hover(move |shown, _, cx| {
                 let Some(&index) = order.get(shown) else { return };
                 let _ = hover.update(cx, |this, cx| {
@@ -1196,6 +1236,11 @@ impl Harness {
                     }
                     FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
                     FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
+                    FieldIntent::Unscope => {
+                        this.browser.field_scope = None;
+                        this.browse_omnibox_selected = 0;
+                        cx.notify();
+                    }
                     FieldIntent::SearchExact(_) => {}
                 });
             });
@@ -1222,6 +1267,18 @@ impl Harness {
                     .role(gpui::Role::Dialog)
                     .aria_label("Open a page, switch tab or ask")
                     .on_key_down(keys)
+                    // ⌫ on an empty query in the Bookmarks scope: up a folder,
+                    // or out. Captured before the input, which eats ⌫.
+                    // (The input binds ⌫ as an action, which runs before any
+                    // key listener, so this captures the action itself.)
+                    .capture_action(cx.listener(|this: &mut Self, _: &gpui_kit::base::input::Backspace, _, cx| {
+                        if this.browser.field_scope.is_some()
+                            && this.browse_address_text(cx).is_empty()
+                            && this.field_scope_up(cx)
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(panel),
             )
@@ -1387,6 +1444,7 @@ impl Harness {
                 self.site_info_open = false;
                 cx.notify();
             }
+            OverlayKind::Bookmark => self.close_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.dismiss_browse_popovers(cx);
             }
