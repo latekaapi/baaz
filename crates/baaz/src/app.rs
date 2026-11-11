@@ -197,6 +197,7 @@ actions!(
         MoveBrowseTabUp,
         /// Open the find strip on the shown Browse tab (⌘F in Browse).
         FindInPage,
+        BookmarkPage,
         /// Copy the shown Browse tab's link (⇧⌘C in Browse).
         CopyLink,
         /// Open the shown Browse tab's developer tools (⌥⌘I in Browse).
@@ -1006,6 +1007,9 @@ pub struct Harness {
     /// The site-information panel (the address row's shield) stands open
     /// over the page ([`crate::overlay`]).
     pub(crate) site_info_open: bool,
+    /// R4: the bookmark popover's bookmark, while it stands open.
+    pub(crate) bookmark_edit: Option<crate::overlay::BookmarkEdit>,
+    pub(crate) bookmark_edit_sub: Option<Subscription>,
     pub(crate) newtab_ground_asked: bool,
     /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
     /// activates the highlighted row once moved, and commits the raw text
@@ -1720,6 +1724,8 @@ impl Harness {
             browse_pickup_hover: None,
             newtab_ground: None,
             site_info_open: false,
+            bookmark_edit: None,
+            bookmark_edit_sub: None,
             newtab_ground_asked: false,
             browse_omnibox_moved: false,
             back_bounds: None,
@@ -5388,6 +5394,16 @@ impl Harness {
                 {
                     Some("Commands")
                 }
+                crate::browser::SuggestKind::Bookmark
+                    if !matches!(last_kind, Some(crate::browser::SuggestKind::Bookmark)) =>
+                {
+                    Some("Bookmarks")
+                }
+                crate::browser::SuggestKind::Folder
+                    if !matches!(last_kind, Some(crate::browser::SuggestKind::Folder)) =>
+                {
+                    Some("Folders")
+                }
                 crate::browser::SuggestKind::History
                     if !matches!(last_kind, Some(crate::browser::SuggestKind::History)) =>
                 {
@@ -7195,6 +7211,11 @@ impl Render for Harness {
                 // carries them here; each is a no-op outside Browse or
                 // with no shown page (the context is what scopes them,
                 // the guards are the belt).
+                .on_action(cx.listener(|this, _: &BookmarkPage, window, cx| {
+                    if this.mode == layout::Mode::Browse {
+                        this.bookmark_shown_page(window, cx);
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                     if this.mode == layout::Mode::Browse {
                         this.open_browse_find(window, cx);

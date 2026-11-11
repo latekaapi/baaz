@@ -1100,6 +1100,9 @@ impl Harness {
         let downloads = (!downloads.is_empty())
             .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
         BrowseModel {
+            bookmarked: self.browse_centre_shown()
+                .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+                .is_some_and(|url| self.browser.is_bookmarked(&url)),
             host: address.host,
             path: address.path,
             can_go_back: history.is_some_and(|h| h.can_back()),
@@ -1354,6 +1357,7 @@ impl Harness {
                 self.site_info_open = self.browse_centre_state().is_some();
                 cx.notify();
             }
+            BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
             BrowseIntent::Back => self.browse_go_back(window, cx),
             BrowseIntent::Forward => self.browse_go_forward(window, cx),
             BrowseIntent::Reload => {

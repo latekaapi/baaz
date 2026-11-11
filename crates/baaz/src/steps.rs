@@ -102,6 +102,8 @@
 //! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range records a step failure, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `history:<url>\|<title>\|<days ago>\|<words>` | seed one page into the (in-memory, capture-only) history, visited `days ago`, with the page's `words` kept for search when given; free |
+//! | `bookmark:<url>\|<title>\|<folder name>` | seed one bookmark (capture-only store) into the named folder, made at the top level when new (default: Bookmarks bar); free |
+//! | `bookmarks` | open the Field scoped to Bookmarks (board R4Daily 1c); free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
 //! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty records a step failure, free |
 //! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds record a step failure, free |
@@ -359,6 +361,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "omnibox", run: |this, rest, window, cx| this.step_omnibox(rest, window, cx) },
     WindowVerb { verb: "history", run: |this, rest, _, cx| this.step_history(rest, cx) },
+    WindowVerb { verb: "bookmark", run: |this, rest, _, cx| this.step_bookmark(rest, cx) },
+    WindowVerb { verb: "bookmarks", run: |this, _, window, cx| this.step_bookmarks(window, cx) },
     WindowVerb { verb: "find", run: |this, rest, window, cx| this.step_find(rest, window, cx) },
     WindowVerb { verb: "permission", run: |this, rest, window, cx| this.step_permission(rest, window, cx) },
     WindowVerb { verb: "download", run: |this, rest, window, cx| this.step_download(rest, window, cx) },

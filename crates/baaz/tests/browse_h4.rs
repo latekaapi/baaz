@@ -172,7 +172,7 @@ fn newtab_placeholder_and_dropdown_anchors() {
     let browser = source("browser/mod.rs");
     let focus = fn_body(&browser, "focus_browse_address_with");
     assert!(
-        focus.contains("set_placeholder(\"Search, open a page, or ask\""),
+        focus.contains("set_placeholder(FIELD_PLACEHOLDER") && browser.contains("FIELD_PLACEHOLDER: &str = \"Search, open a page, or ask\""),
         "the field carries the placeholder"
     );
     let app = source("app.rs");
