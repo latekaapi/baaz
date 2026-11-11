@@ -41,12 +41,14 @@ use crate::app::Harness;
 use crate::layout::RightKind;
 use crate::overlays::MenuKind;
 
+pub(crate) mod adblock;
 pub(crate) mod agents;
 pub(crate) mod assistant;
 pub(crate) mod chrome;
 pub(crate) mod bookmarks;
 pub(crate) mod favicons;
 pub(crate) mod history;
+pub(crate) mod peek_split;
 pub(crate) mod automation;
 pub mod clone_sweep;
 mod sidebar_actions;
@@ -57,7 +59,7 @@ pub(crate) use tabs::{Owner, TabId, Tabs};
 pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
-const HOME_KEY: &str = "home";
+pub(crate) const HOME_KEY: &str = "home";
 
 /// The pending-screenshot key for the tab `id`: the Menu Screenshot
 /// capture keys to the shown tab, never the session key.
@@ -1941,6 +1943,12 @@ impl Harness {
         centre_live: bool,
         cx: &mut Context<Self>,
     ) {
+        // R4: the Split partner shows with the centre; under a Peek both
+        // freeze into their stand-ins (one decision per page per frame —
+        // flipping a page live and back each frame never lets it settle).
+        let in_browse = self.mode == crate::layout::Mode::Browse;
+        let partner = if in_browse { self.split_partner() } else { None };
+        let peeking = in_browse && self.browser.peek.is_some();
         let pages: Vec<(TabId, Entity<WebviewState>)> = self
             .browser
             .states
@@ -1949,8 +1957,9 @@ impl Harness {
             .collect();
         for (id, state) in pages {
             let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
+            let in_centre = Some(id) == centre || Some(id) == partner;
             let visible =
-                (frame_live && Some(id) == shown || centre_live && Some(id) == centre) && !blank;
+                (frame_live && Some(id) == shown || centre_live && in_centre && !peeking) && !blank;
             state.update(cx, |state, cx| state.set_obscured(!visible, cx));
         }
     }
@@ -2136,6 +2145,8 @@ impl Harness {
         // downloads stamp their start for the popover's estimates, and
         // closed tabs drop their find strips.
         let _ = self.drain_browse_popups(cx);
+        self.drain_link_gestures(window, cx);
+        self.prune_split();
         self.stamp_browse_downloads(cx);
         let live: HashSet<TabId> = self.browser.tabs.tabs.iter().map(|tab| tab.id).collect();
         self.browser.find_strips.retain(&live);
@@ -2405,6 +2416,27 @@ impl Harness {
         }
         self.browse_last_holds = centre_holds;
         self.apply_page_visibility(shown, frame_live, centre_shown, centre_live, cx);
+        // R4: a Split partner shows beside the centre; a Peek shows over it,
+        // the centre (and its partner) frozen into their stand-ins beneath.
+        let partner = if in_browse { self.split_partner() } else { None };
+        let peeking = in_browse && self.browser.peek.is_some();
+        // A click into the other half (it just took the keyboard) makes it
+        // the shown tab: the rising edge, since the left page may still
+        // report holding it.
+        let partner_holds = partner.is_some_and(|p| holds.get(&p).copied().unwrap_or(false));
+        if let Some(partner) = partner {
+            if centre_live && !peeking && partner_holds && !self.browser.partner_held {
+                self.browser.split_focus = Some(partner);
+            }
+        }
+        self.browser.partner_held = partner_holds;
+        if let Some(peek) = self.browser.peek.as_ref() {
+            let state = peek.state.clone();
+            state.update(cx, |state, cx| state.set_obscured(!(peeking && centre_live), cx));
+        }
+        if !in_browse && self.browser.peek.is_some() {
+            self.close_peek(cx);
+        }
         // The shown pages stamp their tabs when they really show (never a
         // blank), so discard measures real hiding — in memory only, never
         // a write on its own.
@@ -3611,6 +3643,29 @@ impl Harness {
         cx.notify();
     }
 
+    /// "Allow ads on this site": flips the shown site's exception; a toast
+    /// says which way, and the page reloads so it takes effect.
+    pub(crate) fn toggle_ads_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone())).unwrap_or_default();
+        let site = history::host_of(&url);
+        if !history::recordable(&url) || site.is_empty() {
+            return;
+        }
+        let allowed = self.layout.adblock.toggle(&site);
+        adblock::apply(&self.layout.adblock);
+        crate::layout::write(&self.layout);
+        if let Some(id) = self.browse_centre_shown() {
+            self.reload_browse_tab(id, window, cx);
+        }
+        let (title, body) = if allowed {
+            (format!("Ads allowed on {site}"), "Run the command again to block them.")
+        } else {
+            (format!("Ads blocked on {site}"), "")
+        };
+        self.overlays.update(cx, |o, _| o.toast(title, body));
+        cx.notify();
+    }
+
     /// Clear history: asks first, since it cannot be undone.
     pub(crate) fn ask_clear_history(&mut self, cx: &mut Context<Self>) {
         let pages = self.browser.db().len();
@@ -3721,6 +3776,7 @@ impl Harness {
                     Some(FieldAction::ForgetSite) => self.forget_shown_site(cx),
                     Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
                     Some(FieldAction::Bookmark) => self.bookmark_shown_page(window, cx),
+                    Some(FieldAction::AdsHere) => self.toggle_ads_here(window, cx),
                     Some(FieldAction::Bookmarks) => {
                         // Back into the Field, scoped (the leave above closed it).
                         self.browser.field_scope = Some(None);
@@ -4117,6 +4173,14 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // R4: Esc closes the Peek and ⌘↩ makes it a tab, from inside it.
+        if self.browser.peek.is_some() {
+            match keystroke {
+                "escape" => return self.close_peek(cx),
+                "cmd-enter" => return self.peek_to_tab(cx),
+                _ => {}
+            }
+        }
         if let Some(state) = self.existing_browser(cx) {
             state.update(cx, |state, _| state.release_keyboard());
         }
@@ -4198,7 +4262,8 @@ impl Harness {
             return;
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
-        aui_cef::set_key_router(crate::keymap::claims_keystroke, move |keystroke| {
+        adblock::start(&self.layout.adblock);
+        aui_cef::set_key_router(|k| crate::keymap::claims_keystroke(k) || peek_split::peek_claims(k), move |keystroke| {
             let _ = tx.unbounded_send(keystroke);
         });
         // One task awaiting the channel — no polling timer, no idle wakeups.
@@ -4422,6 +4487,16 @@ pub(crate) struct BrowserRegistry {
     pub field_scope: Option<Option<i64>>,
     /// The Field's input wears the scoped placeholder.
     pub placeholder_scoped: bool,
+    /// R4: the open Peek, if any.
+    pub peek: Option<peek_split::Peek>,
+    /// R4: the open Split, if any.
+    pub split: Option<peek_split::SplitPair>,
+    /// A fresh Peek's page takes the keyboard on the next render.
+    pub peek_focus_pending: bool,
+    /// The Split half the person clicked into: shown on the next render.
+    pub split_focus: Option<TabId>,
+    /// Whether the Split partner held the keyboard last frame.
+    pub partner_held: bool,
     /// The Field's last bookmark lookup: `(query, hits)`.
     pub bookmark_cache: std::cell::RefCell<Option<(String, Vec<toolbar::BookmarkHit>)>>,
 }
@@ -4497,6 +4572,11 @@ impl BrowserRegistry {
             bookmark_cache: std::cell::RefCell::new(None),
             field_scope: None,
             placeholder_scoped: false,
+            peek: None,
+            split: None,
+            peek_focus_pending: false,
+            split_focus: None,
+            partner_held: false,
         }
     }
 }
@@ -4517,10 +4597,12 @@ pub(crate) enum FieldAction {
     Bookmark,
     /// Browse bookmarks in the Field (the scoped view).
     Bookmarks,
+    /// Allow (or block again) ads on the shown page's site.
+    AdsHere,
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 12] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 13] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -4533,6 +4615,7 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 12] = [
     ("clear-history", "Clear history…", FieldAction::ClearHistory),
     ("bookmark", "Bookmark this page", FieldAction::Bookmark),
     ("bookmarks", "Bookmarks", FieldAction::Bookmarks),
+    ("ads-here", "Allow ads on this site", FieldAction::AdsHere),
 ];
 
 impl Harness {

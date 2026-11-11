@@ -980,6 +980,11 @@ fn main() {
                                             // permission ask failing on its
                                             // closed stdin (2026-10-15).
                                             this.shutdown_provider_views(cx);
+                                            // R4: the Peek's page belongs to no
+                                            // tab; close it while Chromium still
+                                            // runs (a quit with a Peek open
+                                            // SIGSEGV'd in shutdown, 11 Nov).
+                                            this.close_peek(cx);
                                             this.flush_right_save();
                                             this.flush_tabs_save();
                                             this.persist_layout();

@@ -50,3 +50,34 @@ Started 11 Nov 2026 from docs/77. Design: docs/27 §5/§7/§8. Board: canvas "Ba
   ★ reopens it; Remove clears the ★; the scoped view lists folders and opens one. **Found live:** ⌫ did nothing
   (the input eats it before the panel's listener; moved to a capture listener) and the scoped input kept the
   default placeholder (now "Search bookmarks").
+
+### Steps 3–4 — Peek and Split (gallery design, wired)
+
+- Library: `aui_webview::LinkGesture { Peek, Split }`, `WebBackend::take_link_gestures`, `WebEvent::LinkGesture`.
+  aui-cef maps `on_open_urlfrom_tab`'s `NEW_WINDOW` (⇧-click) to Peek and `SAVE_TO_DISK` (⌥-click, Chromium's
+  download) to Split; context-menu opens never come through there, so "Open Link in New Window" stays a tab.
+- `browser/peek_split.rs` + `app/peek_split.rs`. **Peek** is a loose page (no tab), 72 % × 82 %, rounded 12; while
+  it is open the page beneath freezes into its stand-in under the gallery's 35 % scrim (a click on it closes);
+  the × is a hole cut through the Peek page; the caption ("host · ⌘↩ open as a tab · esc closes" + Open as tab)
+  is a dark pill under the card. Esc / ⌘↩ work from the page (router claims them only while peeking) and from gpui.
+  ⌘↩ hands the same page to a new tab after the opener — no reload. A gesture inside the Peek navigates it.
+- **Split**: ⌥-click opens the link as a tab beside the opener, side by side (6 px gap in the sidebar ground);
+  the shown tab is the focused half (address line), a click into the other half shows it; each half's × (a hole)
+  leaves Split and keeps the tab (owner default).
+- Live-found: the stand-in never settled (the visibility pass and the Peek pass flipped the page each frame —
+  now one decision per page); ⌘↩ never reached the router (focus sits in gpui after opening — a centre key
+  handler covers it); a quit with a Peek open SIGSEGV'd in Chromium shutdown (the Peek now closes before
+  `aui_cef::shutdown`); the caption was unreadable over the dimmed page (now a pill).
+- Steps `peek:<url>`, `split:<url>`; Tier V entries `browse-peek`, `browse-split`.
+
+### Step 5 — Ad blocking
+
+- Owner default: EasyList + EasyPrivacy bundled (`resources/adblock/*.txt.gz`, fetched 11 Nov) and refreshed
+  weekly into `Browser/adblock/` with `/usr/bin/curl` (a fresher download wins at the next launch).
+- Library: `aui_cef::set_request_blocker` — asked on Chromium's IO thread for every sub-resource with the ABP
+  request type; navigations and downloads are never asked; a blocked load gets a handler that cancels it.
+- `browser/adblock.rs`: adblock-rust 0.13.5 (multi-thread build: Send + Sync), engine built on a background thread
+  at the first Browse page (~1 s), prefs in `layout.json` (`adblock`: enabled, allowed sites). Settings › Browser ›
+  **Ad blocking** (switch + allowed sites with Remove); Field command **Allow ads on this site** (toggles, reloads,
+  toast). Deviation from the board: the per-site toggle is a Field command, not the address line's menu (the ⋯
+  menu is library-drawn; the Field is where every other page command lives).

@@ -198,6 +198,8 @@ actions!(
         /// Open the find strip on the shown Browse tab (⌘F in Browse).
         FindInPage,
         BookmarkPage,
+        ClosePeek,
+        PeekToTab,
         /// Copy the shown Browse tab's link (⇧⌘C in Browse).
         CopyLink,
         /// Open the shown Browse tab's developer tools (⌥⌘I in Browse).
@@ -569,6 +571,7 @@ mod browser_handoff;
 mod find;
 pub(crate) mod lifecycle;
 mod list;
+mod peek_split;
 mod titles;
 /// F2 feedback mode shell (setting, ⌃⌥⌘F, header slot, Done). Included by
 /// path so `feedback/mod.rs` — F1's frozen model/report API — stays
@@ -4545,6 +4548,13 @@ impl Harness {
     /// Browse page as holes, so they show over the native page
     /// and take the clicks there; none outside Browse.
     pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
+        // R4: the Split's × on the shown half rides with the centre's holes.
+        let mut rects = rects;
+        if self.mode == layout::Mode::Browse {
+            if let Some(hole) = self.peek_split_holes(cx) {
+                rects.push(hole);
+            }
+        }
         let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
             rects
                 .iter()
@@ -4908,6 +4918,19 @@ impl Harness {
     /// render side effect elsewhere. With no person tab open the centre
     /// names itself and offers a New tab — render never opens one (B2a-H2b).
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // R4: a click into the Split's other half shows it; a fresh Peek
+        // takes the keyboard (so Esc and ⌘↩ reach it).
+        if let Some(id) = self.browser.split_focus.take() {
+            self.select_browse_sidebar_tab(id, window, cx);
+        }
+        if std::mem::take(&mut self.browser.peek_focus_pending) {
+            if let Some(peek) = self.browser.peek.as_ref() {
+                let state = peek.state.clone();
+                let focus = state.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                state.update(cx, |state, _| state.focus_page());
+            }
+        }
         let harness = cx.weak_entity();
         let mut blank_page = false;
         let body = match self.browse_centre_page(window, cx) {
@@ -4943,7 +4966,7 @@ impl Harness {
                     // there is no card.
                     let radius = if self.browse_page_card() { aui::shell::SHEET_RADIUS } else { 0.0 };
                     state.update(cx, |state, _| state.set_corner_radius(radius));
-                    aui_webview::webview_pane("browse-centre-page", &state)
+                    let page = aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
                         .on_intent(move |intent, window, cx| {
                             if let Some(harness) = harness.upgrade() {
@@ -4952,7 +4975,11 @@ impl Harness {
                                 });
                             }
                         })
-                        .into_any_element()
+                        .into_any_element();
+                    match self.render_split(page, window, cx) {
+                        Ok(split) => split,
+                        Err(page) => page,
+                    }
                 }
             }
             None => self.render_browse_empty(cx),
@@ -5002,10 +5029,26 @@ impl Harness {
                     .on_click(dismiss)
                     .into_any_element()
             });
+        let peek = self.render_peek(cx);
+        let peeking = peek.is_some();
         let centre = v_flex()
             .size_full()
             .relative()
             .id("browse-centre")
+            // R4: Esc closes the Peek and ⌘↩ makes it a tab while gpui holds
+            // the keyboard (the page's own keys come through the router).
+            .when(peeking, |d| {
+                d.on_key_down(cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+                    let k = &event.keystroke;
+                    if k.key == "escape" && !k.modifiers.platform {
+                        this.close_peek(cx);
+                        cx.stop_propagation();
+                    } else if k.key == "enter" && k.modifiers.platform {
+                        this.peek_to_tab(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+            })
             .role(gpui::Role::Group)
             .aria_label("Browse")
             .children(find)
@@ -5015,7 +5058,8 @@ impl Harness {
             .children(scrim)
             .children(downloads)
             .children(extensions)
-            .children(more);
+            .children(more)
+            .children(peek);
         // v3: the shell draws the page's sheet (6 px in, radius 8, the 50 %
         // black ring) and this fills it; the native page's rect and radius
         // match (`browse_centre_page_rect`, `set_corner_radius`). The loading
@@ -7211,6 +7255,21 @@ impl Render for Harness {
                 // carries them here; each is a no-op outside Browse or
                 // with no shown page (the context is what scopes them,
                 // the guards are the belt).
+                // R4: Esc / ⌘↩ for an open Peek; passed on when there is none.
+                .on_action(cx.listener(|this, _: &ClosePeek, _, cx| {
+                    if this.browser.peek.is_some() {
+                        this.close_peek(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &PeekToTab, _, cx| {
+                    if this.browser.peek.is_some() {
+                        this.peek_to_tab(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &BookmarkPage, window, cx| {
                     if this.mode == layout::Mode::Browse {
                         this.bookmark_shown_page(window, cx);
