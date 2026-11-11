@@ -95,13 +95,15 @@ pub(crate) fn split_rects(centre: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pix
 
 impl Harness {
     /// A page that belongs to no tab (Peek): the engine the tabs use.
-    fn loose_page(&mut self, url: &str, window: &Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
+    fn loose_page(&mut self, url: &str, opener: TabId, window: &Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
         let fake = self.browser.fake || cfg!(test);
         let _ = window;
+        #[cfg_attr(not(feature = "cef"), allow(unused_variables))]
+        let profile = self.tab_profile(opener);
         cx.new(|cx| {
             if !fake {
                 #[cfg(feature = "cef")]
-                if let Some(backend) = super::cef_backend(window, url, (255, 255, 255, 255)) {
+                if let Some(backend) = super::cef_backend(window, url, (255, 255, 255, 255), profile.as_deref()) {
                     return WebviewState::new(backend, cx);
                 }
             }
@@ -155,7 +157,7 @@ impl Harness {
             cx.notify();
             return;
         }
-        let state = self.loose_page(url, window, cx);
+        let state = self.loose_page(url, opener, window, cx);
         state.update(cx, |state, _| state.set_corner_radius(12.0));
         self.browser.peek = Some(Peek { url: url.to_owned(), state, opener });
         PEEK_OPEN.store(true, Ordering::Relaxed);

@@ -223,6 +223,11 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:https://example.com;peek:https://example.org/"]},
     "browse-split":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;split:https://example.org/"]},
+    # R4 Import from Chrome over Settings › Browser, on the synthetic profile
+    # in fixtures/ (a capture never reads the person's Chrome).
+    "chrome-import-sheet":  {"env": {"BAAZ_CHROME_ROOT": "fixtures/chrome-profile"},
+                             "shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:browser;chrome-import;wait:600"]},
     "browse-newtab":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;tab-new:about:blank"]},
     "browse-from-session":  {"shot": ["--no-connect", "--login", "signed-in",

@@ -1150,6 +1150,13 @@ impl Harness {
                 }
                 return;
             }
+            if action == DialogAction::SpaceSignIns {
+                this.close_dialog(cx);
+                if let Some(space) = target.as_deref() {
+                    this.toggle_space_signins(space, cx);
+                }
+                return;
+            }
             if action == DialogAction::ClearHistory {
                 this.close_dialog(cx);
                 this.clear_history_now(cx);
@@ -1198,6 +1205,8 @@ impl Harness {
                 DialogAction::DeleteSpace => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::ClearHistory => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::SpaceSignIns => {}
             }
             cx.notify();
         });

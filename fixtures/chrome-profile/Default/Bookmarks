@@ -1,0 +1,51 @@
+{
+ "roots": {
+  "bookmark_bar": {
+   "type": "folder",
+   "name": "Bookmarks bar",
+   "children": [
+    {
+     "type": "url",
+     "name": "The Rust Programming Language",
+     "url": "https://doc.rust-lang.org/book/",
+     "date_added": "13436305943009443"
+    },
+    {
+     "type": "folder",
+     "name": "Work",
+     "children": [
+      {
+       "type": "url",
+       "name": "Linear",
+       "url": "https://linear.app/",
+       "date_added": "13438033943009443"
+      },
+      {
+       "type": "url",
+       "name": "GitHub",
+       "url": "https://github.com/",
+       "date_added": "13438465943009443"
+      }
+     ]
+    }
+   ]
+  },
+  "other": {
+   "type": "folder",
+   "name": "Other bookmarks",
+   "children": [
+    {
+     "type": "url",
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "date_added": "13438725143009443"
+    }
+   ]
+  },
+  "synced": {
+   "type": "folder",
+   "name": "Mobile bookmarks",
+   "children": []
+  }
+ }
+}

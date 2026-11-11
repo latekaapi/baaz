@@ -59,6 +59,7 @@ mod handoff_snapshot;
 mod history;
 mod import;
 mod import_ui;
+mod chrome_import_ui;
 mod images;
 mod index;
 mod keymap;

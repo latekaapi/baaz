@@ -46,6 +46,7 @@ pub(crate) mod agents;
 pub(crate) mod assistant;
 pub(crate) mod chrome;
 pub(crate) mod bookmarks;
+pub(crate) mod chrome_import;
 pub(crate) mod favicons;
 pub(crate) mod history;
 pub(crate) mod peek_split;
@@ -379,12 +380,12 @@ const PAGE_CANVAS: (u8, u8, u8, u8) = (255, 255, 255, 255);
 /// "use WKWebView": CEF unavailable, or it failed to open a page (logged).
 /// The host's ground goes to WKWebView only; Chromium paints white.
 #[cfg(feature = "cef")]
-fn cef_backend(window: &Window, url: &str, _host_ground: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+pub(crate) fn cef_backend(window: &Window, url: &str, _host_ground: (u8, u8, u8, u8), profile: Option<&str>) -> Option<Box<dyn WebBackend>> {
     let rgba = PAGE_CANVAS;
     if !aui_cef::available() || std::env::var("BAAZ_BROWSER_ENGINE").as_deref() == Ok("webkit") {
         return None;
     }
-    match aui_cef::CefBackend::new_at(window, url, (0.0, 0.0), (0.0, 0.0), rgba) {
+    match aui_cef::CefBackend::new_at_in(window, url, (0.0, 0.0), (0.0, 0.0), rgba, profile) {
         Ok(backend) => Some(Box::new(backend)),
         Err(error) => {
             crate::baaz_log!("browser: no Chromium page ({error}); falling back to WKWebView");
@@ -394,10 +395,11 @@ fn cef_backend(window: &Window, url: &str, _host_ground: (u8, u8, u8, u8)) -> Op
 }
 
 #[cfg(not(feature = "cef"))]
-fn cef_backend(
+pub(crate) fn cef_backend(
     _window: &Window,
     _url: &str,
     _rgba: (u8, u8, u8, u8),
+    _profile: Option<&str>,
 ) -> Option<Box<dyn WebBackend>> {
     None
 }
@@ -664,6 +666,7 @@ impl Harness {
         // and tests run the scripted page, the app runs WKWebView.
         self.browser_builds += 1;
         let fake = self.browser.fake || cfg!(test);
+        let profile = self.tab_profile(id);
         let state = cx.new(|cx| {
             if fake {
                 let mut backend = FakeWebBackend::new();
@@ -678,7 +681,7 @@ impl Harness {
                 let rgba =
                     [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
                 let rgba = (rgba[0], rgba[1], rgba[2], rgba[3]);
-                if let Some(backend) = cef_backend(&*window, initial, rgba) {
+                if let Some(backend) = cef_backend(&*window, initial, rgba, profile.as_deref()) {
                     return WebviewState::new(backend, cx);
                 }
                 match WryBackend::new_at_with_background(
@@ -1466,6 +1469,7 @@ impl Harness {
         // scripted backend before it is boxed, then drain through the real
         // poll path. Production never queues, so this takes nothing.
         let scripts = std::mem::take(&mut self.browser.fake_scripts);
+        let profile = self.tab_profile(id);
         let state = cx.new(|cx| {
             if fake {
                 let mut backend = FakeWebBackend::new();
@@ -1481,7 +1485,7 @@ impl Harness {
                 let rgba =
                     [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
                 let rgba = (rgba[0], rgba[1], rgba[2], rgba[3]);
-                if let Some(backend) = cef_backend(&*window, initial, rgba) {
+                if let Some(backend) = cef_backend(&*window, initial, rgba, profile.as_deref()) {
                     return WebviewState::new(backend, cx);
                 }
                 match WryBackend::new_at_with_background(
@@ -2342,7 +2346,9 @@ impl Harness {
         if self.browser.downloads_open && centre_shown.is_some() && !downloads_empty {
             self.browser.downloads_rendered = true;
         }
+        // The footer's popover (anchored) shows an empty list as such.
         if self.browser.downloads_open
+            && self.browser.downloads_anchor.is_none()
             && chrome::downloads_flag_clears(centre_shown.is_some(), downloads_empty, self.browser.downloads_rendered)
         {
             self.browser.downloads_open = false;
@@ -2356,7 +2362,7 @@ impl Harness {
         }
         let chrome_popover_open = in_browse
             && ((self.browser.downloads_open && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
-                || (self.browser.extensions_open && centre_shown.is_some())
+                || (self.browser.extensions_open && centre_shown.is_some() && !self.downloads_overlay_wanted(cx))
                 || (self.browser.more_open && centre_has_state));
         // A crashed page hides the find strip: the highlight stops and the
         // strip closes, so the error page owns the rect alone. First, so
@@ -2424,8 +2430,18 @@ impl Harness {
         // the shown tab: the rising edge, since the left page may still
         // report holding it.
         let partner_holds = partner.is_some_and(|p| holds.get(&p).copied().unwrap_or(false));
+        // The page script reports a press (`take_clicked`): read both
+        // halves every frame so an old press never counts later.
+        let centre_clicked = centre_shown
+            .and_then(|id| self.browser.states.get(&id).cloned())
+            .is_some_and(|state| state.update(cx, |state, _| state.take_clicked()));
+        let partner_clicked = partner
+            .and_then(|id| self.browser.states.get(&id).cloned())
+            .is_some_and(|state| state.update(cx, |state, _| state.take_clicked()));
         if let Some(partner) = partner {
-            if centre_live && !peeking && partner_holds && !self.browser.partner_held {
+            let rising = partner_holds && !self.browser.partner_held;
+            if centre_live && !peeking && (partner_clicked && !centre_clicked || rising) {
+                crate::baaz_log!("browse: split focus → tab {}", partner.0);
                 self.browser.split_focus = Some(partner);
             }
         }
@@ -3135,13 +3151,22 @@ impl Harness {
         cx.notify();
     }
 
-    /// Whether the sidebar's downloads popover wants its overlay window: opened
-    /// from the button, with something to list.
-    pub(crate) fn downloads_overlay_wanted(&self, cx: &gpui::App) -> bool {
+    /// Whether a footer popover (downloads or extensions, R4) wants its
+    /// overlay window: opened from its button. An empty downloads list
+    /// still opens (it says so).
+    pub(crate) fn downloads_overlay_wanted(&self, _cx: &gpui::App) -> bool {
         self.mode == crate::layout::Mode::Browse
-            && self.browser.downloads_open
+            && (self.browser.downloads_open || self.browser.extensions_open)
             && self.browser.downloads_anchor.is_some()
-            && !self.browse_downloads(cx).is_empty()
+    }
+
+    /// The footer's extensions button (R4): its popover above it.
+    pub(crate) fn toggle_browse_extensions(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
+        let open = !self.browser.extensions_open;
+        self.dismiss_browse_popovers(cx);
+        self.browser.extensions_open = open;
+        self.browser.downloads_anchor = anchor;
+        cx.notify();
     }
 
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3619,6 +3644,45 @@ impl Harness {
             .collect();
         *self.browser.history_cache.borrow_mut() = Some((query, hits.clone()));
         hits
+    }
+
+    /// The Chromium profile folder a tab's page lives in: its space's own
+    /// (`Spaces/<id>`) when that space keeps its own sign-ins, else the
+    /// shared profile (`None`).
+    pub(crate) fn tab_profile(&self, id: TabId) -> Option<String> {
+        let space = self.browser.tabs.get(id)?.space.clone()?;
+        let own = self.browser.tabs.spaces.iter().any(|s| s.id == space && s.own_signins);
+        own.then(|| format!("Spaces/{}", space.replace(['/', '.'], "_")))
+    }
+
+    /// Flip a space's own sign-ins (confirmed): every page in it is dropped
+    /// and rebuilds in the other profile when shown (a page cannot move
+    /// between profiles). The own profile's data stays on disk.
+    pub(crate) fn toggle_space_signins(&mut self, space: &str, cx: &mut Context<Self>) {
+        let Some(found) = self.browser.tabs.spaces.iter_mut().find(|s| s.id == space) else { return };
+        found.own_signins = !found.own_signins;
+        let own = found.own_signins;
+        let name = found.name.clone();
+        let in_space: Vec<TabId> = self.browser.tabs.tabs.iter().filter(|t| t.space.as_deref() == Some(space)).map(|t| t.id).collect();
+        self.close_peek(cx);
+        if self.browser.split.is_some_and(|p| in_space.contains(&p.left) || in_space.contains(&p.right)) {
+            self.browser.split = None;
+        }
+        for id in &in_space {
+            if self.browser.states.remove(id).is_some() {
+                self.terminal_service.unregister_tab_page(id.0);
+            }
+        }
+        self.browser.agent_tabs.retain(|_, id| !in_space.contains(id));
+        self.schedule_tabs_write(cx);
+        crate::baaz_log!("browse: space {space} sign-ins → {}", if own { "its own" } else { "shared" });
+        self.overlays.update(cx, |o, _| {
+            o.toast(
+                if own { format!("\u{201C}{name}\u{201D} has its own sign-ins") } else { format!("\u{201C}{name}\u{201D} shares sign-ins again") },
+                if own { "Its pages reload signed out; sign in here." } else { "" },
+            )
+        });
+        cx.notify();
     }
 
     /// "Never remember this site": the shown page's site leaves history

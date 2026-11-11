@@ -103,6 +103,11 @@ pub(crate) struct Space {
     pub id: String,
     /// The chip's label.
     pub name: String,
+    /// R4: the space keeps its own sign-ins (cookies, storage, cache) in
+    /// `Browser/Chromium/Spaces/<id>`; shared (the default) uses the one
+    /// profile every space shares.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_signins: bool,
 }
 
 /// One of the person's own folders, inside one space.
@@ -613,7 +618,7 @@ impl Tabs {
             }
             return false;
         }
-        self.spaces.push(Space { id: PERSONAL.to_owned(), name: "Personal".to_owned() });
+        self.spaces.push(Space { id: PERSONAL.to_owned(), name: "Personal".to_owned(), own_signins: false });
         self.current_space = PERSONAL.to_owned();
         let mut folder_of: HashMap<String, String> = HashMap::new();
         let mut moved_active: Option<TabId> = None;
@@ -731,7 +736,7 @@ impl Tabs {
     pub(crate) fn add_space(&mut self, name: &str) -> String {
         let id = self.next_group_id("space");
         let name = if name.trim().is_empty() { format!("Space {}", self.spaces.len() + 1) } else { name.trim().to_owned() };
-        self.spaces.push(Space { id: id.clone(), name });
+        self.spaces.push(Space { id: id.clone(), name, own_signins: false });
         self.current_space = id.clone();
         self.bump();
         id

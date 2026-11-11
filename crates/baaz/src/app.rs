@@ -1219,6 +1219,8 @@ pub struct Harness {
     /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
     /// flight and the journal Undo reads ([`crate::import_ui`]).
     pub(crate) import: crate::import_ui::ImportUi,
+    /// R4: the Import from Chrome sheet, while open.
+    pub(crate) chrome_import: Option<crate::chrome_import_ui::ChromeImportSheet>,
     /// Which provider each terminal bridge session answers for, by the id
     /// the bridge names (`--session`). A Codex open mints its thread id
     /// after the bridge is already registered under the request id, so
@@ -1797,6 +1799,7 @@ impl Harness {
             migration_cache: None,
             migration_refresh_in_flight: false,
             import: crate::import_ui::ImportUi::boot(),
+            chrome_import: None,
             terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,
@@ -3922,11 +3925,13 @@ impl Harness {
     /// edge and the float drop, 6 px of panel around its rows.
     fn browse_popover(&self, id: impl Into<gpui::ElementId>, aria: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
+        // In the overlay window (the footer's popovers, R4) it sits in flow,
+        // so the window can put it right above its button; in the main
+        // window it hangs from the top-right of the page.
+        let hosted = self.hosting_overlay;
         v_flex()
             .id(id)
-            .absolute()
-            .top(px(4.0))
-            .right(px(8.0))
+            .when(!hosted, |d| d.absolute().top(px(4.0)).right(px(8.0)))
             .w(px(320.0))
             .flex_none()
             .gap(px(2.0))
@@ -4182,11 +4187,25 @@ impl Harness {
         }
         let p = cx.aui().colors;
         let downloads = self.browse_downloads(cx);
-        if downloads.is_empty() {
-            return None;
-        }
         let now = crate::browser::tabs::now_ms();
         let mut menu = self.browse_popover("browse-downloads", "Downloads", cx);
+        if downloads.is_empty() {
+            // R4: the button is always in the footer; an empty list says so.
+            menu = menu.child(
+                div().w_full().px(px(8.0)).py(px(4.0)).ui(scale::FS_13).text_color(p.ink_3).child("No downloads yet."),
+            );
+            let folder = self.browse_menu_row(
+                "browse-downloads-folder",
+                "Open Downloads folder",
+                None,
+                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.dismiss_browse_popovers(cx);
+                    let _ = std::process::Command::new("/usr/bin/open").arg(crate::layout::browser_download_dir(&this.layout)).status();
+                }),
+                cx,
+            );
+            return Some(menu.child(folder).into_any_element());
+        }
         for (tab, owner, download) in &downloads {
             let tab = *tab;
             let id = download.id;
@@ -4299,42 +4318,36 @@ impl Harness {
     /// The extensions popover (B2a-H5): stock CEF exposes no extension
     /// list, so a fixed message — Manage opens chrome://extensions, the
     /// Store opens the Chrome Web Store, each in a new tab.
-    fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.browser.extensions_open {
             return None;
         }
         let p = cx.aui().colors;
         let mut menu = self.browse_popover("browse-extensions", "Extensions", cx);
+        // R4 spike (11 Nov): Chromium here can list extensions but cannot run
+        // their popups or pages, so Baaz does not offer installing them yet;
+        // ad and tracker blocking is built in instead (board R4Daily 4c).
         menu = menu.child(
             div()
                 .w_full()
                 .px(px(8.0))
                 .py(px(4.0))
                 .ui(scale::FS_13)
-                .text_color(p.ink)
-                .child("Extensions run in this browser. Manage them in Chromium's extensions page."),
+                .line_height(px(19.0))
+                .text_color(p.ink_2)
+                .child("Chrome extensions don’t run in Baaz yet. Ads and trackers are blocked without one."),
         );
-        let manage = self.browse_menu_row(
-            "browse-extensions-manage",
-            "Manage",
+        let settings = self.browse_menu_row(
+            "browse-extensions-adblock",
+            "Ad blocking settings",
             None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.dismiss_browse_popovers(cx);
-                this.step_tab_new("chrome://extensions", window, cx);
+                this.open_browse_settings(cx);
             }),
             cx,
         );
-        let store = self.browse_menu_row(
-            "browse-extensions-store",
-            "Chrome Web Store",
-            None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.dismiss_browse_popovers(cx);
-                this.step_tab_new("https://chromewebstore.google.com/", window, cx);
-            }),
-            cx,
-        );
-        menu = menu.child(manage).child(store);
+        menu = menu.child(settings);
         let _ = window;
         Some(menu.into_any_element())
     }
@@ -5009,7 +5022,8 @@ impl Harness {
             .flatten();
         // The sidebar's downloads popover draws in the overlay window, over the live page.
         let downloads = (!self.downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
-        let extensions = self.render_browse_extensions(window, cx);
+        // The footer's extensions popover draws in the overlay window too.
+        let extensions = (!self.downloads_overlay_wanted(cx)).then(|| self.render_browse_extensions(window, cx)).flatten();
         let more = self.render_browse_more(window, cx);
         // A click outside the popovers dismisses them, like the tab menu:
         // the catcher is a sibling below the popovers in the same relative
@@ -6905,7 +6919,8 @@ impl Render for Harness {
         let muse_sheet = self
             .render_muse_sheet(window, cx)
             .or_else(|| self.render_setup_sheet(cx))
-            .or_else(|| self.render_import_sheet(cx));
+            .or_else(|| self.render_import_sheet(cx))
+            .or_else(|| self.render_chrome_import(cx));
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.

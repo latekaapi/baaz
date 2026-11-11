@@ -81,3 +81,43 @@ Started 11 Nov 2026 from docs/77. Design: docs/27 §5/§7/§8. Board: canvas "Ba
   **Ad blocking** (switch + allowed sites with Remove); Field command **Allow ads on this site** (toggles, reloads,
   toast). Deviation from the board: the per-site toggle is a Field command, not the address line's menu (the ⋯
   menu is library-drawn; the Field is where every other page command lives).
+
+### Step 6 — Spaces with their own sign-ins
+
+- Library: `aui_cef::CefBackend::new_at_in(…, profile)` — a `CefRequestContext` per profile folder under the
+  Chromium root (`Browser/Chromium/Spaces/<id>`), made once and reused; popups inherit it. `BrowseSpace::own_signins`
+  draws a lock on the chip; the space menu gains "Use its own sign-ins…" / "Share sign-ins with other spaces…".
+- Baaz: `Space::own_signins` (tabs.json); every page (tabs, Peek) is built in its space's profile
+  (`tab_profile`); flipping it asks first, drops the space's pages (they rebuild in the other profile when shown)
+  and keeps the own profile's data on disk (switching back finds the sign-ins again — less destructive than the
+  board's "signs it out", which would delete them).
+- Deviation from the board: no separate New-space sheet; the choice is on the space's menu (the chip's
+  right-click), behind a confirm dialog. The lock on the chip is as drawn.
+- Live (check build, 12 Nov): httpbin cookie set in Personal is absent in Work after "Use its own sign-ins"; a
+  cookie set in Work is absent in Personal. Found live: the space menu ran off the window's bottom (its size table
+  still said 2 rows) — fixed, and menus now flip up / clamp inside the window.
+
+### Step 7 — Chrome import
+
+- `browser/chrome_import.rs` + `chrome_import_ui.rs`: profiles from Chrome's `Local State`; `Bookmarks` JSON read in
+  place; `History` copied to a temp file and opened read-only (last 90 days, never an excluded site, never a page
+  already known); every row carries `import-<ms>` so Undo removes exactly that import. Settings › Browser › Your
+  data › Import… opens the sheet (profile list, two ticks with counts read off the main thread, Import, Done with
+  Undo). Captures and tests only ever read `BAAZ_CHROME_ROOT` (a synthetic profile in `fixtures/chrome-profile`).
+- Passwords: **not built** (the board marked it as a spike). Writing into CEF's password store from outside isn't
+  possible without Chromium's importer, which CEF doesn't expose; the sheet says passwords and sign-ins stay in
+  Chrome.
+- Live (owner's real Chrome, read-only, into the check build's throwaway state): two profiles found; both have no
+  `Bookmarks` file (verified against the files); 6,879 and 648 history pages counted; importing 648 worked, Undo
+  restored exactly the previous 3 pages, re-import found the pages in the Field with their dates.
+
+### Step 8 — Downloads and extensions in the footer
+
+- Library: the downloads button moved from the page controls to the footer (always there, dot while running),
+  beside a new extensions button (`IconName::Puzzle`, `BrowseIntent::Extensions`).
+- Baaz: both popovers open above their button in the overlay window (below when the button is high); an empty
+  downloads list says "No downloads yet." with "Open Downloads folder".
+- **Extensions spike result:** `chrome://extensions` renders and could list extensions, but Baaz blocks every
+  `chrome-extension://` page except the PDF viewer and has no action toolbar, so an installed extension could not
+  open its popup or pages; installing one from the Web Store (a download) was not tried without the owner's OK.
+  The popover says extensions don't run yet and points to ad blocking. Owner decision needed (see handoff).

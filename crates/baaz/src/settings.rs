@@ -1460,7 +1460,26 @@ impl Harness {
             crate::browser::history::KEEP_DAYS
         );
         let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.ask_clear_history(cx));
+        let import = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_chrome_import(cx));
         let mut rows = vec![h_flex()
+            .id("settings-browser-import")
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Import from Chrome".to_string()))
+                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child("Bookmarks and history. Chrome is only read; nothing in it changes.".to_string())),
+            )
+            .child(
+                button("settings-browser-import-open", "Import…")
+                    .accessibility_label("Import bookmarks and history from Chrome")
+                    .on_click(move |e, w, cx| import(e, w, cx)),
+            )
+            .into_any_element(), h_flex()
             .id("settings-browser-history")
             .w_full()
             .items_center()
