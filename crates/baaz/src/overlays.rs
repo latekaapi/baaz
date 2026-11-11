@@ -69,6 +69,8 @@ pub enum DialogAction {
     DeleteSpace,
     /// Clear all browsing history (R4): confirmed, it cannot be undone.
     ClearHistory,
+    /// Flip a space's own sign-ins (R4); the space id rides the dialog.
+    SpaceSignIns,
     /// Move Baaz's own provider sessions into Baaz's homes (B4M): the
     /// one-time prompt's Move. The plan runs through the journaling
     /// executor; dismissing any other way moves nothing.

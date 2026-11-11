@@ -416,9 +416,20 @@ impl Harness {
             // Under the button, inside a clear rect like the Field's.
             let anchor = self.browser.downloads_anchor?;
             let pad = gpui::px(SHADOW_PAD);
-            let origin = window.bounds().origin + gpui::point(anchor.left() - pad, anchor.bottom() + gpui::px(6.0) - pad);
-            let room = window.bounds().size.height - anchor.bottom() - gpui::px(12.0);
-            let size = gpui::size(gpui::px(320.0) + pad * 2.0, room.min(gpui::px(420.0)) + pad * 2.0);
+            // R4: the buttons sit in the footer, so the popover opens above
+            // (its content sits at the window's bottom edge); a button high
+            // in the window still opens below it.
+            let above = anchor.top() > window.bounds().size.height / 2.0;
+            let width = gpui::px(320.0);
+            let left = anchor.left().min(window.bounds().size.width - width - gpui::px(8.0)).max(gpui::px(8.0));
+            let (top, room) = if above {
+                let room = (anchor.top() - gpui::px(12.0)).min(gpui::px(420.0));
+                (anchor.top() - gpui::px(6.0) - room, room)
+            } else {
+                (anchor.bottom() + gpui::px(6.0), (window.bounds().size.height - anchor.bottom() - gpui::px(12.0)).min(gpui::px(420.0)))
+            };
+            let origin = window.bounds().origin + gpui::point(left - pad, top - pad);
+            let size = gpui::size(width + pad * 2.0, room + pad * 2.0);
             return Some((OverlayKind::Downloads, Bounds::new(origin, size)));
         }
         let menu = self.browse_menu.as_ref()?;
@@ -428,7 +439,17 @@ impl Harness {
         // The menu sits at the pointer; its window reaches the shadow
         // margin past it on every side ([`OverlayView`] pads the content).
         let pad = gpui::px(SHADOW_PAD);
-        let origin = window.bounds().origin + menu.at - gpui::point(pad, pad);
+        // Kept inside the window: a menu opened near the bottom (the space
+        // chips) flips up so its last row ("Delete space") is never cut off.
+        let win = window.bounds().size;
+        let mut at = menu.at;
+        if at.y + size.height > win.height - gpui::px(8.0) {
+            at.y = (at.y - size.height).max(gpui::px(8.0));
+        }
+        if at.x + size.width > win.width - gpui::px(8.0) {
+            at.x = (win.width - size.width - gpui::px(8.0)).max(gpui::px(8.0));
+        }
+        let origin = window.bounds().origin + at - gpui::point(pad, pad);
         Some((OverlayKind::BrowseMenu, Bounds::new(origin, gpui::size(size.width + pad * 2.0, size.height + pad * 2.0))))
     }
 
@@ -1113,14 +1134,22 @@ impl Harness {
             OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.hosting_overlay = true;
-                let list = self.render_browse_downloads(window, cx);
+                let list = if self.browser.extensions_open {
+                    self.render_browse_extensions(window, cx)
+                } else {
+                    self.render_browse_downloads(window, cx)
+                };
                 self.hosting_overlay = false;
+                let above = self.browser.downloads_anchor.is_some_and(|a| a.top() > window.bounds().size.height / 2.0);
                 let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
                     this.dismiss_browse_popovers(cx);
                 });
                 Some(
                     div()
                         .size_full()
+                        .flex()
+                        .flex_col()
+                        .when(above, |d| d.justify_end())
                         .p(gpui::px(SHADOW_PAD))
                         .on_mouse_down(gpui::MouseButton::Left, leave)
                         .children(list)

@@ -1090,7 +1090,7 @@ impl Harness {
             .tabs
             .spaces
             .iter()
-            .map(|space| BrowseSpace { id: space.id.clone().into(), name: space.name.clone().into() })
+            .map(|space| BrowseSpace { id: space.id.clone().into(), name: space.name.clone().into(), own_signins: space.own_signins })
             .collect();
         let current = self.browser.tabs.spaces.iter().position(|s| s.id == space).unwrap_or(0);
         let editing = self.browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
@@ -1111,7 +1111,7 @@ impl Harness {
             tabs: today,
             folders,
             task_folders,
-            spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into() }] } else { spaces },
+            spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into(), own_signins: false }] } else { spaces },
             downloads,
             space: current,
             hovered_today_header: self.hovered_today_header,
@@ -1368,6 +1368,7 @@ impl Harness {
             BrowseIntent::NewTab => self.new_browse_sidebar_tab(window, cx),
             BrowseIntent::PageMenu(anchor) => self.toggle_browse_page_menu(anchor, window, cx),
             BrowseIntent::Downloads(anchor) => self.toggle_browse_downloads(anchor, cx),
+            BrowseIntent::Extensions(anchor) => self.toggle_browse_extensions(anchor, cx),
             BrowseIntent::Page(action) => self.browse_page_action(action, window, cx),
             BrowseIntent::OpenPin(id) | BrowseIntent::SelectTab(id) => {
                 if let Some(id) = browse_tab_id(&id) {

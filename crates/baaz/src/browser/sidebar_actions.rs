@@ -337,6 +337,33 @@ impl Harness {
                 let name = self.browser.tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
                 self.start_browse_naming(BrowseNaming::Space(Some(space.to_owned().into())), &name, window, cx);
             }
+            SpaceAction::SignIns => {
+                let Some(found) = self.browser.tabs.spaces.iter().find(|s| s.id == space).cloned() else { return };
+                let (title, detail, primary) = if found.own_signins {
+                    (
+                        format!("Share sign-ins in \"{}\" again?", found.name),
+                        "Its tabs reload with the sign-ins your other spaces use. Its own sign-ins stay on this Mac, so switching back finds them again.".to_owned(),
+                        "Share sign-ins",
+                    )
+                } else {
+                    (
+                        format!("Give \"{}\" its own sign-ins?", found.name),
+                        "Its tabs reload signed out of every site: sign in here with a second account. Cookies and site data stay apart from your other spaces; saved passwords stay shared.".to_owned(),
+                        "Use its own sign-ins",
+                    )
+                };
+                self.set_dialog(
+                    cx,
+                    crate::overlays::Dialog {
+                        title,
+                        detail,
+                        kind: aui::overlay::DialogKind::Info,
+                        primary,
+                        action: crate::overlays::DialogAction::SpaceSignIns,
+                        archive_target: Some(space.to_owned()),
+                    },
+                );
+            }
             SpaceAction::Delete => {
                 let space_tabs = self.browser.tabs.person_ids_in(space, None).len();
                 if space_tabs == 0 {
