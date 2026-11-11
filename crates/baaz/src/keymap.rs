@@ -135,6 +135,8 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "BrowseTab8", keystroke: "cmd-8", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select tab 8" },
     KeymapEntry { action: "BrowseTabLast", keystroke: "cmd-9", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Select last tab" },
     KeymapEntry { action: "MoveBrowseTabUp", keystroke: "cmd-alt-up", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Move tab up" },
+    KeymapEntry { action: "ClosePeek", keystroke: "escape", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Close Peek" },
+    KeymapEntry { action: "PeekToTab", keystroke: "cmd-enter", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Open Peek as a tab" },
     KeymapEntry { action: "BookmarkPage", keystroke: "cmd-d", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Bookmark this page" },
     KeymapEntry { action: "FindInPage", keystroke: "cmd-f", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Find in page" },
     KeymapEntry { action: "CopyLink", keystroke: "cmd-shift-c", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Copy link" },
@@ -352,6 +354,8 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             context,
         )),
         "FindInPage" => Some(gpui::KeyBinding::new(keystroke, crate::app::FindInPage, context)),
+        "ClosePeek" => Some(gpui::KeyBinding::new(keystroke, crate::app::ClosePeek, context)),
+        "PeekToTab" => Some(gpui::KeyBinding::new(keystroke, crate::app::PeekToTab, context)),
         "BookmarkPage" => Some(gpui::KeyBinding::new(keystroke, crate::app::BookmarkPage, context)),
         "CopyLink" => Some(gpui::KeyBinding::new(keystroke, crate::app::CopyLink, context)),
         "DevTools" => Some(gpui::KeyBinding::new(keystroke, crate::app::DevTools, context)),
@@ -387,7 +391,9 @@ pub(crate) const AUI_ROOT_KEYS: &[&str] = &["cmd-b", "cmd-k", "cmd-\\"];
 /// and editors in web pages use. The host's own ⌃C binding still fires while
 /// gpui holds the keyboard; the page simply never hands it over. Compared
 /// structurally (parsed on both sides), never as strings.
-const PAGE_OWNED: &[&str] = &["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z", "ctrl-c"];
+// ⌘↩ is the page's (forms, chat boxes); the router takes it only while a Peek is
+// open (`browser::peek_split::peek_claims`).
+const PAGE_OWNED: &[&str] = &["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z", "ctrl-c", "cmd-enter"];
 
 /// Whether a parsed keystroke is app-level while a page holds the keyboard:
 /// it carries ⌘, ⌃ or ⌥ (plain and shift-only keys are typing and must reach

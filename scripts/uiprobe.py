@@ -218,6 +218,11 @@ ENTRIES = {
                                       "--steps", "mode:browse;sidebar;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;history:https://doc.rust-lang.org/book/|The Rust Programming Language|1|;history:https://without.boats/blog/pin/|Pin and suffering|9|Rust needs Pin.;omnibox:rust"]},
     "field-bookmarks-scope": {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;sidebar;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://news.ycombinator.com/|Hacker News|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;bookmarks"]},
+    # R4 Peek (⇧-click) and Split (⌥-click), board-approved gallery look.
+    "browse-peek":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;peek:https://example.org/"]},
+    "browse-split":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;split:https://example.org/"]},
     "browse-newtab":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;tab-new:about:blank"]},
     "browse-from-session":  {"shot": ["--no-connect", "--login", "signed-in",

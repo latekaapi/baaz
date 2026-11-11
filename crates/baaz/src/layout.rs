@@ -376,6 +376,14 @@ pub struct Layout {
     /// Settings › Browser › Agents (docs/27 §6.2, R3).
     #[serde(rename = "agents", default, skip_serializing_if = "crate::layout::is_default_agents")]
     pub agents: crate::browser::agents::AgentsPrefs,
+    /// Settings › Browser › Ad blocking (R4): on/off and the allowed sites.
+    #[serde(rename = "adblock", default, skip_serializing_if = "crate::layout::is_default_adblock")]
+    pub adblock: crate::browser::adblock::AdblockPrefs,
+}
+
+/// Whether ad blocking is at its defaults (nothing stored).
+fn is_default_adblock(prefs: &crate::browser::adblock::AdblockPrefs) -> bool {
+    *prefs == crate::browser::adblock::AdblockPrefs::default()
 }
 
 /// Whether the Agents block is at its defaults (nothing stored).
@@ -482,6 +490,7 @@ impl Default for Layout {
             code_wrap: true,
             assistant: Default::default(),
             agents: Default::default(),
+            adblock: Default::default(),
         }
     }
 }
@@ -662,6 +671,7 @@ mod tests {
             code_wrap: false,
             assistant: Default::default(),
             agents: Default::default(),
+            adblock: Default::default(),
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));

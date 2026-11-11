@@ -71,6 +71,10 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "handoff_model_summary" => layout.handoff_model_summary = on,
         "fold_finished_turns" => layout.fold_finished_turns = on,
         "feedback_mode" => layout.feedback_mode = on,
+        "adblock_enabled" => {
+            layout.adblock.enabled = on;
+            crate::browser::adblock::apply(&layout.adblock);
+        }
         _ => return false,
     }
     true
@@ -1514,6 +1518,58 @@ impl Harness {
         self.settings_group("Your data", rows, cx)
     }
 
+    /// R4 Ad blocking: the switch and the sites ads are allowed on.
+    fn settings_browser_adblock_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let prefs = self.layout.adblock.clone();
+        let mut rows = vec![self.settings_switch_row(
+            "adblock_enabled",
+            "Block ads and trackers",
+            "EasyList and EasyPrivacy, refreshed weekly. Pages load without them; nothing you browse is sent anywhere.",
+            prefs.enabled,
+            cx,
+        )];
+        rows.push(
+            div()
+                .id("settings-adblock-allowed")
+                .w_full()
+                .py(px(scale::SP_2))
+                .text_color(p.ink_3)
+                .ui(scale::FS_12)
+                .child(if prefs.allowed.is_empty() {
+                    "Ads are blocked on every site. “Allow ads on this site” in the Field (⌘L) makes an exception.".to_owned()
+                } else {
+                    "Ads are allowed on these sites:".to_owned()
+                })
+                .into_any_element(),
+        );
+        for (index, site) in prefs.allowed.iter().enumerate() {
+            let owned = site.clone();
+            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.layout.adblock.toggle(&owned);
+                crate::browser::adblock::apply(&this.layout.adblock);
+                crate::layout::write(&this.layout);
+                cx.notify();
+            });
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("settings-adblock-site-{index}")))
+                    .w_full()
+                    .items_center()
+                    .gap(px(scale::SP_3))
+                    .py(px(scale::SP_1))
+                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).mono(scale::FS_12).child(site.clone()))
+                    .child(
+                        button(SharedString::from(format!("settings-adblock-remove-{index}")), "Remove")
+                            .accessibility_label(SharedString::from(format!("Block ads on {site} again")))
+                            .on_click(move |e, w, cx| remove(e, w, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        self.settings_group("Ad blocking", rows, cx)
+    }
+
     fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let dir = browser_download_dir(&self.layout);
@@ -1651,6 +1707,7 @@ impl Harness {
             .child(self.settings_browser_assistant_group(cx))
             .child(self.settings_browser_agents_group(cx))
             .child(self.settings_browser_search_group(cx))
+            .child(self.settings_browser_adblock_group(cx))
             .child(self.settings_browser_downloads_group(cx));
         if cfg!(feature = "cef") {
             page = page.child(self.settings_browser_chromium_group(cx));
