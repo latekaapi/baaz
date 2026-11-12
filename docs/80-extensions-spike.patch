@@ -1,0 +1,42 @@
+diff --git a/crates/aui-cef/src/backend.rs b/crates/aui-cef/src/backend.rs
+index f838529..093ab63 100644
+--- a/crates/aui-cef/src/backend.rs
++++ b/crates/aui-cef/src/backend.rs
+@@ -1419,7 +1419,12 @@ const PDF_VIEWER: &str = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/";
+ /// an empty grey page, over file:// and http alike — the viewer's frame was
+ /// cancelled here like any other app scheme.
+ fn cef_navigation_allowed(url: &str) -> bool {
+-    navigation_allowed(url) || url.starts_with("chrome://") || url.starts_with("devtools://") || url.starts_with(PDF_VIEWER)
++    navigation_allowed(url)
++        || url.starts_with("chrome://")
++        || url.starts_with("devtools://")
++        || url.starts_with(PDF_VIEWER)
++        // Spike aid (extensions, 12 Nov): every extension page passes.
++        || (url.starts_with("chrome-extension://") && std::env::var("AUI_CEF_ALLOW_EXTENSIONS").as_deref() == Ok("1"))
+ }
+ 
+ thread_local! {
+diff --git a/crates/aui-cef/src/runtime.rs b/crates/aui-cef/src/runtime.rs
+index b7707ea..bb6f36c 100644
+--- a/crates/aui-cef/src/runtime.rs
++++ b/crates/aui-cef/src/runtime.rs
+@@ -176,6 +176,19 @@ wrap_app! {
+                 // AutofillActorMode, GlicActorUi, KillOnInvalidNavigationHeaders,
+                 // LensOverlay), and a second switch that replaced that list
+                 // re-enabled them and crashed window creation, 3 runs of 3.
++                // `AUI_CEF_EXTRA_SWITCHES=name=value;name2` adds raw Chromium
++                // switches: a diagnosis aid (an extensions spike, a debugging
++                // port), never set by Baaz itself.
++                for switch in std::env::var("AUI_CEF_EXTRA_SWITCHES").unwrap_or_default().split(';') {
++                    let switch = switch.trim();
++                    if switch.is_empty() {
++                        continue;
++                    }
++                    match switch.split_once('=') {
++                        Some((name, value)) => command_line.append_switch_with_value(Some(&CefString::from(name)), Some(&CefString::from(value))),
++                        None => command_line.append_switch(Some(&CefString::from(switch))),
++                    }
++                }
+                 let key = CefString::from("disable-features");
+                 let existing = if command_line.has_switch(Some(&key)) != 0 {
+                     CefString::from(&command_line.switch_value(Some(&key))).to_string()
