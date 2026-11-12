@@ -1,7 +1,10 @@
 # 79 — Handoff after Browser R4 (the daily driver)
 
-Written 12 Nov 2026. R4 is built, gated and checked by hand in the check build; **nothing is pushed** (the owner
-says "push"). Per-step reports and every live-found defect: docs/78. Design: board `R4Daily` on canvas "Baaz v3"
+Written 12 Nov 2026. **PUSHED 12 Nov** (owner said "push"): agentic-ui **v0.7.0** (f14eb0d), Baaz main repinned to
+it with the local patch parked. The same day's owner rounds are in docs/78 ("Owner round, 12 Nov" 1–3): only Baaz's
+own Muse sessions are listed, no random Muse names, no byline on click, Peek corners, white margins under a cover,
+Split resizing, ad boxes hidden, Chrome account bookmarks. The rest of this doc is the state before the push; §0's
+table is history. Per-step reports and every live-found defect: docs/78. Design: board `R4Daily` on canvas "Baaz v3"
 (v68, approved 11 Nov).
 
 ## 0. Where things stand
@@ -71,7 +74,8 @@ the R4 entries (`field-history`, `field-bookmarks`, `field-bookmarks-scope`, `br
 2. harness: repin both `Cargo.toml` files to `v0.7.0`; `git checkout` both lockfiles, then `cargo update -p aui` and
    `-p aui-cef` (in `crates/baaz-cef-helper` too) — the lock then picks up `adblock`/`flate2` as well.
 3. Park the patch (`mv .cargo/config.toml ~/.baaz-dev/harness-cargo-config-patch.toml; rmdir .cargo`).
-4. Build, run the gates (Files baselines then match again), commit the repin, push.
+4. Build, run the gates, commit the repin, push. (The Files baselines did *not* simply match again: R4 added files to
+   this repo, which the Files fixture lists. They were regenerated after the repin, on main, from a clean tree.)
 5. Owner: quit Baaz, `scripts/bundle.sh --swap`, open it.
 
 ## 5. Owner's R4 check (docs/27 §8: "sets Baaz as default browser for a week")
