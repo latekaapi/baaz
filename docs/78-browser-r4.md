@@ -158,3 +158,19 @@ reopen restates).
 **Left as is:** a handful of Baaz-made probe sessions in real folders ("Reply with one word: OK" under harness).
 Nothing tells them from the owner's; archive them by hand. A CLI session is no longer reachable from Baaz at all;
 a Muse lane in Import would bring chosen ones in, if wanted.
+
+## Owner round, 12 Nov (2): Peek corners and black page margins
+
+From the owner's screenshot: HN under a Peek had black margins (white again after closing), and the Peek card was
+square beside the rounded page.
+
+- **Black margins:** the covered page shows as a JPEG stand-in (`Page.captureScreenshot`). The white behind a page
+  with no background of its own is the native view's ground, which the screenshot never includes, so HN's margins
+  were transparent and the JPEG made them black. aui-cef now sets each page's default background to white
+  (`Emulation.setDefaultBackgroundColorOverride`) at page setup.
+- **Square Peek:** the × is a hole cut with a layer mask, and that mask replaced the content view's rounded clip. The
+  mask's outline now uses the page's corner radius (`shim.m`). The pane's own ground also gets that radius when it
+  has no nav row (`aui-webview`), otherwise its square corners showed over the dim.
+- Seen live in the check build (HN, then Peek on example.org): four rounded corners with the dim outside them, and
+  the margins under the dim white. The Peek/Split baselines are unchanged (the deterministic capture never had the
+  hole). agentic-ui f14eb0d.
