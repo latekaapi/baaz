@@ -248,7 +248,13 @@ impl Harness {
                         ))
                         .into_any_element(),
                 );
-                body.push(line("Bookmarks are in “Imported from Chrome”. Find any of them in the Field (⌘L). Pages you already had are not counted twice.".into(), false));
+                // Say where the bookmarks went only when some came in.
+                let note = if done.bookmarks > 0 {
+                    "Bookmarks are in “Imported from Chrome”. Find any of them in the Field (⌘L). Pages you already had are not counted twice."
+                } else {
+                    "No new bookmarks: this profile had none Baaz did not already have. Pages you already had are not counted twice."
+                };
+                body.push(line(note.into(), false));
                 let undo = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.undo_chrome_import(cx));
                 let ok = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
                 actions.push(button("chrome-import-undo", "Undo import").ghost().on_click(move |e, w, cx| undo(e, w, cx)).into_any_element());

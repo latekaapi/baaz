@@ -1985,6 +1985,76 @@ impl Harness {
             && !self.skills.open
     }
 
+    /// Ad blocking's element hiding (owner, 12 Nov: blocked ads left empty
+    /// boxes): each loaded http(s) page is scanned for its classes and ids
+    /// once it stops loading, and again 2.5 s later for slots filled in late;
+    /// the matching rules go in as one stylesheet. Cheap per frame: a map
+    /// look-up per live tab.
+    fn adblock_cosmetics(&mut self, live: &[(TabId, String, String, Option<String>)], cx: &mut Context<Self>) {
+        const SECOND_PASS: std::time::Duration = std::time::Duration::from_millis(2_500);
+        let now = std::time::Instant::now();
+        self.browser.cosmetic_pass.retain(|id, _| live.iter().any(|(tab, ..)| tab == id));
+        for (id, url, ..) in live {
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                continue;
+            }
+            let Some(state) = self.browser.states.get(id).cloned() else { continue };
+            if state.read(cx).loading() || self.browser.cosmetic_reads.values().any(|(tab, _)| tab == id) {
+                continue;
+            }
+            let pass = match self.browser.cosmetic_pass.get(id) {
+                Some((seen, n, _)) if seen == url && *n >= 2 => continue,
+                Some((seen, 1, first)) if seen == url => {
+                    if now.duration_since(*first) < SECOND_PASS {
+                        continue;
+                    }
+                    2
+                }
+                Some((seen, ..)) if seen == url => continue,
+                _ => 1,
+            };
+            let first = if pass == 1 { now } else { self.browser.cosmetic_pass.get(id).map_or(now, |p| p.2) };
+            self.browser.cosmetic_pass.insert(*id, (url.clone(), pass, first));
+            let request = self.browser.next_text_read;
+            self.browser.next_text_read += 1;
+            self.browser.cosmetic_reads.insert(request, (*id, url.clone()));
+            state.update(cx, |state, _| state.eval_with_result(request, adblock::COSMETIC_SCAN_JS));
+            // A quiet window takes no frame: wake for the answer, and once
+            // more for the second pass.
+            let waits: &[u64] = if pass == 1 { &[300, 1200, 2_700] } else { &[300, 1200] };
+            let waits = waits.to_vec();
+            cx.spawn(async move |this, cx| {
+                for wait in waits {
+                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// A scan answered: install the stylesheet its classes and ids earn.
+    fn land_cosmetic_scan(&mut self, state: &Entity<WebviewState>, url: &str, answer: Result<String, String>, cx: &mut Context<Self>) {
+        let Ok(text) = answer else { return };
+        // The script returns a JSON string; the channel may wrap it once more.
+        let text: String = serde_json::from_str(&text).unwrap_or(text);
+        #[derive(serde::Deserialize)]
+        struct Scan {
+            #[serde(default)]
+            c: Vec<String>,
+            #[serde(default)]
+            i: Vec<String>,
+        }
+        let Ok(scan) = serde_json::from_str::<Scan>(&text) else { return };
+        let Some(css) = adblock::page_css(url, &scan.c, &scan.i) else { return };
+        crate::baaz_log!("adblock: hiding {} ad boxes' rules on {}", css.lines().count(), history::host_of(url));
+        let request = self.browser.next_text_read;
+        self.browser.next_text_read += 1;
+        self.browser.cosmetic_injects.insert(request);
+        let js = adblock::inject_js(&css);
+        state.update(cx, |state, _| state.eval_with_result(request, &js));
+    }
+
     /// R4 history (docs/27 §7): every person tab's page becomes a visit, a
     /// late title updates it, and the page in front gives up its words once
     /// it has stayed [`history::DWELL_MS`]. A session's tabs never record.
@@ -2029,16 +2099,35 @@ impl Harness {
             })
             .detach();
         }
-        // Answers: keep the words if the tab is still on that page.
-        if !self.browser.text_reads.is_empty() {
+        self.adblock_cosmetics(live, cx);
+        // Answers: keep the words if the tab is still on that page. One
+        // drain serves every script Baaz runs here (page words, ad-box
+        // scans, stylesheet installs): taking a page's answers takes all of
+        // them, so each is routed by its request id, never dropped.
+        let pending = !self.browser.text_reads.is_empty()
+            || !self.browser.cosmetic_reads.is_empty()
+            || !self.browser.cosmetic_injects.is_empty();
+        if pending {
             let states: Vec<(TabId, Entity<WebviewState>)> =
                 self.browser.states.iter().map(|(id, state)| (*id, state.clone())).collect();
             for (id, state) in states {
-                if !self.browser.text_reads.values().any(|(tab, _, _)| *tab == id) {
+                let waiting = self.browser.text_reads.values().any(|(tab, _, _)| *tab == id)
+                    || self.browser.cosmetic_reads.values().any(|(tab, _)| *tab == id)
+                    || !self.browser.cosmetic_injects.is_empty();
+                if !waiting {
                     continue;
                 }
                 let answers = state.update(cx, |state, _| state.take_eval_results());
                 for (request, answer) in answers {
+                    if self.browser.cosmetic_injects.remove(&request) {
+                        continue;
+                    }
+                    if let Some((tab, url)) = self.browser.cosmetic_reads.remove(&request) {
+                        if tab == id {
+                            self.land_cosmetic_scan(&state, &url, answer, cx);
+                        }
+                        continue;
+                    }
                     let Some((tab, url, title)) = self.browser.text_reads.remove(&request) else { continue };
                     // The words were asked for while the tab showed `url`;
                     // a navigation since does not make them another page's.
@@ -4541,6 +4630,12 @@ pub(crate) struct BrowserRegistry {
     pub text_reads: HashMap<u64, (TabId, String, String)>,
     /// The next page-word request id (a range no other caller uses).
     pub next_text_read: u64,
+    /// Ad-box scans in flight: request id → (tab, url) (`adblock` cosmetics).
+    pub cosmetic_reads: HashMap<u64, (TabId, String)>,
+    /// Stylesheet installs in flight; their answers are only drained.
+    pub cosmetic_injects: std::collections::HashSet<u64>,
+    /// Each tab's scans: the page they were for, how many ran, when the first.
+    pub cosmetic_pass: HashMap<TabId, (String, u8, std::time::Instant)>,
     /// A wake-up is armed for the shown tab's dwell, at this page.
     pub dwell_armed: Option<(TabId, String)>,
     /// Whether the shown page is bookmarked: `(url, yes)`, so the sidebar's
@@ -4555,6 +4650,10 @@ pub(crate) struct BrowserRegistry {
     pub peek: Option<peek_split::Peek>,
     /// R4: the open Split, if any.
     pub split: Option<peek_split::SplitPair>,
+    /// The left half's share of a Split (dragged by the divider).
+    pub split_ratio: f32,
+    /// The Split divider is being dragged.
+    pub split_dragging: bool,
     /// A fresh Peek's page takes the keyboard on the next render.
     pub peek_focus_pending: bool,
     /// The Split half the person clicked into: shown on the next render.
@@ -4631,6 +4730,9 @@ impl BrowserRegistry {
             history_cache: std::cell::RefCell::new(None),
             text_reads: HashMap::new(),
             next_text_read: 1 << 62,
+            cosmetic_reads: HashMap::new(),
+            cosmetic_injects: std::collections::HashSet::new(),
+            cosmetic_pass: HashMap::new(),
             dwell_armed: None,
             bookmarked_cache: std::cell::RefCell::new(None),
             bookmark_cache: std::cell::RefCell::new(None),
@@ -4638,6 +4740,8 @@ impl BrowserRegistry {
             placeholder_scoped: false,
             peek: None,
             split: None,
+            split_ratio: 0.5,
+            split_dragging: false,
             peek_focus_pending: false,
             split_focus: None,
             partner_held: false,

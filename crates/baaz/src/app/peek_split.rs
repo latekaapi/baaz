@@ -8,7 +8,7 @@ use gpui::{div, prelude::*, px, relative, AnyElement, Context, Pixels, SharedStr
 use gpui_kit::base::{h_flex, v_flex};
 
 use super::Harness;
-use crate::browser::peek_split::{self, CLOSE, CLOSE_INSET, PEEK_H, PEEK_W, SPLIT_GAP};
+use crate::browser::peek_split::{self, CLOSE, CLOSE_INSET, PEEK_H, PEEK_W};
 use crate::browser::TabId;
 
 impl Harness {
@@ -77,7 +77,66 @@ impl Harness {
         let left = half(self, pair.left, "left", left, cx);
         let right = half(self, pair.right, "right", right, cx);
         let ground = cx.aui().colors.surface_1;
-        Ok(h_flex().size_full().gap(px(SPLIT_GAP)).bg(ground).child(left).child(right).into_any_element())
+        // The left half takes its dragged share; the right the rest. Before
+        // the centre has been measured, an even split.
+        let ratio = peek_split::clamp_split(self.browser.split_ratio);
+        let centre = self.browser.centre_page_rect;
+        let left = div()
+            .h_full()
+            .flex_none()
+            .map(|d| match centre {
+                Some(centre) => d.w(peek_split::split_left_width(centre, ratio)),
+                None => d.w(relative(ratio)),
+            })
+            .child(left);
+        let right = div().h_full().flex_1().min_w(px(0.0)).child(right);
+        // The divider: the gap itself, which no page covers, so gpui takes
+        // the press; AppKit keeps sending the drag to this window even over
+        // the pages. The capture layer keeps it once the pointer outruns
+        // the strip.
+        let drag = |x: f32, this: &mut Self, cx: &mut Context<Self>| {
+            if let Some(centre) = this.browser.centre_page_rect {
+                this.browser.split_ratio = peek_split::split_ratio_at(centre, x);
+                cx.notify();
+            }
+        };
+        let start = cx.listener(|this: &mut Self, _: &f32, _, cx| {
+            this.browser.split_dragging = true;
+            cx.notify();
+        });
+        let moved = cx.listener(move |this: &mut Self, x: &f32, _, cx| drag(*x, this, cx));
+        let end = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.browser.split_dragging = false;
+            cx.notify();
+        });
+        let moved_strip = std::rc::Rc::new(moved);
+        let moved_layer = moved_strip.clone();
+        let end_strip = std::rc::Rc::new(end);
+        let end_layer = end_strip.clone();
+        let divider = div()
+            .id("browse-split-divider")
+            .h_full()
+            .flex_none()
+            .role(gpui::Role::Splitter)
+            .aria_label("Resize Split")
+            .child(
+                aui::shell::resize_handle("browse-split-resize")
+                    .on_drag_start(move |x, w, cx| start(&x, w, cx))
+                    .on_drag(move |x, w, cx| moved_strip(&x, w, cx))
+                    .on_drag_end(move |w, cx| end_strip(&(), w, cx)),
+            );
+        let mut row = div()
+            .relative()
+            .size_full()
+            .child(h_flex().size_full().bg(ground).child(left).child(divider).child(right));
+        if self.browser.split_dragging {
+            row = row.child(
+                aui::shell::drag_capture_overlay("browse-split-capture")
+                    .on_drag(move |x, w, cx| moved_layer(&x, w, cx))
+                    .on_drag_end(move |w, cx| end_layer(&(), w, cx)),
+            );
+        }
+        Ok(row.into_any_element())
     }
 
     /// The Peek layer over the centre: the scrim (a click closes), the card
@@ -191,7 +250,7 @@ impl Harness {
         let pair = self.browser.split?;
         let shown = self.browse_centre_shown()?;
         let partner = self.split_partner()?;
-        let (left, right) = peek_split::split_rects(centre);
+        let (left, right) = peek_split::split_rects(centre, self.browser.split_ratio);
         let close = |half: gpui::Bounds<Pixels>| {
             gpui::Bounds::new(
                 gpui::point(half.origin.x + half.size.width - px(CLOSE + CLOSE_INSET), half.origin.y + px(CLOSE_INSET)),
