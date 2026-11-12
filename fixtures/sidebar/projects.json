@@ -81,7 +81,7 @@
   },
   {
     "sessionId": "s-stray-1",
-    "workspaceRoot": "/private/tmp/h4ws",
+    "workspaceRoot": "/Users/ada/h4ws",
     "label": "Scratch pad",
     "updatedAt": "2026-09-13T07:30:00Z",
     "turnCount": 2,
@@ -89,7 +89,7 @@
   },
   {
     "sessionId": "s-demo-1",
-    "workspaceRoot": "/private/tmp/harness-demo",
+    "workspaceRoot": "/Users/ada/harness-demo",
     "label": "Demo walkthrough",
     "updatedAt": "2026-09-04T12:00:00Z",
     "turnCount": 6,

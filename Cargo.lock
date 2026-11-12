@@ -83,6 +83,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "adblock"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a4c8558f27608dec74695c866f9a8ef897ec7a77cb826f8a5baf0b8ba461d2a"
+dependencies = [
+ "addr",
+ "arrayvec",
+ "base64 0.22.1",
+ "bitflags 2.13.1",
+ "flatbuffers",
+ "idna",
+ "itertools 0.14.0",
+ "memchr",
+ "percent-encoding",
+ "regex",
+ "rustc-hash 2.1.3",
+ "seahash",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "addr"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a93b8a41dbe230ad5087cc721f8d41611de654542180586b315d9f4cf6b72bef"
+dependencies = [
+ "psl",
+ "psl-types",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -600,7 +633,7 @@ dependencies = [
 [[package]]
 name = "aui"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "anyhow",
  "aui-icons",
@@ -615,7 +648,7 @@ dependencies = [
 [[package]]
 name = "aui-cef"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "aui",
  "aui-webview",
@@ -631,7 +664,7 @@ dependencies = [
 [[package]]
 name = "aui-icons"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -641,7 +674,7 @@ dependencies = [
 [[package]]
 name = "aui-motion"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "aui-tokens",
  "gpui-kit",
@@ -651,7 +684,7 @@ dependencies = [
 [[package]]
 name = "aui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "anyhow",
  "serde",
@@ -660,7 +693,7 @@ dependencies = [
 [[package]]
 name = "aui-terminal"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "alacritty_terminal",
  "aui",
@@ -678,7 +711,7 @@ dependencies = [
 [[package]]
 name = "aui-tokens"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -691,7 +724,7 @@ dependencies = [
 [[package]]
 name = "aui-webview"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.6.9#d9493901c1403a303a8225d4a0f6c4caf76b7db1"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.7.0#f14eb0df6859e8d3de7c2a071fdc59fe16527165"
 dependencies = [
  "aui",
  "aui-icons",
@@ -787,6 +820,7 @@ dependencies = [
 name = "baaz"
 version = "0.1.0"
 dependencies = [
+ "adblock",
  "anyhow",
  "aui",
  "aui-cef",
@@ -801,6 +835,7 @@ dependencies = [
  "chrono",
  "criterion",
  "crossbeam-channel",
+ "flate2",
  "futures",
  "gpui-kit",
  "gpui-pre",
@@ -2554,6 +2589,16 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc_version",
+]
 
 [[package]]
 name = "flate2"
@@ -6743,6 +6788,21 @@ dependencies = [
  "provider",
  "serde_json",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.252"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efefe9aafbc2e8fd9157db7eb16c61a86cbf0ead714adf510a7ae662470fe369"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pulldown-cmark"
