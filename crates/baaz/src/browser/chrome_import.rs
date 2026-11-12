@@ -82,7 +82,7 @@ pub(crate) fn profiles(root: &Path) -> Vec<ChromeProfile> {
     if out.is_empty() {
         for dir in ["Default", "Profile 1", "Profile 2", "Profile 3"] {
             let path = root.join(dir);
-            if path.join("Bookmarks").is_file() || path.join("History").is_file() {
+            if BOOKMARK_FILES.iter().any(|name| path.join(name).is_file()) || path.join("History").is_file() {
                 out.push(ChromeProfile { dir: path, name: dir.to_owned() });
             }
         }
@@ -130,17 +130,33 @@ fn parse_node(value: &Value) -> Option<Node> {
 
 /// The profile's bookmark roots as folders: Bookmarks bar, Other, Mobile
 /// (an empty root is left out).
+/// The files a profile keeps bookmarks in, same JSON shape: `Bookmarks` (on
+/// this Mac only) and `AccountBookmarks` (a signed-in account's, which recent
+/// Chrome keeps apart — the owner's 4,257 bookmarks were all there and
+/// `Bookmarks` did not exist, so the import found none, 12 Nov 2026).
+const BOOKMARK_FILES: [&str; 2] = ["Bookmarks", "AccountBookmarks"];
+
 pub(crate) fn read_bookmarks(profile: &Path) -> Vec<Node> {
-    let Ok(text) = std::fs::read_to_string(profile.join("Bookmarks")) else { return Vec::new() };
-    let Ok(json) = serde_json::from_str::<Value>(&text) else { return Vec::new() };
+    let files: Vec<Value> = BOOKMARK_FILES
+        .iter()
+        .filter_map(|name| std::fs::read_to_string(profile.join(name)).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .collect();
     let mut out = Vec::new();
     for (key, label) in [("bookmark_bar", "Bookmarks bar"), ("other", "Other"), ("synced", "Mobile")] {
-        if let Some(root) = json.pointer(&format!("/roots/{key}")) {
-            if let Some(Node::Folder { children, .. }) = parse_node(root) {
-                if !children.is_empty() {
-                    out.push(Node::Folder { name: label.to_owned(), children });
-                }
-            }
+        // One folder per root, both files' children in it; a URL in both
+        // lands once (the store never adds a duplicate).
+        let children: Vec<Node> = files
+            .iter()
+            .filter_map(|json| json.pointer(&format!("/roots/{key}")))
+            .filter_map(parse_node)
+            .flat_map(|node| match node {
+                Node::Folder { children, .. } => children,
+                Node::Url { .. } => Vec::new(),
+            })
+            .collect();
+        if !children.is_empty() {
+            out.push(Node::Folder { name: label.to_owned(), children });
         }
     }
     out
@@ -357,6 +373,26 @@ mod tests {
         let root = fake_profile();
         let found = profiles(&root);
         assert_eq!(found, vec![ChromeProfile { dir: root.join("Default"), name: "Person 1".into() }]);
+    }
+
+    /// Recent Chrome keeps a signed-in account's bookmarks in
+    /// `AccountBookmarks`; the owner's profile had no `Bookmarks` at all.
+    #[test]
+    fn account_bookmarks_are_read_alone_and_beside_local_ones() {
+        let root = fake_profile();
+        let profile = root.join("Default");
+        let local = std::fs::read_to_string(profile.join("Bookmarks")).unwrap();
+        let before = count_urls(&read_bookmarks(&profile));
+        // Only the account file.
+        std::fs::rename(profile.join("Bookmarks"), profile.join("AccountBookmarks")).unwrap();
+        assert_eq!(count_urls(&read_bookmarks(&profile)), before, "AccountBookmarks alone is read");
+        assert!(profiles(&root).iter().any(|p| p.dir.ends_with("Default")), "a profile with only account bookmarks counts");
+        // Both: each root's children from both files, in one folder each.
+        std::fs::write(profile.join("Bookmarks"), &local).unwrap();
+        let both = read_bookmarks(&profile);
+        assert_eq!(count_urls(&both), before * 2, "both files read (the store drops repeats)");
+        let names: Vec<_> = both.iter().map(|n| match n { Node::Folder { name, .. } => name.clone(), Node::Url { .. } => String::new() }).collect();
+        assert_eq!(names.iter().filter(|n| *n == "Bookmarks bar").count(), 1, "one bar, not two");
     }
 
     #[test]

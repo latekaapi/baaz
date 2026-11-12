@@ -84,12 +84,36 @@ pub(crate) fn close_rect(card: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(gpui::point(x, y), gpui::size(gpui::px(CLOSE), gpui::px(CLOSE)))
 }
 
-/// The two halves of a Split inside `centre`.
-pub(crate) fn split_rects(centre: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
+/// How narrow either half of a Split may be dragged: a fifth of the centre.
+pub(crate) const SPLIT_MIN: f32 = 0.2;
+
+/// `ratio` held to [`SPLIT_MIN`]..=1 − [`SPLIT_MIN`].
+pub(crate) fn clamp_split(ratio: f32) -> f32 {
+    if ratio.is_finite() { ratio.clamp(SPLIT_MIN, 1.0 - SPLIT_MIN) } else { 0.5 }
+}
+
+/// The left half's width for `ratio` of the centre (gap excluded).
+pub(crate) fn split_left_width(centre: Bounds<Pixels>, ratio: f32) -> Pixels {
+    ((centre.size.width - gpui::px(SPLIT_GAP)) * clamp_split(ratio)).round()
+}
+
+/// The ratio that puts the divider's middle under window x `x`.
+pub(crate) fn split_ratio_at(centre: Bounds<Pixels>, x: f32) -> f32 {
+    let usable = f32::from(centre.size.width) - SPLIT_GAP;
+    if usable <= 0.0 {
+        return 0.5;
+    }
+    clamp_split((x - f32::from(centre.origin.x) - SPLIT_GAP / 2.0) / usable)
+}
+
+/// The two halves of a Split inside `centre`, the left one `ratio` of it
+/// (owner 12 Nov: the halves resize by the divider between them).
+pub(crate) fn split_rects(centre: Bounds<Pixels>, ratio: f32) -> (Bounds<Pixels>, Bounds<Pixels>) {
     let gap = gpui::px(SPLIT_GAP);
-    let half = (centre.size.width - gap) / 2.0;
-    let left = Bounds::new(centre.origin, gpui::size(half, centre.size.height));
-    let right = Bounds::new(centre.origin + gpui::point(half + gap, gpui::px(0.0)), gpui::size(half, centre.size.height));
+    let left_w = split_left_width(centre, ratio);
+    let right_w = centre.size.width - gap - left_w;
+    let left = Bounds::new(centre.origin, gpui::size(left_w, centre.size.height));
+    let right = Bounds::new(centre.origin + gpui::point(left_w + gap, gpui::px(0.0)), gpui::size(right_w, centre.size.height));
     (left, right)
 }
 
@@ -193,6 +217,7 @@ impl Harness {
     pub(crate) fn open_split(&mut self, opener: TabId, url: &str, cx: &mut Context<Self>) {
         let Some(right) = super::chrome::place_popup_tab(&mut self.browser.tabs, opener, url, false) else { return };
         self.browser.split = Some(SplitPair { left: opener, right });
+        self.browser.split_ratio = 0.5;
         self.schedule_tabs_write(cx);
         cx.notify();
     }
@@ -270,9 +295,19 @@ mod tests {
 
     #[test]
     fn split_halves_share_the_centre_with_a_gap() {
-        let (l, r) = split_rects(rect(0.0, 0.0, 1006.0, 800.0));
+        let (l, r) = split_rects(rect(0.0, 0.0, 1006.0, 800.0), 0.5);
         assert_eq!(l, rect(0.0, 0.0, 500.0, 800.0));
         assert_eq!(r, rect(506.0, 0.0, 500.0, 800.0));
+        // Dragged: a 30 / 70 split, and never past a fifth either way.
+        let (l, r) = split_rects(rect(0.0, 0.0, 1006.0, 800.0), 0.3);
+        assert_eq!((l, r), (rect(0.0, 0.0, 300.0, 800.0), rect(306.0, 0.0, 700.0, 800.0)));
+        let (l, _) = split_rects(rect(0.0, 0.0, 1006.0, 800.0), 0.05);
+        assert_eq!(l.size.width, gpui::px(200.0));
+        // The divider follows the pointer: its middle lands under x.
+        let centre = rect(100.0, 0.0, 1006.0, 800.0);
+        assert!((split_ratio_at(centre, 100.0 + 300.0 + 3.0) - 0.3).abs() < 1e-4);
+        assert_eq!(split_ratio_at(centre, 0.0), SPLIT_MIN);
+        assert_eq!(split_ratio_at(centre, 5000.0), 1.0 - SPLIT_MIN);
     }
 
     #[test]

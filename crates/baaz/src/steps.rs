@@ -105,6 +105,7 @@
 //! | `bookmark:<url>\|<title>\|<folder name>` | seed one bookmark (capture-only store) into the named folder, made at the top level when new (default: Bookmarks bar); free |
 //! | `peek:<url>` | ⇧-click: Peek `url` over the shown Browse tab (R4); free |
 //! | `split:<url>` | ⌥-click: open `url` in Split beside the shown Browse tab (R4); free |
+//! | `split-ratio:<0..1>` | set the Split's left share, as dragging its divider does (held to 0.2–0.8); free |
 //! | `chrome-import` | open the Import from Chrome sheet (captures read only `BAAZ_CHROME_ROOT`, never the person's Chrome); free |
 //! | `bookmarks` | open the Field scoped to Bookmarks (board R4Daily 1c); free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
@@ -367,6 +368,15 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "bookmark", run: |this, rest, _, cx| this.step_bookmark(rest, cx) },
     WindowVerb { verb: "peek", run: |this, rest, window, cx| this.step_link_gesture(rest, aui_webview::LinkGesture::Peek, window, cx) },
     WindowVerb { verb: "split", run: |this, rest, window, cx| this.step_link_gesture(rest, aui_webview::LinkGesture::Split, window, cx) },
+    WindowVerb {
+        verb: "split-ratio",
+        run: |this, rest, _, cx| {
+            if let Ok(ratio) = rest.trim().parse::<f32>() {
+                this.browser.split_ratio = crate::browser::peek_split::clamp_split(ratio);
+                cx.notify();
+            }
+        },
+    },
     WindowVerb { verb: "chrome-import", run: |this, _, _, cx| this.open_chrome_import(cx) },
     WindowVerb { verb: "bookmarks", run: |this, _, window, cx| this.step_bookmarks(window, cx) },
     WindowVerb { verb: "find", run: |this, rest, window, cx| this.step_find(rest, window, cx) },

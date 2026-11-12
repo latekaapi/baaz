@@ -174,3 +174,23 @@ square beside the rounded page.
 - Seen live in the check build (HN, then Peek on example.org): four rounded corners with the dim outside them, and
   the margins under the dim white. The Peek/Split baselines are unchanged (the deterministic capture never had the
   hole). agentic-ui f14eb0d.
+
+## Owner round, 12 Nov (3) — Split resizing, empty ad boxes, Chrome bookmarks
+
+- **Split panes not resizable.** The 6 px gap between the halves is now a divider (aui `resize_handle` plus a
+  `drag_capture_overlay` mid-drag; role Splitter, "Resize Split"). Each half holds at least a fifth of the
+  centre. The ratio resets to 50/50 for each new Split. Geometry is in `peek_split::{split_rects,
+  split_ratio_at, split_left_width}`, with the × holes following the halves. Step `split-ratio:<f>`. Checked
+  live: the scripted 30/70 split, and a real drag with computer use (30 % → about 65 %). Pages and ×s follow it.
+- **Empty ad boxes.** Network blocking left each page's ad slot behind (Indian Express: a big grey
+  "ADVERTISEMENT" box). Now each loaded http(s) page is scanned for its classes and ids, once at load and again
+  2.5 s later (`COSMETIC_SCAN_JS`). adblock-rust's `url_cosmetic_resources` and `hidden_class_id_selectors`
+  produce the hiding rules, installed as one `display:none` stylesheet (`#baaz-adblock`). The site's
+  `#@#`/generichide exceptions and "Allow ads on this site" are honoured. The scan's answers share the page's
+  script-answer queue with the page-word reads, which used to drop unknown answers; one drain now routes every
+  answer by id. Checked live: indianexpress.com logs "hiding 445 ad boxes' rules", and both boxes are gone.
+- **No bookmarks imported.** Recent Chrome keeps a signed-in account's bookmarks in `AccountBookmarks`. The
+  owner's profile has no `Bookmarks` file and 4,257 bookmarks there. Both files are read now, and merged per root
+  (repeats are dropped by the store). The result line no longer points at an "Imported from Chrome" folder when
+  nothing came in. Checked live, read-only: the sheet counts 4,226 web bookmarks for "Bharani". Nothing was
+  imported in the check run; the owner imports in their own Baaz.

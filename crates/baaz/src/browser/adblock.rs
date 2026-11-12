@@ -132,6 +132,68 @@ pub fn should_block(engine: &adblock::Engine, url: &str, initiator: &str, kind: 
     }
 }
 
+// ---------------------------------------------------------------- cosmetics
+//
+// Blocking a request leaves the box the page laid out for it: an empty grey
+// slot under an "ADVERTISEMENT" label (owner, 12 Nov, Indian Express). The
+// lists' element-hiding rules (`##selector`) hide those boxes. The site's own
+// rules come from the URL alone; the generic ones are matched against the
+// classes and ids the page actually has (`COSMETIC_SCAN_JS`), and the result
+// goes in as one stylesheet (`inject_js`).
+
+/// The engine the request blocker uses, for the cosmetic lookups.
+fn engine_slot() -> &'static RwLock<Option<Arc<adblock::Engine>>> {
+    static ENGINE: OnceLock<RwLock<Option<Arc<adblock::Engine>>>> = OnceLock::new();
+    ENGINE.get_or_init(|| RwLock::new(None))
+}
+
+/// Reads the page's distinct classes and ids (capped), as a JSON string.
+pub const COSMETIC_SCAN_JS: &str = "var c = new Set(), i = new Set(); \
+var all = document.querySelectorAll('[class],[id]'); \
+for (var k = 0; k < all.length && k < 20000; k++) { var e = all[k]; \
+  if (e.id) i.add(e.id); \
+  if (e.classList) for (var j = 0; j < e.classList.length; j++) c.add(e.classList[j]); } \
+return JSON.stringify({ c: Array.from(c).slice(0, 5000), i: Array.from(i).slice(0, 5000) });";
+
+/// The stylesheet that hides what `engine`'s rules match on `url` with these
+/// classes and ids; empty when nothing matches.
+pub fn cosmetic_css(engine: &adblock::Engine, url: &str, classes: &[String], ids: &[String]) -> String {
+    let resources = engine.url_cosmetic_resources(url);
+    let mut selectors: Vec<String> = resources.hide_selectors.into_iter().collect();
+    if !resources.generichide {
+        selectors.extend(engine.hidden_class_id_selectors(classes, ids, &resources.exceptions));
+    }
+    selectors.sort();
+    selectors.dedup();
+    // One rule per selector: a selector this Chromium cannot parse drops only
+    // its own rule, never the whole list.
+    selectors.iter().map(|s| format!("{s}{{display:none!important}}\n")).collect()
+}
+
+/// [`cosmetic_css`] for a page now, honouring the switch and the site's
+/// allowance; `None` when ads are allowed there or the engine is not ready.
+pub fn page_css(url: &str, classes: &[String], ids: &[String]) -> Option<String> {
+    {
+        let live = live().read().ok()?;
+        if !live.enabled || host_allowed(&live, url) {
+            return None;
+        }
+    }
+    let engine = engine_slot().read().ok()?.clone()?;
+    let css = cosmetic_css(&engine, url, classes, ids);
+    (!css.is_empty()).then_some(css)
+}
+
+/// The script that installs (or replaces) Baaz's hiding stylesheet.
+pub fn inject_js(css: &str) -> String {
+    let css = serde_json::to_string(css).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "var s = document.getElementById('baaz-adblock') || document.createElement('style'); \
+s.id = 'baaz-adblock'; s.textContent = {css}; \
+(document.head || document.documentElement).appendChild(s); return true;"
+    )
+}
+
 /// Build the engine in the background and install it as Chromium's request
 /// blocker; then refresh stale lists (the new lists apply next launch).
 /// Once per process; a capture or test never blocks or downloads.
@@ -147,6 +209,9 @@ pub fn start(prefs: &AdblockPrefs) {
             let started = std::time::Instant::now();
             let texts: Vec<String> = LISTS.iter().map(|(name, bundled, _)| list_text(name, bundled)).collect();
             let engine = Arc::new(engine_from(&texts));
+            if let Ok(mut slot) = engine_slot().write() {
+                *slot = Some(engine.clone());
+            }
             crate::baaz_log!("adblock: {} rules ready in {} ms", texts.iter().map(|t| t.lines().count()).sum::<usize>(), started.elapsed().as_millis());
             #[cfg(feature = "cef")]
             {
@@ -234,6 +299,32 @@ mod tests {
         let e = engine_from(&texts);
         assert!(should_block(&e, "https://securepubads.g.doubleclick.net/tag/js/gpt.js", "https://news.example.org/", "script"));
         assert!(!should_block(&e, "https://news.example.org/style.css", "https://news.example.org/", "stylesheet"));
+    }
+
+    /// Element hiding: a site's own rules by URL, generic rules only for the
+    /// classes and ids the page has, and a site's `#@#` exception honoured.
+    #[test]
+    fn cosmetic_rules_hide_ad_boxes_by_site_and_by_class() {
+        let e = engine_from(&[
+            "news.example.org##.top-ad-slot\n##.ad-banner\n###sidebar-ad\nnews.example.org#@#.ad-banner".to_owned(),
+        ]);
+        let none: Vec<String> = Vec::new();
+        let css = cosmetic_css(&e, "https://news.example.org/a", &none, &none);
+        assert!(css.contains(".top-ad-slot{display:none!important}"), "{css}");
+        let css = cosmetic_css(&e, "https://other.example/", &["ad-banner".into(), "story".into()], &["sidebar-ad".into()]);
+        assert!(css.contains(".ad-banner{") && css.contains("#sidebar-ad{"), "{css}");
+        assert!(!css.contains("story") && !css.contains("top-ad-slot"), "only what matches here: {css}");
+        let css = cosmetic_css(&e, "https://news.example.org/", &["ad-banner".into()], &none);
+        assert!(!css.contains(".ad-banner{"), "the site's exception: {css}");
+        // The bundled lists hide a common generic slot.
+        let texts: Vec<String> = LISTS.iter().map(|(name, bundled, _)| list_text(name, bundled)).collect();
+        let full = engine_from(&texts);
+        let css = cosmetic_css(&full, "https://news.example.org/", &["adsbygoogle-wrapper".into()], &none);
+        assert!(css.contains(".adsbygoogle-wrapper{"), "EasyList hides a generic slot");
+        // …and the owner's page by its own rules (12 Nov: empty boxes).
+        let css = cosmetic_css(&full, "https://indianexpress.com/", &none, &none);
+        assert!(css.contains(".ie-adsbox{") && css.contains(".adsizes{"), "Indian Express's own rules");
+        assert!(inject_js("a{}\n").contains("\"a{}\\n\""));
     }
 
     #[test]
