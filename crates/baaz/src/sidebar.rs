@@ -93,7 +93,8 @@ pub struct SessionEntry {
     /// Set at join time when the wire (or the index) itself marks this row
     /// as one of Baaz's throwaway title/summary side sessions — the
     /// side-session prompt prefix or the side workspace — with no local
-    /// record. What keeps such a row hidden across a restart, a scratch
+    /// record — or, the same way, as a session another client made
+    /// ([`made_elsewhere`]). What keeps such a row hidden across a restart, a scratch
     /// state dir, a relay lane, or a store that never saw it start:
     /// `hidden` is re-derived from this flag on every join and rejoin, and
     /// the app's side-session checks read it beside the explicit record.
@@ -208,14 +209,77 @@ pub(crate) fn label_ladder<'a>(
     fn pick(value: Option<&str>) -> Option<&str> {
         value.map(str::trim).filter(|s| !s.is_empty())
     }
+    // Muse's own `name` is not here: Muse 1.4 gives every session a random
+    // two-word name ("flax-deneb") and the list never says which were typed
+    // by a person, so a name there labelled every untitled row with noise
+    // (owner, 2026-11-12). Baaz's own rename is `meta.name`, above.
     pick(meta.and_then(|m| m.name.as_deref()))
         .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
         .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
-        .or_else(|| pick(wire.and_then(|w| w.name.as_deref())))
         .or_else(|| pick(wire.and_then(|w| w.title.as_deref())))
         .or_else(|| pick(wire.and_then(|w| w.first_user_prompt.as_deref())))
         .or_else(|| index.and_then(IndexEntry::label))
         .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())))
+}
+
+/// Whether Muse's index says another client made this session — the `muse`
+/// CLI (a `muse exec` script, a relay lane, a terminal session) or another
+/// app — and nothing in Baaz's store says the person has used it here.
+///
+/// Muse keeps one session list for every client on the Mac, so without this
+/// Baaz drew all of them: 2,874 rows on the owner's Mac on 12 Nov 2026, of
+/// which Baaz made 187 and a scripted exam run 1,450. Claude Code and Codex
+/// only ever show what Baaz started or the person imported; this puts Muse on
+/// the same footing. Such a row is treated like a side session: no row, no
+/// search entry, no title call.
+///
+/// Unknown never hides: an older Muse or a cache from before the field
+/// reads `created_by: None` and keeps today's behaviour.
+///
+/// A session in a temp folder is a scripted or disposable run whoever made
+/// it — the rule Import applies to Claude Code and Codex (`import::under_temp`)
+/// — except the running Baaz's own state dir, so a check run still lists
+/// what it starts. A person's own session without a project runs in
+/// `~/baaz-sessions`, never a temp folder.
+pub fn made_elsewhere(index: Option<&IndexEntry>, workspace: Option<&str>, meta: Option<&SessionMeta>) -> bool {
+    let other_client = index.and_then(|i| i.created_by.as_deref()).is_some_and(|creator| !is_baaz_client(creator));
+    if !other_client && !workspace.is_some_and(is_scripted_root) {
+        return false;
+    }
+    // A session the person has adopted in Baaz stays: named, pinned, put in
+    // a project or handed off. A recorded byline is no evidence — until
+    // 12 Nov 2026 merely opening a row wrote one, so the exam runs the owner
+    // clicked to ask about carried one.
+    let used_here = meta.is_some_and(|m| {
+        let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        m.pinned
+            || set(&m.name)
+            || set(&m.project)
+            || set(&m.generated_title)
+            || set(&m.handoff_from)
+            || set(&m.handoff_to)
+    });
+    !used_here
+}
+
+/// Whether `root` is a temp folder (or under one) other than this run's own
+/// state dir.
+fn is_scripted_root(root: &str) -> bool {
+    static ROOTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let roots = ROOTS.get_or_init(crate::import::temp_roots);
+    if !crate::import::under_temp(root, roots) {
+        return false;
+    }
+    let own = crate::projects::canonical_cached(&crate::store::support_dir().to_string_lossy());
+    let here = crate::projects::canonical_cached(root);
+    !(here == own || here.starts_with(&format!("{}/", own.trim_end_matches('/'))))
+}
+
+/// The `clientInfo.name`s Baaz has started Muse sessions under: `baaz`
+/// ([`crate::conn::CLIENT_NAME`]), its check and test builds (`baaz_check`,
+/// `baaz_t2`) and its first name, `harness`.
+fn is_baaz_client(name: &str) -> bool {
+    name.starts_with(crate::conn::CLIENT_NAME) || name == "harness"
 }
 
 impl SessionEntry {
@@ -228,17 +292,19 @@ impl SessionEntry {
     ///
     /// 1. the name someone gave it with `/name` or the row's pencil;
     /// 2. the generated title one cheap model call wrote (auto-titles);
-    /// 3. the row's own `name`;
-    /// 4. the row's own `title`;
-    /// 5. the row's own `first_user_prompt`;
-    /// 6. the index's `session_name`;
-    /// 7. the index's generated `title`;
-    /// 8. the index's `first_user_prompt`;
-    /// 9. the transcript's first user prompt — else its first `userShell`
+    /// 3. the row's own `title`;
+    /// 4. the row's own `first_user_prompt`;
+    /// 5. the index's generated `title`;
+    /// 6. the index's `first_user_prompt`;
+    /// 7. the transcript's first user prompt — else its first `userShell`
     ///    command when the session has no user text at all — cached in the
     ///    store by the application after a `session/read` or straight from
     ///    the open transcript;
-    /// 10. [`UNNAMED`].
+    /// 8. [`UNNAMED`].
+    ///
+    /// Muse's served `name` and the index's `session_name` are never a label:
+    /// Muse 1.4 names every session at random and says nowhere which names a
+    /// person chose.
     ///
     /// The session id is never a title. "Session 01a081ef" tells a person
     /// nothing they can act on, and it reads like something went wrong.
@@ -269,11 +335,7 @@ impl SessionEntry {
         // `describe`): Muse writes whole first prompts into the index title,
         // and Baaz's derived title is cut from the prompt the same
         // way, so comparing the fallthrough alone misses both.
-        let user_named = name.is_some()
-            || index
-                .and_then(|i| i.session_name.as_deref())
-                .map(str::trim)
-                .is_some_and(|s| !s.is_empty());
+        let user_named = name.is_some();
         let text = label.unwrap_or(UNNAMED);
         let workspace = session.workspace_root.as_deref().map(|root| cache.get(root));
         // A missing root resolves nowhere: the row falls back to "Other
@@ -291,7 +353,7 @@ impl SessionEntry {
         let side_marker = crate::titles::looks_like_side_session(
             session.first_user_prompt.as_deref(),
             session.workspace_root.as_deref(),
-        );
+        ) || made_elsewhere(index, session.workspace_root.as_deref(), meta);
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
@@ -375,12 +437,7 @@ impl SessionEntry {
     ) -> Option<Self> {
         let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let text = label_ladder(meta, None, Some(index))?;
-        let user_named = name.is_some()
-            || index
-                .session_name
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|s| !s.is_empty());
+        let user_named = name.is_some();
         let updated = index
             .updated_at_us
             .and_then(DateTime::from_timestamp_micros)
@@ -400,7 +457,7 @@ impl SessionEntry {
         let side_marker = crate::titles::looks_like_side_session(
             index.first_user_prompt.as_deref(),
             index.workspace_root.as_deref(),
-        );
+        ) || made_elsewhere(Some(index), index.workspace_root.as_deref(), meta);
         Some(Self {
             id: session_id.to_owned(),
             label: one_line(text),
@@ -2593,6 +2650,7 @@ mod tests {
             search_text: String::new(),
             updated_at_us: None,
             workspace_root: None,
+            created_by: None,
         }
     }
 
@@ -2603,16 +2661,21 @@ mod tests {
     fn the_rows_own_words_come_before_the_index_copies() {
         let projects = crate::projects::Projects::default();
         let index = old_index();
-        // An old row: nothing of its own, the index names it.
+        // An old row: nothing of its own, the index names it — by its
+        // title, never Muse's random `session_name`.
         let old = SessionEntry::join(&wire_session(), Some(&index), None, &projects);
-        assert_eq!(old.label, "Old Name");
+        assert_eq!(old.label, "Old Title");
         assert!(!old.needs_title, "the index named it");
-        // A 1.2.1 row: its own name wins over the index's.
+        // Muse's served name is never a label: Muse 1.4 names every
+        // session at random ("flax-deneb") and never says which a person
+        // typed (owner, 2026-11-12). With nothing else the row is unnamed
+        // and asks the transcript.
         let mut named = wire_session();
-        named.name = Some("Wire Name".into());
-        let entry = SessionEntry::join(&named, Some(&index), None, &projects);
-        assert_eq!(entry.label, "Wire Name");
-        // …its own title wins when it has no name…
+        named.name = Some("flax-deneb".into());
+        let entry = SessionEntry::join(&named, None, None, &projects);
+        assert_eq!(entry.label, UNNAMED);
+        assert!(entry.needs_title);
+        // …its own title wins over the index's…
         let mut titled = wire_session();
         titled.title = Some("Wire Title".into());
         let entry = SessionEntry::join(&titled, Some(&index), None, &projects);
@@ -3577,6 +3640,68 @@ mod tests {
         assert!(merged.is_empty());
     }
 
+    /// A session another client made — the `muse` CLI (no client name) or
+    /// another app — draws no row and no hidden count, unless the person
+    /// has used it in Baaz; Baaz's own, and an index that cannot say, draw
+    /// as before (owner, 2026-11-12: 1,450 `muse exec` exam runs filled the
+    /// sidebar).
+    #[test]
+    fn a_session_another_client_made_is_not_listed() {
+        let projects = Projects::default();
+        let made_by = |creator: Option<&str>| IndexEntry {
+            title: "You are writing items for an exam".into(),
+            created_by: creator.map(str::to_owned),
+            ..IndexEntry::default()
+        };
+        let wire = wire_session();
+        for creator in [Some(""), Some("cockpit")] {
+            let index = made_by(creator);
+            let row = SessionEntry::join(&wire, Some(&index), None, &projects);
+            assert!(row.hidden && row.side_marker, "{creator:?} made it: no row");
+            assert!(made_elsewhere(Some(&index), None, None));
+        }
+        for creator in [Some("baaz"), Some("baaz_check"), Some("harness"), None] {
+            let index = made_by(creator);
+            let row = SessionEntry::join(&wire, Some(&index), None, &projects);
+            assert!(!row.hidden && !row.side_marker, "{creator:?}: listed as before");
+        }
+        // Adopted in Baaz — a pin, a project, a name — keeps it.
+        let cli = made_by(Some(""));
+        for meta in [
+            SessionMeta { pinned: true, ..SessionMeta::default() },
+            SessionMeta { project: Some("p".into()), ..SessionMeta::default() },
+            SessionMeta { name: Some("mine".into()), ..SessionMeta::default() },
+        ] {
+            let row = SessionEntry::join(&wire, Some(&cli), Some(&meta), &projects);
+            assert!(!row.side_marker, "used here: listed ({meta:?})");
+        }
+        // Archiving is not use, and neither is a byline: opening a row
+        // used to write one, so the exam runs the owner clicked carried it.
+        let archived = SessionMeta { archived: true, ..SessionMeta::default() };
+        assert!(made_elsewhere(Some(&cli), None, Some(&archived)));
+        let clicked = SessionMeta {
+            last_ask: Some("You are writing items".into()),
+            last_summary: Some("[{\"level\": \"tgt_lt\"".into()),
+            ..SessionMeta::default()
+        };
+        assert!(made_elsewhere(Some(&cli), None, Some(&clicked)));
+        // A temp-folder run is scripted whoever made it — Baaz's own
+        // test and check runs included — but this run's own state dir is not.
+        let baaz = made_by(Some("baaz"));
+        assert!(made_elsewhere(Some(&baaz), Some("/private/var/folders/h8/x/T/exam-muse-dsyzyF"), None));
+        assert!(made_elsewhere(Some(&baaz), Some("/tmp/bz.kfMJ/side-sessions"), None));
+        assert!(!made_elsewhere(Some(&baaz), Some("/Users/me/baaz-sessions"), None));
+        let own = crate::store::support_dir().join("workspace");
+        assert!(!made_elsewhere(Some(&baaz), Some(&own.to_string_lossy()), None), "this run's own workspace");
+        // Baaz's helper sessions, from any state dir, by their label.
+        assert!(crate::titles::looks_like_side_session(Some("baaz auto-title"), Some("/Users/me/Projects/x")));
+        assert!(!crate::titles::looks_like_side_session(Some("baaz draft of my essay"), None));
+        // The provisional boot row follows the same rule.
+        let mut cache = crate::projects::CanonicalCache::default();
+        let row = SessionEntry::provisional("s", &cli, None, &projects, &mut cache).expect("labelled");
+        assert!(row.hidden && row.side_marker);
+    }
+
     fn index_entry(title: &str, prompt: Option<&str>) -> IndexEntry {
         IndexEntry {
             title: title.to_owned(),
@@ -3590,12 +3715,13 @@ mod tests {
     fn provisional_rows_carry_only_what_the_index_knows() {
         let projects = Projects::default();
         let mut cache = crate::projects::CanonicalCache::default();
-        // The label ladder is the index's own: session name, then title,
-        // then first prompt — and Muse's placeholder title counts as none.
+        // The label ladder is the index's own: title, then first prompt —
+        // never Muse's random session name, and Muse's placeholder title
+        // counts as none.
         let mut named = index_entry("Generated title", Some("why panic"));
-        named.session_name = Some("parser".into());
+        named.session_name = Some("flax-deneb".into());
         let row = SessionEntry::provisional("s", &named, None, &projects, &mut cache).expect("labelled");
-        assert_eq!(row.label, "parser");
+        assert_eq!(row.label, "Generated title");
         let row = SessionEntry::provisional("s", &index_entry("Fix the parser", Some("why panic")), None, &projects, &mut cache).expect("labelled");
         assert_eq!(row.label, "Fix the parser");
         let row = SessionEntry::provisional("s", &index_entry("", Some("why panic")), None, &projects, &mut cache).expect("labelled");

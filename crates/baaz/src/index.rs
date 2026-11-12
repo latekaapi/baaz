@@ -40,6 +40,13 @@ pub struct IndexEntry {
     pub updated_at_us: Option<i64>,
     /// The workspace the session ran in, when the index records one.
     pub workspace_root: Option<String>,
+    /// Which client created the session (`msp_created_by_client_name`):
+    /// `Some("baaz")` for Baaz, `Some("")` for one with no client name — a
+    /// `muse` CLI run, `muse exec` included — and `None` when the index
+    /// cannot say (an older Muse, or a cached entry from before this field).
+    /// [`crate::sidebar::made_elsewhere`] reads it; unknown never hides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 impl IndexEntry {
@@ -57,7 +64,9 @@ impl IndexEntry {
         let title = Some(self.title.trim())
             .filter(|s| !s.is_empty())
             .filter(|s| !s.eq_ignore_ascii_case(crate::sidebar::UNNAMED));
-        pick(&self.session_name).or(title).or_else(|| pick(&self.first_user_prompt))
+        // `session_name` is Muse's random two-word name (see
+        // `sidebar::label_ladder`), never a label.
+        title.or_else(|| pick(&self.first_user_prompt))
     }
 }
 
@@ -118,12 +127,9 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
                 .map(|names| names.filter_map(Result::ok).any(|name| name == "workspace_root"))
         })
         .unwrap_or(false);
-    let sql = if has_workspace {
-        "SELECT session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us, workspace_root FROM sessions"
-    } else {
-        "SELECT session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us FROM sessions"
-    };
-    let mut statement = match connection.prepare(sql) {
+    let has_creator = has_column(&connection, CREATOR_COLUMN);
+    let sql = format!("SELECT {} FROM sessions", select_columns(has_workspace, has_creator));
+    let mut statement = match connection.prepare(&sql) {
         Ok(statement) => statement,
         Err(error) => {
             // rusqlite's own message already says "no such table" or "no
@@ -145,6 +151,7 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
                 search_text: String::new(),
                 updated_at_us: row.get(4).ok(),
                 workspace_root: if has_workspace { row.get(5).ok() } else { None },
+                created_by: creator(row, has_workspace, has_creator),
             },
         ))
     });
@@ -219,11 +226,18 @@ pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntr
         // degrade.
         Err(_) => return read_at(path),
     };
+    let has_creator = has_column(&connection, CREATOR_COLUMN);
     let mut out = HashMap::with_capacity(stamps.len());
     let mut need: Vec<String> = Vec::new();
     for (id, updated) in stamps {
         match previous.get(&id) {
-            Some(entry) if entry.updated_at_us == updated && updated.is_some() => {
+            // An entry cached before Baaz read the creating client is read
+            // again once, or it would stay "unknown" until Muse touched it.
+            Some(entry)
+                if entry.updated_at_us == updated
+                    && updated.is_some()
+                    && (entry.created_by.is_some() || !has_creator) =>
+            {
                 out.insert(id, entry.clone());
             }
             _ => need.push(id),
@@ -233,11 +247,7 @@ pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntr
         return out;
     }
     let has_workspace = has_column(&connection, "workspace_root");
-    let columns = if has_workspace {
-        "session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us, workspace_root"
-    } else {
-        "session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us"
-    };
+    let columns = select_columns(has_workspace, has_creator);
     for chunk in need.chunks(500) {
         let marks = vec!["?"; chunk.len()].join(",");
         let sql = format!("SELECT {columns} FROM sessions WHERE session_id IN ({marks})");
@@ -252,6 +262,7 @@ pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntr
                     search_text: String::new(),
                     updated_at_us: row.get(4).ok(),
                     workspace_root: if has_workspace { row.get(5).ok() } else { None },
+                    created_by: creator(row, has_workspace, has_creator),
                 },
             ))
         });
@@ -260,6 +271,33 @@ pub fn read_changed(path: &std::path::Path, previous: &HashMap<String, IndexEntr
         }
     }
     out
+}
+
+/// The column naming the client that created a session (Muse 1.4.x).
+const CREATOR_COLUMN: &str = "msp_created_by_client_name";
+
+/// The columns both reads select, in the order [`creator`] expects.
+fn select_columns(has_workspace: bool, has_creator: bool) -> String {
+    let mut columns =
+        String::from("session_id, session_name, substr(title, 1, 1000), substr(first_user_prompt, 1, 1000), updated_at_us");
+    if has_workspace {
+        columns.push_str(", workspace_root");
+    }
+    if has_creator {
+        columns.push_str(", ");
+        columns.push_str(CREATOR_COLUMN);
+    }
+    columns
+}
+
+/// The creating client from a row [`select_columns`] shaped: a NULL is a
+/// run with no client name (the `muse` CLI), read as `Some("")`.
+fn creator(row: &rusqlite::Row<'_>, has_workspace: bool, has_creator: bool) -> Option<String> {
+    if !has_creator {
+        return None;
+    }
+    let at = if has_workspace { 6 } else { 5 };
+    row.get::<_, Option<String>>(at).ok().map(Option::unwrap_or_default)
 }
 
 /// Whether Muse's `sessions` table has `column`.
@@ -425,15 +463,16 @@ mod tests {
     }
 
     #[test]
-    fn the_label_prefers_a_name_then_a_title_then_the_first_prompt() {
+    fn the_label_prefers_a_title_then_the_first_prompt_never_muses_name() {
         let mut entry = IndexEntry {
             title: "Fix the parser".into(),
             first_user_prompt: Some("why does this panic".into()),
             ..IndexEntry::default()
         };
         assert_eq!(entry.label(), Some("Fix the parser"));
-        entry.session_name = Some("parser".into());
-        assert_eq!(entry.label(), Some("parser"));
+        // Muse's random name is never the label (owner, 2026-11-12).
+        entry.session_name = Some("flax-deneb".into());
+        assert_eq!(entry.label(), Some("Fix the parser"));
         let bare = IndexEntry { first_user_prompt: Some("hello".into()), ..IndexEntry::default() };
         assert_eq!(bare.label(), Some("hello"));
         assert_eq!(IndexEntry::default().label(), None);
