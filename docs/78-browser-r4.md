@@ -121,3 +121,40 @@ Started 11 Nov 2026 from docs/77. Design: docs/27 §5/§7/§8. Board: canvas "Ba
   `chrome-extension://` page except the PDF viewer and has no action toolbar, so an installed extension could not
   open its popup or pages; installing one from the Web Store (a download) was not tried without the owner's OK.
   The popover says extensions don't run yet and points to ad blocking. Owner decision needed (see handoff).
+
+## Owner round, 12 Nov — CLI sessions in the sidebar, random titles, the byline on click
+
+From the owner's recording (Muse rows titled `muted-aster`, `brook-vulpecula`…; clicking one changed its second line).
+
+**Diagnosis (measured on the owner's Mac).**
+- Muse keeps one session list for every client. Baaz drew all of it: 2,874 sessions, of which Baaz made 187.
+  1,702 were CLI runs in temp folders: `muse exec` from the owner's exam script (`T/exam-muse-*`, 1,450),
+  `condense-muse`, and relay lanes. Muse's own index records the creating client
+  (`msp_created_by_client_name`; NULL = the CLI) since 13 Sep, and every CLI log says `host="cli" mode="exec"`.
+- The "random word" titles are Muse 1.4's automatic session names. Every one of the 2,618 named sessions has one,
+  and none was typed. `session/list` carries no `nameOrigin`, so Baaz read each as a name a person gave.
+- Clicking a row replays its history. The replay "settles", and every settle wrote the free byline excerpt, so the
+  row's first prompt became its last reply. This was decided on 30 Oct ("the free excerpt still lands") and is now
+  reversed.
+
+**Fix.**
+1. `index.rs` reads the creating client. `sidebar::made_elsewhere` treats as not the person's (like a side session:
+   no row, no Show-hidden count, no search entry, no title call) a session that is:
+   - made by another client, or
+   - run in a temp folder (Import's rule; this run's own state dir excepted),
+   - unless it was pinned, named, put in a project or handed off in Baaz.
+   A stored byline is not evidence: the click bug wrote one onto every exam run the owner opened. Unknown (older
+   Muse, an old cache) never hides.
+2. Muse's `name` and the index's `session_name` are no longer labels. A row reads Baaz's title, Muse's title or
+   the first prompt.
+3. The byline lands only for a turn this window ran (`live`).
+4. Baaz's own helper sessions are recognised by their start labels (`titles::SIDE_LABELS`) from any state dir.
+
+**Result on the owner's data:** 2,108 listed rows → about 100. Checked live in the check build (connected, on a copy
+of the owner's `sessions.json`/`projects.json`): Unfiled 64 → 6, with no exam runs, no `baaz auto-title` rows and no
+slug titles. `open:<id>` on a probe session left its second line and its store entry unchanged (only the project the
+reopen restates).
+
+**Left as is:** a handful of Baaz-made probe sessions in real folders ("Reply with one word: OK" under harness).
+Nothing tells them from the owner's; archive them by hand. A CLI session is no longer reachable from Baaz at all;
+a Muse lane in Import would bring chosen ones in, if wanted.

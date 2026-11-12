@@ -663,7 +663,7 @@ impl Harness {
 
     /// How many listed sessions are hidden: the view menu's Show hidden count.
     pub(crate) fn hidden_count(&self) -> usize {
-        self.sessions.iter().filter(|entry| entry.hidden && !entry.archived).count()
+        self.sessions.iter().filter(|entry| entry.hidden && !entry.side_marker && !entry.archived).count()
     }
 
     /// Flip a group's disclosure: its id moves in or out of
@@ -755,7 +755,10 @@ impl Harness {
         let pending_head = pending.as_deref().and_then(exempt);
         let mut rows: Vec<SessionEntry> = collapsed
             .into_iter()
-            .filter(|entry| self.show_hidden || !entry.hidden)
+            // Show hidden reveals what the person hid, never a side session
+            // or one another client made (`side_marker`): those are not
+            // theirs, and there are thousands.
+            .filter(|entry| (self.show_hidden && !entry.side_marker) || !entry.hidden)
             .filter(|entry| self.show_archived || !entry.archived)
             .filter(|entry| {
                 // An archived row shown on request is explicitly asked for;

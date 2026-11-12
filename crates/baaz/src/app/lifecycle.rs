@@ -1531,11 +1531,7 @@ impl Harness {
             // Same rule as [`SessionEntry::join`]: a user-given name always
             // earns the first prompt below it, any other label only when it
             // does not already say it.
-            let user_named = name.is_some()
-                || index
-                    .and_then(|i| i.session_name.as_deref())
-                    .map(str::trim)
-                    .is_some_and(|s| !s.is_empty());
+            let user_named = name.is_some();
             let text = label.unwrap_or(crate::sidebar::UNNAMED);
             entry.needs_title = label.is_none();
             // A replayed capture names its own row by file, and no source
@@ -1549,6 +1545,10 @@ impl Harness {
             // The wire-alone mark survives the rejoin: a side started by any
             // other state dir carries no override here, so its own row flag
             // is what keeps it hidden.
+            // The index may land after the row joined: a session another
+            // client made is marked here too (`made_elsewhere`).
+            let root = wire.get(entry.id.as_str()).and_then(|w| w.workspace_root.as_deref());
+            entry.side_marker = entry.side_marker || sidebar::made_elsewhere(index, root, meta);
             entry.hidden = meta.is_some_and(|m| m.hidden) || entry.side_marker;
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
@@ -4763,9 +4763,14 @@ impl Harness {
                     self.rebuild_search_index_for(&ids, cx);
                 }
                 self.sync_row_live(&session_id, false, cx);
-                // The free excerpt may land on any settle: it is the
-                // transcript's own words, no call.
-                self.record_last_summary(cx);
+                // The free excerpt lands only for a turn this window ran.
+                // A reopen's replay settles too, and landing there rewrote
+                // the row's second line just because it was clicked
+                // (owner, 2026-11-12): a session made in the CLI swapped its
+                // first prompt for its last reply on open.
+                if live {
+                    self.record_last_summary(cx);
+                }
                 // A settled pack turn fails its handoff here, with its
                 // reason on the card and the row — never a silent Active.
                 self.reconcile_pack_turns(cx);
@@ -6690,7 +6695,8 @@ mod tests {
             "turnCount": 3,
             "title": "Wire title",
             "activeTurnId": null, "forkedFrom": null, "modelId": null, "providerId": null,
-            "workspaceRoot": "/tmp/w",
+            // Not a temp folder: a temp-folder run is scripted and never listed.
+            "workspaceRoot": "/srv/w",
         }))
         .expect("a list row");
         vc.update(|_, cx| {
@@ -10904,10 +10910,12 @@ done
             );
             assert!(asked.borrow().is_empty(), "a replayed reopen asks no model: {:?}", asked.borrow());
             assert!(!harness.byline_live.contains("s-codex-old"), "no rewrite started");
+            // Opening is not a turn: the row's second line stays what it
+            // was (owner, 2026-11-12: clicking a row rewrote its byline).
             assert_eq!(
                 harness.overrides.get("s-codex-old").and_then(|meta| meta.last_ask.clone()).as_deref(),
-                Some("Restore the header"),
-                "the free excerpt still lands"
+                Some("Rewritten ask"),
+                "a reopen leaves the byline alone"
             );
         });
         lane_restore(state);

@@ -146,7 +146,7 @@ pub fn scan_dirs(claude_config: &Path, codex_home: &Path) -> Scan {
 
 /// The roots a run under counts as scripted: `$TMPDIR`, `/tmp`,
 /// `/private/tmp`, `/private/var`, `/var/folders`.
-fn temp_roots() -> Vec<String> {
+pub(crate) fn temp_roots() -> Vec<String> {
     let mut roots: Vec<String> =
         ["/tmp/", "/private/tmp/", "/private/var/", "/var/folders/"].iter().map(|s| (*s).to_owned()).collect();
     if let Some(tmp) = std::env::var_os("TMPDIR") {
@@ -162,7 +162,7 @@ fn temp_roots() -> Vec<String> {
 }
 
 /// Whether `cwd` is a temp dir (or under one).
-fn under_temp(cwd: &str, roots: &[String]) -> bool {
+pub(crate) fn under_temp(cwd: &str, roots: &[String]) -> bool {
     let with_slash = format!("{}/", cwd.trim_end_matches('/'));
     roots.iter().any(|root| with_slash.starts_with(root.as_str()))
 }

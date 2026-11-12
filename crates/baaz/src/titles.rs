@@ -133,12 +133,20 @@ pub fn is_side_workspace_root(root: &str) -> bool {
 /// handoff summary, or a byline rewrite. Exact-prefix match, so
 /// truncation-safe: the wire's `first_user_prompt` is a preview and may
 /// cut the tail, never the head.
+/// The labels Baaz starts its Muse helper sessions under
+/// ([`crate::app`]'s `muse_side`): Muse records each as the session's first
+/// user prompt, so a helper started by another state dir — a test, a check
+/// run — is recognised by it with no local record (owner, 2026-11-12: rows
+/// titled "baaz auto-title" in the sidebar).
+pub const SIDE_LABELS: [&str; 4] = ["baaz auto-title", "baaz auto-summary", "baaz handoff summary", "baaz draft"];
+
 pub fn is_side_prompt(text: &str) -> bool {
     // A browser chat's asks open with its page preamble (R3): it is
     // reached from the line, the card and its task folder, never the list —
     // also when its record is gone (another state dir; Muse lists it from
     // the server).
-    text.starts_with("I'm looking at tab ")
+    SIDE_LABELS.contains(&text.trim())
+        || text.starts_with("I'm looking at tab ")
         || text.starts_with("Browse with the Baaz browser tools")
         || text.starts_with(TITLE_PROMPT_PREFIX)
         || text.starts_with(crate::handoff::SUMMARY_PROMPT_PREFIX)
