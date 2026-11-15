@@ -9175,6 +9175,46 @@ done
         }
     }
 
+    /// docs/82 0.14: ⌘Q with a parked session's turn running asks first and
+    /// names it; with nothing running it quits without asking.
+    #[gpui::test]
+    fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("quit-turn-running");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        let asked_idle = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.maybe_confirm_quit(cx)));
+        assert!(!asked_idle, "nothing running: no question");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = SessionHost {
+                    provider_id: ProviderId::Codex.as_str().to_owned(),
+                    workspace: harness.workspace(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| SessionView::new("s-quit".to_owned(), host, window, cx));
+                view.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning { session_id: "s-quit".into(), turn_id: "t".into() }],
+                        cx,
+                    );
+                });
+                harness.park_active(cx);
+                harness.active = Some(view);
+                harness.park_active(cx);
+            });
+        });
+        let asked = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.maybe_confirm_quit(cx)));
+        assert!(asked, "a running turn asks first");
+        let (action, title) = vc
+            .update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|d| (d.action, d.title.to_string())))
+            .expect("a dialog");
+        assert_eq!(action, crate::overlays::DialogAction::QuitWithWorkRunning);
+        assert_eq!(title, "Quit while an agent is working?");
+        lane_restore(state);
+    }
+
     /// docs/81 A F1: a parked view with a turn running is never evicted —
     /// dropping it shuts its lane down and kills the child mid-turn. Nine
     /// later sessions park behind it; it is still alive and settles.

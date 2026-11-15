@@ -52,7 +52,7 @@ pub enum DialogAction {
     /// sessions stay on disk and move to Unfiled).
     RemoveProject,
     /// Quit the app after confirming a still-running terminal command (D52).
-    QuitWithRunningTerminal,
+    QuitWithWorkRunning,
     /// Close the dialog's `archive_target` terminal tab after confirming
     /// its still-running command (D52).
     CloseTerminalTab,

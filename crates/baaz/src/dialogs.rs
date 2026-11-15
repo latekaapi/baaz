@@ -123,24 +123,57 @@ impl Harness {
     /// The quit confirmation (D52): names the running command. `others`
     /// counts the running commands past the named one, so a second tab is
     /// not a surprise after the first is confirmed. Pure, so the naming
-    /// has a test without a window.
+    /// has a test without a window. Tests and the feedback fixtures only;
+    /// the window asks through [`Self::quit_dialog`].
+    #[cfg(test)]
     pub(crate) fn quit_terminal_dialog(command: &str, others: usize) -> Dialog {
-        let detail = if others == 0 {
-            format!("`{command}` is still running. Quitting stops it.")
-        } else {
-            format!(
-                "{total} terminal commands are still running, including `{command}`. Quitting stops them.",
-                total = others + 1
-            )
+        Self::quit_dialog(&[], Some((command, others))).expect("a running command asks")
+    }
+
+    /// The quit confirmation for everything still working (docs/82 0.14):
+    /// the sessions with a turn running, by name and count, and the
+    /// terminal's running command. `None` when nothing is running. Pure.
+    pub(crate) fn quit_dialog(working: &[String], command: Option<(&str, usize)>) -> Option<Dialog> {
+        let sessions = match working {
+            [] => None,
+            [one] => Some(format!("\u{201C}{one}\u{201D} is still working.")),
+            [first, rest @ ..] => Some(format!(
+                "{total} sessions are still working, including \u{201C}{first}\u{201D}.",
+                total = rest.len() + 1
+            )),
         };
-        Dialog {
-            title: "Quit with a terminal command running?".into(),
+        let terminal = command.map(|(command, others)| {
+            if others == 0 {
+                format!("`{command}` is still running.")
+            } else {
+                format!(
+                    "{total} terminal commands are still running, including `{command}`.",
+                    total = others + 1
+                )
+            }
+        });
+        let (title, detail) = match (sessions, terminal) {
+            (None, None) => return None,
+            (Some(sessions), None) => (
+                if working.len() == 1 { "Quit while an agent is working?" } else { "Quit while agents are working?" },
+                format!("{sessions} Quitting stops {}; each session picks up when you next send to it.", if working.len() == 1 { "it" } else { "them" }),
+            ),
+            (None, Some(terminal)) => {
+                let them = if command.is_some_and(|(_, others)| others > 0) { "them" } else { "it" };
+                ("Quit with a terminal command running?", format!("{terminal} Quitting stops {them}."))
+            }
+            (Some(sessions), Some(terminal)) => {
+                ("Quit while work is running?", format!("{sessions} {terminal} Quitting stops all of it."))
+            }
+        };
+        Some(Dialog {
+            title: title.into(),
             detail,
             kind: DialogKind::Warning,
             primary: "Quit",
-            action: DialogAction::QuitWithRunningTerminal,
+            action: DialogAction::QuitWithWorkRunning,
             archive_target: None,
-        }
+        })
     }
 
     /// The close-tab confirmation (D52), or `None` when the tab is idle: a
@@ -158,15 +191,37 @@ impl Harness {
         })
     }
 
-    /// ⌘Q with a terminal command running asks first through
-    /// [`Self::quit_terminal_dialog`], naming the command. Returns `true`
-    /// when it asked — the caller must not quit.
+    /// ⌘Q with a turn or a terminal command running asks first through
+    /// [`Self::quit_dialog`], naming them. Returns `true` when it asked —
+    /// the caller must not quit.
     pub(crate) fn maybe_confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        let working = self.working_session_names(cx);
         let running = self.terminal_host.read(cx).running_terminals(cx);
-        let Some((_, command)) = running.first() else { return false };
-        let dialog = Self::quit_terminal_dialog(command, running.len() - 1);
+        let command = running.first().map(|(_, command)| (command.as_str(), running.len() - 1));
+        let Some(dialog) = Self::quit_dialog(&working, command) else { return false };
         self.set_dialog(cx, dialog);
         true
+    }
+
+    /// The names of the sessions with a turn running — open, parked or the
+    /// browser chat — as their rows read them.
+    pub(crate) fn working_session_names(&self, cx: &gpui::App) -> Vec<String> {
+        self.live_views()
+            .iter()
+            .filter(|view| view.read(cx).is_sending())
+            .map(|view| {
+                let id = view.read(cx).session_id.clone();
+                if self.is_browser_chat(&id) {
+                    return "Browser assistant".to_owned();
+                }
+                self.sessions
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.label.clone())
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| "New session".to_owned())
+            })
+            .collect()
     }
 
     /// The close-tab dialog's primary button: the tab id rode the dialog,
@@ -1100,7 +1155,7 @@ impl Harness {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
             let danger = modal.action == DialogAction::Archive
                 || modal.action == DialogAction::RemoveProject
-                || modal.action == DialogAction::QuitWithRunningTerminal
+                || modal.action == DialogAction::QuitWithWorkRunning
                 || modal.action == DialogAction::CloseTerminalTab
                 || modal.action == DialogAction::ProviderSignOut
                 || modal.action == DialogAction::DeleteSpace
@@ -1199,7 +1254,7 @@ impl Harness {
                 DialogAction::Archive => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::RemoveProject => {}
-                DialogAction::QuitWithRunningTerminal => {
+                DialogAction::QuitWithWorkRunning => {
                     crate::tier::cleanup_probes();
                     cx.quit();
                 }
@@ -2151,11 +2206,27 @@ mod tests {
         assert!(Harness::close_tab_dialog("t1", None).is_none(), "an idle tab closes outright");
     }
 
+    /// docs/82 0.14: quitting with turns running names the session and
+    /// counts the rest; with a command too, it says both; with nothing
+    /// running it does not ask.
+    #[test]
+    fn the_quit_confirmation_names_working_sessions() {
+        let one = Harness::quit_dialog(&["Fix the login bug".to_owned()], None).expect("asks");
+        assert_eq!(one.title, "Quit while an agent is working?");
+        assert!(one.detail.contains("Fix the login bug"), "{}", one.detail);
+        assert_eq!(one.action, DialogAction::QuitWithWorkRunning);
+        let several = Harness::quit_dialog(&["A".to_owned(), "B".to_owned(), "C".to_owned()], None).expect("asks");
+        assert!(several.detail.contains('3') && several.detail.contains("\u{201C}A\u{201D}"), "{}", several.detail);
+        let both = Harness::quit_dialog(&["A".to_owned()], Some(("cargo test", 0))).expect("asks");
+        assert!(both.detail.contains("cargo test") && both.detail.contains("\u{201C}A\u{201D}"), "{}", both.detail);
+        assert!(Harness::quit_dialog(&[], None).is_none(), "nothing running, no question");
+    }
+
     /// Quitting names the running command, and counts the ones past it.
     #[test]
     fn the_quit_confirmation_names_the_running_command() {
         let dialog = Harness::quit_terminal_dialog("pnpm vitest", 0);
-        assert_eq!(dialog.action, DialogAction::QuitWithRunningTerminal);
+        assert_eq!(dialog.action, DialogAction::QuitWithWorkRunning);
         assert_eq!(dialog.primary, "Quit");
         assert!(dialog.detail.contains("pnpm vitest"), "it names the command");
         let crowded = Harness::quit_terminal_dialog("pnpm vitest", 2);
