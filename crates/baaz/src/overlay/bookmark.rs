@@ -10,7 +10,7 @@ use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 use gpui_kit::base::input::InputState;
 use gpui_kit::base::{h_flex, v_flex};
 
-use super::{menu_surface, SHADOW_PAD};
+use super::{menu_panel, SHADOW_PAD};
 use crate::app::Harness;
 use crate::browser::bookmarks;
 
@@ -213,7 +213,7 @@ impl Harness {
                 .flex_col()
                 .p(px(SHADOW_PAD))
                 .on_mouse_down(gpui::MouseButton::Left, leave)
-                .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_surface(panel)))
+                .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_panel(panel, cx)))
                 .into_any_element(),
         )
     }

@@ -742,9 +742,8 @@ impl Harness {
     /// The sidebar column as the library's v2 screen (D3): a
     /// [`SidebarModel`] built from Baaz state on every pane render, the
     /// screen's intents routed back to the handlers in this file. The host
-    /// owns the one `ListState` ([`Self::sidebar_list`]) and the one
-    /// `FluidHandle` ([`Self::sidebar_fluid`]) the screen renders through,
-    /// both created once and kept; the list state resets on a regroup
+    /// owns the one `ListState` ([`Self::sidebar_list`]) the screen renders
+    /// through, created once and kept; it resets on a regroup
     /// (`sync_sidebar_list`) and matches `screen_item_count` otherwise.
     pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // One travel per frame (the scripted sweep feeds the accumulator;
@@ -792,7 +791,7 @@ impl Harness {
             }
         }
         let baaz = cx.entity().downgrade();
-        let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.sidebar_list.clone(), self.sidebar_fluid.clone())
+        let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.sidebar_list.clone())
             .width(px(self.resize.width))
             .rename_textarea(&self.rename)
             // v3: the sidebar has no ground of its own — on the frame in the

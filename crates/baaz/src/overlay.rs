@@ -14,7 +14,7 @@
 //! run on the main window's next frame: focus, pages and the rename editor
 //! all live there, never in the panel.
 
-use aui::interact::menu_surface;
+use aui::interact::menu_panel;
 use aui::screens::sidebar::{browse_menu, browse_menu_size, SidebarIntent};
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
@@ -1427,7 +1427,7 @@ impl Harness {
             .flex_col()
             .p(gpui::px(SHADOW_PAD))
             .on_mouse_down(gpui::MouseButton::Left, leave)
-            .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_surface(panel)))
+            .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_panel(panel, cx)))
             .into_any_element()
     }
 

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aui::interact::{fluid_list, Axis};
+use aui::interact::row_list;
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
     ahead_behind, base_and_head, base_picker, branch_label, change_row, changes_caption, diff_fold, commit_foot, commit_frame,
@@ -732,7 +732,7 @@ pub(crate) fn changes_screen(
     let diffs = cache.file_diffs.clone();
     let gaps = cache.gap_lines.clone();
 
-    let mut list = fluid_list("right-changes-list", Axis::Y).gap(px(0.0)).label("Changes");
+    let mut list = row_list("right-changes-list").gap(px(0.0)).label("Changes");
     let mut ix = 0usize;
     let mut sections: Vec<(&str, Vec<FileChange>)> = Vec::new();
     if !session.is_empty() || !session_edits.is_empty() {
@@ -834,7 +834,7 @@ pub(crate) fn changes_screen(
                         entry.1 = foot - entry.0;
                     }
                 });
-                list = list.item_toolbar(ix, wrap.child(fold));
+                list = list.item_static(ix, wrap.child(fold));
                 ix += 1;
             }
         }

@@ -980,8 +980,8 @@ pub struct Harness {
     /// in order (like the palette's `selected`). Meaningful only while
     /// [`Self::browse_address`] is `Some`. Never persists.
     pub(crate) browse_omnibox_selected: usize,
-    /// The new tab's "Pick up" row the pointer lights (its FluidList's
-    /// report), so that row's text lights with the gliding block.
+    /// The new tab's "Pick up" row the pointer is over (its row list's
+    /// pointer report), so that row's text lights with its plain hover.
     pub(crate) browse_pickup_hover: Option<usize>,
     /// The new tab's baked ground ([`crate::newtab_ground`]): `None` until
     /// the first new tab asks for it and the background bake lands, then
@@ -1083,9 +1083,6 @@ pub struct Harness {
     /// `remeasure_items` after a text-only height change — `item_count`
     /// always equals the flattened length.
     pub(crate) sidebar_list: ListState,
-    /// The v2 sidebar's one gliding highlight: created once, kept across
-    /// frames, never shared with another list (D3).
-    pub(crate) sidebar_fluid: aui::interact::FluidHandle,
     /// What the pointer is over in the sidebar, as the screen reports it:
     /// a session id, a Browse tab key, or a reserved chrome key. The row's
     /// trailing slot swaps to its actions on it.
@@ -1742,7 +1739,6 @@ impl Harness {
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
-            sidebar_fluid: aui::interact::FluidHandle::new(),
             sidebar_hovered: None,
             hovered_group: None,
             hovered_projects_header: false,
@@ -5100,9 +5096,8 @@ impl Harness {
     ///
     /// Adaptation: gpui has no backdrop blur, so the panel is surface-1 at
     /// 62 % over the already-blurred ground, which reads as the mock's frost.
-    /// The rows are a FluidList: FF's gliding block, fading in on entry
-    /// (they lit on plain gpui hover, which snapped and lagged — owner
-    /// recording 2026-10-11 7.18 PM).
+    /// The rows are a row list: each row hovers plainly with the library's
+    /// one hover model (no gliding block, docs/83 §9).
     fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
@@ -5171,7 +5166,7 @@ impl Harness {
                 );
             let hover = self.browse_pickup_hover;
             let report = cx.entity().downgrade();
-            let mut list = aui::interact::fluid_list("browse-pickup-rows", aui::interact::Axis::Y)
+            let mut list = aui::interact::row_list("browse-pickup-rows")
                 .label("Pick up where you left off")
                 .gap(px(0.0))
                 .on_highlight(move |index, _, cx| {
@@ -5326,8 +5321,8 @@ impl Harness {
     /// The omnibox list box itself, unpositioned: section headers and rows
     /// for the already-ranked `rows`, with `anchor` deciding the placement
     /// in [`Self::render_omnibox_dropdown`].
-    /// FluidList indices for the suggestion lists' group labels: past any
-    /// row index, static (a label is a gap to the nearest rule).
+    /// Row-list indices for the suggestion lists' group labels: past any
+    /// row index, static (never lit, never activated).
     pub(crate) const OMNI_HEADER_BASE: usize = 10_000;
 
     fn omnibox_list(
@@ -5351,11 +5346,13 @@ impl Harness {
             .shadow(p.floating_shadow())
             .role(gpui::Role::ListBox)
             .aria_label("Address suggestions");
-        // FF DropdownSearch: one fluid highlight that the pointer and the
-        // arrows both drive — a hover moves the selection, so Enter opens
-        // what is lit (it lit on the keyboard alone, with no pointer hover).
+        // One highlight that the pointer and the arrows both drive — a hover
+        // moves the selection, so Enter opens what is lit. The row list paints
+        // only the selection (`pointer(false)`), so the two never light two
+        // rows at once.
         let report = cx.entity().downgrade();
-        let mut rows_list = aui::interact::fluid_list("browse-omni-rows", aui::interact::Axis::Y)
+        let mut rows_list = aui::interact::row_list("browse-omni-rows")
+            .pointer(false)
             .label("Address suggestions")
             .gap(px(0.0))
             .highlighted(Some(selected))
