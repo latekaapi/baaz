@@ -361,6 +361,10 @@ struct FixtureSession {
     /// `turn/completed` record: what `Failed` stands on.
     #[serde(default)]
     error: Option<String>,
+    /// Which provider serves the row, by its wire id (`claude-code`,
+    /// `codex`, `muse`); absent or unknown keeps what the join resolved.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 /// [`FixtureSession::status`] without the field: settled, never running.
@@ -412,6 +416,9 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     }
     if let Some(error) = row.error.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         entry.last_error = Some(error.to_owned());
+    }
+    if let Some(provider) = row.provider.as_deref().and_then(crate::providers::ProviderId::parse_known) {
+        entry.provider = provider;
     }
     entry
 }

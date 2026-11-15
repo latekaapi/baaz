@@ -123,8 +123,8 @@ def _usage_script():
 # (`--sidebar-fixture`, rows instead of skeleton bars — allowed offline) and
 # scripted statuses for the footer account and the Providers rows, so the
 # capture reads like a signed-in window instead of "Checking providers...".
-def _p6_sidebar_fixture():
-    """fixtures/sidebar/projects.json re-dated relative to now. The rows'
+def _p6_sidebar_fixture(name="projects.json"):
+    """fixtures/sidebar/<name> re-dated relative to now. The rows'
     labels ("3d", "12d") and date groups read against the newest row —
     the live session in `child-lost-*` (stamped at the capture's wall
     clock), the newest fixture row in `launch-failure*` — so the fixture's
@@ -134,7 +134,7 @@ def _p6_sidebar_fixture():
     keeps its time of day and its calendar group), and half a day past a
     whole day against the wall clock, never where the day before or after
     would cross a 2/7/31-day group edge. Any time of day reads the same."""
-    with open(os.path.join(REPO, "fixtures", "sidebar", "projects.json")) as f:
+    with open(os.path.join(REPO, "fixtures", "sidebar", name)) as f:
         rows = json.load(f)
     days = [3.5, 3.5, 4.5, 4.5, 5.5, 7.5, 8.5, 9.5, 10.5, 12.5, 14.5, 16.5, 18.5, 20.5,
             22.5, 25.5, 27.5, 29.5]
@@ -165,8 +165,11 @@ def _p6_statuses(claude_auth):
     ])
 
 
+_P6_CLAUDE = {"SignedIn": {"email": "ada@example.com", "plan": "Claude Max", "method": "claude.ai"}}
+
+
 def _p6_entry(steps, claude_auth=None):
-    claude_auth = claude_auth or {"SignedIn": {"email": "ada@example.com", "plan": "Claude Max", "method": "claude.ai"}}
+    claude_auth = claude_auth or _P6_CLAUDE
     return {"shot": ["--no-connect", "--login", "signed-in"] + P6_SIDEBAR + ["--steps", steps],
             "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-p6-state-"),
                     "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(claude_auth)}}
@@ -743,6 +746,105 @@ ENTRIES.update({
     "jump-pill-signed-out":    _jump_entry("--tier", "subscription",
                                            steps="wait:1500;signed-out;wait:600;wheel:30;wait:300;wheel:30;wait:800"),
 })
+
+
+# docs/82 1.5 · populated captures: what the app looks like in use, where
+# every older entry shows an empty or near-empty window. The parts:
+#   - fixtures/sidebar/populated.json: 24 sessions over two projects and
+#     three providers, two running, three waiting on the person (two
+#     approvals, one question), two failed, the rest idle. (No "unread"
+#     row: Baaz has no unread state yet; Stage 3 adds it.)
+#   - fixtures/msp/synthetic-full.jsonl (make-full.py): one transcript
+#     with markdown, code, a table, every tool card, a diff, a plan, and an
+#     approval and a question still waiting.
+#   - a throwaway git repo named acme-web with an edit, a new file and a
+#     deletion, for the Files pane (the Changes pane is scripted in
+#     deterministic runs already).
+#   - the same scripted provider statuses as the P6 entries, so the footer
+#     reads signed in rather than "Checking providers...".
+# Every entry is offline and its own state dir; nothing sends a turn.
+def _fixture_repo():
+    root = os.path.join(tempfile.mkdtemp(prefix="uiprobe-repo-"), "acme-web")
+    os.makedirs(os.path.join(root, "src"))
+    def write(rel, text):
+        with open(os.path.join(root, rel), "w") as f:
+            f.write(text)
+    write("README.md", "# acme-web\n\nThe storefront.\n")
+    write("src/main.rs", 'fn main() {\n    println!("{}", acme_web::cents(1999));\n}\n')
+    write("src/lib.rs", "pub fn total(a: u32, b: u32) -> u32 {\n    a + b\n}\n")
+    git_env = {**os.environ, "GIT_AUTHOR_DATE": "2026-11-01T10:00:00Z",
+               "GIT_COMMITTER_DATE": "2026-11-01T10:00:00Z",
+               "GIT_AUTHOR_NAME": "Ada", "GIT_AUTHOR_EMAIL": "ada@example.com",
+               "GIT_COMMITTER_NAME": "Ada", "GIT_COMMITTER_EMAIL": "ada@example.com"}
+    for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "init"]):
+        subprocess.run(cmd, cwd=root, env=git_env, check=True, capture_output=True)
+    write("src/lib.rs", "pub fn total(a: u32, b: u32) -> u32 {\n    a.saturating_add(b)\n}\n\n"
+          "/// Cents as `d.cc`.\npub fn cents(v: u32) -> String {\n"
+          '    format!("{}.{:02}", v / 100, v % 100)\n}\n')
+    write("src/router.rs", "pub fn route(path: &str) -> &str {\n    path\n}\n")
+    os.remove(os.path.join(root, "README.md"))
+    return root
+
+
+_REPO_ACME = _fixture_repo()
+_POPULATED_SIDEBAR = ["--sidebar-fixture", _p6_sidebar_fixture("populated.json")]
+_FULL = ["--replay", "fixtures/msp/synthetic-full.jsonl"]
+
+
+def _populated(steps=None, replay=False, theme=None, workspace=None, sidebar=True):
+    args = ["--no-connect", "--login", "signed-in"]
+    if sidebar:
+        args += _POPULATED_SIDEBAR
+    if replay:
+        args += _FULL
+    if theme:
+        args += ["--theme", theme]
+    if workspace:
+        args += ["--workspace", workspace]
+    if steps:
+        args += ["--steps", steps]
+    return {"shot": args,
+            "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-populated-state-"),
+                    "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(_P6_CLAUDE)}}
+
+
+_PROJECTS = "project:fixtures/ws/acme-web;project:fixtures/ws/acme-internal;group-by:project"
+
+ENTRIES.update({
+    "shell-populated":         _populated(replay=True),
+    "shell-populated-light":   _populated(replay=True, theme="light"),
+    "sidebar-projects":        _populated(_PROJECTS),
+    "sidebar-projects-light":  _populated(_PROJECTS, theme="light"),
+    "transcript-full":         _populated(replay=True, sidebar=False),
+    "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
+    "transcript-full-top":     _populated("top", replay=True, sidebar=False),
+    "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),
+    "composer-menu-model":     _populated("fixture-models;model", replay=True),
+    "composer-menu-effort":    _populated("effort", replay=True),
+    "composer-menu-provider":  _populated("provider", replay=True),
+    "composer-menu-mode":      _populated("mode", replay=True),
+    "right-changes-full":      _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs", replay=True),
+    "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
+                                          workspace=_REPO_ACME),
+    "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
+    "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
+    "settings-sidebar":        _populated("settings:sidebar"),
+    "palette-populated":       _populated("palette"),
+    "dialog":                  _populated("error-dialog:offline"),
+    "menu":                    _populated("view-menu"),
+    "browse-spaces":           _populated("mode:browse;tab-new:https://example.com;tab-new:https://docs.rs/;"
+                                          "space-new:Research;tab-new:https://www.wikipedia.org/;"
+                                          "tab-new:https://doc.rust-lang.org/book/"),
+})
+
+POPULATED_ENTRIES = [
+    "shell-populated", "shell-populated-light", "sidebar-projects", "sidebar-projects-light",
+    "transcript-full", "transcript-full-light", "transcript-full-top", "transcript-full-mid",
+    "composer-menu-model", "composer-menu-effort", "composer-menu-provider", "composer-menu-mode",
+    "right-changes-full", "right-files-preview", "right-page", "terminal-dock", "settings-sidebar",
+    "palette-populated", "dialog", "menu", "browse-spaces",
+]
 
 
 def boot(entry, verb):

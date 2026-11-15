@@ -887,8 +887,13 @@ fn main() {
     let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
     // A `shell:` step raises a real approval over a live wire, which does not
     // land inside a fixed delay (finding F9).
-    let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
-    let await_steps = !args.steps.is_empty() || !args.login_steps.is_empty();
+    let waits = shot::CaptureWaits {
+        steps: !args.steps.is_empty() || !args.login_steps.is_empty(),
+        approval: args.steps.iter().any(|step| step.starts_with("shell:")),
+        // A replay runs no agent process: no child for the quit to orphan,
+        // and no frame that will ever end its turn.
+        turns: args.replay.is_none(),
+    };
     // 1. The asset source first: the harness's mascot PNGs, then `aui-icons`
     // over gpui-kit's set (see `crate::mascot`).
     let app = gpui_kit::application().with_assets(crate::mascot::BaazAssets);
@@ -1020,7 +1025,7 @@ fn main() {
         })
         .detach();
         match screenshot {
-            Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, capture, cx),
+            Some(path) => shot::capture_and_quit(handle, path, delay, waits, capture, cx),
             None => cx.activate(true),
         }
     });

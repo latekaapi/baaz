@@ -221,11 +221,20 @@ fn any_turn_running(handle: WindowHandle<Root>, cx: &AsyncApp) -> bool {
     })
 }
 
+/// What a capture waits for before it takes the shot and quits.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureWaits {
+    /// `--steps` or `--login-steps` were given.
+    pub steps: bool,
+    /// One of them is a `shell:`, which raises a real, server-minted
+    /// approval over a live wire.
+    pub approval: bool,
+    /// An agent child runs behind the window (anything but `--replay`), so
+    /// quitting under a running turn would orphan it.
+    pub turns: bool,
+}
+
 /// Waits for every scripted step, captures the window and exits the process.
-///
-/// `await_steps` is set whenever `--steps` or `--login-steps` were given, and
-/// `await_approval` when one of them is a `shell:`, which raises a real,
-/// server-minted approval over a live wire.
 ///
 /// The order matters, and used to be wrong: a capture used to apply the
 /// settling `delay` *before* checking on the steps at all, then gave the
@@ -239,7 +248,10 @@ fn any_turn_running(handle: WindowHandle<Root>, cx: &AsyncApp) -> bool {
 /// then any awaited approval, then the settling `delay` — once, last, never
 /// racing the steps it is meant to let settle — and only then, bounded by
 /// [`TURN_CEILING`], a wait for no turn to be running anywhere in the window
-/// before the process quits and takes the `muse` child with it.
+/// before the process quits and takes the `muse` child with it. A
+/// `--replay` run has no child to take, and no frame will ever end its
+/// turn, so [`CaptureWaits::turns`] false skips that wait (it used to hold
+/// every replay that ends mid-turn for the whole ceiling).
 ///
 /// Every wait here is a loop of [`POLL`] timers, never one `timer(delay)`:
 /// in a headless capture nothing else wakes the foreground executor, so a
@@ -252,13 +264,12 @@ pub fn capture_and_quit(
     handle: WindowHandle<Root>,
     path: PathBuf,
     delay: Duration,
-    await_steps: bool,
-    await_approval: bool,
+    waits: CaptureWaits,
     capture: CaptureToken,
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
-        if await_steps {
+        if waits.steps {
             // Readiness first: the app raises it when it can execute the
             // list at all. Only then does the start ceiling begin, so a
             // boot that never becomes ready cannot look like a script that
@@ -299,7 +310,7 @@ pub fn capture_and_quit(
                 }
             }
         }
-        if await_approval {
+        if waits.approval {
             let deadline = std::time::Instant::now() + APPROVAL_CEILING;
             while !capture.pending_approval() && std::time::Instant::now() < deadline {
                 cx.background_executor().timer(POLL).await;
@@ -318,7 +329,7 @@ pub fn capture_and_quit(
         // running — the only way to see the first frames after a send — and
         // waits for the turn after the write instead of before it.
         let midturn = std::env::var_os("BAAZ_SHOT_MIDTURN").is_some();
-        if !midturn {
+        if !midturn && waits.turns {
             wait_for_turns(handle, cx).await;
         }
         // Only the render stays on the UI thread; the Lanczos3 downsample,
@@ -356,7 +367,7 @@ pub fn capture_and_quit(
             Ok((w, h)) => println!("wrote {} ({w}\u{d7}{h})", path.display()),
             Err(err) => eprintln!("screenshot failed: {err:#}"),
         }
-        if midturn {
+        if midturn && waits.turns {
             wait_for_turns(handle, cx).await;
         }
         // The billing probe may still be driving the `muse` TUI on a
@@ -374,7 +385,7 @@ pub fn capture_and_quit(
         // reaches the wire. One line per failure naming the step, then the
         // machine-readable summary, then a non-zero exit. Unscripted
         // captures print nothing new.
-        if await_steps {
+        if waits.steps {
             let leftover: Vec<String> = cx.update(|cx| {
                 handle
                     .update(cx, |root, _window, cx| {
