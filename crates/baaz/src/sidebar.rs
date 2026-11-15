@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use aui_tokens::AgentState;
 pub use aui::nav::Grouping;
 
-use aui::nav::{Byline, DateGroup, ProjectGroup, RowDensity, RowStatus, RowStatusKind, SessionSummary};
+use aui::nav::{Byline, DateGroup, ProjectGroup, RowStatus, RowStatusKind, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
@@ -675,11 +675,11 @@ impl SessionEntry {
             && self.last_ask.as_deref().map(str::trim).is_none_or(str::is_empty)
     }
 
-    /// The row's state dot: running sessions pulse, sessions waiting on a
-    /// person read waiting, sessions holding a terminal error read failed,
-    /// everything else is idle. The compact row (agentic-ui v0.3.15) has no
-    /// status verb line, so this dot — plus the trailing slot — is the only
-    /// place the state reads: "Needs approval" and "Failed" ride both.
+    /// The row's state: running sessions spin, sessions waiting on a person
+    /// read waiting, sessions holding a terminal error read failed,
+    /// everything else is idle. The one-line row (docs/83 §4) has no status
+    /// line and no leading glyph, so the trailing state slot is the only
+    /// place the state reads: spinner, amber dot, danger dot.
     pub(crate) fn state(&self) -> AgentState {
         if self.running {
             AgentState::Running
@@ -743,10 +743,10 @@ impl SessionEntry {
     }
 
     /// The row's state verdict, against `now`: which sentence names it and
-    /// in which colour. The compact row (agentic-ui v0.3.15) draws no status
-    /// verb line of its own — `Needs approval` and `Failed` ride the
-    /// trailing slot (and the hover card), `Working` rides the pulsing dot,
-    /// and the rest read as the plain age. Total — every entry maps to
+    /// in which colour. The one-line row (docs/83 §4) draws no status line
+    /// of its own — the state rides the trailing slot (and the hover card),
+    /// and the sentence is the summary line's when Settings turns it on.
+    /// Total — every entry maps to
     /// exactly one state:
     ///
     /// 1. waiting on a person beats everything (an approval mid-turn still
@@ -902,9 +902,9 @@ impl SessionEntry {
         }
         // A provisional row carries no turn count, no running bit and no
         // status verdict — the index knows none of them — so no status is
-        // set: the row's trailing slot reads the plain age (never a false
-        // `Settled · 0 turns`), and the real row fills the verdict in when
-        // it lands. No layout jump either way: every density is one height
+        // set: the row says no verdict (never a false `Settled · 0
+        // turns`), and the real row fills the verdict in when
+        // it lands. No layout jump either way: a row is one height
         // in every state.
         if !self.provisional {
             let status = self.row_status(now);
@@ -916,19 +916,8 @@ impl SessionEntry {
         if self.running {
             row = row.pulse();
         }
-        let density = row_density(COMPACT_ROWS.load(std::sync::atomic::Ordering::Relaxed), summary_has_context(&row));
-        row.density(density)
+        row
     }
-}
-
-/// The Settings → Sidebar "Compact rows" switch, mirrored here so every
-/// summary builder reads it without threading the layout through each
-/// grouping; [`set_compact_rows`] keeps it in step with the layout.
-static COMPACT_ROWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Mirror the layout's compact-rows switch (on load and on every flip).
-pub fn set_compact_rows(on: bool) {
-    COMPACT_ROWS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The `workspace_root` a `--replay` capture ran in: the first `session/…`
@@ -1969,30 +1958,6 @@ pub(crate) fn hover_title(label: &str) -> String {
     flattened.chars().take(BUDGET - 1).collect::<String>() + "\u{2026}"
 }
 
-/// Which compact density a row draws ([`RowDensity`], agentic-ui v0.3.15):
-/// [`RowDensity::Two`] when the row carries a context/byline line and the
-/// sidebar stands in its comfortable mode; [`RowDensity::One`] otherwise.
-/// One row, one height per density — the library draws the context line in
-/// Two and skips it in One, so state keeps riding the leading glyph and the
-/// trailing slot either way.
-pub fn row_density(compact_rows: bool, has_context: bool) -> RowDensity {
-    if !compact_rows && has_context {
-        RowDensity::Two
-    } else {
-        RowDensity::One
-    }
-}
-
-/// Whether a built summary carries a context/byline line: anything but the
-/// empty line kind — attention, byline, preview, `project · branch`, legacy
-/// meta — counts, exactly as the row's second-line slot reads it.
-pub fn summary_has_context(summary: &SessionSummary) -> bool {
-    !matches!(
-        aui::nav::context_line_kind(summary),
-        aui::nav::ContextLineKind::Empty
-    )
-}
-
 /// The project a rowless session belongs to: its built row first, then
 /// Baaz's own override (drafts file their project before their first
 /// send), then the provider-lane record, else nothing. What marks the
@@ -2123,50 +2088,9 @@ mod tests {
         assert_eq!(one_line(&"x".repeat(200)).chars().count(), 80);
     }
 
-    /// [`row_density`]: Two needs both a context/byline line and the
-    /// comfortable mode — anything else draws the one-line row, where
-    /// state keeps riding the glyph and the trailing slot.
-    #[test]
-    fn compact_density_needs_a_context_line_in_comfortable_mode() {
-        assert_eq!(row_density(false, true), RowDensity::Two);
-        assert_eq!(row_density(false, false), RowDensity::One);
-        assert_eq!(row_density(true, true), RowDensity::One);
-        assert_eq!(row_density(true, false), RowDensity::One);
-    }
-
-    /// The Compact rows switch reaches every built summary: on, a row with
-    /// a byline still renders One; off, it renders Two.
-    #[test]
-    fn the_compact_rows_switch_sets_each_summarys_density() {
-        let now = Local::now();
-        let mut lined = entry("lined");
-        lined.description = "patched the validator".into();
-        set_compact_rows(true);
-        let compact = lined.summary(now).density;
-        set_compact_rows(false);
-        let comfortable = lined.summary(now).density;
-        assert_eq!(compact, Some(RowDensity::One));
-        assert_eq!(comfortable, Some(RowDensity::Two));
-    }
-
-    /// A summary with a byline counts as context; a bare row does not.
-    #[test]
-    fn a_summary_with_a_byline_counts_as_context() {
-        let now = Local::now();
-        let mut lined = entry("lined");
-        lined.description = "patched the validator".into();
-        let summary = lined.summary(now);
-        assert!(summary_has_context(&summary));
-        assert_eq!(row_density(false, summary_has_context(&summary)), RowDensity::Two);
-        let bare = entry("bare");
-        let summary = bare.summary(now);
-        assert!(!summary_has_context(&summary), "a bare row carries no second line");
-        assert_eq!(row_density(false, summary_has_context(&summary)), RowDensity::One);
-    }
-
-    /// No status verb line survives: "Needs approval" and "Failed" read
-    /// through the glyph state and the trailing words, "Working" through
-    /// the pulsing running dot.
+    /// The summary carries the state the trailing slot draws (docs/83 §4):
+    /// Waiting (the amber dot), Failed (the danger dot), Running (the
+    /// spinner); the trailing words still name the first two.
     #[test]
     fn waiting_failed_and_working_read_on_the_glyph_and_the_trailing_slot() {
         use aui::nav::row_trailing_kind;
@@ -2189,7 +2113,7 @@ mod tests {
         working.turn_started = Some(now);
         let summary = working.summary(now);
         assert_eq!(summary.state, AgentState::Running);
-        assert!(summary.pulse, "a working row pulses its dot");
+        assert!(summary.pulse, "a working row is live");
     }
 
     /// A 2,000-char single-line first message joins to a one-line row

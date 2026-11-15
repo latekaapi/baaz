@@ -28,7 +28,7 @@ use aui::nav::{
 };
 use aui::screens::UsageRowState;
 use aui::screens::sidebar::{
-    screen_item_count, sidebar_screen, Account, AccountAction,
+    screen_item_count, sidebar_screen, Account, AccountAction, AccountStatus,
     BrowseEditing, BrowseFolder, BrowseIntent, BrowseModel, BrowseNaming, BrowsePin, BrowseSpace, BrowseTab, Bylines,
     EditingState, FolderKind, GroupKey, Mode, NavItem, ProviderUsage, SidebarIntent, SidebarModel, SortKey,
     TaskFolderAction, UsageLine, ViewOption, ViewOptions,
@@ -320,6 +320,10 @@ pub(crate) struct SidebarKey {
     sidebar_open: bool,
     skills_on: usize,
     plan: Option<String>,
+    /// Settings › Sidebar › "Show a summary line": every row's height.
+    summary_line: bool,
+    /// The session whose `⋯` menu stands open.
+    row_menu: Option<String>,
     /// The usage cards tick while the account menu is open: the minute.
     usage_minute: i64,
     /// What agents are doing on pages: a task folder's word and dot follow it.
@@ -517,6 +521,8 @@ impl SidebarKey {
             sidebar_open: baaz.sidebar_open,
             skills_on: baaz.skills.catalog.on_count(),
             plan: muse_plan_label(baaz.tier.as_ref()),
+            summary_line: baaz.layout.summary_line,
+            row_menu: baaz.open_row_menu(cx),
             usage_minute: if account_menu_open { crate::account_usage::now_secs() / 60 } else { 0 },
         }
     }
@@ -534,6 +540,9 @@ pub(crate) struct SidebarRegroupKey {
     show_hidden: bool,
     show_empty: bool,
     show_archived: bool,
+    /// The summary line changes every session row's height: the list's
+    /// measured heights are stale, so it resets like a regroup.
+    summary_line: bool,
 }
 
 /// The hover card's seated anchor for a row: the sidebar pane's right edge
@@ -642,11 +651,6 @@ impl Harness {
         scrolled
     }
 
-    /// The rows above the Sessions caption: New session, Add project, and
-    /// Automations behind a Soon tag until it has somewhere to go. No side
-    /// inset of its own: the library's gutter positions the nav rows, and
-    /// Baaz block inset shifted them 4 px off the session rows'
-    /// gutter (measured: nav icon centre 41 vs session dot centre 36).
     /// The local favicon file for `tab`, once its icon has been fetched.
     fn favicon_file(&self, tab: &crate::browser::tabs::Tab) -> Option<String> {
         let url = tab.favicon.as_deref()?;
@@ -873,6 +877,7 @@ impl Harness {
     pub(crate) fn sidebar_model(&self, cx: &mut Context<Self>) -> SidebarModel {
         let view_menu_open = self.overlays.read(cx).is_open(MenuKind::ViewOptions);
         let account_menu_open = self.overlays.read(cx).is_open(MenuKind::Account);
+        let row_menu = self.open_row_menu(cx);
         // One identity per chain: the selected row is the head (Y2a).
         let selected = self
             .pending_id
@@ -883,12 +888,13 @@ impl Harness {
             session: session.into(),
             draft: self.rename.read(cx).value().to_string().into(),
         });
-        // The Skills row wears the on-count (D54): how many skills are on.
+        // The Skills row wears the on-count (D54): how many skills are on;
+        // the screen draws none at zero (docs/83 §4). Automations is gone
+        // until the feature exists (plan stage P).
         let on = self.skills.catalog.on_count();
         let nav = vec![
-            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, soon: false },
-            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32), soon: false },
-            NavItem { id: NAV_AUTOMATIONS.into(), label: "Automations".into(), icon: IconName::Zap, count: None, soon: true },
+            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None },
+            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32) },
         ];
         let group_by = match self.effective_group_by() {
             crate::layout::GroupBy::Project => GroupKey::Project,
@@ -926,6 +932,7 @@ impl Harness {
             hovered_projects_header: self.hovered_projects_header,
             highlighted: None,
             editing,
+            row_menu: row_menu.map(SharedString::from),
             loading: self.sidebar_loading(),
             view_menu_open,
             view_options: ViewOptions {
@@ -941,7 +948,8 @@ impl Harness {
                 pr_status_available: false,
                 search_all_projects: self.layout.search_all_projects,
             },
-            bylines: Bylines::All,
+            // Settings › Sidebar › "Show a summary line" (docs/83 §4).
+            bylines: if self.layout.summary_line { Bylines::Summary } else { Bylines::Off },
             account: self.sidebar_account(account_menu_open),
             browse,
         }
@@ -956,14 +964,14 @@ impl Harness {
         // start on when it is connected, else the first connected one in
         // switcher order. Muse's plan label still comes from its tier.
         let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan) = footer_identity(&self.connect_statuses, &self.new_provider, muse_plan);
+        let (name, email, initial, plan, status) = footer_identity(&self.connect_statuses, &self.new_provider, muse_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),
             email: email.into(),
             plan: plan.into(),
             initial: initial.into(),
-            tint: 0,
+            status,
             menu_open,
             usage,
         }
@@ -1130,6 +1138,7 @@ impl Harness {
                 | SidebarIntent::ViewOption(_)
                 | SidebarIntent::Account
                 | SidebarIntent::AccountAction(_)
+                | SidebarIntent::RowAction(_, RowAction::More)
                 | SidebarIntent::MenuBackdrop
                 | SidebarIntent::DismissMenus
                 | SidebarIntent::Hover(..)
@@ -1139,7 +1148,8 @@ impl Harness {
         );
         if !keeps_menu {
             let open = self.overlays.read(cx).is_open(MenuKind::ViewOptions)
-                || self.overlays.read(cx).is_open(MenuKind::Account);
+                || self.overlays.read(cx).is_open(MenuKind::Account)
+                || self.overlays.read(cx).is_open(MenuKind::SessionRow);
             if open {
                 self.overlays.update(cx, |overlays, _| overlays.menu = None);
             }
@@ -1150,11 +1160,7 @@ impl Harness {
             SidebarIntent::Nav(id) => match id.as_ref() {
                 NAV_PROJECTS => self.open_projects(false, window, cx),
                 NAV_SKILLS => self.open_skills(cx),
-                _ => {
-                    self.overlays.update(cx, |overlays, _| {
-                        overlays.toast("Automations", "Automations are not wired up yet.");
-                    });
-                }
+                _ => {}
             },
             SidebarIntent::Select(id) => {
                 // A sidebar click never arms the reveal: the clicked row is
@@ -1205,6 +1211,19 @@ impl Harness {
             }
             SidebarIntent::GroupAction(id, GroupAction::ToggleMore) | SidebarIntent::ToggleMore(id) => {
                 self.toggle_expanded(id.to_string(), cx);
+            }
+            // The row's `⋯`: its menu opens under it, or closes when it is
+            // that row's menu already (the press that closed it is not a
+            // reopen).
+            SidebarIntent::RowAction(id, RowAction::More) => {
+                self.close_row_detail();
+                self.forced_detail = None;
+                let open = self.open_row_menu(cx).as_deref() == Some(id.as_ref());
+                if !open && !self.just_dismissed(MenuKind::SessionRow) {
+                    self.open_row_menu_for(id.to_string(), cx);
+                } else {
+                    self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                }
             }
             SidebarIntent::RowAction(id, action) => {
                 self.close_row_detail();
@@ -1290,6 +1309,45 @@ impl Harness {
     /// Whether `kind` was dismissed by the press of the click now arriving:
     /// a trigger's own click after an outside-press close toggles it shut,
     /// never back open.
+    /// `sidebar-hover:<id>`: stand the sidebar's pointer state on `id`'s
+    /// row, as its own hover report would (the hover card is not armed).
+    /// An id with no session fails the step.
+    pub(crate) fn step_sidebar_hover(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = rest.trim();
+        if !self.sessions.iter().any(|entry| entry.id == id) {
+            return Err(format!("no session row `{id}`"));
+        }
+        self.sidebar_hovered = Some(id.to_owned());
+        self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        Ok(())
+    }
+
+    /// `row-menu:<id>`: open `id`'s row menu (never a toggle). An id with
+    /// no session fails the step.
+    pub(crate) fn step_row_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = rest.trim();
+        if !self.sessions.iter().any(|entry| entry.id == id) {
+            return Err(format!("no session row `{id}`"));
+        }
+        self.open_row_menu_for(id.to_owned(), cx);
+        Ok(())
+    }
+
+    /// The session whose row menu (`⋯`) stands open, if one does.
+    pub(crate) fn open_row_menu(&self, cx: &gpui::App) -> Option<String> {
+        self.overlays.read(cx).menu.as_ref().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.session.clone())
+    }
+
+    /// Open `session`'s row menu, replacing whatever menu was open.
+    pub(crate) fn open_row_menu_for(&mut self, session: String, cx: &mut Context<Self>) {
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.close_plus_menu(cx));
+        }
+        self.overlays.update(cx, |overlays, _| overlays.open(crate::overlays::Menu::session_row(session)));
+        self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
     fn just_dismissed(&mut self, kind: MenuKind) -> bool {
         match self.menu_dismissed.take() {
             Some((closed, at)) => closed == kind && at.elapsed() < std::time::Duration::from_millis(400),
@@ -1563,6 +1621,7 @@ impl Harness {
             show_hidden: self.show_hidden,
             show_empty: self.show_empty,
             show_archived: self.show_archived,
+            summary_line: self.layout.summary_line,
         }
     }
 
@@ -1971,7 +2030,6 @@ pub(crate) fn muse_plan_label(tier: Option<&Tier>) -> Option<String> {
 /// The nav row ids the screen reports back through `SidebarIntent::Nav`.
 const NAV_PROJECTS: &str = "projects";
 const NAV_SKILLS: &str = "skills";
-const NAV_AUTOMATIONS: &str = "automations";
 
 /// A Browse tab's id as the screen's stable row key, and back.
 fn browse_tab_key(id: crate::browser::TabId) -> String {
@@ -3579,16 +3637,18 @@ mod tests {
     }
 }
 
-/// The footer's `(name, email, initial, plan)`: the connected account of
-/// `preferred` (the new-session provider), else of the first connected
+/// The footer's `(name, email, initial, plan, tile)`: the connected account
+/// of `preferred` (the new-session provider), else of the first connected
 /// enabled provider in switcher order; "Checking providers…" while nothing
-/// has been probed; "No provider connected" otherwise. Muse is one provider
-/// among three here, never the app's account. Pure, so tests drive it.
+/// has been probed (the tile spins); "No provider connected" otherwise (the
+/// tile's amber dot: the provider problem, docs/83 §4). Muse is one
+/// provider among three here, never the app's account. Pure, so tests
+/// drive it.
 pub(crate) fn footer_identity(
     statuses: &[crate::provider_status::ProviderStatus],
     preferred: &str,
     muse_plan: impl Fn() -> String,
-) -> (String, String, String, String) {
+) -> (String, String, String, String, AccountStatus) {
     use crate::provider_status::{Auth as ProviderAuth, Headline};
     use crate::providers::ProviderId;
     let connected = |status: &&crate::provider_status::ProviderStatus| {
@@ -3608,17 +3668,22 @@ pub(crate) fn footer_identity(
             } else {
                 plan.clone()
             };
-            return (name, email.clone().unwrap_or_default(), initial, plan.unwrap_or_default());
+            return (name, email.clone().unwrap_or_default(), initial, plan.unwrap_or_default(), AccountStatus::Ready);
         }
     }
     let checking = statuses.iter().filter(|s| s.enabled).all(|s| s.headline() == Headline::Checking);
-    let name = if checking && !statuses.is_empty() { "Checking providers…" } else { "No provider connected" };
-    (name.to_owned(), String::new(), "?".to_owned(), String::new())
+    let (name, tile) = if checking && !statuses.is_empty() {
+        ("Checking providers…", AccountStatus::Checking)
+    } else {
+        ("No provider connected", AccountStatus::Attention)
+    };
+    (name.to_owned(), String::new(), "?".to_owned(), String::new(), tile)
 }
 
 #[cfg(test)]
 mod footer_identity_tests {
     use super::footer_identity;
+    use aui::screens::sidebar::AccountStatus;
     use crate::provider_status::{Auth, Installed, ProviderStatus};
     use crate::providers::ProviderId;
 
@@ -3643,8 +3708,9 @@ mod footer_identity_tests {
             status(ProviderId::ClaudeCode, signed_in("ada@example.com", "Claude Max")),
             status(ProviderId::Codex, signed_in("bo@example.com", "prolite")),
         ];
-        let (name, _, initial, plan) = footer_identity(&statuses, "codex", String::new);
+        let (name, _, initial, plan, tile) = footer_identity(&statuses, "codex", String::new);
         assert_eq!((name.as_str(), initial.as_str(), plan.as_str()), ("bo@example.com", "B", "prolite"));
+        assert_eq!(tile, AccountStatus::Ready);
         let (name, ..) = footer_identity(&statuses, "muse", String::new);
         assert_eq!(name, "ada@example.com", "a signed-out preferred provider falls through to the first connected");
     }
@@ -3652,9 +3718,11 @@ mod footer_identity_tests {
     #[test]
     fn nothing_connected_says_so_without_naming_a_provider() {
         let statuses = [status(ProviderId::Muse, Auth::SignedOut), status(ProviderId::Codex, Auth::SignedOut)];
-        assert_eq!(footer_identity(&statuses, "muse", String::new).0, "No provider connected");
+        let none = footer_identity(&statuses, "muse", String::new);
+        assert_eq!((none.0.as_str(), none.4), ("No provider connected", AccountStatus::Attention), "the amber dot, never a red tile");
         let checking = [ProviderStatus::checking(ProviderId::Muse), ProviderStatus::checking(ProviderId::Codex)];
-        assert_eq!(footer_identity(&checking, "muse", String::new).0, "Checking providers…");
+        let probing = footer_identity(&checking, "muse", String::new);
+        assert_eq!((probing.0.as_str(), probing.4), ("Checking providers…", AccountStatus::Checking), "the tile spins");
     }
 }
 

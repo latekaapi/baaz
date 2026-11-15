@@ -519,24 +519,11 @@ impl Harness {
     /// sidebar's empty states, the Resume palette and the search rows all read
     /// the same `Rc`; [`Self::invalidate_list`] is what drops it.
     /// Which grouping the sidebar draws: the person's explicit choice, else
-    /// Project once there is more than one adoption or a session that
-    /// resolves to none, else Date — so one adopted project with everything
-    /// in it draws exactly the date view it always did.
-    ///
-    /// Replayed rows are capture stand-ins, not sessions that failed to
-    /// adopt: they never flip the default on their own, so a `--replay`
-    /// capture draws as it always did whatever the store holds.
+    /// Project (docs/83 §4, task 2.5: group by project by default). An
+    /// install that never chose reads Project now even with one adopted
+    /// project, where it used to read Date; a stored choice of Date stands.
     pub(crate) fn effective_group_by(&self) -> crate::layout::GroupBy {
-        if let Some(mode) = self.layout.group_by {
-            return mode;
-        }
-        if self.projects.projects.len() >= 2 {
-            return crate::layout::GroupBy::Project;
-        }
-        if self.sessions.iter().any(|e| !e.replayed && e.project.is_none()) {
-            return crate::layout::GroupBy::Project;
-        }
-        crate::layout::GroupBy::Date
+        self.layout.group_by.unwrap_or(crate::layout::GroupBy::Project)
     }
 
     /// The Sessions view menu's "Group by project": persist the other mode

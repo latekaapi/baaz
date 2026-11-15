@@ -220,9 +220,8 @@ pub struct Layout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<f32>,
     /// The explicit grouping choice. `None` is "undecided": the window reads
-    /// Project once there is more than one adoption or a session that
-    /// resolves to none, else Date — and persists the choice the first time
-    /// the person toggles it.
+    /// Project (docs/83 §4) and persists the choice the first time the
+    /// person toggles it.
     #[serde(rename = "groupBy", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub group_by: Option<GroupBy>,
     /// Group ids standing closed: project ids, and `"other"` for the
@@ -255,12 +254,16 @@ pub struct Layout {
     /// is accepted and ignored — Settings no longer offers it.
     #[serde(rename = "groupBar", default)]
     pub group_bar: bool,
-    /// Compact sidebar rows: one line per session (title only) instead of
-    /// the comfortable two (title plus the context/byline line). Off by
-    /// default: rows draw comfortable. Owned by the Settings page's Sidebar
-    /// section — see [`Self::group_chevron`].
-    #[serde(rename = "compactRows", default)]
-    pub compact_rows: bool,
+    /// Settings › Sidebar › "Show a summary line" (docs/83 §4): every
+    /// session row takes a second line under its title (52 px) — the status
+    /// sentence, else the byline. OFF by default: rows are one line (32).
+    /// Replaces the old `compactRows` key (whose default was the two-line
+    /// row); that key is no longer read, so every install — the ones that
+    /// never touched it included, which were indistinguishable on disk
+    /// from a deliberate "comfortable" — starts on the new one-line default
+    /// (docs/83 §9, task 2.5).
+    #[serde(rename = "summaryLine", default)]
+    pub summary_line: bool,
     /// Whether project group rows trail the workspace branch in mono. Off
     /// by default (O4). Owned by the Settings dialog — see
     /// [`Self::group_chevron`].
@@ -457,7 +460,7 @@ impl Default for Layout {
             sort_by: SortBy::Recent,
             group_chevron: false,
             group_bar: false,
-            compact_rows: false,
+            summary_line: false,
             group_branch: false,
             auto_title: true,
             auto_summary: true,
@@ -623,7 +626,7 @@ mod tests {
         assert!(layout.search_all_projects);
         assert!(!layout.group_chevron);
         assert!(!layout.group_bar);
-        assert!(!layout.compact_rows);
+        assert!(!layout.summary_line);
         assert!(!layout.group_branch);
         let stored = Layout {
             sidebar_width: Some(300.0),
@@ -634,7 +637,7 @@ mod tests {
             sort_by: SortBy::Recent,
             group_chevron: true,
             group_bar: true,
-            compact_rows: true,
+            summary_line: true,
             group_branch: true,
             auto_title: true,
             auto_summary: true,
@@ -664,7 +667,7 @@ mod tests {
         assert!(text.contains("\"searchAllProjects\":false"));
         assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
-        assert!(text.contains("\"compactRows\":true"));
+        assert!(text.contains("\"summaryLine\":true"));
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"foldFinishedTurns\":false"));
         assert!(text.contains("\"feedbackMode\":true"));
@@ -686,7 +689,7 @@ mod tests {
         assert!(!back.search_all_projects);
         assert!(back.group_chevron);
         assert!(back.group_bar);
-        assert!(back.compact_rows);
+        assert!(back.summary_line);
         assert!(back.group_branch);
         assert!(!back.fold_finished_turns);
         assert!(back.feedback_mode);
@@ -712,7 +715,11 @@ mod tests {
         assert!(old.search_all_projects);
         assert!(!old.group_chevron);
         assert!(!old.group_bar);
-        assert!(!old.compact_rows);
+        assert!(!old.summary_line);
+        // The retired `compactRows` key reads as nothing: a two-line choice
+        // made under it lands on the new one-line default too.
+        let retired: Layout = serde_json::from_str("{\"compactRows\":false}").unwrap();
+        assert!(!retired.summary_line);
         assert!(!old.group_branch);
         // Both auto switches default ON, old files included: new behaviour
         // without a migration.

@@ -64,7 +64,7 @@ use crate::providers::ProviderId;
 pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     match id {
         "group_chevron" => layout.group_chevron = on,
-        "compact_rows" => layout.compact_rows = on,
+        "summary_line" => layout.summary_line = on,
         "group_branch" => layout.group_branch = on,
         "auto_title" => layout.auto_title = on,
         "auto_summary" => layout.auto_summary = on,
@@ -244,7 +244,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
         "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
         | "feedback_mode" => Some("general"),
-        "group_chevron" | "compact_rows" | "group_branch" => Some("sidebar"),
+        "group_chevron" | "summary_line" | "group_branch" => Some("sidebar"),
         "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
@@ -301,6 +301,11 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     ]
 }
 
+/// Settings › Sidebar's summary-line switch (docs/83 §4), shared by the
+/// row model and the page so the two cannot drift.
+const SUMMARY_LINE_LABEL: &str = "Show a summary line";
+const SUMMARY_LINE_DETAIL: &str = "Add a second line under each session: what it is waiting on, or what it last said.";
+
 /// The Sidebar page's switch rows, from the layout they read: the row
 /// model the page renders and the coverage test enumerates.
 pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
@@ -312,12 +317,10 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             on: layout.group_chevron,
         },
         SettingsRow::Switch {
-            id: SharedString::from("compact_rows"),
-            label: SharedString::from("Compact rows"),
-            detail: Some(SharedString::from(
-                "Row density: one line per session (title only). Off keeps the comfortable two-line rows.",
-            )),
-            on: layout.compact_rows,
+            id: SharedString::from("summary_line"),
+            label: SharedString::from(SUMMARY_LINE_LABEL),
+            detail: Some(SharedString::from(SUMMARY_LINE_DETAIL)),
+            on: layout.summary_line,
         },
         SettingsRow::Switch {
             id: SharedString::from("group_branch"),
@@ -665,7 +668,6 @@ impl Harness {
         if !apply_setting(&mut self.layout, id, on) {
             return;
         }
-        crate::sidebar::set_compact_rows(self.layout.compact_rows);
         crate::layout::write(&self.layout);
         // B12fix: the fold switch applies live to every open view, not
         // just the next frame's settings rows — parked views fold too.
@@ -773,7 +775,16 @@ impl Harness {
                 }
                 None => Err(format!("unknown search engine {value:?}")),
             },
-            _ => Err(format!("unknown settings key {key:?} (expected search-engine=<name>)")),
+            "summary-line" => {
+                let on = match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("summary-line wants on or off, not {value:?}")),
+                };
+                self.flip_setting("summary_line", on, cx);
+                Ok(())
+            }
+            _ => Err(format!("unknown settings key {key:?} (expected search-engine=<name> or summary-line=<on|off>)")),
         }
     }
 
@@ -1516,7 +1527,7 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Sidebar: chevron, row density, branch name — plus the note
+    /// Sidebar: chevron, summary line, branch name — plus the note
     /// that grouping and sort live in the sidebar's view menu. The active
     /// session's project marks itself with an accent bar in every mode; no
     /// switch gates it anymore.
@@ -1531,10 +1542,10 @@ impl Harness {
                 cx,
             ),
             self.settings_switch_row(
-                "compact_rows",
-                "Row density: compact (1 line) / comfortable (2 lines)",
-                "One line per session shows the title only; two add the context line. Comfortable is the default.",
-                self.layout.compact_rows,
+                "summary_line",
+                SUMMARY_LINE_LABEL,
+                SUMMARY_LINE_DETAIL,
+                self.layout.summary_line,
                 cx,
             ),
             self.settings_switch_row(
@@ -2195,10 +2206,10 @@ mod tests {
         let mut layout = Layout::default();
         assert!(apply_setting(&mut layout, "group_chevron", true));
         assert!(layout.group_chevron);
-        assert!(apply_setting(&mut layout, "compact_rows", true));
-        assert!(layout.compact_rows);
-        assert!(apply_setting(&mut layout, "compact_rows", false));
-        assert!(!layout.compact_rows);
+        assert!(apply_setting(&mut layout, "summary_line", true));
+        assert!(layout.summary_line);
+        assert!(apply_setting(&mut layout, "summary_line", false));
+        assert!(!layout.summary_line);
         assert!(apply_setting(&mut layout, "group_branch", true));
         assert!(layout.group_branch);
         assert!(apply_setting(&mut layout, "auto_title", false));
@@ -2472,7 +2483,7 @@ mod tests {
         assert_eq!(normalize_settings_target("providers/nope", ""), "general");
         // A row id opens its home page.
         assert_eq!(normalize_settings_target("auto_title", ""), "general");
-        assert_eq!(normalize_settings_target("compact_rows", ""), "sidebar");
+        assert_eq!(normalize_settings_target("summary_line", ""), "sidebar");
         assert_eq!(normalize_settings_target("fold_finished_turns", ""), "general");
         assert_eq!(normalize_settings_target("provider-enabled:codex", ""), "providers");
         assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "providers");
@@ -2597,7 +2608,7 @@ mod tests {
             "fold_finished_turns",
             "feedback_mode",
             "group_chevron",
-            "compact_rows",
+            "summary_line",
             "group_branch",
         ] {
             assert!(seen.contains_key(id), "{id} renders somewhere");

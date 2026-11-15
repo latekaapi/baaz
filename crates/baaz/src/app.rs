@@ -1786,7 +1786,6 @@ impl Harness {
             saved_list: None,
             layout: {
                 let layout = layout::read();
-                crate::sidebar::set_compact_rows(layout.compact_rows);
                 crate::browser::agents::set_current(&layout.agents);
                 layout
             },
