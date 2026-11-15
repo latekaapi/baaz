@@ -34,9 +34,9 @@ zip = "2"
 # gpui, pinned to the exact version agentic-ui resolves, so `cargo tree -d` shows
 # one gpui-pre and one gpui-kit here and the two repositories build the same
 # library code. agentic-ui states `^0.3.1`; its lock is 0.3.3.
-gpui = { package = "gpui-pre", version = "=0.3.3" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.3" }
-gpui-kit = "0.6.0"
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12" }
+gpui-kit = "=0.9.1"
 
 # The aui component library, pinned to a tag rather than tracked on a branch:
 # `aui` is pre-1.0 and breaks between minor versions, so a moving `main`

@@ -260,7 +260,7 @@ pub struct Args {
     /// `--bench-cadence-ms <ms>`: the delay between streamed events.
     pub bench_cadence: Duration,
     /// `--bench-scroll top|mid|tail|sweep|wheel`: how the list is driven.
-    /// `wheel` dispatches real `ScrollWheelEvent`s at the transcript centre
+    /// `wheel` dispatches real `ScrollEvent`s at the transcript centre
     /// after the stream lands (the scroll-jank instrument); the rest drive
     /// `scroll_to` while the stream lands. See `docs/02-app.md` §6.
     pub bench_scroll: bench::BenchScroll,

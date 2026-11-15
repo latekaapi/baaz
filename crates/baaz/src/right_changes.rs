@@ -853,7 +853,7 @@ pub(crate) fn changes_screen(
             .track_scroll(&scroll)
             // The sticky row is decided in render: a scroll re-renders, after
             // the wheel has moved the offset (live 2026-10-19: it never stuck).
-            .on_scroll_wheel(cx.listener(|_: &mut Harness, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
+            .on_scroll(cx.listener(|_: &mut Harness, _: &gpui::ScrollEvent, _, cx| cx.notify()))
             .pt(px(4.0))
             .px(px(6.0))
             .pb(px(180.0))

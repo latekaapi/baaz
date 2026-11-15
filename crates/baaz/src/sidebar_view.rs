@@ -828,7 +828,7 @@ impl Harness {
             // disarms a pending reveal (theirs wins) and dismisses the group
             // menu and the hover card, like the scripted sweep does. The
             // library list scrolls itself; this only listens.
-            .on_scroll_wheel(move |_, _, cx| {
+            .on_scroll(move |_, _, cx| {
                 let _ = wheel.update(cx, |this, cx| this.note_sidebar_wheel(cx));
             })
             .on_children_prepainted(move |bounds, _, cx| {

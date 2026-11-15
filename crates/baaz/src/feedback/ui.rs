@@ -2122,7 +2122,7 @@ impl crate::app::Harness {
                     cx.stop_propagation();
                 }),
             )
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .children(self.render_feedback_hover(cx, win_w, win_h))
             .children(self.render_feedback_dragbox(cx))
             .children(self.render_feedback_pins(cx, win_w, win_h));

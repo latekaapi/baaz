@@ -806,7 +806,7 @@ impl Harness {
 /// escape, tab, backspace, delete, space, arrows, home/end/page-up/page-down,
 /// f1–f12). Pure, so the unit tests pin it without posting anything.
 pub(crate) fn key_event_parts(keystroke: &str) -> Option<(u16, u64)> {
-    let parsed = gpui::Keystroke::parse(keystroke.trim()).ok()?;
+    let parsed = crate::keymap::parse_keystroke(keystroke.trim()).ok()?;
     let mut flags: u64 = 0;
     if parsed.modifiers.control {
         flags |= 1 << 18;

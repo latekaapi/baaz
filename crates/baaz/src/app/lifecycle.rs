@@ -1040,7 +1040,7 @@ impl Harness {
                 .ok_or_else(|| format!("`{at}` is not a window point x,y"))?
         };
         window.dispatch_event(
-            PlatformInput::ScrollWheel(ScrollWheelEvent {
+            PlatformInput::Scroll(ScrollEvent {
                 position,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                 ..Default::default()
@@ -1122,7 +1122,7 @@ impl Harness {
             let _ = handle.update(cx, |_, window, cx| {
                 for _ in 0..n {
                     window.dispatch_event(
-                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        PlatformInput::Scroll(ScrollEvent {
                             position: at,
                             delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                             ..Default::default()
@@ -8887,7 +8887,7 @@ done
     fn type_unparked(vc: &mut gpui::VisualTestContext, keys: &[&str]) {
         let window = vc.update(|window, _| window.window_handle());
         for key in keys {
-            vc.cx.dispatch_keystroke(window, gpui::Keystroke::parse(key).expect("a keystroke"));
+            vc.cx.dispatch_keystroke(window, crate::keymap::parse_keystroke(key).expect("a keystroke"));
         }
     }
 

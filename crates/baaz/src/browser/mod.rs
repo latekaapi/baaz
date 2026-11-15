@@ -4329,7 +4329,7 @@ impl Harness {
         for id in aui_cef::take_blocked_commands() {
             crate::baaz_log!("browser: blocked Chromium command {id}");
         }
-        match gpui::Keystroke::parse(keystroke) {
+        match crate::keymap::parse_keystroke(keystroke) {
             Ok(parsed) => {
                 crate::baaz_log!("browser: page routed {keystroke}");
                 // Deferred, never inline: `dispatch_keystroke` runs action
@@ -4480,13 +4480,13 @@ pub(crate) fn page_wheel_claimed(wheel: &aui_cef::PageWheel) -> bool {
 /// The gpui wheel event a claimed page swipe replays as: Shift held, the
 /// precise deltas as pixels (a mouse's as lines), its phase.
 #[cfg(feature = "cef")]
-pub(crate) fn page_wheel_event(wheel: &aui_cef::PageWheel) -> gpui::ScrollWheelEvent {
+pub(crate) fn page_wheel_event(wheel: &aui_cef::PageWheel) -> gpui::ScrollEvent {
     let delta = if wheel.precise {
         gpui::ScrollDelta::Pixels(gpui::point(gpui::px(wheel.dx as f32), gpui::px(wheel.dy as f32)))
     } else {
         gpui::ScrollDelta::Lines(gpui::point(wheel.dx as f32, wheel.dy as f32))
     };
-    gpui::ScrollWheelEvent {
+    gpui::ScrollEvent {
         position: gpui::point(gpui::px(wheel.x as f32), gpui::px(wheel.y as f32)),
         delta,
         modifiers: gpui::Modifiers { shift: true, ..Default::default() },
@@ -4495,6 +4495,7 @@ pub(crate) fn page_wheel_event(wheel: &aui_cef::PageWheel) -> gpui::ScrollWheelE
             aui_cef::WheelPhase::Moved => gpui::TouchPhase::Moved,
             aui_cef::WheelPhase::Ended => gpui::TouchPhase::Ended,
         },
+        source: Default::default(),
     }
 }
 

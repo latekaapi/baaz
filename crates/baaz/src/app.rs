@@ -69,7 +69,7 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme, Density, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _,
+    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, ListState, SharedString, Subscription, Task, Window,
 };

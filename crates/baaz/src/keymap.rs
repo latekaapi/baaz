@@ -246,7 +246,30 @@ fn field_twin(context: Option<&str>, keystroke: &str) -> Option<String> {
 /// is unknown. The table constructor ([`build_bindings`]) and the user-file
 /// loader share this, so the two can never disagree about what an action is
 /// called: the table panics on `None`, the loader warns on it.
+/// Parse a keystroke from text this app did not write into the binary (the
+/// person's keymap, a step script, a page's key event): gpui-pre 0.3.12's
+/// `Keystroke::parse` takes only `&'static str`.
+pub(crate) fn parse_keystroke(source: &str) -> Result<gpui::Keystroke, gpui::InvalidKeystrokeError> {
+    gpui::Keystroke::parse_with_os(source, gpui::OperatingSystem::Mac)
+}
+
+/// `keystroke` as the `'static` string gpui's `KeyBinding::new` takes:
+/// each distinct keystroke text is leaked once and reused, so the pool is
+/// bounded by the keystrokes a person ever wrote (gpui-pre 0.3.12 made
+/// `KeyBinding::new` and `Keystroke::parse` take `&'static str`).
+pub(crate) fn interned(keystroke: &str) -> &'static str {
+    static POOL: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut pool = POOL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = pool.iter().find(|known| **known == keystroke) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(keystroke.to_owned().into_boxed_str());
+    pool.push(leaked);
+    leaked
+}
+
 fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> Option<gpui::KeyBinding> {
+    let keystroke = interned(keystroke);
     match action {
         "SendTurn" => Some(gpui::KeyBinding::new(keystroke, crate::app::SendTurn, context)),
         "CommitMessage" => Some(gpui::KeyBinding::new(keystroke, crate::app::CommitMessage, context)),
@@ -405,7 +428,7 @@ fn claimable_keystroke(keystroke: &gpui::Keystroke) -> bool {
         return false;
     }
     !PAGE_OWNED.iter().any(|owned| {
-        gpui::Keystroke::parse(owned).is_ok_and(|parsed| parsed == *keystroke)
+        crate::keymap::parse_keystroke(owned).is_ok_and(|parsed| parsed == *keystroke)
     })
 }
 
@@ -430,7 +453,7 @@ fn claimable_keystroke(keystroke: &gpui::Keystroke) -> bool {
 pub(crate) fn claimed_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
     let mut claimed: Vec<gpui::Keystroke> = Vec::new();
     for keystroke in AUI_ROOT_KEYS {
-        if let Ok(parsed) = gpui::Keystroke::parse(keystroke) {
+        if let Ok(parsed) = crate::keymap::parse_keystroke(keystroke) {
             if claimable_keystroke(&parsed) && !claimed.contains(&parsed) {
                 claimed.push(parsed);
             }
@@ -577,7 +600,7 @@ pub(crate) fn refresh_claimed_from_disk() {
 /// Without either it would be dead code, and `-D warnings` says so loudly.
 #[cfg(any(test, feature = "cef"))]
 pub(crate) fn claims_keystroke(keystroke: &str) -> bool {
-    let Ok(incoming) = gpui::Keystroke::parse(keystroke) else {
+    let Ok(incoming) = crate::keymap::parse_keystroke(keystroke) else {
         return false;
     };
     if !BROWSE_LIVE.with(|slot| slot.get())
@@ -734,9 +757,9 @@ pub(crate) fn load_from_path(path: &std::path::Path, ignore_user: bool) -> Loade
             // consumes the keystroke — the same mechanism the `BaazTerminal`
             // rows use to hand keys to the grid.
             None => {
-                bindings.push(gpui::KeyBinding::new(&entry.keystroke, gpui::NoAction {}, context));
+                bindings.push(gpui::KeyBinding::new(interned(&entry.keystroke), gpui::NoAction {}, context));
                 if let Some(twin) = field_twin(context, &entry.keystroke) {
-                    bindings.push(gpui::KeyBinding::new(&entry.keystroke, gpui::NoAction {}, Some(&twin)));
+                    bindings.push(gpui::KeyBinding::new(interned(&entry.keystroke), gpui::NoAction {}, Some(&twin)));
                 }
             }
             Some(action) => {
@@ -799,7 +822,8 @@ fn normalise_context(context: Option<&str>) -> Option<String> {
 /// A user-written keystroke gpui can parse, as a single keystroke: chords
 /// and sequences are not supported, and gpui's own parser decides.
 fn valid_keystroke(keystroke: &str) -> bool {
-    keystroke.split_whitespace().count() == 1 && gpui::Keystroke::parse(keystroke).is_ok()
+    keystroke.split_whitespace().count() == 1
+        && parse_keystroke(keystroke).is_ok()
 }
 
 /// Validate parsed user blocks in file order: the accepted entries plus one
@@ -1275,7 +1299,7 @@ mod tests {
             };
             assert_eq!(
                 stroke.inner(),
-                &gpui::Keystroke::parse(keystroke).expect("the table parses"),
+                &crate::keymap::parse_keystroke(keystroke).expect("the table parses"),
                 "{keystroke} swallow moved keystrokes"
             );
         }
@@ -1837,7 +1861,7 @@ mod tests {
 
     /// Whether the claimed set holds `keystroke`, parsed structurally.
     fn claimed_has(claimed: &[gpui::Keystroke], keystroke: &str) -> bool {
-        let parsed = gpui::Keystroke::parse(keystroke).expect("the test's own keystroke parses");
+        let parsed = crate::keymap::parse_keystroke(keystroke).expect("the test's own keystroke parses");
         claimed.contains(&parsed)
     }
 

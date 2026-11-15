@@ -2943,9 +2943,9 @@ mod tests {
         assert!(vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "wrapping is on by default");
         // ⌥Z is the preview body's key (VS Code's Toggle Word Wrap); the
         // Wrap button and the key both land in `toggle_code_wrap`.
-        assert!(crate::right_files::is_wrap_key(&gpui::Keystroke::parse("alt-z").unwrap()));
-        assert!(!crate::right_files::is_wrap_key(&gpui::Keystroke::parse("cmd-alt-z").unwrap()));
-        assert!(!crate::right_files::is_wrap_key(&gpui::Keystroke::parse("z").unwrap()));
+        assert!(crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("alt-z").unwrap()));
+        assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("cmd-alt-z").unwrap()));
+        assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("z").unwrap()));
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
         assert!(!vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "the toggle turns wrapping off");
         assert!(!vc.update(|_, cx| baaz.read(cx).layout.code_wrap), "the choice goes into the layout");

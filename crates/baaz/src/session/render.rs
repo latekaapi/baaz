@@ -2985,7 +2985,7 @@ fn wheel_capture(cx: &mut Context<SessionView>) -> gpui::AnyElement {
         // every `div` scroll container use.
         move |bounds, window, _cx| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_bounds, hitbox, window, _cx| {
-            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+            window.on_mouse_event(move |event: &gpui::ScrollEvent, phase, window, cx| {
                 if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                     return;
                 }

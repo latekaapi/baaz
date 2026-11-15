@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     point, px, App, AppContext as _, AsyncApp, Context, Entity, IntoElement, ListOffset,
-    ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
+    ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollEvent, Styled as _,
     Window, WindowHandle,
 };
 use gpui_kit::component::Root;
@@ -245,7 +245,7 @@ async fn drive_bursts(
                         // where it has something to destroy.
                         if zeroed && i == BURST_EVENTS / 2 {
                             window.dispatch_event(
-                                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                PlatformInput::Scroll(ScrollEvent {
                                     position: point(size.width * 0.5, size.height * 0.5),
                                     delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
                                     ..Default::default()
@@ -256,7 +256,7 @@ async fn drive_bursts(
                             trail.push(view.read(cx).bench_list_px());
                         }
                         window.dispatch_event(
-                            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            PlatformInput::Scroll(ScrollEvent {
                                 position: point(size.width * 0.5, size.height * 0.5),
                                 delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                                 ..Default::default()
@@ -337,7 +337,7 @@ struct WheelOutcome {
     scroll_bys: u64,
 }
 
-/// The wheel instrument: pin the tail, then dispatch real `ScrollWheelEvent`s
+/// The wheel instrument: pin the tail, then dispatch real `ScrollEvent`s
 /// at the window centre — where the transcript is — one per frame, sampling
 /// the list's `logical_scroll_top` after each.
 ///
@@ -379,7 +379,7 @@ async fn drive_wheel(
                 .update(cx, |_, window, cx| {
                     let size = window.bounds().size;
                     window.dispatch_event(
-                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        PlatformInput::Scroll(ScrollEvent {
                             position: point(size.width * 0.5, size.height * 0.5),
                             delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                             ..Default::default()
