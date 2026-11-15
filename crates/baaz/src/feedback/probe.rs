@@ -77,6 +77,7 @@ impl ElementProbe for MacProbe {
 }
 
 /// A scripted probe for tests: the smallest-area hit containing the point.
+#[cfg(test)]
 pub struct FakeProbe {
     /// The hits to choose from, in any order.
     pub hits: Vec<ElementHit>,
@@ -87,6 +88,7 @@ pub struct FakeProbe {
     pub enrich_calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
+#[cfg(test)]
 impl FakeProbe {
     /// The smallest-area hit containing `(x, y)`, in window-logical pixels.
     /// The [`ElementProbe`] impl delegates to this; tests call it directly
@@ -109,6 +111,7 @@ impl FakeProbe {
     }
 }
 
+#[cfg(test)]
 impl ElementProbe for FakeProbe {
     fn activate(&self, _window: &mut gpui::Window) {}
 

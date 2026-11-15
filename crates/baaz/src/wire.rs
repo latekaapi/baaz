@@ -1,8 +1,8 @@
 //! The one shape every wire call in this app has: run the blocking request on
 //! the background executor, then come back to the entity with the result.
 //!
-//! Every `muse-client` request blocks (`docs/07-architecture.md` §3), so none
-//! of them may be issued from the UI thread. The pattern that follows from
+//! Every provider request blocks — a `muse-client` call, a provider
+//! adapter's `send` — so none of them may be issued from the UI thread. The pattern that follows from
 //! that — `background_spawn` the request, `cx.spawn` a foreground task, push
 //! it onto the entity's `tasks` so it dies with the entity, `await` the call
 //! and hand the result to `update` — used to be retyped at some forty sites
@@ -124,11 +124,8 @@ fn park(tasks: &mut Vec<Task<()>>, task: Task<()>) {
 /// after the entity is gone is dropped rather than panicking, exactly as
 /// before.
 ///
-/// No production caller yet — the committed tests below exercise the shape,
-/// and the view migration moves the first production lane onto it — so the
-/// shape ships as dead code until then rather than as a second copy typed
-/// at each future call site.
-#[allow(dead_code)]
+/// Every provider-lane command a session view sends goes through
+/// [`ProviderCall::provider_call`] (`SessionView::provider_send`).
 pub trait ProviderCall: WireCall {
     /// Run `command` through [`Provider::send`] on the background executor
     /// and hand its result to `then` on the UI thread.
@@ -143,24 +140,6 @@ pub trait ProviderCall: WireCall {
         F: FnOnce(&mut Self, Result<Ack, ProviderError>, &mut Context<Self>) + 'static,
     {
         self.wire_call(
-            cx,
-            move || provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).send(command),
-            then,
-        );
-    }
-
-    /// [`Self::provider_call`] for a completion that needs the window.
-    fn provider_call_in<F>(
-        &mut self,
-        cx: &mut Context<Self>,
-        provider: SharedProvider,
-        command: Command,
-        then: F,
-    )
-    where
-        F: FnOnce(&mut Self, Result<Ack, ProviderError>, &mut Window, &mut Context<Self>) + 'static,
-    {
-        self.wire_call_in(
             cx,
             move || provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).send(command),
             then,
@@ -228,37 +207,6 @@ mod tests {
 
         let seen = vc.update(|_, cx| probe.read(cx).seen.clone());
         assert_eq!(seen, Some(Ok("a-latest".to_owned())));
-    }
-
-    /// The window variant returns through `update_in` with the same ack.
-    #[gpui::test]
-    fn a_command_with_a_window_completion_comes_back_too(cx: &mut gpui::TestAppContext) {
-        let mut provider = Provider::new(ScriptedProvider::new());
-        provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
-        let provider = Arc::new(Mutex::new(provider));
-
-        let vc = cx.add_empty_window();
-        let probe = vc.update(|_, cx| cx.new(|_| Probe { tasks: Vec::new(), seen: None }));
-        vc.update(|_, cx| {
-            probe.update(cx, |probe, cx| {
-                probe.provider_call_in(
-                    cx,
-                    Arc::clone(&provider),
-                    Command::FollowSession { session_id: "s-scripted".into(), after: None },
-                    |probe, result, _window, _| {
-                        probe.seen = Some(match result {
-                            Ok(Ack::Accepted) => Ok("followed".to_owned()),
-                            Ok(other) => Err(format!("wrong ack: {other:?}")),
-                            Err(error) => Err(error.to_string()),
-                        });
-                    },
-                );
-            });
-        });
-        vc.run_until_parked();
-
-        let seen = vc.update(|_, cx| probe.read(cx).seen.clone());
-        assert_eq!(seen, Some(Ok("followed".to_owned())));
     }
 
     /// The gate refuses through the same shape: an `Unavailable`

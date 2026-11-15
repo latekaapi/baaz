@@ -118,7 +118,7 @@ mod wire;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use aui_tokens::{scale, AuiTheme, ThemeKind};
+use aui_tokens::ThemeKind;
 use gpui::{px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions};
 use gpui_kit::component::{Root, TitleBar};
 
@@ -589,7 +589,6 @@ fn run_bench(args: Args) {
         if crate::clock::deterministic() {
             cx.set_reduce_motion(true);
         }
-        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
         app::bind_keys(cx);
         app::set_menus(cx);
 
@@ -925,8 +924,6 @@ fn main() {
         if crate::clock::deterministic() {
             cx.set_reduce_motion(true);
         }
-        // 3. The product text scale.
-        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
         // 4. The app's own keys, then the native menu bar: macOS reads each
         // menu item's shortcut from the keymap, so the menus come second.
         app::bind_keys(cx);

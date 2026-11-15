@@ -14,7 +14,6 @@
 // F2/F3 own the UI on top of this API, so items that are only constructed
 // or read there read as dead to this lane's compiler: silence that lint for
 // the whole module rather than sprinkling per-item allows.
-#![allow(dead_code)]
 
 mod capture;
 mod probe;
@@ -25,7 +24,9 @@ mod report;
 #[allow(unused_imports)]
 pub use capture::{crop_with_outline, render_window, to_logical};
 #[allow(unused_imports)]
-pub use probe::{enrich_from_debug_json, human_role, ElementProbe, FakeProbe, MacProbe};
+pub use probe::{enrich_from_debug_json, human_role, ElementProbe, MacProbe};
+#[cfg(test)]
+pub use probe::FakeProbe;
 #[allow(unused_imports)]
 pub use report::{feedback_root, render_json, render_markdown, write_report};
 

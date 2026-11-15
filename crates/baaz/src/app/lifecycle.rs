@@ -3054,7 +3054,6 @@ impl Harness {
         self.drafts.retain(|_, id| id != provisional);
         self.unsent.remove(provisional);
         self.terminal_providers.remove(provisional);
-        self.right_kind_migrate.remove(provisional);
         if self.overrides.remove(provisional).is_some() {
             crate::sessions::write(&self.overrides);
             self.invalidate_list();
@@ -3210,9 +3209,6 @@ impl Harness {
             self.overrides.insert(new.to_owned(), meta);
             crate::sessions::write(&self.overrides);
             self.invalidate_list();
-        }
-        if self.right_kind_migrate.remove(old) {
-            self.right_kind_migrate.insert(new.to_owned());
         }
         match &mut self.line_ui {
             super::agent_window::LineUi::Answer { session, .. }

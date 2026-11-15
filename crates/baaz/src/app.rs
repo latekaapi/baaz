@@ -960,7 +960,6 @@ pub struct Harness {
     /// spelling, so the per-session round-trip restores exactly what the
     /// pane showed; a verbatim handoff carry never marks, so it persists
     /// verbatim. Never persists.
-    pub(crate) right_kind_migrate: std::collections::HashSet<String>,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1766,7 +1765,6 @@ impl Harness {
             right_snapshot_print: None,
             right_watch: None,
             right_refresh_again: false,
-            right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -2884,7 +2882,7 @@ impl Harness {
     /// view they load into.
     pub(crate) fn right_tab_index(kind: layout::RightKind) -> usize {
         match kind {
-            layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git => 0,
+            layout::RightKind::Changes => 0,
             layout::RightKind::Files => 1,
             layout::RightKind::Browser => 2,
         }
@@ -2904,30 +2902,6 @@ impl Harness {
         .into_iter()
         .map(|(kind, icon)| TabItem::new(kind.slug(), kind.label(), icon).closable(false))
         .collect()
-    }
-
-    /// Copy the overrides with the marked sessions' legacy right-pane kinds
-    /// migrated onto the merged view (B8fix): a marked pre-merge `diff`/`git`
-    /// lands on disk as `changes`, so a user-gesture save migrates
-    /// `sessions.json` onto the three live kinds and a restart restores the
-    /// merged view. Memory is untouched — the in-memory round-trip keeps the
-    /// stored spelling by design — and unmarked sessions (a verbatim handoff
-    /// carry) persist exactly as stored.
-    fn overrides_for_disk(&self) -> crate::sessions::Overrides {
-        let mut disk = self.overrides.clone();
-        for id in &self.right_kind_migrate {
-            if let Some(meta) = disk.get_mut(id) {
-                if let Some(right) = meta.right.as_mut() {
-                    right.kind = match right.kind {
-                        layout::RightKind::Diff | layout::RightKind::Git => {
-                            layout::RightKind::Changes
-                        }
-                        kind => kind,
-                    };
-                }
-            }
-        }
-        disk
     }
 
     /// Persist one session's right-pane state without the session-list
@@ -2995,7 +2969,7 @@ impl Harness {
                         return None;
                     }
                     this.right_save_pending = false;
-                    Some(this.overrides_for_disk())
+                    Some(this.overrides.clone())
                 })
                 .unwrap_or(None);
             let Some(snapshot) = snapshot else {
@@ -3029,10 +3003,7 @@ impl Harness {
             return;
         }
         self.right_save_epoch += 1;
-        // Drop migration marks for sessions that no longer exist; a marked
-        // session with no override entry has nothing to migrate.
-        self.right_kind_migrate.retain(|id| self.overrides.contains_key(id));
-        crate::sessions::write(&self.overrides_for_disk());
+        crate::sessions::write(&self.overrides);
         self.right_save_pending = false;
     }
 
@@ -3129,13 +3100,6 @@ impl Harness {
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
-        // B8fix: the in-memory state keeps the stored spelling — a legacy
-        // `diff`/`git` kind stays as-is and reads back as the merged
-        // Changes view through `layout::right_kind`, so the per-session
-        // round-trip restores exactly what the pane showed. A legacy kind
-        // saved by a user gesture still migrates on disk: mark the session
-        // so the disk writes land it as `changes` (`overrides_for_disk`).
-        // A verbatim handoff carry never marks, so it persists as stored.
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
             kind: self.layout.right_kind.unwrap_or(layout::RightKind::Files),
@@ -3144,12 +3108,6 @@ impl Harness {
             files_expanded,
             browser_url,
         };
-        if matches!(
-            state.kind,
-            layout::RightKind::Diff | layout::RightKind::Git
-        ) {
-            self.right_kind_migrate.insert(session_id.clone());
-        }
         self.store_right_state_cheap(&session_id, state, cx);
     }
 
@@ -6668,7 +6626,7 @@ impl Render for Harness {
                 && !pending_neutral
                 && matches!(
                     body_kind,
-                    layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git
+                    layout::RightKind::Changes
                 );
             let session_edits: Vec<String> = if shows_changes {
                 self.active
@@ -8037,7 +7995,7 @@ mod tests {
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Git, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_terminal(window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_terminal_tab(None, window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
@@ -8269,7 +8227,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
             !crate::sessions::path().exists(),
             "the toggle itself still writes nothing synchronously"
@@ -9287,7 +9245,7 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         // Arm the debounced pane save, then rename inside its window: the
         // rename writes synchronously and supersedes the armed write.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.set_override("s-1", |meta| meta.name = Some("Renamed".to_owned()), cx)
@@ -9325,7 +9283,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
             !crate::sessions::path().exists(),
             "the toggle itself still writes nothing synchronously"
@@ -9536,23 +9494,12 @@ mod tests {
             assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "select_right never opens a session");
         }
-        // Legacy kinds open the merged view, still without closing: the
-        // stored value is kept as-is and reads back as Changes.
-        for legacy in [crate::layout::RightKind::Diff, crate::layout::RightKind::Git] {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(legacy, cx)));
-            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
-            assert_eq!(
-                vc.update(|_, cx| crate::layout::right_kind(&baaz.read(cx).layout)),
-                crate::layout::RightKind::Changes,
-                "{legacy:?} loads as Changes"
-            );
-        }
         restore_state(state);
     }
 
     /// B8: the header carries exactly the three tabs Changes · Files ·
     /// Browser, each id parsing back to its kind, with the active index
-    /// following the kind (legacy kinds sit on Changes).
+    /// following the kind.
     #[test]
     fn the_three_header_tabs_map_to_the_three_kinds() {
         let tabs = Harness::right_tab_items();
@@ -9571,8 +9518,6 @@ mod tests {
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Browser), 2);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Diff), 0);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Git), 0);
     }
 
     /// Z2: the right pane belongs to each session and a switch restores it
@@ -9631,12 +9576,12 @@ mod tests {
         }
         // Session A shows Diff; a user change never arms the snap.
         open_session!("sess-a");
-        show!(crate::layout::RightKind::Diff);
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        show!(crate::layout::RightKind::Changes);
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // Switching to B (no stored state) closes the pane, snapped — and
         // one frame consumes the snap.
         open_session!("sess-b");
-        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // Browser in B; a user change still does not snap.
@@ -9645,7 +9590,7 @@ mod tests {
         // Back to A: Diff again — open throughout, so no snap. Back to B:
         // Browser again, no snap either.
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         open_session!("sess-b");
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
         draw!();
@@ -9653,14 +9598,14 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), false));
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // A user toggle after the snap is consumed never re-arms it.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // A restore arms the snap; a user toggle BEFORE any frame consumes it
         // must still animate (review finding): the toggle disarms it.
         open_session!("sess-b");

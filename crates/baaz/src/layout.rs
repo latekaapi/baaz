@@ -46,11 +46,8 @@ pub enum SortBy {
 ///
 /// B8 merged the old Diff review and Git changes into one [`RightKind::Changes`]
 /// view (this session's edits on top, the rest of the working tree below).
-/// B8b serialises every load AND write as `changes`: the `Diff` and `Git`
-/// variants stay so the call sites outside the B8b file set still compile,
-/// but they never reach a file — [`RightKind::parse`] maps the stored
-/// `diff`/`git` slugs onto `Changes`, and serialising any of
-/// `Changes`/`Diff`/`Git` writes `changes`.
+/// A stored pre-merge `diff`/`git` still loads, as `Changes`
+/// ([`RightKind::parse`]), and writes back as `changes`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightKind {
     /// An embedded browser.
@@ -59,15 +56,6 @@ pub enum RightKind {
     Changes,
     /// The workspace file tree.
     Files,
-    /// Legacy alias of [`RightKind::Changes`] (the old Diff review).
-    /// Retained so the call sites outside the B8b file set keep compiling;
-    /// serde never produces it (see the impls above).
-    #[allow(dead_code)]
-    Diff,
-    /// Legacy alias of [`RightKind::Changes`] (the old Git changes).
-    /// Retained like [`RightKind::Diff`].
-    #[allow(dead_code)]
-    Git,
 }
 
 impl Serialize for RightKind {
@@ -107,7 +95,7 @@ impl RightKind {
         match self {
             // D6: the session's one page (docs/43 §2.7); `browser` stays the slug.
             RightKind::Browser => "Page",
-            RightKind::Changes | RightKind::Diff | RightKind::Git => "Changes",
+            RightKind::Changes => "Changes",
             RightKind::Files => "Files",
         }
     }
@@ -118,7 +106,7 @@ impl RightKind {
     pub fn slug(self) -> &'static str {
         match self {
             RightKind::Browser => "browser",
-            RightKind::Changes | RightKind::Diff | RightKind::Git => "changes",
+            RightKind::Changes => "changes",
             RightKind::Files => "files",
         }
     }
@@ -555,14 +543,9 @@ pub fn right_width(layout: &Layout) -> f32 {
 }
 
 /// The kind the right pane should show: the last one stored, or Files when
-/// nothing was ever stored. A stored pre-merge `diff`/`git` (written before
-/// B8, or constructed by a legacy call site) normalises to `Changes` here,
-/// so every reader below sees only the three live kinds.
+/// nothing was ever stored.
 pub fn right_kind(layout: &Layout) -> RightKind {
-    match layout.right_kind.unwrap_or(RightKind::Files) {
-        RightKind::Diff | RightKind::Git => RightKind::Changes,
-        kind => kind,
-    }
+    layout.right_kind.unwrap_or(RightKind::Files)
 }
 
 /// One drag move on the right pane's divider. The minus is the whole
@@ -894,18 +877,11 @@ mod tests {
             let text = serde_json::to_string(&layout).unwrap();
             assert!(text.contains("\"rightKind\":\"changes\""), "{slug} re-saves as changes: {text}");
         }
-        // Every in-memory spelling of the merged view writes `changes`.
-        for kind in [RightKind::Changes, RightKind::Diff, RightKind::Git] {
-            let text = serde_json::to_string(&kind).unwrap();
-            assert_eq!(text, "\"changes\"", "{kind:?} writes as changes");
-        }
+        assert_eq!(serde_json::to_string(&RightKind::Changes).unwrap(), "\"changes\"");
         assert_eq!(serde_json::to_string(&RightKind::Files).unwrap(), "\"files\"");
         assert_eq!(serde_json::to_string(&RightKind::Browser).unwrap(), "\"browser\"");
-        // The legacy variants label and slug as the view they load into.
-        assert_eq!(RightKind::Diff.label(), "Changes");
-        assert_eq!(RightKind::Git.label(), "Changes");
-        assert_eq!(RightKind::Diff.slug(), "changes");
-        assert_eq!(RightKind::Git.slug(), "changes");
+        assert_eq!(RightKind::Changes.label(), "Changes");
+        assert_eq!(RightKind::Changes.slug(), "changes");
         // And the three live tabs are exactly Changes · Files · Browser.
         assert_eq!(RightKind::ALL, [RightKind::Changes, RightKind::Files, RightKind::Browser]);
     }

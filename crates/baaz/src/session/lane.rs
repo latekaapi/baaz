@@ -1,14 +1,13 @@
-//! The provider lane: one owning subscription per non-muse session.
+//! The provider lane: the one subscription that owns a session view.
 //!
 //! Part of [`SessionView`](super::SessionView); see [`crate::session`] for
 //! what the entity owns. Every session view is owned by exactly one lane for
-//! its whole life: it folds either `MuseEvent`s through `MuseFold::apply`
-//! (muse lane) or `ProviderEvent`s into the same `Session` model (provider
-//! lane), never both. The lane is fixed at construction — [`Lane`] has no
-//! setter — so no code path can attach a second writer. The one transition
-//! is a new provider view opened on the click: it starts [`Lane::Opening`]
-//! and takes its provider exactly once, when the child's `OpenSession`
-//! answers ([`SessionView::attach_provider`]).
+//! its whole life, folding `ProviderEvent`s into its `Session` model. The
+//! lane is fixed at construction — [`Lane`] has no setter — so no code path
+//! can attach a second writer. The one transition is a new view opened on
+//! the click: it starts [`Lane::Opening`] and takes its provider exactly
+//! once, when the child's `OpenSession` answers
+//! ([`SessionView::attach_provider`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -94,7 +93,6 @@ pub(super) struct ExternalQuestion {
 /// The pending provider questions of one session, keyed by provider-side id.
 ///
 /// Only recorded in W1; W3 routes the answers.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExternalQuestions {
     /// Each question with the order it arrived in.
@@ -280,9 +278,7 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) {
         let agent = provider.id();
-        let id = self.session_id.clone();
         let workspace = self.workspace.clone();
-        let _ = id;
         self.store.ensure_live(agent, String::new(), workspace);
         self.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)), unreported_mode: None });
         // A (re)opened lane may have missed an approval or a question while

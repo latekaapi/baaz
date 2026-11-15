@@ -744,13 +744,6 @@ ENTRIES.update({
                                            steps="wait:1500;signed-out;wait:600;wheel:30;wait:300;wheel:30;wait:800"),
 })
 
-# B8 merged Diff review and Git changes into one Changes view: the old
-# `right-diff` and `right-git` entry names stay as aliases of
-# `right-changes` (same steps, same screen), so older invocations keep
-# working. No baselines: capture and look.
-ENTRIES["right-diff"] = ENTRIES["right-changes"]
-ENTRIES["right-git"] = ENTRIES["right-changes"]
-
 
 def boot(entry, verb):
     spec = ENTRIES.get(entry)

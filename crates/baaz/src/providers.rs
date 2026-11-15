@@ -1187,12 +1187,8 @@ pub fn write_last_provider(id: ProviderId) {
 
 // ------------------------------------------------- external approvals
 
-/// Where an approval waiting on the person came from. Claude Code sends
-/// one control request (`can_use_tool`); Codex sends five.
-///
-/// Constructed by the provider lane decoders when they land (today only
-/// by tests and fixtures); the surface already renders every variant.
-#[allow(dead_code)]
+/// Where an approval waiting on the person came from. The provider lane
+/// constructs it from the decoded request (`session::lane`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalApprovalKind {
     /// Claude Code `can_use_tool` on the control channel: `tool_name`,
@@ -1200,12 +1196,6 @@ pub enum ExternalApprovalKind {
     ClaudeCanUseTool,
     /// Codex `item/commandExecution/requestApproval`.
     CodexCommand,
-    /// Codex `item/fileChange/requestApproval`.
-    CodexFileChange,
-    /// Codex `item/permissions/requestApproval`.
-    CodexPermissions,
-    /// Codex `item/tool/requestUserInput`.
-    CodexUserInput,
     /// Codex `mcpServer/elicitation/request`.
     CodexMcpElicitation,
     /// Muse `approval/request`: the inline card carries its choices.
@@ -1218,9 +1208,6 @@ impl ExternalApprovalKind {
         match self {
             ExternalApprovalKind::ClaudeCanUseTool => "Claude Code tool request",
             ExternalApprovalKind::CodexCommand => "Codex command approval",
-            ExternalApprovalKind::CodexFileChange => "Codex file-change approval",
-            ExternalApprovalKind::CodexPermissions => "Codex permissions approval",
-            ExternalApprovalKind::CodexUserInput => "Codex question",
             ExternalApprovalKind::CodexMcpElicitation => "Codex tool question",
             ExternalApprovalKind::MuseApproval => "Muse approval",
         }
@@ -1863,14 +1850,11 @@ mod tests {
     }
 
     #[test]
-    fn all_six_request_shapes_reach_the_store() {
+    fn every_request_shape_reaches_the_store() {
         let mut store = ExternalApprovalStore::empty();
         let kinds = [
             ExternalApprovalKind::ClaudeCanUseTool,
             ExternalApprovalKind::CodexCommand,
-            ExternalApprovalKind::CodexFileChange,
-            ExternalApprovalKind::CodexPermissions,
-            ExternalApprovalKind::CodexUserInput,
             ExternalApprovalKind::CodexMcpElicitation,
         ];
         for (i, kind) in kinds.into_iter().enumerate() {
@@ -1878,6 +1862,6 @@ mod tests {
             approval.id = format!("appr-{i}");
             store.inject(approval);
         }
-        assert_eq!(store.pending().len(), 6);
+        assert_eq!(store.pending().len(), 3);
     }
 }

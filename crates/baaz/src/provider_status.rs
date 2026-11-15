@@ -1252,7 +1252,6 @@ pub fn onboarding_completed_path() -> PathBuf {
 
 /// Set the first-run flag. Best-effort, and never in deterministic mode.
 /// Settable by the later first-run screen; nothing sets it yet.
-#[allow(dead_code)]
 pub fn set_onboarding_completed() {
     if deterministic() {
         return;

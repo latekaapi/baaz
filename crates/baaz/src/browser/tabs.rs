@@ -314,7 +314,6 @@ impl Tabs {
     /// Reopen the most recently closed tab, selecting it for its owner.
     /// Keeps its identity, space and URL; appended at the strip's end.
     /// (Next tasks: the reopen control.)
-    #[allow(dead_code)]
     pub(crate) fn reopen_last(&mut self) -> Option<TabId> {
         let tab = self.closed.pop()?;
         let id = tab.id;
@@ -358,7 +357,6 @@ impl Tabs {
     }
 
     /// Every open tab of `owner`, in strip order.
-    #[allow(dead_code)]
     pub(crate) fn tabs_of(&self, owner: &Owner) -> Vec<&Tab> {
         self.tabs.iter().filter(|tab| &tab.owner == owner).collect()
     }
@@ -385,7 +383,6 @@ impl Tabs {
     }
 
     /// The person's tabs in `space`, pinned first, in strip order.
-    #[allow(dead_code)]
     pub(crate) fn person_tabs(&self, space: Option<&str>) -> Vec<&Tab> {
         self.ordered_tabs(&Owner::Person, space)
     }
@@ -416,7 +413,6 @@ impl Tabs {
     /// cleared); the new owner's active pointer moves onto the tab.
     /// False for an unknown tab. (Next tasks: handing session tabs to the
     /// person in Browse mode.)
-    #[allow(dead_code)]
     pub(crate) fn move_to(&mut self, id: TabId, owner: Owner) -> bool {
         let index = match self.tabs.iter().position(|tab| tab.id == id) {
             Some(index) => index,
@@ -454,7 +450,6 @@ impl Tabs {
     /// block (when unpinning: ahead of the first unpinned tab) — so the
     /// model order already reads like the strip. False for an unknown tab.
     /// (Next tasks: the pin control on the strip.)
-    #[allow(dead_code)]
     pub(crate) fn set_pinned(&mut self, id: TabId, pinned: bool) -> bool {
         let from = match self.tabs.iter().position(|tab| tab.id == id) {
             Some(from) => from,
@@ -483,7 +478,7 @@ impl Tabs {
 
     /// Move `id` to strip position `index` (clamped). False for unknown.
     /// (Next tasks: strip drag-reorder.)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn reorder(&mut self, id: TabId, index: usize) -> bool {
         let from = match self.tabs.iter().position(|tab| tab.id == id) {
             Some(from) => from,
