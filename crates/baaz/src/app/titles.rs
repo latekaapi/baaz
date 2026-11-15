@@ -298,25 +298,28 @@ impl Harness {
 
     /// `title-pending`: capture aid — the active session reads as if its
     /// generation were in flight, so a `--replay` run screenshots the
-    /// `Naming this session…` row without spending a turn.
-    pub(crate) fn step_title_pending(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else { return };
+    /// `Naming this session…` row without spending a turn. No open
+    /// session fails the step.
+    pub(crate) fn step_title_pending(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
         self.titles_pending.insert(id.clone());
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == id) {
             entry.title_pending = true;
         }
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `title-timeout`: capture aid — stand the active session's generation
     /// down through the watchdog's own path, so a `--replay` run screenshots
     /// the `Naming this session…` fallback to the first prompt without
     /// spending a turn. A following `title-land:<text>` then lands like a
-    /// late answer would.
-    pub(crate) fn step_title_timeout(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else { return };
+    /// late answer would. No open session fails the step.
+    pub(crate) fn step_title_timeout(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
         self.title_timeout(&id, cx);
+        Ok(())
     }
 
     /// `title-land:<text>`: capture aid — land `<text>` as the active
@@ -325,9 +328,10 @@ impl Harness {
     /// `title-timeout` the same step lands like a late answer: the row fell
     /// back to the first prompt meanwhile, and the title updates it in
     /// place — exactly what a stood-down job's harvest does on the wire.
-    pub(crate) fn step_title_land(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let Some(id) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else { return };
-        let Some(title) = titles::clean_title(rest) else { return };
+    /// No open session, or a text that cleans to no title, fails the step.
+    pub(crate) fn step_title_land(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
+        let title = titles::clean_title(rest).ok_or_else(|| format!("`{rest}` is not a usable title"))?;
         self.set_override(&id, |meta| meta.generated_title = Some(title), cx);
         self.titles_pending.remove(&id);
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == id) {
@@ -335,6 +339,7 @@ impl Harness {
         }
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 }
 

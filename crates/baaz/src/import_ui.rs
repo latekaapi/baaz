@@ -632,8 +632,9 @@ impl Harness {
 
     // ---------------------------------------------------------------- steps
 
-    /// `import-open`: the sheet, on a plan scanned now (fixture homes).
-    pub(crate) fn step_import_open(&mut self, cx: &mut Context<Self>) {
+    /// `import-open`: the sheet, on a plan scanned now (fixture homes). A
+    /// sheet that did not open with a choice is an `Err`.
+    pub(crate) fn step_import_open(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.scan_import_now();
         self.open_import_sheet(cx);
         // The background refresh `open` kicked is redundant here; the
@@ -644,52 +645,61 @@ impl Harness {
             }
         }
         if self.import.sheet.as_ref().is_none_or(|s| s.choice.is_none()) {
-            crate::steps::record_step_failure("import-open");
+            return Err("the import sheet did not open on a plan".into());
         }
+        Ok(())
     }
 
     /// `import-toggle:<folder>`: flip one folder (its name or cwd), or
-    /// `scripted` for the "Skip scripted runs" box.
-    pub(crate) fn step_import_toggle(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// `scripted` for the "Skip scripted runs" box. No open sheet, or no
+    /// such folder in the plan, is an `Err`.
+    pub(crate) fn step_import_toggle(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let rest = rest.trim();
-        let Some(choice) = self.import.sheet.as_ref().and_then(|s| s.choice.clone()) else {
-            crate::steps::record_step_failure(&format!("import-toggle:{rest}"));
-            return;
-        };
+        let choice = self
+            .import
+            .sheet
+            .as_ref()
+            .and_then(|s| s.choice.clone())
+            .ok_or("the import sheet is not open")?;
         if rest == "scripted" {
             self.set_import_skip_scripted(!choice.skip_scripted, cx);
-            return;
+            return Ok(());
         }
         let cwd = self
             .import
             .plan()
             .and_then(|plan| plan.folders.iter().find(|f| f.cwd == rest || f.name == rest).map(|f| f.cwd.clone()));
-        match cwd {
-            Some(cwd) => {
-                let on = !choice.ticked.contains(&cwd);
-                self.toggle_import_folder(&cwd, on, cx);
-            }
-            None => crate::steps::record_step_failure(&format!("import-toggle:{rest}")),
-        }
+        let cwd = cwd.ok_or_else(|| format!("no folder `{rest}` in the import plan"))?;
+        let on = !choice.ticked.contains(&cwd);
+        self.toggle_import_folder(&cwd, on, cx);
+        Ok(())
     }
 
     /// `import-run[:<n>]`: press Import; with `n`, hold after `n` sessions.
-    pub(crate) fn step_import_run(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let hold = rest.trim().parse::<usize>().ok();
+    /// An unparseable `n`, or a press that starts no new run (one already
+    /// running, no sheet or plan, nothing chosen left to import), is an
+    /// `Err`.
+    pub(crate) fn step_import_run(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let hold = match rest.trim() {
+            "" => None,
+            n => Some(n.parse::<usize>().map_err(|_| format!("`{n}` is not a session count"))?),
+        };
+        let before = self.import.run.as_ref().map(|run| run.id.clone());
         self.start_import(hold, cx);
-        if self.import.run.is_none() {
-            crate::steps::record_step_failure(&format!("import-run:{rest}"));
+        let after = self.import.run.as_ref().map(|run| run.id.clone());
+        if after.is_none() || after == before {
+            return Err("Import started no new run".into());
         }
+        Ok(())
     }
 
-    /// `import-undo`: the toast's Undo for the newest run.
-    pub(crate) fn step_import_undo(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.import.journal.runs.last().map(|run| run.id.clone()) else {
-            crate::steps::record_step_failure("import-undo");
-            return;
-        };
+    /// `import-undo`: the toast's Undo for the newest run. No run in the
+    /// journal is an `Err`.
+    pub(crate) fn step_import_undo(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.import.journal.runs.last().map(|run| run.id.clone()).ok_or("no import run to undo")?;
         self.undo_stack.retain(|batch| *batch != crate::app::UndoBatch::Imported(id.clone()));
         self.undo_import(&id, cx);
+        Ok(())
     }
 
     // --------------------------------------------------------------- render

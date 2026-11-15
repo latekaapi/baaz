@@ -752,13 +752,24 @@ impl SessionView {
     /// would report, with no child behind it — and, since there is no
     /// child to have said anything, sample stderr lines for the failure's
     /// well, as `launch-failed:` shows (the scripted lane has none).
-    pub(crate) fn step_child_lost(&mut self, cx: &mut Context<Self>) {
+    /// Fails, changing nothing, on a provider whose one child is the
+    /// window's connection (Muse): its loss wears the window's reconnect
+    /// banner, which this step does not raise, so the session would show
+    /// nothing.
+    pub(crate) fn step_child_lost(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.provider_kind().shares_one_child() {
+            return Err(format!(
+                "{} shares the window's connection: a lost child shows no session banner",
+                self.provider_kind().label()
+            ));
+        }
         let sample = vec![
             "Error: failed to load config: ~/.config/sample/config.toml".to_owned(),
             "  caused by: unknown field `sample_key` at line 3, column 1".to_owned(),
             "the sample process exited with status 1".to_owned(),
         ];
         self.lose_child("the agent process exited", Some(sample), cx);
+        Ok(())
     }
 
     /// The lane's provider, for tests driving the gate directly.

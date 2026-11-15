@@ -1421,9 +1421,9 @@ impl Harness {
     /// a fixture catalog — no CLI, deterministic, offline (S3). The K3
     /// fixtures open the Add menu, the import preview and the New dialog
     /// over the page fixture, idempotently: they set the state rather than
-    /// toggling it, so both settle shots agree. An unknown payload records
-    /// a step failure instead of capturing a window where nothing happened.
-    pub(crate) fn step_skills(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// toggling it, so both settle shots agree. An unknown payload is an
+    /// `Err` instead of capturing a window where nothing happened.
+    pub(crate) fn step_skills(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let which = rest.trim();
         if !which.is_empty()
             && which != "page"
@@ -1432,9 +1432,8 @@ impl Harness {
             && which != "import-preview"
             && which != "new"
         {
-            crate::steps::record_step_failure(&format!("skills:{rest}"));
             crate::baaz_log!("unknown skills fixture `{rest}`; the page fixtures open the Skills page");
-            return;
+            return Err(format!("unknown skills fixture `{which}`"));
         }
         let which = if which.is_empty() { "page" } else { which };
         self.skills.open = true;
@@ -1490,6 +1489,7 @@ impl Harness {
             }
         }
         cx.notify();
+        Ok(())
     }
 
     /// The lane the page speaks for: the open session's, else the pick new

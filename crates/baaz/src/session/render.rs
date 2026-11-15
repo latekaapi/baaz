@@ -1619,29 +1619,31 @@ impl SessionView {
     /// `--steps select-text:<turn>:<from>-<to>`: hold a scripted selection
     /// over the turn's first paragraph (`p0`), for the selection screenshot.
     /// `<turn>` is the turn's index in the live transcript; the range is
-    /// byte offsets, clamped to the paragraph. A turn with no text paragraph
-    /// (or a bad range) holds nothing rather than a lie. The hold travels
-    /// the span path — a single-cell span renders exactly like the legacy
-    /// single-cell selection it replaces — so the verb, its arguments and
-    /// its screenshot are unchanged.
-    pub(crate) fn select_text_step(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// byte offsets, clamped to the paragraph. The hold travels the span
+    /// path — a single-cell span renders exactly like the legacy single-cell
+    /// selection it replaces — so the verb, its arguments and its screenshot
+    /// are unchanged. Fails, holding nothing, on a payload that does not
+    /// parse, a turn with no text paragraph, or a range that clamps to
+    /// nothing. Holding the same span again is a success.
+    pub(crate) fn step_select_text(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (turn, range) = rest.split_once(':').unwrap_or((rest, ""));
         let (from, to) = range.split_once('-').unwrap_or((range, ""));
         let (Ok(index), Ok(mut from), Ok(mut to)) =
             (turn.parse::<usize>(), from.parse::<usize>(), to.parse::<usize>())
         else {
-            return;
+            return Err(format!("`{rest}` is not <turn>:<from>-<to>"));
         };
         if from > to {
             std::mem::swap(&mut from, &mut to);
         }
-        let Some((turn_id, source)) = self.step_turn_source(index) else { return };
+        let (turn_id, source) =
+            self.step_turn_source(index).ok_or_else(|| format!("turn {index} has no text to select"))?;
         // Clamp to the source so the highlight never addresses bytes that
         // are not there; an emptied range holds nothing rather than a lie.
         from = from.min(source.len());
         to = to.min(source.len());
         if from >= to {
-            return;
+            return Err(format!("the range selects nothing in turn {index} ({} bytes)", source.len()));
         }
         let single = TextSelection { cell: SelectionKey::paragraph("", 0), range: from..to };
         let span = MessageSelection::from_single(single);
@@ -1649,31 +1651,40 @@ impl SessionView {
         if super::spans::hold_span(held, turn_id, source, Some(span)) {
             cx.notify();
         }
+        Ok(())
     }
 
     /// `--steps select-span:<turn>`: hold the whole turn — first non-empty
     /// cell to last — for the cross-block highlight screenshot (a paragraph,
     /// a list and a code block in one drag's span). `<turn>` is the turn's
-    /// index in the live transcript; a turn with no selectable text holds
-    /// nothing rather than a lie.
-    pub(crate) fn select_span_step(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let Ok(index) = rest.trim().parse::<usize>() else { return };
-        let Some((turn_id, source)) = self.step_turn_source(index) else { return };
-        let span = aui::transcript::message_select_all(&source);
+    /// index in the live transcript. Fails, holding nothing, on a payload
+    /// that is not a number or a turn with no selectable text. Holding the
+    /// same span again is a success.
+    pub(crate) fn step_select_span(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let index = rest.trim().parse::<usize>().map_err(|_| format!("`{rest}` is not a turn index"))?;
+        let (turn_id, source) =
+            self.step_turn_source(index).ok_or_else(|| format!("turn {index} has no text to select"))?;
+        let span = aui::transcript::message_select_all(&source)
+            .ok_or_else(|| format!("turn {index} has no selectable text"))?;
         let held = Rc::make_mut(&mut self.span_held);
-        if super::spans::hold_span(held, turn_id, source, span) {
+        if super::spans::hold_span(held, turn_id, source, Some(span)) {
             cx.notify();
         }
+        Ok(())
     }
 
     /// `--steps copy:<turn>`: press the turn's copy button for the copy-tick
     /// screenshot. `<turn>` is the turn's index in the live transcript, like
     /// `select-span`; it travels the same button arms a press would, so the
-    /// hold the capture shows is the hold a person sees.
-    pub(crate) fn step_copy(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(index) = rest.trim().parse::<usize>() else { return };
-        let Some(session) = self.store.session().cloned() else { return };
-        let Some(turn) = session.turns.get(index) else { return };
+    /// hold the capture shows is the hold a person sees. Fails on a payload
+    /// that is not a number, or an index past the transcript.
+    pub(crate) fn step_copy(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let index = rest.trim().parse::<usize>().map_err(|_| format!("`{rest}` is not a turn index"))?;
+        let session = self.store.session().cloned().ok_or("no transcript to copy from")?;
+        let turn = session
+            .turns
+            .get(index)
+            .ok_or_else(|| format!("the transcript has {} turns; there is no turn {index}", session.turns.len()))?;
         match turn {
             Turn::User { id, text, .. } => {
                 self.user_action(id.clone(), text.clone(), aui::transcript::UserTurnAction::Copy, window, cx);
@@ -1682,6 +1693,7 @@ impl SessionView {
                 self.assistant_action(id.clone(), AssistantTurnAction::Copy, window, cx);
             }
         }
+        Ok(())
     }
 
     /// Open every tool group for a screenshot: group keys default closed, so
@@ -3586,7 +3598,7 @@ mod tests {
         vc.update(|window, cx| {
             view.update(cx, |view, cx| {
                 std::rc::Rc::make_mut(&mut view.span_held).insert(owner.clone(), (source.clone(), span.clone()));
-                view.quote_selection_step(window, cx);
+                view.step_quote(window, cx).expect("a held span quotes");
                 let quote = view.quotes.first().cloned().expect("a quote");
                 assert_eq!(quote.text, "ok 12 passed\n``` not a fence", "the output's own text, ANSI stripped, fence kept intact");
                 assert_eq!(quote.source.as_deref(), Some("t-1"), "the source is the turn");
@@ -4446,7 +4458,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let view = handoff_destination(vc, "picker-over-plus", "codex");
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus toggles");
         assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
         let (plus, mode) = vc.update(|_, cx| {
@@ -4550,9 +4562,18 @@ impl SessionView {
         self.add_quote_with_span(text, Some(turn_id), code, Some((owner, span)), window, cx);
     }
 
-    /// `quote`: the selection bar's Quote, for scripted captures.
-    pub(crate) fn quote_selection_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `quote`: the selection bar's Quote, for scripted captures. Fails,
+    /// quoting nothing, when no selection is held or the held span selects
+    /// no text.
+    pub(crate) fn step_quote(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.span_held.is_empty() {
+            return Err("no selection is held".into());
+        }
+        if super::spans::span_copy_text(&self.span_held).is_none() {
+            return Err("the held selection has no text to quote".into());
+        }
         self.quote_selection(window, cx);
+        Ok(())
     }
 
     /// The selection bar over the transcript, when a selection is held.

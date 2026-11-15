@@ -2265,7 +2265,8 @@ impl SessionView {
         if let Some((_, choices)) = self.newest_pending_approval() {
             let wanted = |d: &D| if allow { matches!(d, D::Once | D::ApprovedForSession) } else { matches!(d, D::Deny) };
             let Some(index) = choices.iter().position(|c| wanted(&c.decision)) else { return false };
-            self.step_choose(&(index + 1).to_string(), window, cx);
+            // A press on a choice that exists: the step cannot fail here.
+            let _ = self.step_choose(&(index + 1).to_string(), window, cx);
             return true;
         }
         if self.external_approvals.pending().is_empty() {
@@ -2273,15 +2274,16 @@ impl SessionView {
         }
         let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
         let Some(index) = crate::providers::ApprovalChoice::all().iter().position(|c| *c == wanted) else { return false };
-        self.step_choose(&(index + 1).to_string(), window, cx);
+        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
         true
     }
 
     /// Pick the n-th choice of the newest pending approval (`1`–`9`).
     pub fn choose_nth(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         // The same handler the `choose:<n>` step reaches, with the same
-        // 1-based numbering the digits on the card carry.
-        self.step_choose(&(index + 1).to_string(), window, cx);
+        // 1-based numbering the digits on the card carry. A digit past the
+        // card's choices, or with nothing pending, presses nothing.
+        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
     }
 
     /// Whether plan mode is on, for the app's Shift+Tab.

@@ -3562,8 +3562,9 @@ impl Harness {
 
     /// The `--steps` verb's route: open the dock over a FakePty-backed tab
     /// and drain its script at once, so the capture replays the same bytes
-    /// on every run. The payload names the tab; empty is "terminal".
-    pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// on every run. The payload names the tab; empty is "terminal". Fails
+    /// the step while the Settings page stands open.
+    pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let title = rest.trim();
         let title = if title.is_empty() { "terminal".to_owned() } else { title.to_owned() };
         let root = self
@@ -3573,7 +3574,7 @@ impl Harness {
         // The scripted dock stays shut while the Settings page stands open
         // (B11b): a capture aid must not flip hidden state either.
         if self.settings_page.open {
-            return;
+            return Err("the Settings page is open".into());
         }
         self.layout.terminal_open = true;
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
@@ -3586,6 +3587,7 @@ impl Harness {
         self.persist_layout();
         window.focus(&self.terminal_focus, cx);
         cx.notify();
+        Ok(())
     }
 
     /// The centre column's height: the sheet, the window less its 6 px
@@ -7998,7 +8000,8 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_terminal(window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_terminal_tab(None, window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
+        assert!(refused.is_err(), "the right step fails while Settings stands open");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.layout.right_open, right_open, "toggle_right changed hidden state");
@@ -8649,7 +8652,8 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)))
+            .expect("the fixture session opens");
         let carried = vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.mode, Mode::Browse, "the fixture lands in Browse");
@@ -8669,7 +8673,8 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(baaz.read(cx).browse_centre_shown(), Some(carried), "the shown tab survives the trip");
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
+            .expect("the tab opens");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.browse_session_tab, None);
@@ -8690,19 +8695,22 @@ mod tests {
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)))
+            .expect("the verb lands on Kagi");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "the verb lands on Kagi"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=altavista", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=altavista", cx)));
+        assert!(refused.is_err(), "an unknown value fails the step");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "an unknown value changes nothing"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("engine=google", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("engine=google", cx)));
+        assert!(refused.is_err(), "an unknown key fails the step");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
@@ -8734,7 +8742,7 @@ mod tests {
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         for url in ["https://www.wikipedia.org/", "https://docs.rs/"] {
-            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new(url, window, cx)));
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new(url, window, cx))).expect("the tab opens");
         }
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-strip").is_none(), "vertical keeps the tabs down the sidebar");
@@ -8763,7 +8771,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
+        })
+        .expect("the tab opens");
         draw_shell(&mut *vc, &baaz);
         let (open_page, width) = vc.update(|_, cx| {
             let h = baaz.read(cx);
@@ -8804,7 +8813,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
+        })
+        .expect("the tab opens");
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
         });
@@ -8830,7 +8840,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
         draw_shell(&mut *vc, &baaz);
@@ -8864,7 +8874,7 @@ mod tests {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
                 h.layout.feedback_mode = true;
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
         draw_shell(&mut *vc, &baaz);
@@ -8895,7 +8905,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
                 // No skill picked: the list alone, in Settings' 680.
                 h.skills.selected = None;
             })

@@ -13,6 +13,12 @@
 //! the verb touches, so the state stays private where it was; what moved here
 //! is the vocabulary and the dispatch.
 //!
+//! Every handler returns a [`StepResult`]: `Ok` when it did what the step
+//! says, `Err(reason)` when it did not. The first failed or unknown step ends
+//! the script with a `steps: … failed: <reason>` log line, and a capture then
+//! exits 1 — as it does when the list never became ready to run at all. A
+//! step that silently does nothing is a bug in its handler (docs/82 1.4).
+//!
 //! # Cost
 //!
 //! **The whole surface is scripting only**: no verb here has any other entry
@@ -60,7 +66,7 @@
 //! | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
 //! | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
 //! | `choose:<n>` | the n-th choice of the newest pending approval |
-//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done\\|hover:x,y\\|click:x,y\\|drag:x1,y1,x2,y2\\|note:text\\|cancel>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; `hover:`/`click:`/`drag:` point like the mouse through the same handlers (window-logical px, with the cold-tree retry), `note:` fills the open popover and saves (finishing an in-flight capture first), `cancel` closes it unsaved; an unknown sub records a step failure, free |
+//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done\\|hover:x,y\\|click:x,y\\|drag:x1,y1,x2,y2\\|note:text\\|cancel>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; `hover:`/`click:`/`drag:` point like the mouse through the same handlers (window-logical px, with the cold-tree retry), `note:` fills the open popover and saves (finishing an in-flight capture first), `cancel` closes it unsaved; an unknown sub fails the step, free |
 //! | `feedback:<text>` | type into the open session's approval feedback or question clarify field, without sending, free |
 //! | `answer:<label>` | pick one option on the newest question and send |
 //! | `answers:<a\|b>` | pick several options on the newest question and send |
@@ -92,14 +98,14 @@
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `peek` | hold the v3 peek open (or release it) while the sidebar is closed — a capture aid, no hover |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
-//! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
-//! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
-//! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty records a step failure, free |
-//! | `open-url:<url>` | the scripted form of a real open-URL event: the same classify/queue/open path `App::on_open_urls` drains into (a person tab in the current project, Browse mode, window to the front; queued before sign-in); empty records a step failure, free |
-//! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range records a step failure, free |
-//! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range records a step failure, free |
-//! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range records a step failure, free |
-//! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range records a step failure, free |
+//! | `right:<browser\|changes\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown fails the step, free |
+//! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty fails the step, free |
+//! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty fails the step, free |
+//! | `open-url:<url>` | the scripted form of a real open-URL event: the same classify/queue/open path `App::on_open_urls` drains into (a person tab in the current project, Browse mode, window to the front; queued before sign-in); empty fails the step, free |
+//! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range fails the step, free |
+//! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range fails the step, free |
+//! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range fails the step, free |
+//! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range fails the step, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `history:<url>\|<title>\|<days ago>\|<words>` | seed one page into the (in-memory, capture-only) history, visited `days ago`, with the page's `words` kept for search when given; free |
 //! | `bookmark:<url>\|<title>\|<folder name>` | seed one bookmark (capture-only store) into the named folder, made at the top level when new (default: Bookmarks bar); free |
@@ -109,18 +115,18 @@
 //! | `chrome-import` | open the Import from Chrome sheet (captures read only `BAAZ_CHROME_ROOT`, never the person's Chrome); free |
 //! | `bookmarks` | open the Field scoped to Bookmarks (board R4Daily 1c); free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
-//! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty records a step failure, free |
-//! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds record a step failure, free |
-//! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty records a step failure, free |
+//! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty fails the step, free |
+//! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds fail the step, free |
+//! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty fails the step, free |
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
 //! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse (the offline `browse-from-session` shot), free |
 //! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
-//! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown records a step failure, free |
+//! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown fails the step, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
-//! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown records a step failure, free |
+//! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown fails the step, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
@@ -130,20 +136,20 @@
 //! | `resize-sweep:<to_w,step_px>` | march the divider toward `to_w` one `step_px` per rendered frame, logging `baaz: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per tick |
 //! | `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>` | a frame-paced sidebar wheel gesture: `dy` for `finger_ticks` rendered frames, then decaying to 5% of `dy` over `tail_ticks` more, one push per tick (the in-process fallback for a real `CGEvent` gesture where the environment cannot confirm a landing window; pair with `BAAZ_FRAME_TRACE=1`) |
 //! | `page-eval:<js>` | run `js` in the Browse centre page (no `;` — it separates steps), e.g. `window.scrollTo(0,900)`; free |
-//! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page records a step failure |
+//! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page fails the step |
 //! | `pointer:<x>,<y>` | dispatch one mouse move to that window point: the pointer resting on a row, so a following `sidebar-scroll-sweep:` shows hover under a scroll |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
 //! | `overflow` | open the header's overflow menu |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
-//! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number records a step failure, free |
-//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values record a step failure, free |
+//! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number fails the step, free |
+//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`); unknown keys or values fail the step, free |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
-//! | `error-dialog:<offline\|blocked\|sorry>` | capture aid: raise a critical error dialog of that family through the real dialog path (default `sorry`), free |
-//! | `toast:<title>\|<body>` | capture aid: raise a toast through the production toast path (empty title records a step failure), free |
+//! | `error-dialog:<offline\|blocked\|sorry>` | capture aid: raise a critical error dialog of that family through the real dialog path (empty means `sorry`; an unknown family fails the step), free |
+//! | `toast:<title>\|<body>` | capture aid: raise a toast through the production toast path (empty title fails the step), free |
 //! | `projects` | open the Projects palette |
 //! | `project:<path>` | adopt `path` as a project and make it current (no panel, no session) |
 //! | `project-menu` | open the header's project menu (`project-menu:<name>` opens the group row menu for the project named) |
@@ -166,7 +172,7 @@
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `baaz: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `baaz: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
-//! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names record a step failure, free |
+//! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names fail the step, free |
 //! | `page-focus` | give the active browser page the keyboard, free |
 //! | `agent-line` | Browse: open or close the ⌘J agent line on the page on screen (R3), free |
 //! | `page-theme-changed` | Browse: send Chromium's theme-changed notification to every page window (as a macOS appearance or display change does), free |
@@ -174,20 +180,20 @@
 //! | `agent-column` | Browse: dock the card as a column, or undock it (⌘⇧E, R3), free |
 //! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the line's chat — `answer` lands the inline answer, `steps` opens the card, `draft` the landed draft (R3), free: no turn |
 //! | `handoff-picker` | open the agent card's handoff picker (R3 board 3a), free |
-//! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for records a step failure, free |
+//! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for fails the step, free |
 //! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
-//! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would; no child, no turn; unknown parts record a step failure, free |
-//! | `child-lost` | the open lane hears its child die (`ConnectionLost`), as its adapter would report it: the quiet banner with Retry now; twice in a row grows it into the typed failure (sample stderr well) under the transcript. No child, no turn; no session records a step failure, free |
-//! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session records a step failure, free |
-//! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts record a step failure |
-//! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog records a step failure) — same warning |
-//! | `crumb:<n>` | press the n-th Settings breadcrumb (0-based); the current page's crumb, or a crumb that is no link, records a step failure, free |
-//! | `import-open` | open the P7 import sheet (docs/72) on a plan scanned now, synchronously, from the owner home (`BAAZ_IMPORT_OWNER_HOME` in captures); a capture with no fixture home scans nothing and records a step failure, free |
-//! | `import-toggle:<folder>` | flip one folder's box on the open import sheet, by its name or its full path; `scripted` flips "Skip scripted runs"; an unknown folder records a step failure, free |
+//! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would; no child, no turn; unknown parts fail the step, free |
+//! | `child-lost` | the open lane hears its child die (`ConnectionLost`), as its adapter would report it: the quiet banner with Retry now; twice in a row grows it into the typed failure (sample stderr well) under the transcript. No child, no turn; no session fails the step, free |
+//! | `signed-out` | raise the signed-out banner above the composer for the open session's provider, as a typed auth failure would; no session fails the step, free |
+//! | `provider-action:<provider>:<recheck\|signin\|signout>` | press that Settings card button through its click's intent handler (`signout` raises the confirm only) — **signs a CLI in or out for real**: live checks run it on throwaway `CLAUDE_CONFIG_DIR` / `CODEX_HOME` homes only; unknown parts fail the step |
+//! | `signout-confirm` | press the open sign-out confirm's Sign out (no such dialog fails the step) — same warning |
+//! | `crumb:<n>` | press the n-th Settings breadcrumb (0-based); the current page's crumb, or a crumb that is no link, fails the step, free |
+//! | `import-open` | open the P7 import sheet (docs/72) on a plan scanned now, synchronously, from the owner home (`BAAZ_IMPORT_OWNER_HOME` in captures); a capture with no fixture home scans nothing and fails the step, free |
+//! | `import-toggle:<folder>` | flip one folder's box on the open import sheet, by its name or its full path; `scripted` flips "Skip scripted runs"; an unknown folder fails the step, free |
 //! | `import-run:[<n>]` | press "Import N sessions"; with `n`, stop after `n` sessions so the progress state holds for a capture; writes records (never files), free |
-//! | `import-undo` | the import toast's Undo for the newest run: removes exactly the records it added, never a file; no run records a step failure, free |
+//! | `import-undo` | the import toast's Undo for the newest run: removes exactly the records it added, never a file; no run fails the step, free |
 //! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
 //! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
@@ -217,7 +223,7 @@ use aui::screens::LoginIntent;
 use gpui::{Context, Window};
 
 use crate::app::Harness;
-use crate::overlays::{Command, MenuKind, PaletteKind};
+use crate::overlays::{MenuKind, PaletteKind};
 use crate::session::{SessionEvent, SessionView};
 use crate::wire::WireCall;
 
@@ -225,11 +231,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Scripted-step accounting: a flow script that names a renamed verb used to
 /// pass silently (a stderr line, exit 0), so the script rotted into a no-op
-/// unnoticed. Every unknown step now counts one failure, and the scripted-run
-/// exit fails the process when the count is non-zero. A known step that
-/// cannot run counts one failure too: a session verb with no open session,
-/// or any step in a list readiness never released, is recorded and named
-/// rather than reported as a success that did nothing.
+/// unnoticed. A failed step — a verb's `Err`, an unknown verb, a session
+/// verb with no open session — counts one failure and ends the script, as
+/// does every step in a list readiness never released; the scripted-run
+/// exit fails the process when the count is non-zero.
 static STEP_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// Every scripted item actually executed: counted by the runners below as
 /// each step runs. A skipped step is not a run step — a session verb that
@@ -237,7 +242,7 @@ static STEP_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// the run never became able to execute it (see `record_unrun_steps`),
 /// count failures only, never runs.
 static STEPS_RAN: AtomicU64 = AtomicU64::new(0);
-/// The unknown step names behind `STEP_FAILURES`, in order, for the
+/// The step names behind `STEP_FAILURES`, in order, for the
 /// one-line-per-failure report before exit.
 static FAILED_STEP_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -251,7 +256,7 @@ pub(crate) fn steps_ran() -> u64 {
     STEPS_RAN.load(Ordering::Relaxed)
 }
 
-/// Unknown step names behind `step_failures`, in order.
+/// Failed step names behind `step_failures`, in order.
 pub(crate) fn step_failure_names() -> Vec<String> {
     FAILED_STEP_NAMES.lock().map(|names| names.clone()).unwrap_or_default()
 }
@@ -285,13 +290,15 @@ fn is_known_step(step: &str) -> bool {
     WINDOW_VERBS.iter().any(|v| v.verb == head) || SESSION_VERBS.iter().any(|v| v.verb == head)
 }
 
-/// A known step that cannot run counts a failure too, named for the
-/// summary. Session verbs call this when their payload names nothing
-/// they can do (unknown provider, unknown effort, a swap a session
-/// with turns refuses in place): a script that silently does nothing
-/// reports success, and P5 ended that.
-/// Counted in `STEP_FAILURES` and named in `FAILED_STEP_NAMES`, like
-/// every other failure.
+/// What every `--steps` verb reports: `Ok` when it did what the step says,
+/// `Err(reason)` when it did not — an unparseable payload, a target that
+/// is not there, a refusal. A verb that does nothing must say so: a script
+/// that silently does nothing used to report success (docs/82 1.4).
+pub(crate) type StepResult = Result<(), String>;
+
+/// Count one failed step and name it for the summary. The runner calls
+/// this for a verb's `Err`, an unknown step and a step with nowhere to
+/// run; [`record_unrun_steps`] for a list that never ran.
 pub(crate) fn record_step_failure(step: &str) {
     STEP_FAILURES.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut names) = FAILED_STEP_NAMES.lock() {
@@ -311,16 +318,16 @@ pub(crate) fn split(step: &str) -> (&str, &str) {
 pub(crate) struct WindowVerb {
     /// What the step says.
     pub verb: &'static str,
-    /// What it does to the window.
-    pub run: fn(&mut Harness, &str, &mut Window, &mut Context<Harness>),
+    /// What it does to the window, and whether it did it.
+    pub run: fn(&mut Harness, &str, &mut Window, &mut Context<Harness>) -> StepResult,
 }
 
 /// A `--steps` verb the open session owns.
 pub(crate) struct SessionVerb {
     /// What the step says.
     pub verb: &'static str,
-    /// What it does to the session.
-    pub run: fn(&mut SessionView, &str, &mut Window, &mut Context<SessionView>),
+    /// What it does to the session, and whether it did it.
+    pub run: fn(&mut SessionView, &str, &mut Window, &mut Context<SessionView>) -> StepResult,
 }
 
 /// A `--login-steps` verb. The handler returns whether the run continues.
@@ -337,18 +344,25 @@ pub(crate) struct LoginVerb {
 /// exactly as it did when the two matches were tried in this order.
 pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "search", run: |this, rest, window, cx| this.step_search(rest, window, cx) },
-    WindowVerb { verb: "open", run: |this, rest, window, cx| this.resume(rest.to_owned(), window, cx) },
-    WindowVerb { verb: "click", run: |this, rest, window, cx| this.resume_quiet(rest.to_owned(), window, cx) },
-    WindowVerb { verb: "palette", run: |this, _, _, cx| this.open_palette(PaletteKind::Commands, cx) },
-    WindowVerb { verb: "resume", run: |this, _, _, cx| this.open_palette(PaletteKind::Resume, cx) },
-    WindowVerb { verb: "fork-picker", run: |this, _, _, cx| this.open_palette(PaletteKind::Fork, cx) },
+    WindowVerb { verb: "open", run: |this, rest, window, cx| this.step_open(rest, false, window, cx) },
+    WindowVerb { verb: "click", run: |this, rest, window, cx| this.step_open(rest, true, window, cx) },
+    WindowVerb { verb: "palette", run: |this, _, _, cx| { this.open_palette(PaletteKind::Commands, cx); Ok(()) } },
+    WindowVerb { verb: "resume", run: |this, _, _, cx| { this.open_palette(PaletteKind::Resume, cx); Ok(()) } },
+    WindowVerb { verb: "fork-picker", run: |this, _, _, cx| { this.open_palette(PaletteKind::Fork, cx); Ok(()) } },
     WindowVerb { verb: "rename", run: |this, rest, window, cx| this.step_rename(rest, window, cx) },
     WindowVerb { verb: "hidden", run: |this, _, _, cx| this.step_toggle_hidden(cx) },
     WindowVerb { verb: "empty", run: |this, _, _, cx| this.step_toggle_empty(cx) },
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
-    WindowVerb { verb: "page-menu", run: |this, rest, _, cx| this.set_page_menu(rest.trim() != "off", cx) },
+    WindowVerb {
+        verb: "page-menu",
+        run: |this, rest, _, cx| match rest.trim() {
+            "" | "on" => { this.set_page_menu(true, cx); Ok(()) }
+            "off" => { this.set_page_menu(false, cx); Ok(()) }
+            other => Err(format!("`{other}` is not on or off")),
+        },
+    },
     WindowVerb { verb: "mode", run: |this, rest, window, cx| this.step_mode(rest, window, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "tab-new", run: |this, rest, window, cx| this.step_tab_new(rest, window, cx) },
@@ -371,13 +385,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb {
         verb: "split-ratio",
         run: |this, rest, _, cx| {
-            if let Ok(ratio) = rest.trim().parse::<f32>() {
-                this.browser.split_ratio = crate::browser::peek_split::clamp_split(ratio);
-                cx.notify();
-            }
+            let ratio = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a number"))?;
+            this.browser.split_ratio = crate::browser::peek_split::clamp_split(ratio);
+            cx.notify();
+            Ok(())
         },
     },
-    WindowVerb { verb: "chrome-import", run: |this, _, _, cx| this.open_chrome_import(cx) },
+    WindowVerb { verb: "chrome-import", run: |this, _, _, cx| { this.open_chrome_import(cx); Ok(()) } },
     WindowVerb { verb: "bookmarks", run: |this, _, window, cx| this.step_bookmarks(window, cx) },
     WindowVerb { verb: "find", run: |this, rest, window, cx| this.step_find(rest, window, cx) },
     WindowVerb { verb: "permission", run: |this, rest, window, cx| this.step_permission(rest, window, cx) },
@@ -403,11 +417,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         verb: "transcript-scroll-sweep",
         run: |this, rest, _, cx| this.step_transcript_scroll_sweep(rest, cx),
     },
-    WindowVerb { verb: "sidebar", run: |this, _, _, cx| this.toggle_sidebar(cx) },
-    WindowVerb { verb: "peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); } },
-    WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
-    WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },
-    WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
+    WindowVerb { verb: "sidebar", run: |this, _, _, cx| { this.toggle_sidebar(cx); Ok(()) } },
+    WindowVerb { verb: "peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); Ok(()) } },
+    WindowVerb { verb: "overflow", run: |this, _, _, cx| { this.open_menu(MenuKind::Overflow, cx); Ok(()) } },
+    WindowVerb { verb: "view-menu", run: |this, _, _, cx| { this.open_menu(MenuKind::ViewOptions, cx); Ok(()) } },
+    WindowVerb { verb: "account", run: |this, _, _, cx| { this.open_menu(MenuKind::Account, cx); Ok(()) } },
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "settings-set", run: |this, rest, _, cx| this.step_settings_set(rest, cx) },
     WindowVerb { verb: "stall", run: |_, rest, _, _| step_stall(rest) },
@@ -416,7 +430,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },
     WindowVerb { verb: "toast", run: |this, rest, _, cx| this.step_toast(rest, cx) },
-    WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| this.confirm_archive_dialog(window, cx) },
+    WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| { this.confirm_archive_dialog(window, cx); Ok(()) } },
     WindowVerb { verb: "show-archived", run: |this, _, _, cx| this.step_toggle_archived(cx) },
     WindowVerb { verb: "projects", run: |this, _, window, cx| this.step_projects(window, cx) },
     WindowVerb { verb: "project", run: |this, rest, _, cx| this.step_adopt(rest, cx) },
@@ -440,17 +454,14 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "pointer", run: |this, rest, window, cx| this.step_pointer(rest, window, cx) },
     WindowVerb { verb: "page-eval", run: |this, rest, _, cx| {
-        match this.browse_centre_state() {
-            Some(state) => state.update(cx, |state, _| state.eval_with_result(u64::MAX, rest)),
-            None => record_step_failure(&format!("page-eval:{rest}")),
-        }
+        let state = this.browse_centre_state().ok_or("no page is open")?;
+        state.update(cx, |state, _| state.eval_with_result(u64::MAX, rest));
+        Ok(())
     } },
     WindowVerb { verb: "site-info", run: |this, _, _, cx| {
         this.site_info_open = this.browse_centre_state().is_some();
-        if !this.site_info_open {
-            record_step_failure("site-info");
-        }
         cx.notify();
+        if this.site_info_open { Ok(()) } else { Err("no page is open".into()) }
     } },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
@@ -465,11 +476,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // do; `browser-chat-fixture:<answer|steps|draft>` makes a read-only
     // browser chat with a canned transcript and points the line at it;
     // `handoff-picker` opens the card's picker.
-    WindowVerb { verb: "agent-line", run: |this, _, _, cx| this.toggle_agent_line(cx) },
-    WindowVerb { verb: "agent-card", run: |this, _, _, cx| this.toggle_agent_card(cx) },
-    WindowVerb { verb: "agent-column", run: |this, _, _, cx| this.toggle_agent_column(cx) },
+    WindowVerb { verb: "agent-line", run: |this, _, _, cx| { this.toggle_agent_line(cx); Ok(()) } },
+    WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
+    WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
-    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.handoff_picker_open = true; cx.notify(); } },
+    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.handoff_picker_open = true; cx.notify(); Ok(()) } },
     // Chromium's theme-change notification on every page window, as macOS
     // sends on an appearance or display change: the page ground must stay
     // white through it (owner 9 Nov: dark margins on Hacker News). Free.
@@ -477,13 +488,14 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         #[cfg(feature = "cef")]
         aui_cef::notify_theme_changed();
         cx.notify();
+        Ok(())
     } },
     // D5 providers: the setup sheet (`setup:<provider>:<install|signin|update>`)
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
-    WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); } },
+    WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); Ok(()) } },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
-    WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); } },
+    WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); Ok(()) } },
     WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },
     // P7 import (docs/72): the sheet, a folder's box, the run, the Undo.
     WindowVerb { verb: "import-open", run: |this, _, _, cx| this.step_import_open(cx) },
@@ -496,10 +508,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             // The open lane hears its child die, as its adapter would say
             // it (docs/71 §2): no child, no turn. No session records a
             // step failure.
-            match this.active.clone() {
-                Some(view) => view.update(cx, |view, cx| view.step_child_lost(cx)),
-                None => record_step_failure("child-lost"),
-            }
+            let view = this.active.clone().ok_or("no open session")?;
+            view.update(cx, |view, cx| view.step_child_lost(cx))
         },
     },
     WindowVerb {
@@ -507,14 +517,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, _, _, cx| {
             // The banner a typed auth failure raises, on the open session's
             // provider; no session records a step failure.
-            match this.active.as_ref().map(|view| view.read(cx).provider_kind()) {
-                Some(id) => {
-                    this.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
-                    this.typed_signed_out.insert(id);
-                    cx.notify();
-                }
-                None => record_step_failure("signed-out"),
-            }
+            let id = this.active.as_ref().map(|view| view.read(cx).provider_kind()).ok_or("no open session")?;
+            this.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
+            this.typed_signed_out.insert(id);
+            cx.notify();
+            Ok(())
         },
     },
     WindowVerb {
@@ -522,20 +529,23 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |_, rest, _, cx| {
             // Captures and live checks only: the text "Copy diagnostics"
             // would put on the clipboard, printed to stderr instead.
-            let id = crate::providers::ProviderId::parse(rest);
+            let id = crate::providers::ProviderId::parse_known(rest).ok_or_else(|| format!("no provider `{rest}`"))?;
             let status = crate::provider_status::live_statuses()
                 .into_iter()
                 .find(|status| status.provider == id)
                 .unwrap_or_else(|| crate::provider_status::ProviderStatus::checking(id));
             gpui::AppContext::background_spawn(cx, async move { eprintln!("baaz: diagnostics ↓\n{}", crate::details::collect(id, &status)) })
                 .detach();
+            Ok(())
         },
     },
     WindowVerb {
         verb: "details",
         run: |this, rest, _, cx| {
-            this.provider_details_open.insert(crate::providers::ProviderId::parse(rest));
+            let id = crate::providers::ProviderId::parse_known(rest).ok_or_else(|| format!("no provider `{rest}`"))?;
+            this.provider_details_open.insert(id);
             cx.notify();
+            Ok(())
         },
     },
     // A card button as its click delivers it, for live checks of the
@@ -552,10 +562,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
                 .as_ref()
                 .filter(|dialog| dialog.action == crate::overlays::DialogAction::ProviderSignOut)
                 .and_then(|dialog| dialog.archive_target.clone());
-            match target {
-                Some(wire) => this.confirm_provider_signout(crate::providers::ProviderId::parse(&wire), window, cx),
-                None => record_step_failure("signout-confirm"),
-            }
+            let wire = target.ok_or("no sign-out confirm is open")?;
+            this.confirm_provider_signout(crate::providers::ProviderId::parse(&wire), window, cx);
+            Ok(())
         },
     },
     WindowVerb {
@@ -565,10 +574,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
                 .parse::<usize>()
                 .ok()
                 .and_then(|index| crate::settings::settings_crumb_target(&this.settings_page.section, index));
-            match target {
-                Some(target) => this.open_settings_page(target, cx),
-                None => record_step_failure(&format!("crumb:{rest}")),
-            }
+            let target = target.ok_or_else(|| format!("no crumb `{rest}` on this Settings page"))?;
+            this.open_settings_page(target, cx);
+            Ok(())
         },
     },
 ];
@@ -579,22 +587,16 @@ impl Harness {
     /// An unknown provider or action records a step failure.
     /// `launch-failed:<provider>[:<kind>]`: the typed failure view with
     /// sample words — what a capture of docs/71 §3 needs without a child.
-    pub(crate) fn step_launch_failed(&mut self, rest: &str, cx: &mut Context<Self>) {
+    pub(crate) fn step_launch_failed(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         use crate::provider_status::FailureKind;
         let (wire, kind) = rest.split_once(':').unwrap_or((rest, "crashed"));
-        let Some(provider) = crate::providers::ProviderId::parse_known(wire) else {
-            record_step_failure(&format!("launch-failed:{rest}"));
-            return;
-        };
+        let provider = crate::providers::ProviderId::parse_known(wire).ok_or_else(|| format!("no provider `{wire}`"))?;
         let kind = match kind {
             "crashed" => FailureKind::Crashed,
             "not-installed" => FailureKind::NotInstalled,
             "signed-out" => FailureKind::SignedOut,
             "too-old" => FailureKind::TooOld,
-            _ => {
-                record_step_failure(&format!("launch-failed:{rest}"));
-                return;
-            }
+            other => return Err(format!("no failure kind `{other}`")),
         };
         self.active = None;
         self.provider_open_error = Some(crate::app::LaunchFailure {
@@ -610,28 +612,23 @@ impl Harness {
             retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace(), draft: String::new() },
         });
         cx.notify();
+        Ok(())
     }
 
-    pub(crate) fn step_provider_action(&mut self, rest: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_provider_action(&mut self, rest: &str, window: &mut gpui::Window, cx: &mut Context<Self>) -> StepResult {
         use aui::screens::{ProviderAction, ProviderIntent};
-        let Some((wire, action)) = rest.split_once(':') else {
-            record_step_failure(&format!("provider-action:{rest}"));
-            return;
-        };
+        let (wire, action) = rest.split_once(':').ok_or("expected <provider>:<action>")?;
         let action = match action {
             "recheck" => ProviderAction::Recheck,
             "signin" => ProviderAction::SignIn,
             "signout" => ProviderAction::SignOut,
-            _ => {
-                record_step_failure(&format!("provider-action:{rest}"));
-                return;
-            }
+            other => return Err(format!("no provider action `{other}`")),
         };
         if crate::providers::ProviderId::parse(wire).as_str() != wire {
-            record_step_failure(&format!("provider-action:{rest}"));
-            return;
+            return Err(format!("no provider `{wire}`"));
         }
         self.handle_provider_intent(ProviderIntent { id: wire.to_owned().into(), action }, window, cx);
+        Ok(())
     }
 
     /// `right:<browser|changes|files|off>`: open the right pane on that kind
@@ -642,16 +639,16 @@ impl Harness {
     /// unknown slug records a step failure instead of capturing a window
     /// where nothing happened (a known verb that silently does nothing
     /// reports success). Free: no turn, no wire.
-    pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) {
-        // Ignored while the Settings page stands open (B11b), like the
+    pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        // Refused while the Settings page stands open (B11b), like the
         // keys: a capture aid must not flip hidden pane state either.
         if self.settings_page.open {
-            return;
+            return Err("the Settings page is open".into());
         }
         let slug = rest.trim();
         if slug.is_empty() {
             self.toggle_right(cx);
-            return;
+            return Ok(());
         }
         // `off` closes it; a kind OPENS it, idempotently, and neither
         // writes `layout.json`. With a session active the pane state IS
@@ -676,7 +673,7 @@ impl Harness {
             self.layout.right_open = false;
             self.save_right_for_active(cx);
             cx.notify();
-            return;
+            return Ok(());
         }
         match crate::layout::RightKind::parse(slug) {
             Some(kind) => {
@@ -684,11 +681,11 @@ impl Harness {
                 self.layout.right_open = true;
                 self.save_right_for_active(cx);
                 cx.notify();
+                Ok(())
             }
             None => {
-                record_step_failure(&format!("right:{rest}"));
                 let known: Vec<&str> = crate::layout::RightKind::ALL.iter().map(|kind| kind.slug()).collect();
-                crate::baaz_log!("unknown right pane kind `{rest}`; known kinds are {}", known.join(", "));
+                Err(format!("unknown right pane kind `{rest}`; known kinds are {}", known.join(", ")))
             }
         }
     }
@@ -698,25 +695,22 @@ impl Harness {
     /// folder selects with every ancestor expanded and no preview, a file
     /// previews banded on the optional `#L…`/`:line` suffix the payload
     /// carries. Empty or project-less fails, free.
-    pub(crate) fn step_files_reveal(&mut self, rest: &str, cx: &mut Context<Self>) {
-        // Ignored while the Settings page stands open (B11b): it opens the
+    pub(crate) fn step_files_reveal(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        // Refused while the Settings page stands open (B11b): it opens the
         // pane on Files, a pane-kind command.
         if self.settings_page.open {
-            return;
+            return Err("the Settings page is open".into());
         }
         let raw = rest.trim();
         if raw.is_empty() {
-            record_step_failure("files-reveal:");
-            return;
+            return Err("no path".into());
         }
-        let Some((root, _)) = self.right_project() else {
-            record_step_failure(&format!("files-reveal:{rest}"));
-            return;
-        };
+        let (root, _) = self.right_project().ok_or("no current project")?;
         let highlight = crate::session::render::parse_link_lines(raw);
         let abs = crate::session::render::resolve_link_path(&root, raw);
         let is_dir = std::fs::metadata(&abs).ok().map(|meta| meta.is_dir());
         self.reveal_link_path(&root, &abs, is_dir, highlight, cx);
+        Ok(())
     }
 
     /// `files-select:<path>`: preview the project-relative file `path` in
@@ -726,34 +720,32 @@ impl Harness {
     /// empty payload, or no current project, records a step failure
     /// instead of capturing a window where nothing happened. Free: no
     /// turn, no wire.
-    pub(crate) fn step_files_select(&mut self, rest: &str, cx: &mut Context<Self>) {
-        // Ignored while the Settings page stands open (B11b): it opens the
+    pub(crate) fn step_files_select(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        // Refused while the Settings page stands open (B11b): it opens the
         // pane on Files, a pane-kind command.
         if self.settings_page.open {
-            return;
+            return Err("the Settings page is open".into());
         }
         let id = rest.trim();
         if id.is_empty() {
-            record_step_failure("files-select:");
-            return;
+            return Err("no path".into());
         }
-        let Some((root, _)) = self.right_project() else {
-            record_step_failure(&format!("files-select:{rest}"));
-            return;
-        };
+        let (root, _) = self.right_project().ok_or("no current project")?;
         self.layout.right_kind = Some(crate::layout::RightKind::Files);
         self.layout.right_open = true;
         self.refresh_right_now(cx);
         self.begin_file_preview_for(&root, id, cx);
+        Ok(())
     }
 
     /// `right-width:<px>`: settle the right pane's divider at a width,
     /// clamped into the library range exactly like a released drag, so a
     /// capture never depends on whatever `layout.json` holds on the
-    /// machine running the probe. Unparseable payloads keep the current
-    /// width, like `sidebar-width:`. Free: no turn, no wire.
-    pub(crate) fn step_right_width(&mut self, rest: &str, cx: &mut Context<Self>) {
-        if let Ok(width) = rest.trim().parse::<f32>() {
+    /// machine running the probe. An unparseable payload fails the step.
+    /// Free: no turn, no wire.
+    pub(crate) fn step_right_width(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        let width = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a width"))?;
+        {
             let width = aui::shell::clamp_right_width(width);
             // BOTH, and the second one is the one that renders. The shell is
             // given `self.right_resize.width`; `layout.right_width` is only
@@ -765,6 +757,7 @@ impl Harness {
             self.right_resize.width = width;
         }
         cx.notify();
+        Ok(())
     }
 
     /// `mode:<sessions|browse>`: set the window's mode, idempotently —
@@ -773,25 +766,25 @@ impl Harness {
     /// with no person tab opens one blank tab, like the switch does. An
     /// unknown payload records a step failure instead of capturing a
     /// window where nothing happened. Free: no turn, no wire.
-    pub(crate) fn step_mode(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_mode(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
         // A bare `mode` is the session verb this window verb shadows: it
         // opens the composer's approval-mode picker.
         if rest.trim().is_empty() {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx));
-                return;
+                return Ok(());
             }
         }
         match crate::layout::Mode::parse(rest.trim()) {
-            Some(mode) => self.set_mode(mode, window, cx),
-            None => {
-                record_step_failure(&format!("mode:{rest}"));
-                crate::baaz_log!(
-                    "unknown mode `{rest}`; known modes are {}, {}",
-                    crate::layout::Mode::Sessions.slug(),
-                    crate::layout::Mode::Browse.slug()
-                );
+            Some(mode) => {
+                self.set_mode(mode, window, cx);
+                Ok(())
             }
+            None => Err(format!(
+                "unknown mode `{rest}`; known modes are {}, {}",
+                crate::layout::Mode::Sessions.slug(),
+                crate::layout::Mode::Browse.slug()
+            )),
         }
     }
 
@@ -800,14 +793,10 @@ impl Harness {
     /// AppKit to whatever window is key exactly like a person's keypress. An
     /// unparseable or unsupported keystroke records a step failure instead of
     /// pressing nothing. Free: no turn, no wire.
-    pub(crate) fn step_key(&mut self, rest: &str) {
-        match key_event_parts(rest) {
-            Some((code, flags)) => post_key_event(code, flags),
-            None => {
-                record_step_failure(&format!("key:{rest}"));
-                crate::baaz_log!("unknown key step `key:{rest}`");
-            }
-        }
+    pub(crate) fn step_key(&mut self, rest: &str) -> StepResult {
+        let (code, flags) = key_event_parts(rest).ok_or_else(|| format!("unknown keystroke `{rest}`"))?;
+        post_key_event(code, flags);
+        Ok(())
     }
 }
 
@@ -967,28 +956,28 @@ fn post_key_event(code: u16, _flags: u64) {
 
 /// The open session's `--steps` verbs.
 pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
-    SessionVerb { verb: "draft", run: |v, rest, window, cx| v.set_draft(rest.to_owned(), window, cx) },
-    SessionVerb { verb: "send", run: |v, rest, _, cx| v.send_text(rest.to_owned(), cx) },
+    SessionVerb { verb: "draft", run: |v, rest, window, cx| { v.set_draft(rest.to_owned(), window, cx); Ok(()) } },
+    SessionVerb { verb: "send", run: |v, rest, _, cx| v.step_send(rest, cx) },
     // The billing banner's "Send anyway", as a verb: sends what the guard
     // held back — **costs a turn** when there is anything to send.
-    SessionVerb { verb: "send-anyway", run: |v, _, window, cx| v.send_anyway(window, cx) },
-    SessionVerb { verb: "steer", run: |v, rest, _, cx| v.steer_text(rest.to_owned(), cx) },
-    SessionVerb { verb: "model", run: |v, _, _, cx| v.toggle_picker(MenuKind::Model, cx) },
-    SessionVerb { verb: "effort", run: |v, _, _, cx| v.toggle_picker(MenuKind::Effort, cx) },
+    SessionVerb { verb: "send-anyway", run: |v, _, window, cx| v.step_send_anyway(window, cx) },
+    SessionVerb { verb: "steer", run: |v, rest, _, cx| v.step_steer(rest, cx) },
+    SessionVerb { verb: "model", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Model, cx); Ok(()) } },
+    SessionVerb { verb: "effort", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Effort, cx); Ok(()) } },
     SessionVerb { verb: "fixture-models", run: |v, _, _, cx| v.step_fixture_models(cx) },
     SessionVerb { verb: "submenu", run: |v, _, _, cx| v.step_submenu(cx) },
-    SessionVerb { verb: "provider", run: |v, _, _, cx| v.toggle_picker(MenuKind::Provider, cx) },
-    SessionVerb { verb: "mode", run: |v, _, _, cx| v.toggle_picker(MenuKind::Mode, cx) },
-    SessionVerb { verb: "confirm", run: |v, _, window, cx| v.confirm_menu(window, cx) },
+    SessionVerb { verb: "provider", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Provider, cx); Ok(()) } },
+    SessionVerb { verb: "mode", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Mode, cx); Ok(()) } },
+    SessionVerb { verb: "confirm", run: |v, _, window, cx| v.step_confirm(window, cx) },
     // The session operations, so their screenshots come from a command
     // line rather than from a pointer.
     SessionVerb {
         verb: "name",
-        run: |v, rest, window, cx| v.run_command_with(Command::Name, rest.to_owned(), window, cx),
+        run: |v, rest, window, cx| v.step_name(rest, window, cx),
     },
-    SessionVerb { verb: "hide", run: |_, _, _, cx| cx.emit(SessionEvent::Hide) },
-    SessionVerb { verb: "resume", run: |_, _, _, cx| cx.emit(SessionEvent::Resume) },
-    SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.set_model(rest, cx) },
+    SessionVerb { verb: "hide", run: |_, _, _, cx| { cx.emit(SessionEvent::Hide); Ok(()) } },
+    SessionVerb { verb: "resume", run: |_, _, _, cx| { cx.emit(SessionEvent::Resume); Ok(()) } },
+    SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.step_setmodel(rest, cx) },
     SessionVerb { verb: "setprovider", run: |v, rest, _, cx| v.step_setprovider(rest, cx) },
     // `handoff:<provider>`: start the lossy re-prompt to that backend,
     // headless — the command line already asked, so no confirm dialog.
@@ -996,19 +985,19 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // pick) record a step failure and change nothing.
     SessionVerb { verb: "handoff", run: |v, rest, _, cx| v.step_handoff(rest, cx) },
     SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
-    SessionVerb { verb: "compact", run: |v, _, _, cx| v.compact(cx) },
+    SessionVerb { verb: "compact", run: |v, _, _, cx| v.step_compact(cx) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },
     SessionVerb { verb: "context", run: |v, rest, _, cx| v.step_context(rest, cx) },
-    SessionVerb { verb: "plan", run: |v, _, _, cx| v.set_plan(true, cx) },
-    SessionVerb { verb: "image", run: |v, rest, _, cx| v.attach_paths(vec![rest.into()], cx) },
-    SessionVerb { verb: "file", run: |v, rest, _, cx| v.attach_paths(vec![rest.into()], cx) },
+    SessionVerb { verb: "plan", run: |v, _, _, cx| { v.set_plan(true, cx); Ok(()) } },
+    SessionVerb { verb: "image", run: |v, rest, _, cx| v.step_attach(rest, cx) },
+    SessionVerb { verb: "file", run: |v, rest, _, cx| v.step_attach(rest, cx) },
     SessionVerb { verb: "plus", run: |v, _, _, cx| v.step_plus(cx) },
     SessionVerb { verb: "drop", run: |v, _, _, cx| v.step_drop(cx) },
     SessionVerb { verb: "command", run: |v, rest, window, cx| v.step_caret_menu("/", rest, window, cx) },
     SessionVerb { verb: "mention", run: |v, rest, window, cx| v.step_caret_menu("@", rest, window, cx) },
     // `session/userShell`: free on every provider, and the only way to raise a
     // real approval without spending a turn.
-    SessionVerb { verb: "shell", run: |v, rest, _, cx| v.run_user_shell(rest.to_owned(), cx) },
+    SessionVerb { verb: "shell", run: |v, rest, _, cx| v.step_shell(rest, cx) },
     SessionVerb { verb: "setmode", run: |v, rest, _, cx| v.step_setmode(rest, cx) },
     SessionVerb { verb: "choose", run: |v, rest, window, cx| v.step_choose(rest, window, cx) },
     SessionVerb { verb: "feedback", run: |v, rest, window, cx| v.step_feedback(rest, window, cx) },
@@ -1020,20 +1009,20 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "skip", run: |v, _, _, cx| v.step_skip(cx) },
     // Transcript inspection: jump without touching the pointer, hold a
     // selection, and open every tool group for its screenshot.
-    SessionVerb { verb: "select-text", run: |v, rest, _, cx| v.select_text_step(rest, cx) },
-    SessionVerb { verb: "select-span", run: |v, rest, _, cx| v.select_span_step(rest, cx) },
-    SessionVerb { verb: "quote", run: |v, _, window, cx| v.quote_selection_step(window, cx) },
+    SessionVerb { verb: "select-text", run: |v, rest, _, cx| v.step_select_text(rest, cx) },
+    SessionVerb { verb: "select-span", run: |v, rest, _, cx| v.step_select_span(rest, cx) },
+    SessionVerb { verb: "quote", run: |v, _, window, cx| v.step_quote(window, cx) },
     SessionVerb { verb: "copy", run: |v, rest, window, cx| v.step_copy(rest, window, cx) },
     SessionVerb { verb: "top", run: |v, _, _, cx| v.step_top(cx) },
     SessionVerb { verb: "end", run: |v, _, _, cx| v.step_end(cx) },
     SessionVerb { verb: "mid", run: |v, _, _, cx| v.step_mid(cx) },
-    SessionVerb { verb: "expand-groups", run: |v, _, _, cx| v.expand_all_groups(cx) },
+    SessionVerb { verb: "expand-groups", run: |v, _, _, cx| { v.expand_all_groups(cx); Ok(()) } },
     SessionVerb { verb: "bench", run: |v, rest, _, cx| v.step_bench(rest, cx) },
-    SessionVerb { verb: "fork", run: |v, _, _, cx| v.fork(None, cx) },
+    SessionVerb { verb: "fork", run: |v, _, _, cx| v.step_fork(cx) },
     SessionVerb { verb: "retry", run: |v, _, _, cx| v.step_retry(cx) },
     // `wait` is handled by the runners, which are the only thing that can let
     // the wire catch up; reaching a table means it slipped through.
-    SessionVerb { verb: "wait", run: |_, _, _, _| {} },
+    SessionVerb { verb: "wait", run: |_, _, _, _| Err("`wait` belongs to the runner".into()) },
 ];
 
 /// The `--login-steps` verbs.
@@ -1072,28 +1061,40 @@ const ATTACH_WAIT_POLLS: usize = 100;
 
 /// One `--steps` item, tried against the window's verbs.
 ///
-/// Returns whether it was one of them; anything else goes on to
-/// [`session_step`], exactly as the two matches used to be tried in turn.
-pub(crate) fn window_step(this: &mut Harness, step: &str, window: &mut Window, cx: &mut Context<Harness>) -> bool {
+/// `None` when it is not one of them — it goes on to [`session_step`],
+/// exactly as the two matches used to be tried in turn — else the verb's
+/// own result.
+pub(crate) fn window_step(this: &mut Harness, step: &str, window: &mut Window, cx: &mut Context<Harness>) -> Option<StepResult> {
     let (head, rest) = split(step);
-    let Some(verb) = WINDOW_VERBS.iter().find(|v| v.verb == head) else { return false };
+    let verb = WINDOW_VERBS.iter().find(|v| v.verb == head)?;
     crate::log::crumb(verb.verb);
-    (verb.run)(this, rest, window, cx);
+    let result = (verb.run)(this, rest, window, cx);
     cx.notify();
-    true
+    Some(result)
+}
+
+/// One `--steps` item, run where it belongs: the window's verbs first,
+/// then the open session's. A session verb with no session to run on, or
+/// while a switch is still landing, fails rather than vanishing.
+pub(crate) fn run_one_step(this: &mut Harness, step: &str, window: &mut Window, cx: &mut Context<Harness>) -> StepResult {
+    if let Some(result) = window_step(this, step, window, cx) {
+        return result;
+    }
+    if this.pending_switch_dest(cx).is_some() {
+        return Err("a session switch is still landing".into());
+    }
+    let view = this.active.clone().ok_or("no open session")?;
+    view.update(cx, |view, cx| session_step(view, step, window, cx))
 }
 
 /// `stall:<ms>`: hold the UI thread, so a live run can watch the stall
 /// watchdog write (see [`crate::watchdog`]). Capped at 10 s.
-fn step_stall(rest: &str) {
+fn step_stall(rest: &str) -> StepResult {
     let (ms, busy) = match rest.trim().strip_suffix(",busy") {
         Some(ms) => (ms, true),
         None => (rest.trim(), false),
     };
-    let Ok(ms) = ms.parse::<u64>() else {
-        record_step_failure(&format!("stall:{rest}"));
-        return;
-    };
+    let ms = ms.parse::<u64>().map_err(|_| format!("`{rest}` is not milliseconds"))?;
     let until = std::time::Instant::now() + std::time::Duration::from_millis(ms.min(10_000));
     if busy {
         // On CPU the whole time, as a runaway loop would be.
@@ -1103,18 +1104,14 @@ fn step_stall(rest: &str) {
     } else {
         std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
     }
+    Ok(())
 }
 
 /// One `--steps` item, run against the open session.
-pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Window, cx: &mut Context<SessionView>) {
+pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Window, cx: &mut Context<SessionView>) -> StepResult {
     let (head, rest) = split(step);
-    match SESSION_VERBS.iter().find(|v| v.verb == head) {
-        Some(verb) => (verb.run)(view, rest, window, cx),
-        None => {
-            record_step_failure(step);
-            crate::baaz_log!("unknown step `{head}`")
-        }
-    }
+    let verb = SESSION_VERBS.iter().find(|v| v.verb == head).ok_or_else(|| format!("unknown step `{head}`"))?;
+    (verb.run)(view, rest, window, cx)
 }
 
 /// Whether a `--steps` item runs against the open session (as opposed to
@@ -1241,27 +1238,20 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                         "session switch never arrived; `{step}` runs against {active:?}"
                     );
                 }
-                // A session verb with no open session has nowhere to go:
-                // fail it loudly rather than vanishing into
-                // `with_session`'s silent no-op below. Not counted in
-                // `ran`: a skipped step is not a run step.
-                let has_session = this
-                    .read_with(cx, |this, cx| this.active_id(cx).is_some())
-                    .unwrap_or(false);
-                if !has_session {
-                    crate::baaz_log!("`{step}`: no open session; step failed");
-                    record_step_failure(&step);
-                    continue;
-                }
             }
             STEPS_RAN.fetch_add(1, Ordering::Relaxed);
-            let ran = this.update_in(cx, |this, window, cx| {
-                if !window_step(this, &step, window, cx) {
-                    this.with_session(cx, |view, cx| session_step(view, &step, window, cx));
-                }
-            });
-            if ran.is_err() {
+            let Ok(result) = this.update_in(cx, |this, window, cx| run_one_step(this, &step, window, cx)) else {
                 crate::baaz_log!("steps: `{step}` lost its window; ending script");
+                capture.set_steps_running(false);
+                capture.set_steps_done(true);
+                return;
+            };
+            // The first step that did not do what it says ends the script:
+            // everything after it would run against a screen the script
+            // did not mean, and the capture exits non-zero on the count.
+            if let Err(reason) = result {
+                record_step_failure(&step);
+                crate::baaz_log!("steps: `{step}` failed: {reason}; ending script");
                 capture.set_steps_running(false);
                 capture.set_steps_done(true);
                 return;
@@ -1582,7 +1572,7 @@ mod tests {
             cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         for kind in crate::layout::RightKind::ALL {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(kind.slug(), cx)));
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(kind.slug(), cx))).expect("a known kind opens");
             assert!(
                 vc.update(|_, cx| baaz.read(cx).layout.right_open),
                 "{kind:?} opens the pane"
@@ -1592,8 +1582,8 @@ mod tests {
         restore_state(state);
     }
 
-    /// The empty payload toggles, and an unknown slug records a step
-    /// failure while leaving the pane alone.
+    /// The empty payload toggles, and an unknown slug fails the step while
+    /// leaving the pane alone.
     #[gpui::test]
     fn step_right_empty_toggles_and_unknown_fails(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("toggle-fail");
@@ -1603,27 +1593,27 @@ mod tests {
             cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let start = vc.update(|_, cx| baaz.read(cx).layout.right_open);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx))).expect("empty toggles");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_open),
             !start,
             "empty payload toggles the pane"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx))).expect("empty toggles");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_open),
             start,
             "empty payload toggles back"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("not-a-kind", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("not-a-kind", cx)));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_open),
             start,
             "unknown slug changes nothing on screen"
         );
         assert!(
-            super::step_failure_names().iter().any(|name| name == "right:not-a-kind"),
-            "unknown slug is recorded as a step failure"
+            refused.is_err_and(|reason| reason.contains("not-a-kind")),
+            "unknown slug fails the step"
         );
         restore_state(state);
     }
@@ -1641,23 +1631,25 @@ mod tests {
         // whether or not the verb touches the field — the hermetic state opens
         // at RIGHT_WIDTH, which is the very value most captures ask for.
         vc.update(|_, cx| baaz.update(cx, |h, _| h.right_resize.width = 615.0));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx))).expect("a width");
         assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_width), Some(400.0));
         // The field the shell actually renders (`app.rs` hands the shell
         // `self.right_resize.width`). Asserting only the layout field above is
         // what let this verb ship inert: the captures drew at whatever width
         // the person had last dragged to.
         assert_eq!(vc.update(|_, cx| baaz.read(cx).right_resize.width), 400.0);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx))).expect("a width");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_width),
             Some(aui::shell::RIGHT_MAX_WIDTH)
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("1", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("1", cx))).expect("a width");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_width),
             Some(aui::shell::RIGHT_MIN_WIDTH)
         );
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("wide", cx)));
+        assert!(refused.is_err(), "an unparseable width fails the step");
         restore_state(state);
     }
 

@@ -165,6 +165,23 @@ pub(crate) fn normalize_settings_target(raw: &str, last_visited: &str) -> String
     "general".to_owned()
 }
 
+/// Whether `settings:<raw>` names something the page can open: empty (the
+/// last-visited section), a section id, a provider sub-page, a row id with
+/// a home page, or the legacy `sidebar`. Everything
+/// [`normalize_settings_target`] would quietly turn into General is
+/// unknown, so a scripted step can refuse it.
+pub(crate) fn settings_target_known(raw: &str) -> bool {
+    let target = raw.trim().trim_matches('/');
+    if target.is_empty() {
+        return true;
+    }
+    let lower = target.to_lowercase();
+    SETTINGS_SECTIONS.iter().any(|(id, _)| *id == lower)
+        || provider_subpage_id(&lower).is_some()
+        || setting_home(&lower).is_some()
+        || lower == "sidebar"
+}
+
 /// The section-list selection for a page id: a provider sub-page selects
 /// Providers (its sub-pages nest under Providers, indented, only while
 /// Providers is selected).
@@ -615,11 +632,19 @@ impl Harness {
     }
 
     /// `settings[:<section>]`: open the page, optionally at that section
-    /// (`settings:sidebar`, `settings:providers/codex`). Empty reopens the
-    /// last-visited section (General on first open); unknown opens General.
-    /// Idempotent: open, never toggle.
-    pub(crate) fn step_settings(&mut self, rest: &str, cx: &mut Context<Self>) {
-        self.open_settings_page(rest.trim(), cx);
+    /// (`settings:sidebar`, `settings:providers/codex`, or a row id that
+    /// names its home page). Empty reopens the last-visited section
+    /// (General on first open). A target the page does not know is an
+    /// `Err` and opens nothing — the page would otherwise fall back to
+    /// General and the capture would show the wrong section. Idempotent:
+    /// open, never toggle.
+    pub(crate) fn step_settings(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let target = rest.trim();
+        if !settings_target_known(target) {
+            return Err(format!("no settings section or row named {target:?}"));
+        }
+        self.open_settings_page(target, cx);
+        Ok(())
     }
 
     /// Flip one Settings switch by its row id and persist it.
@@ -719,45 +744,60 @@ impl Harness {
             .map(|tab| tab.id);
         match existing {
             Some(id) => self.select_browse_sidebar_tab(id, window, cx),
-            None => self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx),
+            None => {
+                if let Err(reason) = self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx) {
+                    crate::baaz_log!("open_chromium_settings: no tab opened: {reason}");
+                }
+            }
         }
     }
 
     /// `settings-set:<key>=<value>`: the scripted twin of the Settings →
-    /// Browser rows. `search-engine=<name>` lands instantly; anything else
-    /// records a step failure, never a silent no-op.
-    pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// Browser rows. `search-engine=<name>` lands instantly; an unknown key
+    /// or an engine name that does not parse is an `Err`, never a silent
+    /// no-op.
+    pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (key, value) =
             rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
         match key {
             "search-engine" => match SearchEngine::parse(value) {
-                Some(engine) => self.set_search_engine(engine, cx),
-                None => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
+                Some(engine) => {
+                    self.set_search_engine(engine, cx);
+                    Ok(())
+                }
+                None => Err(format!("unknown search engine {value:?}")),
             },
-            _ => crate::steps::record_step_failure(&format!("settings-set:{rest}")),
+            _ => Err(format!("unknown settings key {key:?} (expected search-engine=<name>)")),
         }
     }
 
     /// `auto-title`: flip the automatic-naming switch and persist it. The
     /// switch itself lives on the Settings page's General section; this
     /// verb is what captures flip. Off means no title model call ever.
-    pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) {
+    /// Always flips: `Ok`.
+    pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let on = !self.layout.auto_title;
-        apply_setting(&mut self.layout, "auto_title", on);
+        if !apply_setting(&mut self.layout, "auto_title", on) {
+            return Err("no auto_title switch to flip".to_owned());
+        }
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `auto-summary`: flip the sidebar-summaries switch and persist it.
     /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
-    /// the ladder's preview rung still fills every second line.
-    pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) {
+    /// the ladder's preview rung still fills every second line. Always flips: `Ok`.
+    pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let on = !self.layout.auto_summary;
-        apply_setting(&mut self.layout, "auto_summary", on);
+        if !apply_setting(&mut self.layout, "auto_summary", on) {
+            return Err("no auto_summary switch to flip".to_owned());
+        }
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// The old modal slot: the page renders inline now (left column +

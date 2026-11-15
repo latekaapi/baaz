@@ -211,7 +211,9 @@ impl Harness {
             self.set_mode(crate::layout::Mode::Browse, window, cx);
         }
         for url in urls {
-            self.step_tab_new(url, window, cx);
+            if let Err(reason) = self.step_tab_new(url, window, cx) {
+                crate::baaz_log!("open-url: no tab opened for {url}: {reason}");
+            }
         }
         cx.activate(true);
         window.activate_window();
@@ -267,15 +269,19 @@ impl Harness {
 
     /// `open-url:<url>`: the scripted form of a real open-URL event —
     /// the same classify/queue/open path `on_open_urls` drains into, so
-    /// the probe exercises what a click in another app triggers. Empty
-    /// records a step failure. Free: no turn, no wire.
-    pub(crate) fn step_open_url(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// the probe exercises what a click in another app triggers. An empty
+    /// URL is an `Err`; so is one the path ignores (not web, not an HTML
+    /// file), since it opens no tab — it still runs the path, so the log
+    /// line lands. A URL parked until the shell is up succeeds: parking is
+    /// what the real event does then. Free: no turn, no wire.
+    pub(crate) fn step_open_url(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let url = rest.trim();
         if url.is_empty() {
-            crate::steps::record_step_failure("open-url:");
-            return;
+            return Err("no URL given".into());
         }
+        let opens_tab = matches!(classify_external_open(&normalize_external_url(url)), ExternalOpen::WebTab(_));
         self.ingest_external_urls(vec![url.to_owned()], window, cx);
+        if opens_tab { Ok(()) } else { Err(format!("`{url}` opens no tab (not a web URL)")) }
     }
 }
 

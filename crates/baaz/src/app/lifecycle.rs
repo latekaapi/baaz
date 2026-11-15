@@ -962,7 +962,7 @@ impl Harness {
     // that reaches them is [`crate::steps`].
 
     /// `search:<query>`: open the search palette, optionally on a query.
-    pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.open_search(window, cx);
         if !rest.is_empty() {
             self.search_query.update(cx, |state, cx| {
@@ -975,38 +975,42 @@ impl Harness {
                 cx.emit(gpui_kit::base::input::InputEvent::Change);
             });
         }
+        Ok(())
     }
 
-    /// `rename:<name>`: open the active row's inline field, optionally filled.
-    pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-        if let Some(session_id) = session_id {
-            self.start_rename(session_id, window, cx);
-            if !rest.is_empty() {
-                self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-            }
+    /// `rename:<name>`: open the active row's inline field, optionally
+    /// filled. No open session fails the step.
+    pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone()).ok_or("no open session")?;
+        self.start_rename(session_id, window, cx);
+        if !rest.is_empty() {
+            self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
         }
+        Ok(())
     }
 
-    /// `hidden`: list hidden sessions anyway.
-    pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) {
+    /// `hidden`: list hidden sessions anyway (a toggle).
+    pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.show_hidden = !self.show_hidden;
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
-    /// `empty`: list sessions with no turns anyway.
-    pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) {
+    /// `empty`: list sessions with no turns anyway (a toggle).
+    pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.show_empty = !self.show_empty;
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
-    /// `show-archived`: list archived sessions anyway.
-    pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) {
+    /// `show-archived`: list archived sessions anyway (a toggle).
+    pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.show_archived = !self.show_archived;
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `wheel:<dy>[@<x>,<y>]`: dispatch one synthetic wheel event at the
@@ -1014,16 +1018,20 @@ impl Harness {
     /// and log the transcript's pixel offset before and after — the
     /// palette-scroll instrument: over the open palette the
     /// palette's list scrolls and the transcript never moves, while over the
-    /// bare transcript the same wheels move it. Free: no turn, no wire.
-    pub(crate) fn step_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// bare transcript the same wheels move it. An unparseable `dy` or
+    /// point fails the step. Free: no turn, no wire.
+    pub(crate) fn step_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (dy, at) = rest.split_once('@').unwrap_or((rest, ""));
-        let dy: f32 = dy.trim().parse().unwrap_or(0.0);
+        let dy: f32 = dy.trim().parse().map_err(|_| format!("`{dy}` is not a wheel delta"))?;
         let before = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
         let size = window.bounds().size;
-        let position = at
-            .split_once(',')
-            .and_then(|(x, y)| Some(point(px(x.trim().parse().ok()?), px(y.trim().parse().ok()?))))
-            .unwrap_or(point(size.width * 0.5, size.height * 0.5));
+        let position = if at.trim().is_empty() {
+            point(size.width * 0.5, size.height * 0.5)
+        } else {
+            at.split_once(',')
+                .and_then(|(x, y)| Some(point(px(x.trim().parse().ok()?), px(y.trim().parse().ok()?))))
+                .ok_or_else(|| format!("`{at}` is not a window point x,y"))?
+        };
         window.dispatch_event(
             PlatformInput::ScrollWheel(ScrollWheelEvent {
                 position,
@@ -1042,6 +1050,7 @@ impl Harness {
         }
         let after = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
         crate::baaz_log!("wheel dy={dy} list_px={before}->{after}");
+        Ok(())
     }
 
     /// `centre`: the open-flicker instrument. Log
@@ -1049,9 +1058,10 @@ impl Harness {
     /// hero vs loading-row paints since the last call. An existing session
     /// opened through `open:`/`click:` must read `hero=0`; a draft opened
     /// through `new` still reads `hero>0`. Free: no turn, no wire.
-    pub(crate) fn step_centre(&mut self) {
+    pub(crate) fn step_centre(&mut self) -> crate::steps::StepResult {
         let (hero, loading) = crate::session::take_centre_paints();
         crate::baaz_log!("centre hero={hero} loading={loading}");
+        Ok(())
     }
 
     /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument. Dispatch
@@ -1067,23 +1077,25 @@ impl Harness {
     /// wire.
     /// `pointer:<x>,<y>`: dispatch one mouse move to window point (x, y) —
     /// the pointer resting on a row, for captures of hover under a scroll
-    /// (`sidebar-scroll-sweep:`). Free: no turn, no wire.
-    pub(crate) fn step_pointer(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((x, y)) = rest.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))) else {
-            crate::steps::record_step_failure(&format!("pointer:{rest}"));
-            return;
-        };
+    /// (`sidebar-scroll-sweep:`). An unparseable point fails the step.
+    /// Free: no turn, no wire.
+    pub(crate) fn step_pointer(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (x, y) = rest
+            .split_once(',')
+            .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+            .ok_or_else(|| format!("`{rest}` is not a window point x,y"))?;
         // Dispatched after this update: the list's hover handler reports to
         // Harness, which is mid-update here.
         window.defer(cx, move |window, cx| {
             window.dispatch_event(PlatformInput::MouseMove(gpui::MouseMoveEvent { position: point(px(x), px(y)), ..Default::default() }), cx);
         });
+        Ok(())
     }
 
-    pub(crate) fn step_sidebar_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_sidebar_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (dy_text, n_text) = rest.split_once(',').unwrap_or((rest, "1"));
-        let dy: f32 = dy_text.trim().parse().unwrap_or(0.0);
-        let n: usize = n_text.trim().parse().unwrap_or(1);
+        let dy: f32 = dy_text.trim().parse().map_err(|_| format!("`{dy_text}` is not a wheel delta"))?;
+        let n: usize = n_text.trim().parse().map_err(|_| format!("`{n_text}` is not a wheel count"))?;
         // Drained first: what this line reports is everything since the
         // previous drain, i.e. the earlier burst's frames once a `wait:`
         // separates the two calls.
@@ -1128,6 +1140,7 @@ impl Harness {
                 );
             });
         });
+        Ok(())
     }
 
     /// `resize-begin:<x>` / `resize-move:<x>` / `resize-end`: the scripted
@@ -1144,11 +1157,12 @@ impl Harness {
     /// display link's pace on a real display — logging
     /// `baaz: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per
     /// tick. Like a press it disarms the reveal and owns the list while it
-    /// runs; it never persists.
-    pub(crate) fn step_resize_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// runs; it never persists. An unparseable width or step fails the
+    /// step; `step_px` defaults to 4 when absent.
+    pub(crate) fn step_resize_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (to, step) = rest.split_once(',').unwrap_or((rest, "4"));
-        let to: f32 = to.trim().parse().unwrap_or(aui::shell::SIDEBAR_WIDTH);
-        let step: f32 = step.trim().parse().unwrap_or(4.0);
+        let to: f32 = to.trim().parse().map_err(|_| format!("`{to}` is not a width"))?;
+        let step: f32 = step.trim().parse().map_err(|_| format!("`{step}` is not a step in px"))?;
         self.reveal = None;
         self.reveal_unknown = None;
         self.sidebar_user_scrolled = true;
@@ -1156,6 +1170,7 @@ impl Harness {
         self.resize.active = true;
         self.resize.scripted = true;
         cx.notify();
+        Ok(())
     }
 
     /// `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>`: a frame-paced
@@ -1168,32 +1183,37 @@ impl Harness {
     /// screencapture), a posted event's landing window cannot be confirmed
     /// (see `docs/02-app.md`). Pair with
     /// `BAAZ_FRAME_TRACE=1` and read `scripts/frame-trace.py --metric
-    /// sidebar`; free, no turn, no wire.
-    pub(crate) fn step_sidebar_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let mut parts = rest.split(',');
-        let dy: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(-20.0);
-        let finger: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(60);
-        let tail: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(40);
+    /// sidebar`; free, no turn, no wire. An absent part takes its
+    /// default (-20, 60, 40); a present one that does not parse fails the
+    /// step.
+    pub(crate) fn step_sidebar_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (dy, finger, tail) = parse_scroll_sweep(rest)?;
         self.sidebar_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
         cx.notify();
+        Ok(())
     }
 
     /// `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>`: the
     /// transcript's twin of `sidebar-scroll-sweep:`, pushing into the
     /// active session's own wheel accumulator
     /// (`SessionView::push_wheel`) once per rendered frame. Same shape,
-    /// same fallback reason, same free/no-turn/no-wire guarantee.
-    pub(crate) fn step_transcript_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let mut parts = rest.split(',');
-        let dy: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(-20.0);
-        let finger: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(60);
-        let tail: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(40);
+    /// same fallback reason, same defaults and failures, same
+    /// free/no-turn/no-wire guarantee.
+    pub(crate) fn step_transcript_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (dy, finger, tail) = parse_scroll_sweep(rest)?;
         self.transcript_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
         cx.notify();
+        Ok(())
     }
 
-    pub(crate) fn step_resize_drag(&mut self, phase: &str, rest: &str, cx: &mut Context<Self>) {
-        let x: f32 = rest.trim().parse().unwrap_or(0.0);
+    /// See the `resize-begin` doc above: `begin` and `move` fail the step
+    /// on an unparseable `x`; `end` ignores its payload.
+    pub(crate) fn step_resize_drag(&mut self, phase: &str, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let x: f32 = if phase == "begin" || phase == "move" {
+            rest.trim().parse().map_err(|_| format!("`{rest}` is not an x position"))?
+        } else {
+            0.0
+        };
         match phase {
             "begin" => {
                 self.begin_resize(x, cx);
@@ -1217,26 +1237,33 @@ impl Harness {
             self.sidebar_user_scrolled,
             self.resize.active
         );
+        Ok(())
     }
 
     /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
     /// clamped and settled exactly like a released drag, minus the pointer.
-    pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
-        if let Ok(width) = rest.parse::<f32>() {
-            self.resize.width = clamp_sidebar_width(width);
-            self.resize.active = false;
-            self.resize.persist();
-        }
+    /// An unparseable width fails the step.
+    pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let width = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a width"))?;
+        self.resize.width = clamp_sidebar_width(width);
+        self.resize.active = false;
+        self.resize.persist();
         cx.notify();
+        Ok(())
     }
 
     /// `row-detail:<session_id>`: capture aid — pin the hover card open for
     /// one row, seated at the selected row's bounds (pair with `click:` on
-    /// the same id). Empty clears the pin. Free: no pointer, no turn.
-    pub(crate) fn step_row_detail(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// the same id). Empty clears the pin; an id that names no sidebar row
+    /// fails the step. Free: no pointer, no turn.
+    pub(crate) fn step_row_detail(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
+        if !id.is_empty() && !self.sessions.iter().any(|entry| entry.id == id) {
+            return Err(format!("no sidebar row `{id}`"));
+        }
         self.forced_detail = if id.is_empty() { None } else { Some(id.to_owned()) };
         cx.notify();
+        Ok(())
     }
 
     /// `hover:<session_id>`: capture aid — deliver the selected row's own
@@ -1250,20 +1277,17 @@ impl Harness {
     /// never touch the entity) — so this makes the report's own call. The
     /// pointer-to-report half lives in the
     /// `hover_report_seats_the_card_without_a_pane_render` test, which
-    /// sweeps a real pointer over the real pane. Free: no turn, no wire.
-    pub(crate) fn step_hover(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// sweeps a real pointer over the real pane. No selected row bounds
+    /// yet, or an id that is not the selected row, fails the step. Free: no
+    /// turn, no wire.
+    pub(crate) fn step_hover(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
-        let Some((known, bounds)) = self.selected_row_bounds.clone() else {
-            crate::baaz_log!(
-                "hover: no selected row bounds yet (pair with `click:` and a `wait:`)"
-            );
-            return;
-        };
+        let (known, bounds) = self
+            .selected_row_bounds
+            .clone()
+            .ok_or("no selected row bounds yet (pair with `click:` and a `wait:`)")?;
         if !id.is_empty() && known != id {
-            crate::baaz_log!(
-                "hover: `{id}` is not the selected row (`{known}`); pair with `click:{id}` first"
-            );
-            return;
+            return Err(format!("`{id}` is not the selected row (`{known}`); pair with `click:{id}` first"));
         }
         self.note_row_hover(known.clone(), true, Some(bounds), cx);
         match crate::sidebar_view::row_detail_seat(&self.sidebar_bounds, &bounds) {
@@ -1274,39 +1298,52 @@ impl Harness {
             ),
             None => crate::baaz_log!("hover id={known} no-sidebar-edge"),
         }
+        Ok(())
     }
 
     /// `new`: the same as ⌘N, in the current project. `new:<project name>`:
-    /// the group row's `+` for the project named — an unknown name only logs.
-    pub(crate) fn step_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// the group row's `+` for the project named — an unknown name fails
+    /// the step.
+    pub(crate) fn step_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let name = rest.trim();
         if name.is_empty() {
             self.new_session(window, cx);
-            return;
+            return Ok(());
         }
-        match self.projects.projects.iter().find(|p| p.name == name).map(|p| p.id.clone()) {
-            Some(id) => self.new_session_in(Some(id), window, cx),
-            None => crate::baaz_log!("unknown project `{name}`"),
-        }
+        let id = self
+            .projects
+            .projects
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| format!("unknown project `{name}`"))?;
+        self.new_session_in(Some(id), window, cx);
+        Ok(())
     }
 
-    /// `pin`: pin or unpin the active session.
     /// `pin`: toggle the active session's pin; `pin:<id>`: toggle that row's.
     /// The id form is for captures: the replay row lives in closed Other, so
-    /// pinning it shows nothing — `pin:s-web-1` pins a row on screen.
-    pub(crate) fn step_pin(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let id =
-            if rest.is_empty() { self.active_id(cx) } else { Some(rest.to_owned()) };
-        if let Some(session_id) = id {
-            self.toggle_pin(session_id, cx);
-        }
+    /// pinning it shows nothing — `pin:s-web-1` pins a row on screen. No
+    /// open session, or an id this window does not know, fails the step.
+    pub(crate) fn step_pin(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = rest.trim();
+        let session_id = if id.is_empty() {
+            self.active_id(cx).ok_or("no open session")?
+        } else if self.knows_session(id, cx) {
+            id.to_owned()
+        } else {
+            return Err(format!("no session `{id}`"));
+        };
+        self.toggle_pin(session_id, cx);
+        Ok(())
     }
 
-    /// `archive`: raise the active session's archive confirmation.
-    pub(crate) fn step_archive(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.active_id(cx) {
-            self.open_archive_dialog(session_id, cx);
-        }
+    /// `archive`: raise the active session's archive confirmation. No open
+    /// session fails the step.
+    pub(crate) fn step_archive(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let session_id = self.active_id(cx).ok_or("no open session")?;
+        self.open_archive_dialog(session_id, cx);
+        Ok(())
     }
 
     /// Paint the sidebar from the local index while `session/list` is still
@@ -1828,16 +1865,21 @@ impl Harness {
     /// `new-in:<path>`: [`Self::new_session_in_root`] against a named root,
     /// so a capture can put a session in a folder of its own rather than in
     /// the default workspace. Relative paths resolve against the process's
-    /// own directory, like `project:<path>` already does for adoption.
-    pub(crate) fn step_new_in(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// own directory, like `project:<path>` already does for adoption. An
+    /// empty path, or one that is not a directory on disk, fails the step.
+    pub(crate) fn step_new_in(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let rest = rest.trim();
         if rest.is_empty() {
-            return;
+            return Err("no folder path".into());
         }
         let path = std::path::PathBuf::from(rest);
         let path =
             if path.is_absolute() { path } else { std::env::current_dir().unwrap_or_default().join(path) };
+        if !path.is_dir() {
+            return Err(format!("`{}` is not a directory", path.display()));
+        }
         self.new_session_in_root(&path, window, cx);
+        Ok(())
     }
 
     /// Whether `session_id` still names an unsent draft: a row with zero
@@ -2025,6 +2067,56 @@ impl Harness {
     /// rather than served.
     pub(crate) fn resume_quiet(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.resume_inner(session_id, true, false, window, cx);
+    }
+
+    /// Whether `session_id` names a session this window knows: a sidebar
+    /// row, a provider record, a local index entry, or an open or parked
+    /// view. What the `open:`/`click:`/`pin:` steps check before acting,
+    /// since offline `resume` would open any id as a blank local view.
+    pub(crate) fn knows_session(&self, session_id: &str, cx: &gpui::App) -> bool {
+        self.sessions.iter().any(|entry| entry.id == session_id)
+            || self.provider_sessions.contains_key(session_id)
+            || self.index.contains_key(session_id)
+            || self.session_cache.iter().any(|(cached, _)| cached == session_id)
+            || self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
+    }
+
+    /// `open:<session_id>` / `click:<session_id>`: [`Self::resume`] (an
+    /// outside activation, reveal armed) or [`Self::resume_quiet`] (a row
+    /// click). Fails the step when the id is empty, when it names no
+    /// session this window knows — no sidebar row, no provider record, no
+    /// index entry, no open or parked view, after the chain-head redirect
+    /// `resume` applies — and when `resume` would refuse it as hidden or
+    /// archived; offline, `resume` would otherwise open any id as a blank
+    /// local view and the capture would pass on a session that is not
+    /// there.
+    pub(crate) fn step_open(
+        &mut self,
+        rest: &str,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::steps::StepResult {
+        let id = rest.trim();
+        if id.is_empty() {
+            return Err("no session id".into());
+        }
+        let head = self.chain_head(id);
+        if !self.knows_session(id, cx) && !self.knows_session(&head, cx) {
+            return Err(format!("no session `{id}`"));
+        }
+        if self.overrides.get(&head).is_some_and(|m| m.hidden) && !self.show_hidden {
+            return Err(format!("session `{id}` is hidden"));
+        }
+        if self.overrides.get(&head).is_some_and(|m| m.archived) && !self.show_archived {
+            return Err(format!("session `{id}` is archived"));
+        }
+        if quiet {
+            self.resume_quiet(id.to_owned(), window, cx);
+        } else {
+            self.resume(id.to_owned(), window, cx);
+        }
+        Ok(())
     }
 
     /// Open a chain member itself, bypassing the head redirect: the X3a
@@ -5113,18 +5205,17 @@ impl Harness {
     /// turns" switch (Settings → General, default on) and apply it live
     /// to every open view — the same backing as the settings row, so the
     /// probe, the palette and the switch never disagree. Registered in
-    /// [`crate::steps::WINDOW_VERBS`]; any other payload records a step
-    /// failure instead of toggling something nobody asked for.
+    /// [`crate::steps::WINDOW_VERBS`]; any other payload fails the step
+    /// instead of toggling something nobody asked for.
     pub(crate) fn step_transcript_fold(
         &mut self,
         rest: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> crate::steps::StepResult {
         let _ = window;
         if rest.trim() != "fold" {
-            crate::steps::record_step_failure(&format!("transcript:{rest}"));
-            return;
+            return Err(format!("unknown transcript payload `{rest}`; the only one is fold"));
         }
         let on = !self.layout.fold_finished_turns;
         crate::settings::apply_setting(&mut self.layout, "fold_finished_turns", on);
@@ -5132,6 +5223,7 @@ impl Harness {
         self.apply_fold_to_views(on, cx);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// Push the persisted "Fold finished turns" switch into every open
@@ -5155,6 +5247,18 @@ impl Harness {
         }
     }
 
+}
+
+/// The `<dy,finger_ticks,tail_ticks>` payload of the two scroll-sweep
+/// steps: an absent or empty part takes its default (-20, 60, 40), a
+/// present one that does not parse is the step's failure.
+fn parse_scroll_sweep(rest: &str) -> Result<(f32, u32, u32), String> {
+    let mut parts = rest.split(',').map(str::trim);
+    let mut next = || parts.next().filter(|part| !part.is_empty());
+    let dy = next().map(|text| text.parse::<f32>().map_err(|_| format!("`{text}` is not a wheel delta"))).transpose()?;
+    let finger = next().map(|text| text.parse::<u32>().map_err(|_| format!("`{text}` is not a tick count"))).transpose()?;
+    let tail = next().map(|text| text.parse::<u32>().map_err(|_| format!("`{text}` is not a tick count"))).transpose()?;
+    Ok((dy.unwrap_or(-20.0), finger.unwrap_or(60), tail.unwrap_or(40)))
 }
 
 /// Handoff between providers (H2): the application half. The machine
@@ -7216,12 +7320,12 @@ mod tests {
         });
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(view.read(cx).child_failure().is_none(), "one loss is the quiet banner only");
         });
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -9618,7 +9722,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().expect("the lane opened");
-            view.update(cx, |view, cx| view.step_plus(cx));
+            view.update(cx, |view, cx| view.step_plus(cx)).expect("the `+` step runs");
             assert!(view.read(cx).plus_open(), "the `+` menu opened");
         });
         vc.update(|window, cx| {

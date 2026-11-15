@@ -597,10 +597,14 @@ impl Harness {
     /// `browser-chat-fixture:<answer|steps|draft>` (free: no turn, no wire):
     /// a read-only browser chat whose transcript is canned, made the line's
     /// chat. `answer` lands the line in its inline answer, `steps` opens the
-    /// card on a multi-step chat, `draft` lands the draft state.
-    pub(crate) fn step_browser_chat_fixture(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// card on a multi-step chat, `draft` lands the draft state; empty is
+    /// `answer`. Any other payload fails the step.
+    pub(crate) fn step_browser_chat_fixture(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         use aui_protocol::{Block, Session, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta};
         let kind = rest.trim();
+        if !matches!(kind, "" | "answer" | "steps" | "draft") {
+            return Err(format!("unknown fixture `{kind}`; known fixtures are answer, steps, draft"));
+        }
         let id = format!("browser-fixture-{}", if kind.is_empty() { "answer" } else { kind });
         crate::baaz_log!("browser-chat-fixture: {id} (page {:?})", self.browse_centre_shown());
         let page = self.page_on_screen(cx);
@@ -676,6 +680,7 @@ impl Harness {
             _ => self.line_ui = LineUi::Answer { question: ask.to_owned(), session: id },
         }
         cx.notify();
+        Ok(())
     }
 }
 

@@ -23,6 +23,7 @@ use gpui::{div, prelude::*, AnyElement, Context, Focusable, Window};
 use crate::app::Harness;
 use crate::overlays::{Menu, MenuKind};
 use crate::projects;
+use crate::steps::StepResult;
 
 /// The eight label-ramp slots as the Colour submenu names them, in token
 /// order (`label-1` … `label-8`, red through pink).
@@ -276,121 +277,160 @@ impl Harness {
     }
 
     /// `projects`: the Projects palette, over whatever is open.
-    pub(crate) fn step_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
         self.open_projects(false, window, cx);
+        Ok(())
     }
 
     /// `project:<path>`: adopt the path and make it current — no panel, no
     /// session. Relative paths resolve against the launch directory, like
-    /// the fixture's roots.
-    pub(crate) fn step_adopt(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// the fixture's roots. An empty path, or one that is not a directory
+    /// on disk, fails the step.
+    pub(crate) fn step_adopt(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let rest = rest.trim();
         if rest.is_empty() {
-            return;
+            return Err("no project path".into());
         }
         let path = std::path::PathBuf::from(rest);
         let path =
             if path.is_absolute() { path } else { std::env::current_dir().unwrap_or_default().join(path) };
+        if !path.is_dir() {
+            return Err(format!("`{}` is not a directory", path.display()));
+        }
         self.adopt_root(&path, cx);
+        Ok(())
     }
 
     /// `project-menu`: the current project's menu, seated at its group row.
     /// `project-menu:<name>`: the group row menu for the project named.
-    pub(crate) fn step_project_menu(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// No current project, or no project by that name, fails the step.
+    pub(crate) fn step_project_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let name = rest.trim();
         if name.is_empty() {
-            if let Some(id) = self.current_project_id() {
-                self.open_project_menu(Some(id), true, cx);
-            }
-        } else if let Some(id) =
-            self.projects.projects.iter().find(|p| p.name == name).map(|p| p.id.clone())
-        {
+            let id = self.current_project_id().ok_or("no current project")?;
+            self.open_project_menu(Some(id), true, cx);
+        } else {
+            let id = self
+                .projects
+                .projects
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.id.clone())
+                .ok_or_else(|| format!("no project named `{name}`"))?;
             self.open_project_menu(Some(id), false, cx);
         }
+        Ok(())
     }
 
     /// `project-colour:<n>`: the current project's colour slot, 1–8.
-    /// Anything else is not a slot and does nothing. With no payload, open
-    /// the Colour submenu instead (opening the current project's menu
-    /// first when no project menu is open), so the submenu has a scripted
-    /// entry for its screenshots.
-    pub(crate) fn step_project_colour(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// Anything else is not a slot and fails the step, as does no current
+    /// project. With no payload, open the Colour submenu instead (opening
+    /// the current project's menu first when no project menu is open), so
+    /// the submenu has a scripted entry for its screenshots; with no
+    /// project menu open and no current project to open one on, that fails
+    /// the step too.
+    pub(crate) fn step_project_colour(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         if rest.trim().is_empty() {
             if !self.overlays.read(cx).is_open(MenuKind::Project) {
-                if let Some(id) = self.current_project_id() {
-                    self.open_project_menu(Some(id), true, cx);
-                }
+                let id = self.current_project_id().ok_or("no project menu is open and no current project")?;
+                self.open_project_menu(Some(id), true, cx);
             }
             self.project_colour_open = true;
             cx.notify();
-            return;
+            return Ok(());
         }
-        let Ok(slot) = rest.trim().parse::<u8>() else { return };
-        if !(1..=8).contains(&slot) {
-            return;
-        }
-        let Some(id) = self.current_project_id() else { return };
-        if let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) {
-            project.colour = slot;
-        }
+        let slot = rest.trim().parse::<u8>().ok().filter(|slot| (1..=8).contains(slot));
+        let slot = slot.ok_or_else(|| format!("`{rest}` is not a colour slot 1–8"))?;
+        let id = self.current_project_id().ok_or("no current project")?;
+        let project = self
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("current project `{id}` is not adopted"))?;
+        project.colour = slot;
         projects::write(&self.projects);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `group-by:<date|project>`: persist the sidebar grouping and regroup.
-    pub(crate) fn step_group_by(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// Any other payload fails the step.
+    pub(crate) fn step_group_by(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let mode = match rest.trim() {
             "date" => crate::layout::GroupBy::Date,
             "project" => crate::layout::GroupBy::Project,
-            _ => return,
+            other => return Err(format!("unknown grouping `{other}`; known groupings are date, project")),
         };
         self.layout.group_by = Some(mode);
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `group-chevron`: flip the group-row chevron flag and persist it. The
     /// switch itself lives in the Settings dialog; this
     /// verb is what captures flip until it exists.
-    pub(crate) fn step_group_chevron(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn step_group_chevron(&mut self, cx: &mut Context<Self>) -> StepResult {
         self.layout.group_chevron = !self.layout.group_chevron;
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `group-bar`: flip the current-project accent bar flag and persist it.
     /// See [`Self::step_group_chevron`].
-    pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) -> StepResult {
         self.layout.group_bar = !self.layout.group_bar;
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `group-branch`: flip the trailing-branch flag and persist it. See
     /// [`Self::step_group_chevron`].
-    pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) -> StepResult {
         self.layout.group_branch = !self.layout.group_branch;
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
+        Ok(())
     }
 
     /// `remove-project:<name>`: raise the removal dialog for the project
-    /// named.
-    pub(crate) fn step_remove_project(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// named. No project by that name fails the step.
+    pub(crate) fn step_remove_project(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let name = rest.trim();
-        if let Some(id) = self.projects.projects.iter().find(|p| p.name == name).map(|p| p.id.clone()) {
-            self.open_remove_project_dialog(id, cx);
-        }
+        let id = self
+            .projects
+            .projects
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| format!("no project named `{name}`"))?;
+        self.open_remove_project_dialog(id, cx);
+        Ok(())
     }
 
-    /// `remove-confirm`: confirm the open removal dialog.
-    pub(crate) fn step_remove_confirm(&mut self, cx: &mut Context<Self>) {
+    /// `remove-confirm`: confirm the open removal dialog. No removal
+    /// dialog open, or one whose project is no longer adopted, fails the
+    /// step.
+    pub(crate) fn step_remove_confirm(&mut self, cx: &mut Context<Self>) -> StepResult {
+        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+            (d.action == crate::overlays::DialogAction::RemoveProject)
+                .then(|| d.archive_target.clone())
+                .flatten()
+        });
+        let id = target.ok_or("no removal dialog is open")?;
+        if self.projects.find(&id).is_none() {
+            return Err(format!("project `{id}` is not adopted"));
+        }
         self.confirm_remove_project(cx);
+        Ok(())
     }
 
     /// The project menu, anchored below-start of the group row's tray `…`

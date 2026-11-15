@@ -75,7 +75,7 @@ fn mode_steps_set_idempotently_and_are_window_steps() {
         "mode: is a window verb"
     );
     assert!(
-        steps.contains("Some(mode) => self.set_mode(mode, window, cx),"),
+        steps.contains("Some(mode) => {\n                self.set_mode(mode, window, cx);"),
         "the verb sets the parsed mode"
     );
     let app = source("app.rs");
