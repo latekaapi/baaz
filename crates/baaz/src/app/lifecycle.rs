@@ -3141,7 +3141,7 @@ impl Harness {
         }
         let draft = view.read(cx).words_in_hand(cx);
         self.close_view(provisional, cx);
-        self.subscriptions.clear();
+        self.resubscribe_live_views(cx);
         self.session_switch_pending = false;
         let kind = crate::provider_status::FailureKind::classify(provider_id, Some(&failed.error));
         self.provider_open_error = Some(LaunchFailure {
@@ -3449,7 +3449,7 @@ impl Harness {
         }
         self.fail_pending_handoff(reason.clone(), cx);
         self.park_active(cx);
-        self.subscriptions.clear();
+        self.resubscribe_live_views(cx);
         self.session_switch_pending = false;
         // A failed open lands no session: the Ask has nowhere to go.
         self.drop_pending_ask();
@@ -4348,10 +4348,10 @@ impl Harness {
         // leaves with it and a re-activated view is never subscribed
         // twice. Parked transcripts never re-render through these: the
         // row-affecting arms read the parked fold without touching its UI.
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.view_subscriptions.clear();
+        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         for (_, cached) in &self.session_cache {
-            self.subscriptions.push(cx.subscribe(cached, |this, view, event, cx| this.on_session_event(view, event, cx)));
+            self.view_subscriptions.push(cx.subscribe(cached, |this, view, event, cx| this.on_session_event(view, event, cx)));
         }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
@@ -4415,8 +4415,18 @@ impl Harness {
     }
 
     /// Park the outgoing view in the MRU: its event subscription drops with
-    /// `subscriptions`, while its fold, scroll position and draft ride along
+    /// `view_subscriptions`, while its fold, scroll position and draft ride along
     /// in the entity. Hidden, archived and replayed views are never cached.
+    /// After a failed open: one subscription per view still alive (the
+    /// active one if any, every parked one), so a parked turn finishing
+    /// behind the failure view still reaches its row (docs/81 A F17).
+    fn resubscribe_live_views(&mut self, cx: &mut Context<Self>) {
+        self.view_subscriptions.clear();
+        for view in self.active.iter().chain(self.session_cache.iter().map(|(_, view)| view)) {
+            self.view_subscriptions.push(cx.subscribe(view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        }
+    }
+
     fn park_active(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.take() else { return };
         let session_id = view.read(cx).session_id.clone();
@@ -13037,7 +13047,7 @@ done
     /// B3b: a parked session finishing its turn flips its row from Working
     /// to Settled without being activated. Before the fix the second open
     /// cleared the first view's subscription, so the finish reached no one:
-    /// the `subscriptions` count below stays flat and the row keeps reading
+    /// the `view_subscriptions` count below stays flat and the row keeps reading
     /// Working.
     #[gpui::test]
     fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppContext) {
@@ -13083,7 +13093,7 @@ done
                 "setup: the row reads Working before the switch"
             );
         });
-        let subs_before = vc.update(|_, cx| baaz.read(cx).subscriptions.len());
+        let subs_before = vc.update(|_, cx| baaz.read(cx).view_subscriptions.len());
         // Switching away parks the first view; its subscription must stay.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
@@ -13102,7 +13112,7 @@ done
                 "the first view parks instead of closing"
             );
             assert_eq!(
-                harness.subscriptions.len(),
+                harness.view_subscriptions.len(),
                 subs_before + 1,
                 "both live views stay subscribed"
             );
@@ -13136,6 +13146,80 @@ done
                 "Working becomes Settled without activating"
             );
         });
+        lane_restore(state);
+    }
+
+    /// F2/F17 (docs/81 A): the boot-time field subscriptions — search
+    /// query, Projects and Commands queries, the API-key field — outlive a
+    /// session activation. Before the split, `activate` cleared them with
+    /// the per-view ones, so typing in ⌘⇧F stopped re-querying, the palette
+    /// selections stopped clamping and Enter in the key field did nothing.
+    #[gpui::test]
+    fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) {
+        use gpui_kit::base::input::InputEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f2-field-subs");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).active.is_some()), "setup: a session is open");
+
+        // Search: a keystroke re-queries (the epoch moves).
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.open_search(window, cx)));
+        let before = vc.update(|_, cx| baaz.read(cx).search_epoch);
+        vc.update(|_, cx| {
+            let field = baaz.read(cx).search_query.clone();
+            field.update(cx, |_, cx| cx.emit(InputEvent::Change));
+        });
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).search_epoch), before + 1, "typing in search re-queries");
+
+        // Projects and Commands: a keystroke clamps a stale selection.
+        for kind in [PaletteKind::Projects, PaletteKind::Commands] {
+            vc.update(|_, cx| {
+                baaz.update(cx, |harness, cx| {
+                    harness.open_palette(kind, cx);
+                    harness.overlays.update(cx, |overlays, _| {
+                        overlays.palette.as_mut().expect("the palette opened").selected = 9_999;
+                    });
+                });
+                let field = match kind {
+                    PaletteKind::Projects => baaz.read(cx).projects_query.clone(),
+                    _ => baaz.read(cx).commands_query.clone(),
+                };
+                field.update(cx, |_, cx| cx.emit(InputEvent::Change));
+            });
+            let selected = vc.update(|_, cx| {
+                baaz.read(cx).overlays.read(cx).palette.as_ref().map(|palette| palette.selected)
+            });
+            assert_eq!(selected, Some(0), "{kind:?}: typing clamps the selection");
+        }
+
+        // API key: Enter submits.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_login_state(aui::screens::LoginState::ApiKey { can_submit: true, error: None }, cx);
+                let field = harness.login.api_key_field();
+                field.update(cx, |state, cx| state.set_value("sk-test-f2", window, cx));
+                field.update(cx, |_, cx| cx.emit(InputEvent::PressEnter { secondary: false, shift: false }));
+            });
+        });
+        assert_ne!(
+            vc.update(|_, cx| baaz.read(cx).login.state_name()),
+            "apikey",
+            "Enter in the key field submits"
+        );
         lane_restore(state);
     }
 

@@ -109,6 +109,17 @@ impl Login {
         matches!(self.state, LoginState::Starting | LoginState::Device { .. })
     }
 
+    /// The state's log name and the key field, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn state_name(&self) -> &'static str {
+        login_state_name(&self.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn api_key_field(&self) -> Entity<InputState> {
+        self.api_key.clone()
+    }
+
     pub(crate) fn reset_to_choose(&mut self) {
         self.state = LoginState::Choose;
         self.url = None;

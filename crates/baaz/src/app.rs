@@ -1565,7 +1565,12 @@ pub struct Harness {
     /// change.
     pub(crate) hover_trace_last_shown: Option<bool>,
     pub(crate) tasks: Vec<Task<()>>,
-    subscriptions: Vec<Subscription>,
+    /// The boot-time text-field subscriptions (rename, search, Projects and
+    /// Commands queries, API key). Made once in `new`, never cleared.
+    field_subscriptions: Vec<Subscription>,
+    /// One `SessionEvent` subscription per live view, rebuilt from the live
+    /// views by `activate` and the failed-open paths.
+    view_subscriptions: Vec<Subscription>,
 }
 
 impl WireCall for Harness {
@@ -1883,7 +1888,8 @@ impl Harness {
             selected_row_bounds: None,
             hover_trace_last_shown: None,
             tasks: Vec::new(),
-            subscriptions: Vec::new(),
+            field_subscriptions: Vec::new(),
+            view_subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_fade_since: None,
             browse_drop_target: None,
@@ -2027,14 +2033,14 @@ impl Harness {
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
         // header title that shares the field.
-        this.subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
         }));
         // Typing in the search palette's query re-queries off the UI thread.
-        this.subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.refresh_search(cx);
             }
@@ -2042,7 +2048,7 @@ impl Harness {
         // Typing in the Projects palette's query only redraws: both sections
         // are filtered synchronously at render, so the selection is clamped
         // to the filtered rows here.
-        this.subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.clamp_projects_selection(cx);
                 cx.notify();
@@ -2051,7 +2057,7 @@ impl Harness {
         // Typing in the Commands palette's query only redraws: the rows are
         // filtered synchronously at render, so the selection is clamped to
         // the filtered rows here.
-        this.subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.clamp_commands_selection(cx);
                 cx.notify();
@@ -2060,7 +2066,7 @@ impl Harness {
         // The API-key field: Enter submits, and any change re-renders the
         // form — `can_submit` is recomputed in `render_login`, so the Sign
         // in button tracks the field's non-empty trimmed text.
-        this.subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
             match event {
                 InputEvent::PressEnter { .. } => this.submit_api_key(cx),
                 InputEvent::Change => cx.notify(),
@@ -4790,8 +4796,8 @@ impl Harness {
         });
         crate::log::trace_mark("replay-folded");
         crate::log::trace_arm_first_frame();
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.view_subscriptions.clear();
+        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
