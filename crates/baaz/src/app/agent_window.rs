@@ -665,7 +665,7 @@ impl Harness {
         if let Some((_, title, url)) = page.as_ref() {
             self.browser_chat_pages.insert(id.clone(), vec![(title.clone(), url.clone())]);
         }
-        self.browser_chat = Some(view);
+        self.set_browser_chat(view, cx);
         match kind {
             "steps" => self.card_ui = CardUi::Card,
             "draft" => {

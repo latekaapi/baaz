@@ -5922,8 +5922,8 @@ impl Harness {
         cx.notify();
     }
 
-    /// Hang up every provider lane's child this window holds — the open view
-    /// and every parked one. What app quit calls so no `claude` or `codex`
+    /// Hang up every provider lane's child this window holds — the open view,
+    /// every parked one and the browser chat (docs/81 A F6). What app quit calls so no `claude` or `codex`
     /// child outlives the app; dropping the views would do the same through
     /// [`Drop`](crate::session::SessionView), but quit should not rely on
     /// teardown order. Quitting with a switch pending cancels it too, so an
@@ -5935,10 +5935,7 @@ impl Harness {
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
         self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, _| view.shutdown_lane());
-        }
-        for (_, view) in &self.session_cache {
+        for view in self.live_views() {
             view.update(cx, |view, _| view.shutdown_lane());
         }
     }

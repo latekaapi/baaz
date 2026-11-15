@@ -3,7 +3,9 @@
 //! provider and model, held by the window beside the centre's session.
 //!
 //! The chat's view is never the centre's: it lives in
-//! [`Harness::browser_chat`], which [`Harness::find_view`] also searches, so
+//! [`Harness::browser_chat`] (set only through
+//! [`Harness::set_browser_chat`], which subscribes it), which
+//! [`Harness::find_view`] also searches, so
 //! the provider open lands on it ([`Harness::land_provider_draft`]) exactly as
 //! it lands on a parked draft. Its record is hidden from the Sessions
 //! sidebar; the line, the card and its task folder reach it.
@@ -61,9 +63,7 @@ impl Harness {
             view.update(cx, |view, cx| view.set_model(choice.model, cx));
         }
         view.update(cx, |view, cx| view.send_or_queue(ask, cx));
-        // One chat at a time on the line; the one it replaces keeps its
-        // record and its task folder.
-        self.browser_chat = Some(view);
+        self.set_browser_chat(view, cx);
         self.starts_in_flight.insert(request_id.clone());
         self.spawn_provider_open(choice.provider, None, workspace, request_id.clone(), mode, cx);
         cx.notify();
@@ -75,12 +75,31 @@ impl Harness {
     pub(crate) fn show_browser_chat(&mut self, session: &str, cx: &mut Context<Self>) -> bool {
         match self.find_view(session, cx) {
             Some(view) => {
-                self.browser_chat = Some(view);
+                self.set_browser_chat(view, cx);
                 cx.notify();
                 true
             }
             None => false,
         }
+    }
+
+    /// Make `view` the chat on the line and subscribe it (docs/81 A F5).
+    /// One chat at a time on the line; the one it replaces keeps its record
+    /// and its task folder, and — while it has work in hand — its view, in
+    /// the parked MRU, so its child is not killed mid-turn (F7). An idle
+    /// replaced chat parks too and is capped like any idle view.
+    pub(crate) fn set_browser_chat(&mut self, view: gpui::Entity<SessionView>, cx: &mut Context<Self>) {
+        if let Some(old) = self.browser_chat.take().filter(|old| *old != view) {
+            if old.read(cx).must_stay_alive() && self.active.as_ref() != Some(&old) {
+                let id = old.read(cx).session_id.clone();
+                self.session_cache.retain(|(parked, _)| *parked != id);
+                self.session_cache.insert(0, (id, old));
+            }
+        }
+        // Shown again from its folder: it leaves the MRU for the line.
+        self.session_cache.retain(|(_, parked)| *parked != view);
+        self.browser_chat = Some(view);
+        self.resubscribe_live_views(cx);
     }
 
     /// Whether `session` is a browser chat (by its record).

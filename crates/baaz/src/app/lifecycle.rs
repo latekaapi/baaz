@@ -3160,9 +3160,10 @@ impl Harness {
     /// id onto the id its child minted (Codex's thread id): the parked
     /// view's slot, the drafts and unsent names, the selection and reveal,
     /// the Ask waiting on it, a per-session override (the pane state a
-    /// toggle wrote meanwhile) and any session browser tabs. The view
-    /// renames itself in `attach_provider`. Nothing else can hold the id:
-    /// the draft has no row, no record and no turn until it lands.
+    /// toggle wrote meanwhile), any session browser tabs, and a browser
+    /// chat's line state, used pages and reveal (docs/81 A F4). The view
+    /// renames itself in `attach_provider`. The draft has no row, no
+    /// record and no turn until it lands.
     fn rekey_session(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
         for (id, _) in &mut self.session_cache {
             if id == old {
@@ -3199,6 +3200,22 @@ impl Harness {
         }
         if self.right_kind_migrate.remove(old) {
             self.right_kind_migrate.insert(new.to_owned());
+        }
+        match &mut self.line_ui {
+            super::agent_window::LineUi::Answer { session, .. }
+            | super::agent_window::LineUi::Drafting { session, .. }
+            | super::agent_window::LineUi::Drafted { session, .. }
+                if session == old =>
+            {
+                *session = new.to_owned();
+            }
+            _ => {}
+        }
+        if let Some(pages) = self.browser_chat_pages.remove(old) {
+            self.browser_chat_pages.insert(new.to_owned(), pages);
+        }
+        if let Some((id, _)) = self.reveal_unknown.as_mut().filter(|(id, _)| id == old) {
+            *id = new.to_owned();
         }
         let owner = crate::browser::Owner::Session(old.to_owned());
         let tabs: Vec<_> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
@@ -4351,8 +4368,10 @@ impl Harness {
         // row-affecting arms read the parked fold without touching its UI.
         self.view_subscriptions.clear();
         self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        for (_, cached) in &self.session_cache {
-            self.view_subscriptions.push(cx.subscribe(cached, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        for other in self.live_views() {
+            if other != view {
+                self.view_subscriptions.push(cx.subscribe(&other, |this, view, event, cx| this.on_session_event(view, event, cx)));
+            }
         }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
@@ -4418,13 +4437,32 @@ impl Harness {
     /// Park the outgoing view in the MRU: its event subscription drops with
     /// `view_subscriptions`, while its fold, scroll position and draft ride along
     /// in the entity. Hidden, archived and replayed views are never cached.
-    /// After a failed open: one subscription per view still alive (the
-    /// active one if any, every parked one), so a parked turn finishing
-    /// behind the failure view still reaches its row (docs/81 A F17).
-    fn resubscribe_live_views(&mut self, cx: &mut Context<Self>) {
+    /// Every live view this window holds, once each: the open one, every
+    /// parked one, the browser chat. The one enumeration subscriptions and
+    /// quit go through, so a browser chat is never left out (docs/81 A F5,
+    /// F6) — until stage 1's registry owns them all.
+    pub(crate) fn live_views(&self) -> Vec<Entity<SessionView>> {
+        let mut views: Vec<Entity<SessionView>> = Vec::new();
+        let all = self
+            .active
+            .iter()
+            .chain(self.session_cache.iter().map(|(_, view)| view))
+            .chain(self.browser_chat.iter());
+        for view in all {
+            if !views.contains(view) {
+                views.push(view.clone());
+            }
+        }
+        views
+    }
+
+    /// One subscription per live view ([`Self::live_views`]): after a failed
+    /// open, so a parked turn finishing behind the failure view still
+    /// reaches its row (docs/81 A F17), and when a browser chat is set.
+    pub(crate) fn resubscribe_live_views(&mut self, cx: &mut Context<Self>) {
         self.view_subscriptions.clear();
-        for view in self.active.iter().chain(self.session_cache.iter().map(|(_, view)| view)) {
-            self.view_subscriptions.push(cx.subscribe(view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        for view in self.live_views() {
+            self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         }
     }
 
@@ -4491,8 +4529,7 @@ impl Harness {
     /// ([`Harness::route`]) — so this is best-effort for a session parked
     /// mid-turn, same as every other read of parked state in this module.
     pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
-        self.active.as_ref().is_some_and(|view| view.read(cx).is_sending())
-            || self.session_cache.iter().any(|(_, view)| view.read(cx).is_sending())
+        self.live_views().iter().any(|view| view.read(cx).is_sending())
     }
 
     /// Store a pick as the one every new session starts with, in any
@@ -10658,6 +10695,36 @@ done
         lane_restore(state);
     }
 
+    /// docs/81 A F6: quit hangs up a browser chat's child too.
+    #[gpui::test]
+    fn quit_hangs_up_the_browser_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f6-chat-quit");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, shared) = y2b2_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                mark_muse_up(harness);
+            });
+        });
+        let chat = y2b2_open(vc, &baaz, ProviderId::Codex);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.take().expect("the lane opened");
+                harness.set_browser_chat(view, cx);
+                assert!(harness.active.is_none() && harness.session_cache.is_empty(), "held by the line alone");
+                harness.shutdown_provider_views(cx);
+            });
+        });
+        vc.run_until_parked();
+        let locked = shared.inner.lock().expect("y2b2");
+        assert!(locked.shutdowns.contains(&chat), "the chat's child hangs up at quit, drew {:?}", locked.shutdowns);
+        drop(locked);
+        lane_restore(state);
+    }
+
     /// Y2b2: quitting (which hangs up every lane child) while the switched
     /// draft's child is still answering: an open that lands after teardown
     /// is hung up, never attached.
@@ -13221,6 +13288,128 @@ done
                 aui::nav::RowStatusKind::Settled,
                 "Working becomes Settled without activating"
             );
+        });
+        lane_restore(state);
+    }
+
+    /// A plain view standing in for a browser chat, with its record marked.
+    fn chat_view(
+        harness: &mut Harness,
+        id: &str,
+        window: &mut gpui::Window,
+        cx: &mut Context<Harness>,
+    ) -> Entity<SessionView> {
+        let host = SessionHost {
+            provider_id: ProviderId::Codex.as_str().to_owned(),
+            workspace: harness.workspace(),
+            overlays: harness.overlays.clone(),
+            capture: crate::shot::CaptureToken::default(),
+            terminal_host: None,
+        };
+        harness.set_override(id, |meta| {
+            meta.hidden = true;
+            meta.browser_chat = true;
+        }, cx);
+        cx.new(|cx| SessionView::new(id.to_owned(), host, window, cx))
+    }
+
+    /// docs/81 A F5: a browser chat's events reach the window (a Dialog here;
+    /// the ledger, turn count and sign-out banner ride the same path).
+    #[gpui::test]
+    fn a_browser_chat_is_subscribed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f5-chat-subscribed");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let chat = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let chat = chat_view(harness, "s-chat", window, cx);
+                harness.set_browser_chat(chat.clone(), cx);
+                chat
+            })
+        });
+        vc.update(|_, cx| {
+            chat.update(cx, |_, cx| {
+                cx.emit(SessionEvent::Dialog { title: "From the chat".into(), detail: "d".into() });
+            });
+        });
+        vc.run_until_parked();
+        let title = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|dialog| dialog.title.to_string())
+        });
+        assert_eq!(title.as_deref(), Some("From the chat"), "the chat's event reached on_session_event");
+        lane_restore(state);
+    }
+
+    /// docs/81 A F7: asking again while the chat is busy replaces it on the
+    /// line but keeps the busy view alive (its child is not killed); an
+    /// idle replaced chat is just parked.
+    #[gpui::test]
+    fn a_replaced_busy_browser_chat_stays_alive(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f7-chat-replaced");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let busy = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let busy = chat_view(harness, "s-chat-busy", window, cx);
+                busy.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning {
+                            session_id: "s-chat-busy".into(),
+                            turn_id: "t-1".into(),
+                        }],
+                        cx,
+                    );
+                });
+                harness.set_browser_chat(busy.clone(), cx);
+                let next = chat_view(harness, "s-chat-next", window, cx);
+                harness.set_browser_chat(next, cx);
+                busy
+            })
+        });
+        let weak = busy.downgrade();
+        drop(busy);
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.browser_chat_id(cx).as_deref(), Some("s-chat-next"));
+            assert!(harness.find_view("s-chat-busy", cx).is_some(), "the busy chat is still findable");
+            assert_eq!(harness.live_views().len(), 2, "and still live, and subscribed with the new one");
+        });
+        assert!(weak.upgrade().is_some(), "the busy chat's view was not dropped");
+        // Shown again from its folder: back on the line, out of the MRU.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| assert!(harness.show_browser_chat("s-chat-busy", cx)));
+            let harness = baaz.read(cx);
+            assert!(harness.session_cache.iter().all(|(id, _)| id != "s-chat-busy"), "one holder at a time");
+        });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F4: a Codex-style rename of a browser chat (provisional id
+    /// → minted thread id) moves its line state, used pages and reveal.
+    #[gpui::test]
+    fn a_renamed_browser_chat_keeps_its_line(cx: &mut gpui::TestAppContext) {
+        use super::agent_window::LineUi;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f4-chat-rekey");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.line_ui = LineUi::Answer { question: "q".into(), session: "req-1".into() };
+                harness.browser_chat_pages.insert("req-1".into(), vec![("Page".into(), "https://a.test".into())]);
+                harness.reveal_unknown = Some(("req-1".into(), 3));
+                harness.rekey_session("req-1", "thread-9", cx);
+                assert_eq!(harness.line_ui, LineUi::Answer { question: "q".into(), session: "thread-9".into() });
+                assert!(harness.browser_chat_pages.contains_key("thread-9"));
+                assert!(!harness.browser_chat_pages.contains_key("req-1"));
+                assert_eq!(harness.reveal_unknown, Some(("thread-9".into(), 3)));
+                harness.line_ui = LineUi::Drafting { session: "thread-9".into(), tab: 4 };
+                harness.rekey_session("thread-9", "thread-10", cx);
+                assert_eq!(harness.line_ui, LineUi::Drafting { session: "thread-10".into(), tab: 4 });
+            });
         });
         lane_restore(state);
     }
