@@ -745,6 +745,11 @@ fn wall_ms_since(start: Instant) -> u64 {
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeFold {
     started: HashMap<String, ()>,
+    /// The child process's running `total_cost_usd` at its last `result`:
+    /// the CLI reports cost cumulatively per process, so a turn's own cost
+    /// is the difference (docs/81 B D-1). Back to zero when a process
+    /// starts ([`Self::note_new_process`]).
+    cost_baseline: f64,
     /// Stop asked the child to interrupt (docs/82 0.8): the error `result`
     /// that ends the turn is the person's stop, settled `Interrupted` —
     /// never `Failed`. Cleared by that result.
@@ -1331,6 +1336,16 @@ impl ClaudeFold {
                     .or_else(|| model.clone().filter(|name| crate::frame::is_model_id(name)))
                     .or_else(|| self.model.clone())
                     .unwrap_or_default();
+                // The CLI's `total_cost_usd` is the process's running
+                // total: this turn's cost is what it added. A total below
+                // the baseline means a process started unannounced, so the
+                // total is this turn's alone.
+                let turn_cost = if *total_cost_usd >= self.cost_baseline {
+                    *total_cost_usd - self.cost_baseline
+                } else {
+                    *total_cost_usd
+                };
+                self.cost_baseline = *total_cost_usd;
                 let meta = TurnMeta {
                     model: answered,
                     duration_ms: *duration_ms,
@@ -1339,7 +1354,7 @@ impl ClaudeFold {
                         .saturating_add(cache_write_tokens.unwrap_or(0)),
                     tokens_out: *output_tokens,
                     reasoning_tokens: *reasoning_tokens,
-                    cost_usd: *total_cost_usd,
+                    cost_usd: turn_cost,
                     cache_read_tokens: *cache_read_tokens,
                     cache_write_tokens: *cache_write_tokens,
                     cached_tokens: 0,
@@ -1478,6 +1493,10 @@ impl ClaudeFold {
             // The other lane, by choice (see module docs): parsed, ignored.
             // A mode report renders nothing: [`step_line`] carries it out
             // as its own event.
+            Frame::Ignored { note } if note == crate::frame::PROCESS_START_NOTE => {
+                self.note_new_process();
+                Vec::new()
+            }
             Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => Vec::new(),
         }
     }
@@ -1704,6 +1723,11 @@ impl ClaudeFold {
     /// by its `result`): what Stop waits on.
     pub fn has_live_turn(&self) -> bool {
         !self.open.is_empty()
+    }
+
+    /// A child process started: its `total_cost_usd` counts from zero.
+    pub fn note_new_process(&mut self) {
+        self.cost_baseline = 0.0;
     }
 
     /// Stop asked the child to interrupt: the result that ends the turn is
@@ -5469,7 +5493,7 @@ mod tests {
 
     /// W8, three turns live (`resume-replay.jsonl`): three echoes, three
     /// assistant turns, three finishes — each finish carrying its own
-    /// `result` frame's totals, in order.
+    /// `result` frame's tokens, in order, and its own share of the cost.
     #[test]
     fn three_live_turns_finish_three_times_with_own_totals() {
         let lines = fixture_lines("resume-replay.jsonl");
@@ -5487,8 +5511,12 @@ mod tests {
         for ((_, meta), total) in done.iter().zip(want.iter()) {
             assert_eq!(meta.tokens_in, total.0, "each turn billed once");
             assert_eq!(meta.tokens_out, total.1);
-            assert!((meta.cost_usd - total.3).abs() < 1e-9);
         }
+        // docs/81 B D-1: `total_cost_usd` is the process's running total.
+        // Turns 1 and 2 share a process (0.32916, then 0.36583 in all);
+        // turn 3 is a resumed process (0.02443). Each turn records its own.
+        let costs: Vec<f64> = done.iter().map(|(_, meta)| (meta.cost_usd * 1e5).round() / 1e5).collect();
+        assert_eq!(costs, vec![0.32916, 0.03667, 0.02443]);
     }
 
     /// W8, defect 5 (structural half): a turn whose thinking rendered keeps

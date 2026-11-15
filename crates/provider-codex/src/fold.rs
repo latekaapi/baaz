@@ -989,7 +989,10 @@ pub struct CodexFold {
     /// creates. Recorded when `turn/start` answers, read when the turn's
     /// `userMessage` item completes (live and `thread/resume` alike).
     display_by_turn: HashMap<String, String>,
-    usage: HashMap<(String, String), TokenCounts>,
+    /// Per `(thread, turn)`: the thread's total before the turn's first
+    /// usage update, and its total at the latest one. The turn's figure is
+    /// the difference ([`Self::usage_for`]).
+    usage: HashMap<(String, String), (TokenCounts, TokenCounts)>,
     account: AccountSnapshot,
     current_turn: Option<String>,
     /// The turn `turn/started` opened and no `turn/completed` has closed
@@ -1193,10 +1196,13 @@ impl CodexFold {
             .map(String::as_str)
     }
 
-    /// The per-turn figure for `(thread_id, turn_id)`: the `last` bucket,
-    /// never the cumulative `total`.
-    pub fn usage_for(&self, thread_id: &str, turn_id: &str) -> Option<&TokenCounts> {
-        self.usage.get(&(thread_id.to_owned(), turn_id.to_owned()))
+    /// The turn's own figure for `(thread_id, turn_id)`: the thread total
+    /// at its latest update minus the total before its first — every model
+    /// request the turn made, not only the last (docs/81 B F-7).
+    pub fn usage_for(&self, thread_id: &str, turn_id: &str) -> Option<TokenCounts> {
+        self.usage
+            .get(&(thread_id.to_owned(), turn_id.to_owned()))
+            .map(|(before, latest)| latest.minus(before))
     }
 
     /// The latest account reading (see [`AccountSnapshot`]).
@@ -1725,10 +1731,14 @@ impl CodexFold {
                     notification.turn_id(),
                     notification.usage(),
                 ) {
-                    self.usage.insert(
-                        (thread.to_owned(), turn.to_owned()),
-                        usage.per_turn().clone(),
-                    );
+                    // The first update of a turn fixes where it started;
+                    // each later one moves its end. Summing `last` would
+                    // also work but double-counts a repeated update.
+                    let entry = self
+                        .usage
+                        .entry((thread.to_owned(), turn.to_owned()))
+                        .or_insert_with(|| (usage.total_before(), usage.total.clone()));
+                    entry.1 = usage.total.clone();
                 }
                 Vec::new()
             }
@@ -2267,7 +2277,6 @@ impl CodexFold {
         let last = notification
             .turn_id()
             .and_then(|turn| self.usage_for(thread_id, turn))
-            .cloned()
             .unwrap_or_default();
         let meta = TurnMeta {
             model: self.model.clone().unwrap_or_default(),
@@ -2627,10 +2636,11 @@ mod tests {
     }
 
     #[test]
-    fn per_turn_tokens_use_last_not_total() {
-        // approval.jsonl updates usage twice for one turn. The first update
-        // has total == last; the second splits: total 28645, last 14352. A
-        // fold that summed `total` would bill 42938 for one turn.
+    fn a_turn_with_two_requests_counts_both() {
+        // approval.jsonl updates usage twice for one turn: two model
+        // requests (last 14293, then 14352; total 14293, then 28645). The
+        // turn is both requests — 28645 — not the last one alone (the old
+        // reading, docs/81 B F-7), and not the sum of the totals (42938).
         let lines = fixture_lines("approval.jsonl");
         let mut fold = CodexFold::new();
         let mut seen = Vec::new();
@@ -2648,8 +2658,8 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "two usage updates pin the split");
         let (thread_id, turn_id) = &seen[1];
-        let last = fold.usage_for(thread_id, turn_id).expect("usage recorded");
-        assert_eq!(last.total_tokens, 14352, "the per-turn figure is last");
+        let turn = fold.usage_for(thread_id, turn_id).expect("usage recorded");
+        assert_eq!(turn.total_tokens, 28645, "both requests of the turn");
         // And the raw notification proves total differs: the trap is real.
         let raw_total = lines
             .iter()
@@ -2662,7 +2672,40 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(raw_total, [14293, 28645], "cumulative totals, never summed");
-        assert_ne!(raw_total[1], last.total_tokens, "total != last on the second update");
+    }
+
+    /// docs/81 B F-7: a tool-using turn makes several model requests and
+    /// Codex sends one usage update per request; `edit.jsonl` has three for
+    /// one turn (`last` out 110, 72, 5; `total` out 110, 182, 187). The turn
+    /// is 187 output tokens, not the last request's 5.
+    #[test]
+    fn a_turns_usage_counts_every_request_it_made() {
+        let lines: Vec<String> = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/codex/edit.jsonl"
+        ))
+        .expect("fixture")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+        let mut fold = CodexFold::new();
+        let mut key = None;
+        for line in &lines {
+            let Ok((_, frame)) = decode_envelope(line) else { continue };
+            if let Frame::Notification(notification) = &frame {
+                if notification.usage().is_some() {
+                    key = Some((
+                        notification.thread_id().unwrap_or_default().to_owned(),
+                        notification.turn_id().unwrap_or_default().to_owned(),
+                    ));
+                }
+            }
+            fold.apply(&frame);
+        }
+        let (thread, turn) = key.expect("a usage update");
+        let usage = fold.usage_for(&thread, &turn).expect("usage recorded");
+        assert_eq!(usage.output_tokens, 187);
+        assert_eq!(usage.input_tokens, 45_194);
     }
 
     /// THE RESUME TEST. `resume.jsonl` records a thread started, one

@@ -299,6 +299,8 @@ impl ControlHub {
     /// epoch its pump reports end of stream under.
     pub(crate) fn begin_child(&self) -> u64 {
         self.child_lost.store(false, Ordering::SeqCst);
+        // A new process reports its cost from zero, hook or no hook.
+        self.fold.lock().expect("fold mutex").note_new_process();
         // A fresh child holds only the layer its argv gave it, and that
         // one carries no MCP denies; its servers are its own, so the last
         // child's answer no longer counts either.
