@@ -358,8 +358,10 @@ impl Harness {
     /// line of the latest reply. Free — the fold is already in memory — so
     /// it refreshes after every completed turn, and skipped when nothing new
     /// arrived, so the store is not rewritten on every completion.
-    pub(super) fn record_last_summary(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
+    ///
+    /// `view` is the session that finished — often a parked one, never
+    /// assumed to be the open one (docs/81 A F3).
+    pub(super) fn record_last_summary(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
         let (session_id, summary, ask) = (
             view.read(cx).session_id.clone(),
             view.read(cx).last_summary_text(),
@@ -1004,7 +1006,7 @@ impl Harness {
         });
     }
 
-    /// F10. The open session's transcript may name it when nothing else does:
+    /// F10. A session's transcript may name it when nothing else does:
     /// the first thing the person said, never a command the agent ran. The
     /// first shell command is only the fallback for a session with no user
     /// text at all (a shell-only session).
@@ -1014,8 +1016,10 @@ impl Harness {
     /// answer lands in `derived_title`, so the next rejoin keeps the label
     /// a `turn/started` already gave the row (a fresh session reads "New
     /// session" with its reply as the preview until this runs).
-    pub(super) fn title_from_transcript(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
+    ///
+    /// `view` is the session whose transcript speaks — the emitter of the
+    /// event, which may be parked (docs/81 A F3).
+    pub(super) fn title_from_transcript(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
         let session_id = view.read(cx).session_id.clone();
         // A handoff destination keeps the chain title: no rename from the
         // pack or anything after it (Y2a).

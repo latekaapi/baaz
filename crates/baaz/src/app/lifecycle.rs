@@ -4677,7 +4677,7 @@ impl Harness {
                 // muse side session the muse lane uses — never a second
                 // provider child.
                 self.maybe_start_title(&session_id, Some(prompt), cx);
-                self.title_from_transcript(cx);
+                self.title_from_transcript(&view, cx);
                 // A late admission — the ack arriving after its turn
                 // already finished — is bookkeeping only (row, record,
                 // title above): the row declines it as a start and
@@ -4786,18 +4786,18 @@ impl Harness {
                 // (owner, 2026-11-12): a session made in the CLI swapped its
                 // first prompt for its last reply on open.
                 if live {
-                    self.record_last_summary(cx);
+                    self.record_last_summary(&view, cx);
                 }
                 // A settled pack turn fails its handoff here, with its
                 // reason on the card and the row — never a silent Active.
                 self.reconcile_pack_turns(cx);
                 if counted {
-                    self.title_from_transcript(cx);
+                    self.title_from_transcript(&view, cx);
                     // The free excerpt just landed; a poor one may earn one
                     // debounced rewrite — idle sessions only, never a
                     // running turn — through the same side session as a
                     // title.
-                    self.maybe_rewrite_byline(cx);
+                    self.maybe_rewrite_byline(&view, cx);
                 }
                 // The lane settled: repaint on this path even if the
                 // view's own notify raced the event delivery (W8c).
@@ -4837,10 +4837,8 @@ impl Harness {
             }
             SessionEvent::TierRecheck => self.probe_tier(true, cx),
             SessionEvent::Rename { name } => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.rename_session(session_id, name.clone(), cx);
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.rename_session(session_id, name.clone(), cx);
             }
             // The person picked a model, effort or approval mode in a
             // session: it becomes the last pick, so the next session — in
@@ -4974,18 +4972,14 @@ impl Harness {
                 self.fail_handoff(session_id.clone(), reason.clone(), cx);
             }
             SessionEvent::RenameStart => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.tasks.push(cx.spawn(async move |this, cx| {
-                        let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
-                    }));
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
+                }));
             }
             SessionEvent::Hide => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.hide_session(session_id, cx);
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.hide_session(session_id, cx);
             }
             SessionEvent::ToggleEmpty => {
                 self.show_empty = !self.show_empty;
@@ -11663,7 +11657,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
@@ -11913,7 +11908,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m2").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Prepared),
@@ -11965,7 +11961,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m2").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Activated),
@@ -13224,6 +13221,85 @@ done
                 aui::nav::RowStatusKind::Settled,
                 "Working becomes Settled without activating"
             );
+        });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F3: a parked session finishing a turn this window ran lands
+    /// its own byline and title; the open session's row is untouched (the
+    /// helpers used to read `self.active`).
+    #[gpui::test]
+    fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Block, Session, Turn, TurnMeta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f3-parked-byline");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                mark_muse_up(harness);
+            });
+        });
+        let open = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| {
+                    let workspace = harness.workspace();
+                    harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+                });
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| baaz.read(cx).active.clone().expect("a lane opened"))
+        };
+        let fill = |view: &Entity<SessionView>, ask: &str, reply: &str, cx: &mut gpui::App| {
+            let id = view.read(cx).session_id.clone();
+            let mut session = Session::new(id, aui_protocol::Provider::Claude, "m", "/tmp");
+            session.turns = vec![
+                Turn::User { id: "u1".into(), text: ask.into(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None },
+                Turn::Assistant {
+                    id: "a1".into(),
+                    blocks: vec![Block::Text { text: reply.into(), streaming: false }],
+                    meta: TurnMeta::default(),
+                    timestamp: None,
+                },
+            ];
+            view.update(cx, |view, cx| view.load_fixture(session, cx));
+        };
+        let first = open(vc);
+        let second = open(vc);
+        let (first_id, second_id) =
+            vc.update(|_, cx| (first.read(cx).session_id.clone(), second.read(cx).session_id.clone()));
+        assert_ne!(first_id, second_id);
+        vc.update(|_, cx| {
+            fill(&first, "Parked ask about tests", "Parked reply: all tests pass now.", cx);
+            fill(&second, "Open ask about docs", "Open reply: the docs are rewritten.", cx);
+            baaz.update(cx, |harness, _| {
+                harness.turns_admitted.insert(first_id.clone());
+            });
+            first.update(cx, |_, cx| {
+                cx.emit(SessionEvent::ProviderTurnFinished {
+                    session_id: first_id.clone(),
+                    turn_id: "a1".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let parked = harness.overrides.get(&first_id);
+            assert!(
+                parked.and_then(|m| m.last_ask.as_deref()).is_some_and(|ask| ask.contains("Parked ask")),
+                "the parked session's row gets its own byline: {:?}",
+                parked.and_then(|m| m.last_ask.as_deref())
+            );
+            assert!(
+                parked.and_then(|m| m.derived_title.as_deref()).is_some_and(|t| t.contains("Parked ask")),
+                "the parked session is titled from its own transcript"
+            );
+            let open = harness.overrides.get(&second_id);
+            assert!(open.and_then(|m| m.last_ask.as_deref()).is_none(), "the open session's byline is untouched");
+            assert!(open.and_then(|m| m.derived_title.as_deref()).is_none(), "the open session's title is untouched");
         });
         lane_restore(state);
     }

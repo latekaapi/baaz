@@ -2521,7 +2521,9 @@ impl Harness {
             }
             _ => return,
         }
-        self.title_from_transcript(cx);
+        if let Some(view) = self.active.clone() {
+            self.title_from_transcript(&view, cx);
+        }
         cx.notify();
     }
 
@@ -4867,7 +4869,9 @@ impl Harness {
         // The capture is already folded, and no wire event will ever run
         // `title_from_transcript` for it: without this the replayed row
         // keeps the file's name even when the transcript knows better.
-        self.title_from_transcript(cx);
+        if let Some(view) = self.active.clone() {
+            self.title_from_transcript(&view, cx);
+        }
         self.maybe_run_steps(window, cx);
         cx.notify();
     }
