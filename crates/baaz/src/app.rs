@@ -4240,7 +4240,7 @@ impl Harness {
                 None,
                 cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                     this.dismiss_browse_popovers(cx);
-                    let _ = std::process::Command::new("/usr/bin/open").arg(crate::layout::browser_download_dir(&this.layout)).status();
+                    let _ = crate::system_open::open_detached([crate::layout::browser_download_dir(&this.layout)]);
                 }),
                 cx,
             );
@@ -7494,7 +7494,7 @@ impl Harness {
     fn show_docs(&mut self) {
         match docs_dir() {
             Some(dir) => {
-                if std::process::Command::new("open").arg(dir).spawn().is_err() {
+                if crate::system_open::open_detached([dir]).is_err() {
                     crate::baaz_log!("could not reveal {}", dir.display());
                 }
             }

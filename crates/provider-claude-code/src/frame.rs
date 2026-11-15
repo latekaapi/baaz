@@ -368,6 +368,13 @@ pub enum Frame {
         /// The raw `request` object, kept for inspection.
         raw: Value,
     },
+    /// A child→host `control_cancel_request`: the child withdrew a control
+    /// request it raised (an ask it no longer waits on). The pending ask
+    /// leaves the answerable queue (docs/81 B PM-15).
+    ControlCancel {
+        /// The withdrawn request's `request_id`.
+        request_id: String,
+    },
     /// A child→host `control_response` (e.g. the answer to the host's
     /// `initialize` handshake). Carried so the frame counts balance;
     /// host-initiated, so nothing about it needs answering. An `initialize`
@@ -542,6 +549,7 @@ impl Frame {
             | Frame::Ignored { .. }
             | Frame::ControlRequest(_)
             | Frame::ControlUnknown { .. }
+            | Frame::ControlCancel { .. }
             | Frame::ControlResponse { .. } => None,
         }
     }
@@ -1183,6 +1191,9 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 }),
             }
         }
+        "control_cancel_request" => Ok(Frame::ControlCancel {
+            request_id: value.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        }),
         "control_response" => {
             let response = value.get("response");
             let get = |key: &str| response.and_then(|response| response.get(key));

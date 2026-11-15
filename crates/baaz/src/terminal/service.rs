@@ -212,7 +212,7 @@ static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl UmaskGuard {
     fn restrict() -> Self {
-        let lock = UMASK_LOCK.lock().expect("umask lock");
+        let lock = UMASK_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: `umask` always succeeds and is async-signal-safe; the
         // previous mask is restored in `drop`, and the static lock keeps
         // concurrent holders from interleaving set/restore pairs.
@@ -539,7 +539,7 @@ impl TerminalService {
     /// Trust `id` (a session the app opened) for `project_root` (D53).
     /// Re-registering moves the session to the new root.
     pub fn register_session(&self, id: &str, project_root: PathBuf) {
-        self.shared.sessions.lock().expect("session registry").insert(id.to_owned(), project_root);
+        self.shared.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_owned(), project_root);
     }
 
     /// What the harness runs on the UI thread when the agent starts
@@ -549,25 +549,25 @@ impl TerminalService {
     /// draining entity's update: it must defer entity work with `cx.defer`
     /// rather than updating the draining entity inline (see [`ActivityHook`]).
     pub fn set_activity_hook(&self, hook: impl Fn(&mut App) + Send + Sync + 'static) {
-        *self.shared.activity.lock().expect("activity hook") = Some(Box::new(hook));
+        *self.shared.activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// Trust `state` as `session`'s webview for `browser_*` tools. Called
     /// on the UI thread when the pane creates (or reuses) the session's
     /// webview; re-registering moves the session to the new state.
     pub fn register_browser(&self, session: &str, state: Entity<WebviewState>) {
-        self.shared.browsers.lock().expect("browser registry").insert(session.to_owned(), state);
+        self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(session.to_owned(), state);
     }
 
     /// Remembers the page of `session`'s tab `tab`, for the tools' `tab` argument.
     pub fn register_tab_page(&self, session: &str, tab: u64, state: Entity<WebviewState>) {
-        self.shared.tab_pages.lock().expect("tab pages").insert(tab, (session.to_owned(), state));
+        self.shared.tab_pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(tab, (session.to_owned(), state));
     }
 
     /// Forgets a closed tab's page, and every grant on it.
     pub fn unregister_tab_page(&self, tab: u64) {
-        self.shared.tab_pages.lock().expect("tab pages").remove(&tab);
-        self.shared.tab_grants.lock().expect("tab grants").remove(&tab);
+        self.shared.tab_pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&tab);
+        self.shared.tab_grants.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&tab);
     }
 
     /// Lets `session` use the person's tab `tab` (its page `state`) through
@@ -576,7 +576,7 @@ impl TerminalService {
     /// first for the same session.
     pub fn grant_tab(&self, session: &str, tab: u64, state: Entity<WebviewState>, read_only: bool) {
         let key = self.resolve_session(session);
-        let mut grants = self.shared.tab_grants.lock().expect("tab grants");
+        let mut grants = self.shared.tab_grants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let list = grants.entry(tab).or_default();
         list.retain(|(who, _, _)| *who != key);
         list.push((key, state, read_only));
@@ -585,7 +585,7 @@ impl TerminalService {
     /// Takes back every grant `session` holds (its chat closed or handed off).
     pub fn revoke_grants(&self, session: &str) {
         let key = self.resolve_session(session);
-        let mut grants = self.shared.tab_grants.lock().expect("tab grants");
+        let mut grants = self.shared.tab_grants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for list in grants.values_mut() {
             list.retain(|(who, _, _)| *who != key);
         }
@@ -594,14 +594,14 @@ impl TerminalService {
 
     /// The page and read-only flag of `session`'s grant on `tab`, if any.
     fn granted(&self, session_key: &str, tab: u64) -> Option<(Entity<WebviewState>, bool)> {
-        let grants = self.shared.tab_grants.lock().expect("tab grants");
+        let grants = self.shared.tab_grants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         grants.get(&tab)?.iter().find(|(who, _, _)| who == session_key).map(|(_, state, read_only)| (state.clone(), *read_only))
     }
 
     /// What the harness does for `browser_tabs`. Same re-entrancy rule as
     /// [`Self::set_activity_hook`]: it runs inside `drain`.
     pub fn set_browser_tabs_hook(&self, hook: impl Fn(&mut App, TabsCall) + Send + Sync + 'static) {
-        *self.shared.browser_tabs.lock().expect("tabs hook") = Some(Box::new(hook));
+        *self.shared.browser_tabs.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// Forget `session`'s webview for `browser_*` tools. Called on the UI
@@ -609,7 +609,7 @@ impl TerminalService {
     /// registered page is discarded), so a closed tab stays dead through
     /// the agent tools. Idempotent; unknown sessions remove nothing.
     pub fn unregister_browser(&self, session: &str) {
-        self.shared.browsers.lock().expect("browser registry").remove(session);
+        self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(session);
     }
 
     /// The webview `browser_*` tools currently act on for `session`, if
@@ -617,7 +617,7 @@ impl TerminalService {
     /// agent registration follows the active tab.
     #[cfg(test)]
     pub(crate) fn test_browser_state(&self, session: &str) -> Option<Entity<WebviewState>> {
-        self.shared.browsers.lock().expect("browser registry").get(session).cloned()
+        self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(session).cloned()
     }
 
     /// Remember that `from` (a provider open's spawn-time request id) is now
@@ -631,14 +631,14 @@ impl TerminalService {
         self.shared
             .session_aliases
             .lock()
-            .expect("session aliases")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(from.to_owned(), to.to_owned());
     }
 
     /// The lane id `session` now answers as: one alias chain, cycle-guarded.
     /// Unaliased ids answer as themselves, so this is safe to call blindly.
     fn resolve_session(&self, session: &str) -> String {
-        let aliases = self.shared.session_aliases.lock().expect("session aliases");
+        let aliases = self.shared.session_aliases.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut current = session.to_owned();
         for _ in 0..8 {
             match aliases.get(&current) {
@@ -656,14 +656,14 @@ impl TerminalService {
     /// fires inside [`drain`][TerminalService::drain], so it must defer
     /// entity work with `cx.defer`.
     pub fn set_browser_open_hook(&self, hook: impl Fn(&mut App, String) + Send + Sync + 'static) {
-        *self.shared.browser_open.lock().expect("browser open hook") = Some(Box::new(hook));
+        *self.shared.browser_open.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// How long a `browser_*` evaluation waits for the page. Tests shorten
     /// it so the timeout path does not take [`BROWSER_TIMEOUT`].
     #[cfg(test)]
     pub(crate) fn set_browser_timeout(&self, timeout: Duration) {
-        *self.shared.browser_timeout.lock().expect("browser timeout") = timeout;
+        *self.shared.browser_timeout.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = timeout;
     }
 
     /// Run every queued request and poll every pending run. Call on the UI
@@ -678,14 +678,14 @@ impl TerminalService {
     /// Whether a pass of [`Self::drain`] has anything to do now or soon: a
     /// queued job, or a run, mark watch or browser call still waiting.
     pub fn busy(&self) -> bool {
-        !self.shared.queue.lock().expect("job queue").is_empty()
-            || !self.shared.pending.lock().expect("pending runs").is_empty()
-            || !self.shared.marks.lock().expect("mark watches").is_empty()
+        !self.shared.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+            || !self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+            || !self.shared.marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
             || !self.jobs.borrow().is_empty()
     }
 
     pub fn drain(&self, cx: &mut App) {
-        let jobs: Vec<Job> = self.shared.queue.lock().expect("job queue").drain(..).collect();
+        let jobs: Vec<Job> = self.shared.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..).collect();
         for job in jobs {
             self.execute(job, cx);
         }
@@ -698,7 +698,7 @@ impl TerminalService {
     /// the app never needs it.
     #[cfg(test)]
     pub(crate) fn pending_runs(&self) -> usize {
-        self.shared.pending.lock().expect("pending runs").len()
+        self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     fn execute(&self, job: Job, cx: &mut App) {
@@ -708,7 +708,7 @@ impl TerminalService {
         // root so either id would find the same tabs; resolving keeps the
         // recorded origin on the lane's current id, like the browser tools.
         let session = self.resolve_session(&job.session);
-        let root = match self.shared.sessions.lock().expect("session registry").get(&session) {
+        let root = match self.shared.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&session) {
             Some(root) => root.clone(),
             None => {
                 send(&job.reply, &job.id, false, json!({"error": format!("unknown session: no session the app opened is named {}", job.session)}));
@@ -757,7 +757,7 @@ impl Drop for TerminalService {
         // removal deterministic: no still-bound socket can answer a probe
         // and no fresh bind after a crash can be mistaken for ours.
         self.shutdown.store(true, Ordering::Release);
-        if let Some(accept) = self.accept.lock().expect("listener thread").take() {
+        if let Some(accept) = self.accept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
             let _ = accept.join();
         }
         if self.owned {
@@ -845,7 +845,11 @@ fn wait_readable(listener: &UnixListener, timeout: Duration) {
 }
 
 fn serve_conn(stream: UnixStream, shared: Arc<Shared>) {
-    let mut reader = BufReader::new(stream.try_clone().expect("socket clones"));
+    // A socket that cannot be cloned (out of descriptors) drops this one
+    // connection, never the serving thread's process. Not logged: nothing
+    // in this service writes to the app log.
+    let Ok(read_half) = stream.try_clone() else { return };
+    let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     loop {
         line.clear();
@@ -886,7 +890,7 @@ fn serve_conn(stream: UnixStream, shared: Arc<Shared>) {
             }
         };
         let (tx, rx) = mpsc::channel();
-        shared.queue.lock().expect("job queue").push_back(Job { id: id.clone(), session, tool, params, reply: tx });
+        shared.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push_back(Job { id: id.clone(), session, tool, params, reply: tx });
         let _ = shared.wake.unbounded_send(());
         // The socket thread waits; the UI thread answers in `drain`. A
         // dead UI (quit mid-request) drops the sender and unblocks this.
@@ -1078,7 +1082,7 @@ impl TerminalService {
             });
         }
         // The person watches the agent work: the dock opens, unfocused.
-        if let Some(hook) = self.shared.activity.lock().expect("activity hook").as_ref() {
+        if let Some(hook) = self.shared.activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
             hook(cx);
         }
 
@@ -1105,10 +1109,10 @@ impl TerminalService {
             );
             // The block forms after this reply; watch it so it still earns
             // the agent mark.
-            self.shared.marks.lock().expect("mark watches").push(MarkWatch { tab: id, before });
+            self.shared.marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(MarkWatch { tab: id, before });
             return;
         }
-        self.shared.pending.lock().expect("pending runs").push(PendingRun {
+        self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(PendingRun {
             id: job_id.clone(),
             tab: id,
             before,
@@ -1122,7 +1126,7 @@ impl TerminalService {
     /// new blocks agent-owned, and answer when the block closes or the
     /// deadline passes. `timeout` stops waiting, never the command.
     fn poll_runs(&self, cx: &mut App) {
-        let mut pending = self.shared.pending.lock().expect("pending runs");
+        let mut pending = self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut done: Vec<usize> = Vec::new();
         for (index, run) in pending.iter().enumerate() {
             let Some(entity) =
@@ -1186,7 +1190,7 @@ impl TerminalService {
                 );
                 // `timeout` stops waiting, never the command: watch the
                 // block so its eventual close still earns the agent mark.
-                self.shared.marks.lock().expect("mark watches").push(MarkWatch {
+                self.shared.marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(MarkWatch {
                     tab: run.tab.clone(),
                     before: run.before,
                 });
@@ -1204,7 +1208,7 @@ impl TerminalService {
     /// when its block closes (later blocks are someone else's) or when the
     /// tab goes away.
     fn poll_marks(&self, cx: &mut App) {
-        let mut marks = self.shared.marks.lock().expect("mark watches");
+        let mut marks = self.shared.marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut done: Vec<usize> = Vec::new();
         for (index, watch) in marks.iter().enumerate() {
             let Some(entity) =
@@ -1444,7 +1448,7 @@ impl TerminalService {
     /// The host of `session`'s current page.
     pub fn page_host(&self, session: &str, cx: &App) -> Option<String> {
         let key = self.resolve_session(session);
-        let view = self.shared.browsers.lock().expect("browser registry").get(&key).cloned()?;
+        let view = self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned()?;
         let url = view.read(cx).url().to_string();
         let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(&url);
         Some(rest.split('/').next().unwrap_or("").to_owned())
@@ -1519,7 +1523,7 @@ impl TerminalService {
     /// How long a job may run, not counting time waiting on the person: a navigation
     /// and a settle fit inside it.
     fn job_timeout(&self) -> Duration {
-        *self.shared.browser_timeout.lock().expect("browser timeout") * 4
+        *self.shared.browser_timeout.lock().unwrap_or_else(std::sync::PoisonError::into_inner) * 4
     }
 
     /// Starts `start` on the tab the call names.
@@ -1544,7 +1548,7 @@ impl TerminalService {
     fn page_for(&self, session: &str, tab: Option<u64>) -> Result<Option<Entity<WebviewState>>, String> {
         let key = self.resolve_session(session);
         if let Some(tab) = tab {
-            let pages = self.shared.tab_pages.lock().expect("tab pages");
+            let pages = self.shared.tab_pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((owner, state)) = pages.get(&tab) {
                 if *owner == key {
                     return Ok(Some(state.clone()));
@@ -1556,7 +1560,7 @@ impl TerminalService {
             }
             return Err(format!("no tab {tab} in this session: browser_tabs lists them"));
         }
-        Ok(self.shared.browsers.lock().expect("browser registry").get(&key).cloned())
+        Ok(self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned())
     }
 
     fn tab_handle(&self, view: &Entity<WebviewState>) -> TabHandle {
@@ -1658,7 +1662,7 @@ impl TerminalService {
                 if id == request {
                     ours = Some(answer);
                 } else {
-                    let mut stash = self.shared.eval_stash.lock().expect("eval stash");
+                    let mut stash = self.shared.eval_stash.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if stash.len() >= EVAL_STASH_MAX {
                         stash.clear();
                     }
@@ -1666,7 +1670,7 @@ impl TerminalService {
                 }
             }
             if ours.is_none() {
-                ours = self.shared.eval_stash.lock().expect("eval stash").remove(&(running.session.clone(), request));
+                ours = self.shared.eval_stash.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(running.session.clone(), request));
             }
             let Some(answer) = ours else {
                 if now >= running.deadline {
@@ -1699,7 +1703,7 @@ impl TerminalService {
                 running.deadline = now + ASK_TIMEOUT;
                 // The person must be able to see it: the foreground session's pane
                 // opens on its page, as it does for an agent's navigation.
-                if let Some(hook) = self.shared.browser_open.lock().expect("browser open hook").as_ref() {
+                if let Some(hook) = self.shared.browser_open.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                     hook(cx, running.session.clone());
                 }
                 false
@@ -1741,7 +1745,7 @@ impl TerminalService {
         let start: JobStart = match tool {
             "browser_tabs" => {
                 let call = TabsCall { session: session.to_owned(), params: args, id: job_id.clone(), reply };
-                match self.shared.browser_tabs.lock().expect("tabs hook").as_ref() {
+                match self.shared.browser_tabs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                     Some(hook) => hook(cx, call),
                     None => answer_tabs(&call, Err(String::from("tabs are not available here"))),
                 }
@@ -1768,7 +1772,7 @@ impl TerminalService {
                 // Browser, unfocused. Deferred like the dock hook — `drain`
                 // runs inside a Harness update.
                 if tab.is_none() {
-                    if let Some(hook) = self.shared.browser_open.lock().expect("browser open hook").as_ref() {
+                    if let Some(hook) = self.shared.browser_open.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                         hook(cx, session.to_owned());
                     }
                 }
@@ -1796,7 +1800,7 @@ impl TerminalService {
         let mut persons_tab = false;
         if let Some(tab) = tab {
             let key = self.resolve_session(session);
-            let owned = self.shared.tab_pages.lock().expect("tab pages").get(&tab).is_some_and(|(owner, _)| *owner == key);
+            let owned = self.shared.tab_pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&tab).is_some_and(|(owner, _)| *owner == key);
             let grant = (!owned).then(|| self.granted(&key, tab)).flatten();
             if grant.as_ref().is_some_and(|(_, read_only)| *read_only) && !read_only_tool(tool) {
                 send(&reply, job_id, false, json!({"error": format!("tab {tab} is the person's and read-only for you: read it, or open your own tab with browser_tabs")}));
@@ -3200,12 +3204,12 @@ mod tests {
         {
             let seen = seen.clone();
             fx.service.set_browser_open_hook(move |_, session: String| {
-                seen.lock().expect("hook log").push(session);
+                seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(session);
             });
         }
         let out = result(&bcall(cx, &fx, "sb-open", "browser_navigate", json!({"url": "https://example.com"})));
         assert_eq!(out["url"], "https://example.com/");
-        assert_eq!(&*seen.lock().expect("hook log"), &["sb-open".to_owned()]);
+        assert_eq!(&*seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &["sb-open".to_owned()]);
     }
 
     /// `javascript:` and friends never reach the page.

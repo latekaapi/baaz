@@ -97,13 +97,18 @@ pub(super) struct ExternalQuestion {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExternalQuestions {
-    questions: HashMap<String, ExternalQuestion>,
+    /// Each question with the order it arrived in.
+    questions: HashMap<String, (u64, ExternalQuestion)>,
+    /// The next arrival number.
+    next: u64,
 }
 
 impl ExternalQuestions {
-    /// Park a raised question, replacing any earlier tap under the same id.
+    /// Park a raised question, replacing any earlier tap under the same id
+    /// (and taking its place as the newest).
     fn record(&mut self, question: ExternalQuestion) {
-        self.questions.insert(question.id.clone(), question);
+        self.next += 1;
+        self.questions.insert(question.id.clone(), (self.next, question));
     }
 
     /// Forget every parked question: the child that asked is gone.
@@ -116,16 +121,17 @@ impl ExternalQuestions {
         self.questions.is_empty()
     }
 
-    /// The newest parked question's headline, by id — what the sidebar row
-    /// stands on while a provider lane waits on a person.
+    /// The newest parked question's headline, by arrival — never by id
+    /// string, which sorts `q-10` before `q-9` (docs/81 A F25) — what the
+    /// sidebar row stands on while a provider lane waits on a person.
     pub(super) fn newest_headline(&self) -> Option<String> {
-        self.questions.values().max_by(|a, b| a.id.cmp(&b.id)).map(|question| question.headline.clone())
+        self.questions.values().max_by_key(|(at, _)| *at).map(|(_, question)| question.headline.clone())
     }
 
     /// Look one up, for the question surface.
     #[cfg(test)]
     fn get(&self, id: &str) -> Option<&ExternalQuestion> {
-        self.questions.get(id)
+        self.questions.get(id).map(|(_, question)| question)
     }
 }
 
@@ -1321,6 +1327,17 @@ impl SessionView {
 
 #[cfg(test)]
 mod tests {
+    /// docs/81 A F25: the newest question is the last to arrive, not the
+    /// largest id string ("q-9" > "q-10" as strings).
+    #[test]
+    fn the_newest_question_is_the_last_to_arrive() {
+        let mut questions = ExternalQuestions::default();
+        for (id, headline) in [("q-9", "older"), ("q-10", "newer")] {
+            questions.record(ExternalQuestion { id: id.into(), session_id: "s".into(), headline: headline.into() });
+        }
+        assert_eq!(questions.newest_headline().as_deref(), Some("newer"));
+    }
+
     use super::*;
     use gpui::{AppContext as _, Entity};
 

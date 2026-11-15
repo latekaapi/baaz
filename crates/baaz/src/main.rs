@@ -62,6 +62,7 @@ mod import_ui;
 mod chrome_import_ui;
 mod images;
 mod index;
+mod system_open;
 mod instance;
 mod keymap;
 mod layout;

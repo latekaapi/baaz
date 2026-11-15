@@ -1334,8 +1334,16 @@ impl ClaudeCodeAdapter {
         // So do the lines it never answered: its end of stream is
         // epoch-gated (a replaced child's never reaches the fold), so
         // nothing else clears them, and a stale one would pair the new
-        // child's next turn with an old ack.
-        self.fold.lock().expect("fold mutex").forget_submissions();
+        // child's next turn with an old ack. And so do its asks: an answer
+        // under its request id must never reach the new child (PM-14).
+        let (session_id, dropped) = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            fold.forget_submissions();
+            (fold.session_id().map(str::to_owned), fold.drop_pending_asks())
+        };
+        if !dropped.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id, deltas: dropped });
+        }
         let (launch, fallback) = self.relaunch_launch(launch)?;
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
@@ -3433,6 +3441,66 @@ mod tests {
         let _ = adapter.dispatch(Command::ListModels { session: None });
         assert_eq!(adapter.model.lock().expect("model mutex").as_deref(), Some("opus"), "the new pick stands");
         assert!(control_cards(&drain_events(&adapter)).is_empty(), "no stale banner");
+    }
+
+    /// docs/81 B PM-14: an ask the replaced child raised is gone after a
+    /// relaunch — a late decision for it is refused, never written to the
+    /// new child under the old request id.
+    #[test]
+    fn relaunch_drops_the_old_childs_asks() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.ingest_child_line(
+            r#"{"type":"control_request","request_id":"req-old","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"}}}"#,
+        );
+        assert_eq!(adapter.fold.lock().expect("fold").pending_approvals().len(), 1, "setup: the ask waits");
+        let launch = SessionLaunch {
+            argv: Vec::new(),
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let _ = adapter.relaunch(&launch);
+        assert!(adapter.fold.lock().expect("fold").pending_approvals().is_empty(), "the old ask is dropped");
+        let error = adapter
+            .dispatch(Command::DecideApproval {
+                request_id: "d-1".into(),
+                session_id: "sess-1".into(),
+                approval: "req-old".into(),
+                choice: "allow".into(),
+                feedback: None,
+                stage_token: None,
+            })
+            .expect_err("a decision for the old child's ask is refused");
+        assert!(!format!("{error:?}").is_empty());
+        assert!(
+            !adapter.sent_control.lock().expect("sent").iter().any(|line| line.contains("req-old")),
+            "nothing reached a child under the old id"
+        );
+    }
+
+    /// docs/81 B PM-15: a withdrawn ask (`control_cancel_request`) is no
+    /// longer answerable; an unknown control subtype raises the needs-you
+    /// tap as well as its card.
+    #[test]
+    fn a_withdrawn_ask_leaves_the_queue_and_unknown_controls_are_tapped() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.ingest_child_line(
+            r#"{"type":"control_request","request_id":"req-w","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"}}}"#,
+        );
+        assert_eq!(adapter.fold.lock().expect("fold").pending_approvals().len(), 1);
+        adapter.ingest_child_line(r#"{"type":"control_cancel_request","request_id":"req-w"}"#);
+        assert!(adapter.fold.lock().expect("fold").pending_approvals().is_empty(), "withdrawn");
+        let _ = drain_events(&adapter);
+        adapter.ingest_child_line(r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#);
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::ApprovalRequested { approval_id, .. } if approval_id == "req-x")),
+            "{events:?}"
+        );
     }
 
     /// A relaunch forgets the replaced child's waiting submissions too: its

@@ -202,12 +202,7 @@ fn read_name_and_email() -> (Option<String>, Option<String>) {
 ///
 /// The URL never reaches a log; it goes straight into the child's argv.
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
-    std::process::Command::new("open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
+    crate::system_open::open_detached([url])
 }
 
 #[cfg(test)]

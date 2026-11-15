@@ -115,10 +115,62 @@ impl Capture {
         }
     }
 
-    /// One line, with the arrow that says which way it went.
+    /// One line, with the arrow that says which way it went. Secrets are
+    /// redacted first: captures become fixtures in a public repository,
+    /// and `account/loginStart` carries the API key (docs/81 B PM-17).
     fn write(&self, arrow: &str, line: &str) {
+        let line = redact_secrets(line.trim_end());
         let Ok(mut file) = self.file.lock() else { return };
-        let _ = writeln!(file, "{arrow} {}", line.trim_end());
+        let _ = writeln!(file, "{arrow} {line}");
+    }
+}
+
+/// The keys whose values never reach a capture file.
+const SECRET_KEYS: [&str; 4] = ["apiKey", "api_key", "token", "password"];
+
+/// `line` with every [`SECRET_KEYS`] value replaced by `"[redacted]"`, at
+/// any depth. A line that is not JSON is kept only when it names none of
+/// the keys; otherwise it becomes one redaction marker.
+fn redact_secrets(line: &str) -> String {
+    fn scrub(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, inner) in map.iter_mut() {
+                    if SECRET_KEYS.contains(&key.as_str()) && !inner.is_null() {
+                        *inner = serde_json::Value::String("[redacted]".into());
+                    } else {
+                        scrub(inner);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(scrub),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(mut value) => {
+            scrub(&mut value);
+            value.to_string()
+        }
+        Err(_) if SECRET_KEYS.iter().any(|key| line.contains(key)) => "[redacted line]".to_owned(),
+        Err(_) => line.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    /// docs/81 B PM-17: an API key typed into the login sheet never lands
+    /// in a capture file.
+    #[test]
+    fn a_login_api_key_is_redacted_in_captures() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"method":"account/loginStart","params":{"apiKey":"sk-live-123","nested":{"token":"t"}}}"#;
+        let out = redact_secrets(line);
+        assert!(!out.contains("sk-live-123") && !out.contains("\"t\""), "{out}");
+        assert!(out.contains("account/loginStart"), "the rest stays: {out}");
+        assert_eq!(redact_secrets("not json apiKey=sk"), "[redacted line]");
+        assert_eq!(redact_secrets(r#"{"method":"turn/start"}"#), r#"{"method":"turn/start"}"#);
     }
 }
 

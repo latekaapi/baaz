@@ -706,6 +706,11 @@ impl Harness {
                 Err(_) => 0,
             };
             crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
+            // A failed listing still settles the first load (the sidebar
+            // shows what it has), but never silently (docs/81 A F25).
+            if let Err(error) = &result {
+                crate::baaz_log!("session/list failed: {error}");
+            }
             this.sessions_list_in_flight = false;
             // The first reply replaces the provisional rows wholesale (see
             // `install_provisional_rows`); a later reply whose rows match

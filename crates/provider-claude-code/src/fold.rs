@@ -1472,6 +1472,9 @@ impl ClaudeFold {
             Frame::ControlUnknown { request_id, subtype, raw } => {
                 self.apply_unknown_control(request_id, subtype, raw)
             }
+            // The child withdrew an ask: it leaves the answerable queue and
+            // its card settles, so a late decision finds nothing (PM-15).
+            Frame::ControlCancel { request_id } => self.withdraw_ask(request_id),
             // A child→host `control_response` (e.g. the answer to our
             // `initialize` handshake). Host-initiated, so nothing about it
             // needs answering — but the answer confirms or refuses one of
@@ -1734,6 +1737,43 @@ impl ClaudeFold {
     /// read as interrupted ([`step_line`]).
     pub fn note_stopping(&mut self) {
         self.stopping = true;
+    }
+
+    /// The child withdrew `request_id` (`control_cancel_request`): it is no
+    /// longer answerable, and its card reads "Not run — withdrawn".
+    fn withdraw_ask(&mut self, request_id: &str) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        self.pending.retain(|request| request.request_id != request_id);
+        self.pending_unknown.retain(|request| request.request_id != request_id);
+        if self.approval_sites.contains_key(request_id) {
+            self.resolve_approval_card(
+                request_id,
+                ApprovalState::Cancelled { reason: Some("withdrawn".to_owned()) },
+                &mut deltas,
+            );
+        }
+        deltas
+    }
+
+    /// A relaunch replaced the child (docs/81 B PM-14): the asks the old
+    /// one raised can never be answered on the new one, so they leave the
+    /// answerable queue and their cards settle "Not run — Claude Code
+    /// restarted" (denied when the person denied them). Without this a
+    /// late decision was written to the new child under the old id.
+    pub fn drop_pending_asks(&mut self) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for request_id in carded {
+            let state = if self.denied.contains(&request_id) {
+                ApprovalState::Denied
+            } else {
+                ApprovalState::Cancelled { reason: Some("Claude Code restarted".to_owned()) }
+            };
+            self.resolve_approval_card(&request_id, state, &mut deltas);
+        }
+        self.pending.clear();
+        self.pending_unknown.clear();
+        deltas
     }
 
     /// Stop's fallback (docs/82 0.8): the child is being ended on purpose,
@@ -3380,6 +3420,13 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
             session_id: session_id.clone().unwrap_or_default(),
             approval_id: request.request_id.clone(),
             headline: approval_headline(request),
+        }),
+        // An unknown subtype waits on a decision too: the row must say so,
+        // not only the card (docs/81 B PM-15).
+        Frame::ControlUnknown { request_id, subtype, .. } => Some(ProviderEvent::ApprovalRequested {
+            session_id: session_id.clone().unwrap_or_default(),
+            approval_id: request_id.clone(),
+            headline: format!("Waiting on a request Baaz does not know ({subtype})"),
         }),
         _ => None,
     };

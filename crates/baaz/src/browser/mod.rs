@@ -3358,7 +3358,7 @@ impl Harness {
     /// A no-op unless the URL is `http(s)`.
     pub(crate) fn open_browse_in_safari(&mut self, cx: &mut Context<Self>) {
         if let Some(url) = self.browse_safari_url(cx) {
-            let _ = std::process::Command::new("open").args(["-a", "Safari", &url]).spawn();
+            let _ = crate::system_open::open_detached(["-a", "Safari", url.as_str()]);
         }
         self.dismiss_browse_popovers(cx);
     }
@@ -3411,7 +3411,7 @@ impl Harness {
             cx.notify();
             return;
         }
-        let _ = std::process::Command::new("open").args(["-R", "--", path]).spawn();
+        let _ = crate::system_open::open_detached([std::ffi::OsStr::new("-R"), std::ffi::OsStr::new("--"), path.as_ref()]);
     }
 
     /// Open the downloads folder ("All downloads", `~/Downloads`, resolved
@@ -3422,7 +3422,7 @@ impl Harness {
             crate::baaz_log!("downloads: no $HOME, cannot open the downloads folder");
             return;
         };
-        let _ = std::process::Command::new("open").arg(home.join("Downloads")).spawn();
+        let _ = crate::system_open::open_detached([home.join("Downloads")]);
     }
 
     /// Navigate the Browse centre's shown tab to `url`: the model records
