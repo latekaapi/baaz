@@ -2195,6 +2195,17 @@ impl Harness {
             .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned())
     }
 
+    /// Where a session that belongs to no project starts, on every
+    /// provider: the folder `--workspace` named, else the default
+    /// workspace (`~/baaz-sessions`) — never the launch directory, which is
+    /// `/` from Finder (docs/81 F C1).
+    pub(crate) fn unfiled_workspace(&self) -> String {
+        if self.args.workspace_explicit {
+            return self.args.workspace.to_string_lossy().into_owned();
+        }
+        projects::default_workspace().to_string_lossy().into_owned()
+    }
+
     /// The current project's id, when one is current.
     pub(crate) fn current_project_id(&self) -> Option<String> {
         self.current_project.clone()

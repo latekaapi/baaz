@@ -1665,6 +1665,12 @@ impl SessionView {
         crate::providers::gate(self.provider_kind(), provider::Capability::TurnControl)
     }
 
+    /// The folder this session runs in, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn workspace_for_tests(&self) -> &str {
+        &self.workspace
+    }
+
     /// Whether this session's provider offers `capability` (docs/82 0.7):
     /// what every control that sends a command asks first.
     pub(crate) fn offers(&self, capability: provider::Capability) -> bool {

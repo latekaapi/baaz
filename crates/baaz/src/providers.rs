@@ -294,13 +294,6 @@ impl ProviderId {
         matches!(self, ProviderId::Muse)
     }
 
-    /// A session with no project starts in Baaz's default workspace (which
-    /// is not a project, so it files as unfiled), not in the window's
-    /// workspace: Muse works inside a folder.
-    pub fn unfiled_starts_in_default_workspace(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
     /// The open names the model vendor its requests route to
     /// (`OpenSession.model_provider`: `meta`, or `echo` in a scripted run)
     /// and carries the approval mode only when one was picked — with no

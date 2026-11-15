@@ -1750,15 +1750,10 @@ impl Harness {
                 .as_deref()
                 .and_then(|id| self.projects.find_available(id))
                 .map(|project| project.root.to_string_lossy().into_owned());
-            // A Muse session with no project goes to the default workspace,
-            // which is not a project, so it files as unfiled.
-            let workspace = match root {
-                Some(root) => root,
-                None if wanted.unfiled_starts_in_default_workspace() => {
-                    projects::default_workspace().to_string_lossy().into_owned()
-                }
-                None => self.workspace(),
-            };
+            // A session with no project — on any provider — goes to the
+            // default workspace, which is not a project, so it files as
+            // unfiled (docs/81 F C1).
+            let workspace = root.unwrap_or_else(|| self.unfiled_workspace());
             self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
@@ -3564,7 +3559,7 @@ impl Harness {
             crate::provider_sessions::remove(&mut self.provider_sessions, &record.session_id);
             self.persist_provider_sessions(cx);
             self.merge_provider_rows();
-            let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+            let workspace = record.workspace.clone().unwrap_or_else(|| self.unfiled_workspace());
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
@@ -9143,6 +9138,41 @@ done
             })
         });
         lane_restore(state);
+    }
+
+    /// docs/81 F C1 / docs/82 0.9: a new session with no project starts in
+    /// the default workspace on every provider — never in the launch
+    /// directory (`/` from Finder).
+    #[gpui::test]
+    fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for provider in [ProviderId::Codex, ProviderId::ClaudeCode, ProviderId::Muse] {
+            let state = lane_state(&format!("unfiled-home-{}", provider.as_str()));
+            let vc = cx.add_empty_window();
+            let baaz = lane_harness(vc, &state.2);
+            vc.update(|_, cx| {
+                baaz.update(cx, |harness, _| {
+                    harness.provider_factory = parking_factory();
+                    mark_muse_up(harness);
+                    // A Finder launch: no `--workspace`, cwd `/`.
+                    harness.args.workspace = std::path::PathBuf::from("/");
+                    harness.args.workspace_explicit = false;
+                    harness.current_project = None;
+                    // First run: nothing adopted, so nothing is current.
+                    harness.projects.current = None;
+                    harness.projects.projects.clear();
+                    harness.new_provider = provider.as_str().to_owned();
+                });
+            });
+            vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+            vc.run_until_parked();
+            let workspace = vc.update(|_, cx| {
+                baaz.read(cx).active.clone().map(|view| view.read(cx).workspace_for_tests().to_owned())
+            });
+            let home = projects::default_workspace().to_string_lossy().into_owned();
+            assert_eq!(workspace.as_deref(), Some(home.as_str()), "{provider:?} starts in the default workspace");
+            lane_restore(state);
+        }
     }
 
     /// docs/81 A F1: a parked view with a turn running is never evicted —
