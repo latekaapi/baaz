@@ -965,13 +965,15 @@ impl Harness {
     pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_search(window, cx);
         if !rest.is_empty() {
-            self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-            // `set_value` does not raise `InputEvent::Change`, which is what
-            // typing goes through, so the query has to be run by hand here.
-            // Without this the step opened the palette, filled the field and
-            // left the empty-query result on screen — a capture of a search
-            // that never ran, which is worse than no capture at all.
-            self.refresh_search(cx);
+            self.search_query.update(cx, |state, cx| {
+                state.set_value(rest.to_owned(), window, cx);
+                // `set_value` raises no `InputEvent::Change`; typing does.
+                // The step raises it on the field, so the query runs through
+                // the same subscription a keystroke does — calling
+                // `refresh_search` by hand here is how a dead subscription
+                // once passed every scripted check (docs/81 A F2).
+                cx.emit(gpui_kit::base::input::InputEvent::Change);
+            });
         }
     }
 
@@ -2619,7 +2621,12 @@ impl Harness {
     ) {
         use provider::ProviderAdapter as _;
         let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
-        let mut adapter = provider::scripted::ScriptedProvider::new();
+        // Each scripted lane its own session: the first keeps `s-scripted`
+        // (probe entries reopen it by that id), later ones are numbered.
+        static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SCRIPTED_LANES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scripted_id = if n == 0 { "s-scripted".to_owned() } else { format!("s-scripted-{}", n + 1) };
+        let mut adapter = provider::scripted::ScriptedProvider::with_session_id(scripted_id);
         let bridged = adapter
             .connect(&conn::connect_info())
             .map_err(|error| error.to_string())
@@ -2754,6 +2761,9 @@ impl Harness {
                 }
             }
         }
+        // Where the session runs: what a scripted check reads to prove a
+        // project-less session never starts in `/` (docs/82 0.9).
+        crate::baaz_log!("provider lane workspace session={session_id} workspace={workspace}");
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         // A provider that pages its history (Muse) attached without it: an
         // existing session's turns page in now.
@@ -3094,6 +3104,9 @@ impl Harness {
         view.update(cx, |view, cx| view.attach_provider(session_id.clone(), provider, events, cx));
         // Recorded before the queue replays, so a send's acceptance finds
         // the record it titles.
+        // Where the session runs: what a scripted check reads to prove a
+        // project-less session never starts in `/` (docs/82 0.9).
+        crate::baaz_log!("provider lane workspace session={session_id} workspace={workspace}");
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         view.update(cx, |view, cx| view.start_landed(window, cx));
         crate::log::trace_mark("provider lane open");

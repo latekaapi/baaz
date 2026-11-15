@@ -31,6 +31,9 @@ struct Inner {
     state: Mutex<State>,
     tx: crossbeam_channel::Sender<ProviderEvent>,
     rx: Receiver<ProviderEvent>,
+    /// The id `OpenSession` mints: `s-scripted` unless the host names
+    /// another ([`ScriptedProvider::with_session_id`]).
+    session_id: String,
 }
 
 struct State {
@@ -44,14 +47,29 @@ impl ScriptedProvider {
     /// deliberately not muse — so a test failure here means the trait leans
     /// on the vendor it was first written against.
     pub fn new() -> Self {
+        Self::with_session_id("s-scripted")
+    }
+
+    /// A disconnected scripted provider whose session is `session_id`: a
+    /// host opening several scripted lanes at once gives each its own id.
+    pub fn with_session_id(session_id: impl Into<String>) -> Self {
         let (tx, rx) = unbounded();
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State { connected: false, shutdown: false, next_turn: 0 }),
                 tx,
                 rx,
+                session_id: session_id.into(),
             }),
         }
+    }
+
+    /// `[hold <ms>] …`: how long a scripted turn stays running before it
+    /// finishes — what a scripted run needs to show a busy session.
+    fn hold_of(text: &str) -> Option<std::time::Duration> {
+        let rest = text.trim_start().strip_prefix("[hold ")?;
+        let ms: u64 = rest.split(']').next()?.trim().parse().ok()?;
+        Some(std::time::Duration::from_millis(ms))
     }
 
     /// The canned reply to one submitted text: the person's turn, one
@@ -93,6 +111,28 @@ impl ScriptedProvider {
                 },
             ],
         }]
+    }
+
+    /// Send the canned reply for `text`: at once, or — for `[hold <ms>]` —
+    /// the turn's start now and its end after the hold, from a thread, as a
+    /// real child's later output would arrive.
+    fn reply(&self, session_id: &str, text: &str) {
+        let mut events = self.script_for(session_id, text);
+        let Some(hold) = Self::hold_of(text) else {
+            for event in events {
+                let _ = self.inner.tx.send(event);
+            }
+            return;
+        };
+        let Some(ProviderEvent::Deltas { session_id: sid, deltas }) = events.pop() else { return };
+        let split = deltas.iter().position(|delta| matches!(delta, Delta::BlockAdded { .. })).unwrap_or(deltas.len());
+        let (start, end) = deltas.split_at(split);
+        let _ = self.inner.tx.send(ProviderEvent::Deltas { session_id: sid.clone(), deltas: start.to_vec() });
+        let (tx, end) = (self.inner.tx.clone(), end.to_vec());
+        std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            let _ = tx.send(ProviderEvent::Deltas { session_id: sid, deltas: end });
+        });
     }
 }
 
@@ -165,11 +205,11 @@ impl ProviderAdapter for ScriptedProvider {
                 // it, the way a real adapter reports the mode it started.
                 if let Some(mode) = mode {
                     let _ = self.inner.tx.send(ProviderEvent::ApprovalModeChanged {
-                        session_id: "s-scripted".into(),
+                        session_id: self.inner.session_id.clone(),
                         mode,
                     });
                 }
-                Ok(Ack::Session { session_id: "s-scripted".into(), title: None })
+                Ok(Ack::Session { session_id: self.inner.session_id.clone(), title: None })
             }
             Command::SubmitInput { session_id, parts, .. } => {
                 let text = parts
@@ -180,9 +220,7 @@ impl ProviderAdapter for ScriptedProvider {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                for event in self.script_for(&session_id, &text) {
-                    let _ = self.inner.tx.send(event);
-                }
+                self.reply(&session_id, &text);
                 Ok(Ack::TurnAccepted { turn_id: "a-latest".into(), queued: false })
             }
             Command::FollowSession { .. } => Ok(Ack::Accepted),
