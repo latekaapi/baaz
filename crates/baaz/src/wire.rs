@@ -47,10 +47,9 @@ use provider::{Ack, Command, Provider, ProviderError};
 ///
 /// A mutex, not a bare `Arc`: the adapter trait is `Send` but not `Sync`
 /// (the muse transport holds its I/O join handles), so a bare `Arc` could
-/// not cross onto the executor. Commands therefore serialize on this lock —
-/// today that serializes nothing in production, where the legacy lane still
-/// carries every command; the follow-up that moves commands over can
-/// revisit the granularity.
+/// not cross onto the executor. A session's commands therefore serialize on
+/// this lock; each provider lane holds its own provider, so sessions never
+/// wait on each other.
 pub type SharedProvider = Arc<Mutex<Provider>>;
 
 /// The background-call-then-update shape, for any entity that keeps its
