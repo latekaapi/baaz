@@ -119,7 +119,7 @@ pub fn read() -> ProviderSessionStore {
     if deterministic() && std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_none() {
         return ProviderSessionStore::new();
     }
-    crate::store::read_json(&path())
+    crate::store::read_json_map(&path())
 }
 
 /// Whether this is a deterministic capture (see [`read`]).
@@ -127,9 +127,8 @@ fn deterministic() -> bool {
     std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
-/// Write the store, atomically, now. Best-effort like
-/// [`crate::sessions::write`]: a store that cannot be written loses a row,
-/// never a session. The window writes through
+/// Write the store, atomically, now. Like [`crate::sessions::write`], a
+/// failed write is reported and the file on disk stays the previous one. The window writes through
 /// [`write_ordered`] off the UI thread instead; this is the synchronous
 /// form (the quit flush, a view's own display-text write, tests), and it
 /// takes its place in the same generation line.
@@ -166,10 +165,12 @@ pub fn write_ordered(generation: u64, store: &ProviderSessionStore) {
     if generation <= *written {
         return;
     }
+    // A failed write is reported and leaves the generation where it was.
     if let Ok(text) = serde_json::to_vec_pretty(store) {
-        let _ = crate::store::write_atomic(&path(), &text);
+        if crate::store::write_authored(&path(), &text).is_ok() {
+            *written = generation;
+        }
     }
-    *written = generation;
 }
 
 /// Insert or refresh the record of a session a provider lists itself (a

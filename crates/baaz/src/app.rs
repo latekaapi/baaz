@@ -2074,6 +2074,27 @@ impl Harness {
             }
         }));
         this.overrides = sessions::read();
+        // A damaged store was set aside while booting, or a background write
+        // fails later: one toast each (docs/81 A F8, F9). The wake channel
+        // is closed in tests, like the status wake: those call
+        // `raise_store_problems` themselves.
+        if !cfg!(test) {
+            this.raise_store_problems(cx);
+        }
+        let mut store_wake = if cfg!(test) {
+            futures::channel::mpsc::unbounded().1
+        } else {
+            crate::store::problem_wake()
+        };
+        this.tasks.push(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while store_wake.next().await.is_some() {
+                while store_wake.try_recv().is_ok() {}
+                if this.update(cx, |this, cx| this.raise_store_problems(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
         // A restart mid-flight still hides every side session: the persisted
         // `side_session` flags rejoin the in-memory record at boot.
         this.side_sessions = this
@@ -5919,6 +5940,51 @@ impl Harness {
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
         self.ensure_provider_started(id, cx);
+        cx.notify();
+    }
+
+    /// One toast per store problem ([`crate::store::take_problems`]); a
+    /// problem whose toast is already up is not shown twice, so a store that
+    /// keeps failing to write raises one note, not one per edit.
+    pub(crate) fn raise_store_problems(&mut self, cx: &mut Context<Self>) {
+        use crate::store::StoreProblem;
+        let problems = crate::store::take_problems();
+        if problems.is_empty() {
+            return;
+        }
+        self.overlays.update(cx, |overlays, _| {
+            for problem in problems {
+                let aside_name = |aside: &std::path::Path| {
+                    aside.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                };
+                let (title, body) = match problem {
+                    StoreProblem::SetAside { name, aside, restored: true } => (
+                        format!("Restored {name} from its backup"),
+                        format!("The file could not be read. It was kept as {}.", aside_name(&aside)),
+                    ),
+                    StoreProblem::SetAside { name, aside, restored: false } => (
+                        format!("{name} could not be read"),
+                        format!("Baaz started without it. The file was kept as {}.", aside_name(&aside)),
+                    ),
+                    StoreProblem::EntriesDropped { name, count, aside } => (
+                        format!("Part of {name} could not be read"),
+                        format!(
+                            "{count} {} skipped. The whole file was kept as {}.",
+                            if count == 1 { "entry was" } else { "entries were" },
+                            aside_name(&aside)
+                        ),
+                    ),
+                    StoreProblem::WriteFailed { name, error } => (
+                        format!("Couldn't save {name}"),
+                        format!("{error}. Recent changes are not on disk yet."),
+                    ),
+                };
+                if overlays.toasts.iter().any(|toast| toast.title.as_ref() == title) {
+                    continue;
+                }
+                overlays.toast(title, body);
+            }
+        });
         cx.notify();
     }
 

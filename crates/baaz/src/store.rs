@@ -14,9 +14,12 @@
 //! * **Every write is atomic.** A file is written beside itself and renamed,
 //!   so a crash mid-write leaves the previous state rather than half of the
 //!   next one.
-//! * **Every read is best-effort.** A missing file, a truncated file and a
-//!   file this build cannot parse are all ordinary; each yields the default
-//!   rather than an error a person has to see.
+//! * **A damaged file is never wiped.** A missing file yields the default
+//!   quietly. A file this build cannot parse (truncated, hand-edited, written
+//!   by a newer build) is renamed aside to `<name>.corrupt-<ts>`, logged and
+//!   reported ([`take_problems`] → one toast); the last good copy
+//!   (`<name>.bak`, kept by [`write_authored`]) is read instead when there is
+//!   one. A failed write is reported the same way and returns its error.
 
 use std::path::PathBuf;
 
@@ -240,31 +243,191 @@ fn copy_dir_all(old: &std::path::Path, new: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
+/// What a store met that the person should hear about (docs/81 A F8, F9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreProblem {
+    /// A file could not be parsed and was renamed aside. `restored` says
+    /// whether its `.bak` was read in its place.
+    SetAside { name: String, aside: PathBuf, restored: bool },
+    /// Entries of a map store that did not parse were dropped; the whole
+    /// file was copied to `aside` first.
+    EntriesDropped { name: String, count: usize, aside: PathBuf },
+    /// A write failed; the file on disk is the previous one.
+    WriteFailed { name: String, error: String },
+}
+
+static PROBLEMS: std::sync::Mutex<Vec<StoreProblem>> = std::sync::Mutex::new(Vec::new());
+static PROBLEM_WAKERS: std::sync::Mutex<Vec<futures::channel::mpsc::UnboundedSender<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn report(problem: StoreProblem) {
+    crate::baaz_log!("store: {problem:?}");
+    PROBLEMS.lock().unwrap_or_else(|p| p.into_inner()).push(problem);
+    PROBLEM_WAKERS.lock().unwrap_or_else(|p| p.into_inner()).retain(|waker| waker.unbounded_send(()).is_ok());
+}
+
+/// Every problem reported since the last call, oldest first.
+pub fn take_problems() -> Vec<StoreProblem> {
+    std::mem::take(&mut *PROBLEMS.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+/// A channel that receives one message per reported problem, so the window
+/// raises its toast when a background write fails. Problems reported before
+/// the window subscribed wait in [`take_problems`].
+pub fn problem_wake() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    PROBLEM_WAKERS.lock().unwrap_or_else(|p| p.into_inner()).push(sender);
+    receiver
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// `<path>.bak`: the previous good copy [`write_authored`] keeps.
+pub fn backup_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
 /// Write `bytes` to `path` through a sibling temporary file and a rename.
 ///
-/// The parent directory is created if it is missing. Blocking; call it off the
-/// UI thread.
+/// The parent directory is created if it is missing. The temporary name is
+/// unique per call, so two writers of one path never share it; it is removed
+/// when the write fails. The file and its directory are fsynced, so a crash
+/// right after leaves either the old file or the new one. Blocking; call it
+/// off the UI thread.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&temporary, bytes)?;
-    match std::fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(error)
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".tmp{}-{n}", std::process::id()));
+    let temporary = PathBuf::from(name);
+    let written = (|| {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
+    Ok(())
+}
+
+/// [`write_atomic`] for a store the person authored (names, pins, projects,
+/// layout, tabs): the current file is kept as `<name>.bak` first, and a
+/// failure is reported ([`StoreProblem::WriteFailed`]) as well as returned,
+/// so the caller can leave its generation where it was.
+pub fn write_authored(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if path.exists() {
+        let backup = backup_path(path);
+        let _ = std::fs::remove_file(&backup);
+        // A hard link costs nothing and keeps the old inode once the rename
+        // replaces `path`; a copy where links are refused.
+        if std::fs::hard_link(path, &backup).is_err() {
+            let _ = std::fs::copy(path, &backup);
+        }
+    }
+    let result = write_atomic(path, bytes);
+    if let Err(error) = &result {
+        report(StoreProblem::WriteFailed { name: file_name(path), error: error.to_string() });
+    }
+    result
 }
 
 /// Parse a JSON file in the store, or the type's default.
+///
+/// A missing file is the default, quietly. A file that does not parse is
+/// renamed to `<name>.corrupt-<unix secs>` — never overwritten — and
+/// reported; its `.bak` is read in its place when that parses.
 pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
-    std::fs::read_to_string(path)
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(error) => {
+            crate::baaz_log!("store: cannot read {}: {error}", path.display());
+            return T::default();
+        }
+    };
+    let error = match serde_json::from_str(&text) {
+        Ok(value) => return value,
+        Err(error) => error,
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".corrupt-{stamp}"));
+    let aside = PathBuf::from(aside);
+    crate::baaz_log!("store: {} does not parse ({error}); setting it aside", path.display());
+    if std::fs::rename(path, &aside).is_err() {
+        let _ = std::fs::copy(path, &aside);
+    }
+    let restored: Option<T> = std::fs::read_to_string(backup_path(path))
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    report(StoreProblem::SetAside { name: file_name(path), aside, restored: restored.is_some() });
+    restored.unwrap_or_default()
+}
+
+/// A field that falls back to its default when the stored value does not
+/// parse (an enum variant a newer build added, a hand-edited slug), instead
+/// of failing the whole file: `#[serde(default, deserialize_with =
+/// "crate::store::lenient")]`.
+pub fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    use serde::Deserialize as _;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// [`read_json`] for a store that is a map of independent entries
+/// (`sessions.json`, `provider-sessions.json`): one entry that does not
+/// parse drops only itself, and the file is copied aside first so nothing
+/// it said is lost.
+pub fn read_json_map<V: serde::de::DeserializeOwned>(path: &std::path::Path) -> std::collections::HashMap<String, V> {
+    let raw: serde_json::Map<String, serde_json::Value> = read_json(path);
+    let mut kept = std::collections::HashMap::with_capacity(raw.len());
+    let mut dropped = 0usize;
+    for (key, value) in raw {
+        match serde_json::from_value(value) {
+            Ok(entry) => {
+                kept.insert(key, entry);
+            }
+            Err(error) => {
+                crate::baaz_log!("store: {} entry {key:?} does not parse ({error}); dropped", path.display());
+                dropped += 1;
+            }
+        }
+    }
+    if dropped > 0 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default();
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(format!(".corrupt-{stamp}"));
+        let aside = PathBuf::from(aside);
+        let _ = std::fs::copy(path, &aside);
+        report(StoreProblem::EntriesDropped { name: file_name(path), count: dropped, aside });
+    }
+    kept
 }
 
 /// Serializes the tests that point `BAAZ_STATE_DIR` at a temp dir: two
@@ -296,12 +459,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// docs/81 A F8: a damaged file is set aside, never overwritten, and
+    /// reported; with no `.bak` the read is the default.
     #[test]
-    fn an_unparseable_file_reads_as_the_default() {
+    fn an_unparseable_file_is_set_aside_and_reported() {
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("baaz-store-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("thing.json");
-        write_atomic(&path, b"not json").expect("write");
+        write_atomic(&path, b"{\"a\": 1, \"trunc").expect("write");
+        let _ = take_problems();
         assert_eq!(read_json::<serde_json::Map<String, serde_json::Value>>(&path).len(), 0);
+        assert!(!path.exists(), "the damaged file is moved, so no later write can replace it");
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("thing.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), b"{\"a\": 1, \"trunc");
+        let problems = take_problems();
+        assert!(
+            problems.iter().any(|p| matches!(p, StoreProblem::SetAside { name, restored: false, .. } if name == "thing.json")),
+            "{problems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The last good copy is read when the file is damaged.
+    #[test]
+    fn a_damaged_file_falls_back_to_its_backup() {
+        let _guard = test_env_lock();
+        let dir = std::env::temp_dir().join(format!("baaz-store-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("kept.json");
+        write_authored(&path, b"{\"a\":1}").expect("first");
+        write_authored(&path, b"{\"a\":2}").expect("second");
+        assert_eq!(std::fs::read(backup_path(&path)).unwrap(), b"{\"a\":1}", "one .bak: the previous write");
+        std::fs::write(&path, b"").expect("truncate");
+        let back: serde_json::Map<String, serde_json::Value> = read_json(&path);
+        assert_eq!(back.get("a"), Some(&serde_json::json!(1)), "read from the .bak");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/81 A F9: a failed write returns its error, leaves no temporary
+    /// and is reported.
+    #[test]
+    fn a_failed_write_is_reported_and_leaves_no_temporary() {
+        let _guard = test_env_lock();
+        let dir = std::env::temp_dir().join(format!("baaz-store-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory where the file should be: the rename fails.
+        let path = dir.join("blocked.json");
+        std::fs::create_dir_all(path.join("inside")).expect("seed");
+        let _ = take_problems();
+        assert!(write_authored(&path, b"{}").is_err());
+        let names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|name| !name.contains(".tmp")), "{names:?}");
+        assert!(take_problems().iter().any(|p| matches!(p, StoreProblem::WriteFailed { name, .. } if name == "blocked.json")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

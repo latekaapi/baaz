@@ -13292,6 +13292,60 @@ done
         lane_restore(state);
     }
 
+    /// docs/81 A F8: a truncated `sessions.json` is set aside, never
+    /// overwritten, and the window starts with one toast saying so.
+    #[gpui::test]
+    fn a_truncated_sessions_store_is_set_aside_with_a_toast(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f8-truncated");
+        let path = state.2.join("sessions.json");
+        std::fs::write(&path, br#"{"s-1":{"name":"My session","pinn"#).expect("seed");
+        let _ = crate::store::take_problems();
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.raise_store_problems(cx)));
+        let titles: Vec<String> = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).toasts.iter().map(|toast| toast.title.to_string()).collect()
+        });
+        assert_eq!(titles, vec!["sessions.json could not be read".to_owned()]);
+        let aside: Vec<_> = std::fs::read_dir(&state.2)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("sessions.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the damaged file is kept");
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
+        // A write after boot never touches the kept copy.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.set_override("s-2", |meta| meta.pinned = true, cx));
+        });
+        vc.run_until_parked();
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
+        lane_restore(state);
+    }
+
+    /// docs/81 A F9: a store that keeps failing to write raises one toast,
+    /// not one per edit.
+    #[gpui::test]
+    fn repeated_write_failures_raise_one_toast(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f9-write-fails");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let blocked = state.2.join("blocked").join("layout.json");
+        std::fs::create_dir_all(blocked.join("inside")).expect("a directory where the file goes");
+        let _ = crate::store::take_problems();
+        for _ in 0..3 {
+            assert!(crate::store::write_authored(&blocked, b"{}").is_err());
+            vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.raise_store_problems(cx)));
+        }
+        let titles: Vec<String> = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).toasts.iter().map(|toast| toast.title.to_string()).collect()
+        });
+        assert_eq!(titles, vec!["Couldn't save layout.json".to_owned()]);
+        lane_restore(state);
+    }
+
     /// A plain view standing in for a browser chat, with its record marked.
     fn chat_view(
         harness: &mut Harness,

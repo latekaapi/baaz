@@ -36,8 +36,10 @@ pub struct RightState {
     /// for, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open: bool,
-    /// Which kind the pane showed. Files when nothing was ever stored.
-    #[serde(default)]
+    /// Which kind the pane showed. Files when nothing was ever stored, or
+    /// when a newer build stored a kind this one does not know: only this
+    /// field falls back, never the entry or the file (docs/81 A F8).
+    #[serde(default, deserialize_with = "crate::store::lenient")]
     pub kind: RightKind,
     /// The tree id of the open Files preview, if one stood open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,15 +188,16 @@ pub fn path() -> PathBuf {
     crate::store::support_dir().join("sessions.json")
 }
 
-/// Read the store. Blocking; call it off the UI thread.
+/// Read the store, entry by entry ([`crate::store::read_json_map`]).
+/// Blocking; call it off the UI thread.
 pub fn read() -> Overrides {
-    crate::store::read_json(&path())
+    crate::store::read_json_map(&path())
 }
 
 /// Write the store, atomically, dropping entries that no longer say anything.
 ///
-/// Best-effort: a store that cannot be written loses an override, which is a
-/// nuisance, and never a session, which would be a loss.
+/// A store that cannot be written raises one toast ([`crate::store`]); the
+/// file on disk stays the previous one.
 pub fn write(overrides: &Overrides) {
     write_ordered(next_write_generation(), overrides);
 }
@@ -224,10 +227,13 @@ pub fn write_ordered(generation: u64, overrides: &Overrides) {
     }
     let kept: Overrides =
         overrides.iter().filter(|(_, meta)| !meta.is_empty()).map(|(k, v)| (k.clone(), v.clone())).collect();
+    // A failed write is reported by the store and leaves the generation
+    // where it was, so the next edit writes again (docs/81 A F9).
     if let Ok(text) = serde_json::to_vec_pretty(&kept) {
-        let _ = crate::store::write_atomic(&path(), &text);
+        if crate::store::write_authored(&path(), &text).is_ok() {
+            *written = generation;
+        }
     }
-    *written = generation;
 }
 
 /// A `userShell` command turned into a row's title (finding F10).
@@ -348,6 +354,59 @@ mod tests {
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
         assert!(old.right.is_none());
         assert!(SessionMeta::default().is_empty());
+    }
+
+    /// docs/81 A F8: an entry a newer build wrote with a pane kind this
+    /// build does not know loses only that field; every other entry and the
+    /// rest of that entry load. Before, the whole file read as empty.
+    #[test]
+    fn an_unknown_pane_kind_loses_only_that_field() {
+        let _guard = crate::store::test_env_lock();
+        let dir = std::env::temp_dir().join(format!("baaz-unknown-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        std::fs::write(
+            &path,
+            r#"{"a":{"name":"Kept","pinned":true,"right":{"open":true,"kind":"quantum"}},"b":{"name":"Other"}}"#,
+        )
+        .unwrap();
+        let overrides: Overrides = crate::store::read_json_map(&path);
+        assert_eq!(overrides.len(), 2, "no entry is lost");
+        let a = &overrides["a"];
+        assert_eq!(a.name.as_deref(), Some("Kept"));
+        assert!(a.pinned);
+        let right = a.right.as_ref().expect("the pane state stays");
+        assert!(right.open, "the rest of the pane state stays");
+        assert_eq!(right.kind, crate::layout::RightKind::Files, "the unknown kind falls back to the default");
+        assert_eq!(overrides["b"].name.as_deref(), Some("Other"));
+        assert!(path.exists(), "a file that parses is never set aside");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An entry that does not parse at all drops only itself, and the file
+    /// is copied aside first so nothing it said is lost.
+    #[test]
+    fn a_broken_entry_drops_only_itself() {
+        let _guard = crate::store::test_env_lock();
+        let dir = std::env::temp_dir().join(format!("baaz-broken-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        std::fs::write(&path, r#"{"a":{"name":"Kept"},"b":{"name":42}}"#).unwrap();
+        let _ = crate::store::take_problems();
+        let overrides: Overrides = crate::store::read_json_map(&path);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides["a"].name.as_deref(), Some("Kept"));
+        let problems = crate::store::take_problems();
+        assert!(
+            problems.iter().any(|p| matches!(p, crate::store::StoreProblem::EntriesDropped { count: 1, .. })),
+            "{problems:?}"
+        );
+        let copies = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("sessions.json.corrupt-")).count();
+        assert_eq!(copies, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

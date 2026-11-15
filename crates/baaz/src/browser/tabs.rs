@@ -868,7 +868,7 @@ pub(crate) fn write_tabs_bytes_generation(generation: u64, bytes: &[u8]) -> bool
     if generation <= *last {
         return false;
     }
-    if crate::store::write_atomic(&path(), bytes).is_ok() {
+    if crate::store::write_authored(&path(), bytes).is_ok() {
         *last = generation;
         true
     } else {
@@ -876,8 +876,9 @@ pub(crate) fn write_tabs_bytes_generation(generation: u64, bytes: &[u8]) -> bool
     }
 }
 
-/// Read the store; best-effort like every store read — a missing or
-/// unparseable file is an empty model, and migration refills it. Under
+/// Read the store like every store read — a missing file is an empty model
+/// and migration refills it; an unparseable one is set aside and its `.bak`
+/// read instead ([`crate::store::read_json`]). Under
 /// `BAAZ_DETERMINISTIC=1` the store is never read: captures boot an empty
 /// model. Repairs `next_id` past every id the file holds (live and
 /// closed), so a hand-edited or older file can never hand out a duplicate.
