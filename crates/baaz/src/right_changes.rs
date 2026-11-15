@@ -138,6 +138,18 @@ pub(crate) fn foot_for(tree: &GitTree, ui: &ChangesUi) -> Foot {
     }
 }
 
+/// What the commit box commits: the "This session" files when the session
+/// touched any, else "Other changes" — the heading's name and its paths
+/// (docs/81 F E3; ticking files comes in docs/82 7.2).
+pub(crate) fn commit_set(files: &[FileChange], session_edits: &[String], root: &Path) -> (&'static str, Vec<String>) {
+    let (session, other) = crate::right::partition_session_files(files, session_edits, root);
+    if !session.is_empty() {
+        ("This session", session.into_iter().map(|f| f.path).collect())
+    } else {
+        ("Other changes", other.into_iter().map(|f| f.path).collect())
+    }
+}
+
 /// What follows the branch when nothing is waiting to push: "up to date",
 /// or how far the remote is ahead (no Pull here; docs/43 §2.6).
 fn level_note(behind: u32) -> SharedString {
@@ -370,12 +382,22 @@ impl Harness {
         cx.notify();
     }
 
-    /// Commit every listed file with the message.
+    /// Commit the files under the heading the box commits from
+    /// ([`commit_set`]) with the message — never the rest of the tree.
     pub(crate) fn commit_changes(&mut self, root: &Path, cx: &mut Context<Self>) {
         self.settle_commit_message(root, cx);
+        let session_edits: Vec<String> = self
+            .active
+            .clone()
+            .map(|view| view.update(cx, |view, _| view.fresh_session_edits().unwrap_or_else(|| view.refresh_session_edits())))
+            .unwrap_or_default();
+        let paths = match self.right_cache.git_for(root) {
+            Some(Some(tree)) => commit_set(&tree.files, &session_edits, root).1,
+            _ => Vec::new(),
+        };
         let ui = self.changes_ui(root);
         let message = ui.message.trim().to_string();
-        if message.is_empty() || ui.busy.is_some() {
+        if message.is_empty() || ui.busy.is_some() || paths.is_empty() {
             return;
         }
         ui.busy = Some(GitBusy::Committing);
@@ -384,7 +406,8 @@ impl Harness {
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
-            let outcome = cx.background_executor().spawn(async move { git_ops::commit_all(&r, &message) }).await;
+            let outcome =
+                cx.background_executor().spawn(async move { git_ops::commit_paths(&r, &message, &paths) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
                 ui.busy = None;
@@ -814,7 +837,7 @@ pub(crate) fn changes_screen(
         }
     }
 
-    let foot_el = foot_element(ui, &root_buf, &tree, foot, agent, window, cx);
+    let foot_el = foot_element(ui, &root_buf, &tree, session_edits, foot, agent, window, cx);
     let clean = tree.files.is_empty();
     let body = if clean {
         div().size_full().pb(px(72.0)).child(state_block("right-changes-clean", IconName::Check, "No changes").line("The working tree is clean.")).into_any_element()
@@ -873,7 +896,8 @@ fn loading_body(cx: &Context<Harness>) -> gpui::Div {
 }
 
 /// The commit box (or the hook note over it, or the PR card).
-fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<Harness>) -> AnyElement {
+#[allow(clippy::too_many_arguments)]
+fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[String], foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<Harness>) -> AnyElement {
     let busy = ui.busy;
     let hook = ui.hook_failure.clone();
     let editor = ui.editor.clone();
@@ -882,8 +906,16 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, foot: Foot, agent: 
     let root_buf = root.to_path_buf();
     match foot {
         Foot::Commit => {
-            let n = tree.files.len();
-            let label = if busy == Some(GitBusy::Committing) { "Committing…".to_string() } else { format!("Commit {n} file{}", if n == 1 { "" } else { "s" }) };
+            // The count is what Commit takes: the heading's files only.
+            let (heading, set) = commit_set(&tree.files, session_edits, root);
+            let n = set.len();
+            let label = if busy == Some(GitBusy::Committing) {
+                "Committing…".to_string()
+            } else if heading == "This session" && n < tree.files.len() {
+                format!("Commit {n} file{} from this session", if n == 1 { "" } else { "s" })
+            } else {
+                format!("Commit {n} file{}", if n == 1 { "" } else { "s" })
+            };
             let editing = editor.is_some();
             let focused = editor.as_ref().is_some_and(|e| gpui::Focusable::focus_handle(e.read(cx), cx).is_focused(window));
             let message_el: AnyElement = match editor {
@@ -1075,6 +1107,20 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window:
 
 #[cfg(test)]
 mod tests {
+    /// docs/82 0.13: the box commits the "This session" files when the
+    /// session touched any, else "Other changes".
+    #[test]
+    fn the_commit_set_is_one_headings_files() {
+        let file = |path: &str| FileChange { path: path.into(), change: ChangeKind::Modified, added: 1, removed: 0 };
+        let files = vec![file("src/a.rs"), file("src/b.rs"), file("README.md")];
+        let root = Path::new("/repo");
+        let (heading, set) = commit_set(&files, &["src/a.rs".to_owned()], root);
+        assert_eq!((heading, set), ("This session", vec!["src/a.rs".to_owned()]));
+        let (heading, set) = commit_set(&files, &[], root);
+        assert_eq!(heading, "Other changes");
+        assert_eq!(set.len(), 3);
+    }
+
     use super::*;
 
     fn tree(files: Vec<FileChange>, branch: &str, upstream: Option<&str>, ahead: u32) -> GitTree {

@@ -392,17 +392,30 @@ fn has_commit_hook(root: &Path) -> bool {
     })
 }
 
-/// Commit every listed file with `message` (owner 2026-10-17: no staging —
-/// `git add -A`, then `git commit -F -`). Blocking: run it off the UI thread.
-pub(crate) fn commit_all(root: &Path, message: &str) -> CommitOutcome {
+/// Commit exactly `paths` with `message` (owner 2026-10-17: no staging
+/// step in the UI). `git add -A -- <paths>` takes new, changed and deleted
+/// files among them, and `git commit -F - -- <paths>` commits only those —
+/// never anything else in the working tree or the index (docs/81 F E3).
+/// Blocking: run it off the UI thread.
+pub(crate) fn commit_paths(root: &Path, message: &str, paths: &[String]) -> CommitOutcome {
+    if paths.is_empty() {
+        return CommitOutcome::Failed("Nothing to commit under this heading.".into());
+    }
     let deadline = Instant::now() + WRITE_TIMEOUT;
-    let Some(add) = spawn("git", root, &["add", "-A"], None, true).and_then(|j| j.finish(deadline)) else {
+    let with_paths = |head: &[&'static str]| -> Vec<String> {
+        head.iter().map(|arg| (*arg).to_owned()).chain(std::iter::once("--".to_owned())).chain(paths.iter().cloned()).collect()
+    };
+    let add_args = with_paths(&["add", "-A"]);
+    let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
+    let Some(add) = spawn("git", root, &add_args, None, true).and_then(|j| j.finish(deadline)) else {
         return CommitOutcome::Failed("git add timed out".into());
     };
     if !add.ok {
         return CommitOutcome::Failed(first_line(&add.text));
     }
-    let Some(out) = spawn("git", root, &["commit", "-F", "-"], Some(message), true).and_then(|j| j.finish(deadline)) else {
+    let commit_args = with_paths(&["commit", "-F", "-"]);
+    let commit_args: Vec<&str> = commit_args.iter().map(String::as_str).collect();
+    let Some(out) = spawn("git", root, &commit_args, Some(message), true).and_then(|j| j.finish(deadline)) else {
         return CommitOutcome::Failed("The commit timed out.".into());
     };
     if out.ok {
@@ -733,8 +746,33 @@ mod tests {
         assert!(tree.is_ignored("build/out"));
         let diff = read_file_diff(root, a).unwrap();
         assert_eq!((diff.added, diff.removed), (2, 1));
-        assert_eq!(commit_all(root, "Change a, add b\n\nBody."), CommitOutcome::Done);
+        let all: Vec<String> = tree.files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(commit_paths(root, "Change a, add b\n\nBody.", &all), CommitOutcome::Done);
         assert!(read_tree(root).unwrap().files.is_empty(), "every listed file was committed");
+    }
+
+    /// docs/82 0.13: Commit takes only the files it was given — another
+    /// session's edit, a staged change elsewhere and a new file outside the
+    /// set all stay uncommitted; a deletion and a new file in the set go in.
+    #[test]
+    fn commit_takes_only_the_listed_files() {
+        let dir = scratch_repo();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "mine\n").unwrap();
+        std::fs::write(root.join("mine-new.txt"), "new\n").unwrap();
+        std::fs::write(root.join("theirs.txt"), "other session\n").unwrap();
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        // Something someone staged by hand, outside the set.
+        std::fs::write(root.join("staged.txt"), "staged\n").unwrap();
+        let ok = Command::new("git").current_dir(root).args(["add", "staged.txt"]).status().unwrap().success();
+        assert!(ok);
+        let set = vec!["a.txt".to_owned(), "mine-new.txt".to_owned(), ".gitignore".to_owned()];
+        assert_eq!(commit_paths(root, "Mine only", &set), CommitOutcome::Done);
+        let left: Vec<String> = read_tree(root).unwrap().files.iter().map(|f| f.path.clone()).collect();
+        assert!(left.contains(&"theirs.txt".to_owned()), "{left:?}");
+        assert!(left.contains(&"staged.txt".to_owned()), "{left:?}");
+        assert!(!left.iter().any(|p| set.contains(p)), "the set went in: {left:?}");
+        assert_eq!(commit_paths(root, "x", &[]), CommitOutcome::Failed("Nothing to commit under this heading.".into()));
     }
 
     #[test]
@@ -749,7 +787,7 @@ mod tests {
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::write(root.join("a.txt"), "changed\n").unwrap();
-        match commit_all(root, "x") {
+        match commit_paths(root, "x", &["a.txt".to_owned()]) {
             CommitOutcome::HookFailed(lines) => assert!(lines.iter().any(|l| l.contains("unused variable")), "{lines:?}"),
             other => panic!("expected a hook failure, got {other:?}"),
         }
