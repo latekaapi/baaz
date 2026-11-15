@@ -43,9 +43,4 @@ for t in dark light; do
       --screenshot "$out/readme-approval-$t.png" >/dev/null 2>&1 || echo "FAILED approval $t"
 done
 
-# The welcome screen: signed out, no server.
-BAAZ_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login choose --theme dark \
-    --screenshot-delay 4000 --screenshot "$out/readme-welcome-dark.png" >/dev/null 2>&1 \
-    || echo "FAILED welcome"
-
 ls "$out"/readme-*.png

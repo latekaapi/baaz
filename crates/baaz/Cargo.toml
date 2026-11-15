@@ -9,7 +9,7 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Baaz: a macOS chat interface to Meta's Muse Code agent, built on the aui component library."
+description = "Baaz: a native macOS workspace for Claude Code, Codex and Muse Code, built on the aui component library."
 # The app itself is not meant to be published to crates.io (it is a binary,
 # distributed as a signed .app bundle, not a library).
 publish = false

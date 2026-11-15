@@ -140,21 +140,11 @@ const SHOT_DELAY: Duration = Duration::from_millis(600);
 /// text are the example values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoginSample {
-    /// The method choice (the default).
+    /// No sample: the window boots as a launch would (the default).
     #[default]
     Choose,
-    /// The device flow mid-poll, with the example URL and code.
-    Device,
-    /// The API-key form, with a sample string in the masked field.
-    ApiKey,
-    /// The API-key form with an inline rejection.
-    ApiKeyError,
-    /// `account/loginStart {apiKey}` in flight.
-    Validating,
-    /// A failed flow, with both ways out.
-    Error,
-    /// The signed-in shell with sample identity, for captures past the
-    /// login screen (the Projects hero). Sample data only, like the rest.
+    /// The signed-in shell with sample identity, for captures (the
+    /// Projects hero). Sample data only, like the rest.
     SignedIn,
     /// The first-run Connect your providers screen, fed from the scripted
     /// statuses (`BAAZ_PROVIDER_STATUS_SCRIPT`) or all Checking when unset.
@@ -453,11 +443,6 @@ fn parse_args() -> Args {
                 let value = args.next().unwrap_or_default();
                 out.login = match value.as_str() {
                     "choose" => LoginSample::Choose,
-                    "device" => LoginSample::Device,
-                    "apikey" => LoginSample::ApiKey,
-                    "apikey-error" => LoginSample::ApiKeyError,
-                    "validating" => LoginSample::Validating,
-                    "error" => LoginSample::Error,
                     "signed-in" => LoginSample::SignedIn,
                     "connect" => LoginSample::Connect,
                     other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in|connect, not `{other}`")),

@@ -206,19 +206,8 @@ pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
     mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", (BOOT_PT, BOOT_PT), window, cx)
 }
 
-/// The welcome hero on the signed-out screen: the same greeting the boot
-/// screen wears, under its own presence id so the two never share an enter.
-///
-/// They cannot appear together — the login screen owns the whole window and
-/// the shell is not built behind it — but a shared id would still hand the
-/// second one a presence the first had already settled, so it would draw
-/// without its enter the first time a person saw it.
-pub fn welcome_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
-    mascot_hero_element(BOOT_GREETING, "baaz-welcome-mascot", (BOOT_PT, BOOT_PT), window, cx)
-}
-
 /// The connect screen's mascot (D5 board): 72 × 81, the greeting contained
-/// in it — smaller than the welcome hero, so the rows lead.
+/// in it — smaller than the boot hero, so the rows lead.
 pub fn connect_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
     mascot_hero_element(BOOT_GREETING, "baaz-connect-mascot", (CONNECT_W, CONNECT_H), window, cx)
 }

@@ -7,8 +7,8 @@ contract onto it and normalises the output to the contract's JSON.
 Entries are named screens. All of them run offline (`--no-connect`), so a probe
 run costs nothing and reaches no model.
 
-    uiprobe.py --entry login-choose --probe-shot out.png
-    uiprobe.py --entry login-choose --probe-idle 2000
+    uiprobe.py --entry signed-in --probe-shot out.png
+    uiprobe.py --entry signed-in --probe-idle 2000
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
 
@@ -47,7 +47,7 @@ CONNECT_MIXED = json.dumps([
 PROBE_ENV = {**os.environ, "BAAZ_DETERMINISTIC": "1"}
 
 # Two kinds of entry, because baaz measures them with different flags.
-#   shot: a login-screen state, booted offline. Free, ~2s, no running turn.
+#   shot: a screen state, booted offline. Free, ~2s, no running turn.
 #   idle: a transcript capture driven through `--bench`, which already reports
 #         frames drawn at rest. Free, ~4s.
 # An entry that declares only one kind cannot answer the other verb, and says
@@ -172,12 +172,6 @@ def _p6_entry(steps, claude_auth=None):
                     "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(claude_auth)}}
 
 ENTRIES = {
-    "login-choose":         {"shot": ["--no-connect", "--login", "choose"]},
-    "login-apikey":         {"shot": ["--no-connect", "--login", "apikey"]},
-    "login-apikey-error":   {"shot": ["--no-connect", "--login", "apikey-error"]},
-    "login-device":         {"shot": ["--no-connect", "--login", "device"]},
-    "login-validating":     {"shot": ["--no-connect", "--login", "validating"]},
-    "login-error":          {"shot": ["--no-connect", "--login", "error"]},
     "signed-in":            {"shot": ["--no-connect", "--login", "signed-in"]},
     "right-browser":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:browser"]},

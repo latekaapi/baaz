@@ -2443,16 +2443,11 @@ impl Harness {
         (self.args.offline || self.args.replay.is_some()) && !self.muse_slot.is_ready()
     }
 
-    /// Whether the whole-window login screen is up: only offline and replay
-    /// captures boot into it now; a live launch never gates on Muse.
-    pub(crate) fn login_screen_up(&self) -> bool {
-        !matches!(self.auth, Auth::SignedIn(_)) && (self.args.offline || self.args.replay.is_some()) && !self.show_connect
-    }
-
-    /// Whether the shell is on screen: not behind the connect screen or the
-    /// capture-only login screen. What links from other apps wait for.
+    /// Whether the shell is on screen: not behind the connect screen. What
+    /// links from other apps wait for. (The capture-only whole-window login
+    /// screen is gone, docs/82 0.16: no launch ever showed it.)
     pub(crate) fn shell_up(&self) -> bool {
-        !self.show_connect && !self.login_screen_up()
+        !self.show_connect
     }
 
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
@@ -6572,19 +6567,13 @@ impl Render for Harness {
         crate::sidebar_view::note_baaz_render();
         crate::log::note_root_render();
         self.on_frame(window, cx);
-        // The login screen owns the whole window; the shell is not built behind
-        // it, so nothing of the signed-in state can leak into a capture.
-        // The connect screen owns it the same way on a first run. Any other
-        // launch renders the shell at once: a slow or signed-out Muse never
-        // gates the window (offline/replay captures still boot into the
-        // login screen for their sample states).
-        let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let showing_login =
-            !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
+        // The connect screen owns the whole window on a first run; the shell
+        // is not built behind it. Any other launch renders the shell at once:
+        // a slow or signed-out Muse never gates the window.
         let body: AnyElement = if self.show_connect {
             aui::shell::place_native_lights(window, cx);
             self.render_connect(window, cx).into_any_element()
-        } else if !showing_login {
+        } else {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
             // `size_full` is what the column wears itself (`render_sidebar`
@@ -6977,9 +6966,6 @@ impl Render for Harness {
                 );
             }
             stack.into_any_element()
-        } else {
-            aui::shell::place_native_lights(window, cx);
-            self.render_login(window, cx).into_any_element()
         };
         // In Browse the overlay window hosts the modals over the live page
         // (`OverlayKind::Modal`): the main window draws neither.
@@ -7552,12 +7538,8 @@ impl Harness {
             self.close_setup_sheet(cx);
             return;
         }
-        if self.muse_sheet && !self.login_screen_up() {
+        if self.muse_sheet {
             self.close_muse_sheet(window, cx);
-            return;
-        }
-        if self.login_screen_up() {
-            self.login_escape(window, cx);
             return;
         }
         // The Settings page is the first thing Escape takes back:

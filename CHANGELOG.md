@@ -2,11 +2,27 @@
 
 All notable user-visible changes to this project are documented here.
 
-## 0.1.0 — unreleased
+## Unreleased
 
-First public release. A native macOS chat client for Muse Code
-(`muse serve`, MSP over stdio), built with [gpui](https://www.gpui.rs) and
-the `aui` component library.
+- **Nothing quietly lost or left running.** A damaged settings file is set
+  aside with a note instead of wiped; a second Baaz on the same data folder
+  brings the first forward; Quit asks while an agent is working; a busy
+  background session is never dropped; Stop ends a running Claude Code turn.
+- **Controls only where they work.** `/compact`, `/fork`, images and the `!`
+  shell appear only on a provider that can do them.
+- **Commit takes only this session's files.**
+- **Usage is per turn**: Claude Code cost and Codex tokens were running totals.
+- **The browser assistant asks first** before acting in one of your tabs on
+  a new site.
+- The capture-only Muse login screen is gone.
+
+## 0.1.0
+
+First public release: a native macOS workspace for coding agents — Claude
+Code, Codex and Muse Code, each driven through its own CLI — built with
+[gpui](https://www.gpui.rs) and the `aui` component library. The entries
+below were written as features landed and some describe the Muse-only
+client it started as.
 
 - **Chat over Muse Code.** Drives `muse serve` as a child process and speaks
   MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does

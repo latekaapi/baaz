@@ -447,10 +447,12 @@ mod tests {
         restore_state(state);
     }
 
-    /// B2a-H7b over a live shell: URLs arriving at the login screen
-    /// wait, then the frame hook opens them in order once the shell is
-    /// up — through [`Harness::poll_external_urls`], never a direct
-    /// flush call, so the test pins the path a real sign-in takes.
+    /// B2a-H7b over a live shell: URLs arriving while the first-run
+    /// connect screen owns the window wait, then the frame hook opens them
+    /// in order once the shell is up — through
+    /// [`Harness::poll_external_urls`], never a direct flush call, so the
+    /// test pins the path a real first run takes. (It was the capture-only
+    /// login screen until docs/82 0.16 deleted it.)
     #[gpui::test]
     fn urls_before_sign_in_flush_through_poll(cx: &mut gpui::TestAppContext) {
         use crate::browser::Owner;
@@ -462,6 +464,7 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
+                h.show_connect = true;
                 h.ingest_external_urls(
                     vec!["https://queued-one.example/".to_owned(), "https://queued-two.example/".to_owned()],
                     window,
@@ -482,9 +485,10 @@ mod tests {
                 "nothing opens before the shell is up"
             );
         });
-        // The sign-in transition, then frames: no direct flush anywhere.
+        // Continue past the connect screen, then frames: no direct flush.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
+                h.show_connect = false;
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
             })

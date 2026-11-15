@@ -285,7 +285,7 @@ mod tests {
             email: "ada@example.com".into(),
         };
         assert_eq!(by_email.display_name(), "ada@example.com");
-        assert_eq!(by_email.initial(), "L");
+        assert_eq!(by_email.initial(), "A");
         let bare = Identity {
             lane: AccountLane::AccountLogin,
             name: "27681631238169".into(),
