@@ -2609,6 +2609,18 @@ impl SessionView {
         matches!(self.start, StartState::Starting(_))
     }
 
+    /// Whether dropping this view would lose work: a turn in flight, an
+    /// approval or question waiting on the person, or a start still on the
+    /// wire. The parked-view cap never evicts such a view (docs/81 A F1).
+    pub(crate) fn must_stay_alive(&self) -> bool {
+        self.is_sending()
+            || self.is_starting()
+            || self.newest_pending_approval().is_some()
+            || !self.external_approvals.pending().is_empty()
+            || !self.external_questions.is_empty()
+            || self.newest_pending_question().is_some()
+    }
+
     /// The banner's text, for tests that check what a failure said.
     #[cfg(test)]
     pub(crate) fn banner_text(&self) -> Option<&str> {

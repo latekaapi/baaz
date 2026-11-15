@@ -40,8 +40,9 @@ pub(crate) fn draft_decision(
     }
 }
 
-/// Which parked ids survive the MRU cap, in order: drafts are never evicted,
-/// everything else keeps most-recent-first up to `limit`.
+/// Which parked ids survive the MRU cap, in order: `drafts` (every view the
+/// caller must keep — drafts and busy views) are never evicted, everything
+/// else keeps most-recent-first up to `limit`.
 pub(crate) fn evict_parked(
     ids: &[String],
     drafts: &std::collections::HashSet<String>,
@@ -4443,12 +4444,18 @@ impl Harness {
             self.session_cache.insert(0, (session_id, view));
             // Views named in `drafts` are never evicted from the MRU: the
             // draft outlives whatever else was parked since. Nor is a view
-            // still starting — a provider draft whose child has not
-            // answered (project-less ones are in no `drafts`) holds the
-            // sends queued meanwhile, which eviction would lose.
+            // with work in hand (`must_stay_alive`): one still starting — a
+            // provider draft whose child has not answered (project-less
+            // ones are in no `drafts`) holds the sends queued meanwhile —
+            // or one with a turn running or the person's answer pending,
+            // whose drop would shut its lane and kill the child mid-turn
+            // (docs/81 A F1). Only idle views count toward the cap.
             let mut kept: std::collections::HashSet<String> = self.drafts.values().cloned().collect();
             kept.extend(
-                self.session_cache.iter().filter(|(_, view)| view.read(cx).is_starting()).map(|(id, _)| id.clone()),
+                self.session_cache
+                    .iter()
+                    .filter(|(_, view)| view.read(cx).must_stay_alive())
+                    .map(|(id, _)| id.clone()),
             );
             let ids: Vec<String> =
                 self.session_cache.iter().map(|(id, _)| id.clone()).collect();
@@ -9103,6 +9110,78 @@ done
                 assert!(harness.session_cache.len() <= SESSION_CACHE_LIMIT + 1);
             })
         });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F1: a parked view with a turn running is never evicted —
+    /// dropping it shuts its lane down and kills the child mid-turn. Nine
+    /// later sessions park behind it; it is still alive and settles.
+    #[gpui::test]
+    fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("busy-never-evicted");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        let busy_id = "s-busy".to_owned();
+        let busy = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = SessionHost {
+                    provider_id: ProviderId::Codex.as_str().to_owned(),
+                    workspace: harness.workspace(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| SessionView::new(busy_id.clone(), host, window, cx));
+                view.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning {
+                            session_id: busy_id.clone(),
+                            turn_id: "t-busy".into(),
+                        }],
+                        cx,
+                    );
+                });
+                assert!(view.read(cx).is_sending(), "setup: a turn is running");
+                harness.drafts.clear();
+                harness.park_active(cx);
+                harness.active = Some(view.clone());
+                for n in 0..=SESSION_CACHE_LIMIT {
+                    let host = SessionHost {
+                        provider_id: ProviderId::Codex.as_str().to_owned(),
+                        workspace: harness.workspace(),
+                        overlays: harness.overlays.clone(),
+                        capture: crate::shot::CaptureToken::default(),
+                        terminal_host: None,
+                    };
+                    let other = cx.new(|cx| SessionView::new(format!("s-idle-{n}"), host, window, cx));
+                    harness.park_active(cx);
+                    harness.active = Some(other);
+                }
+                harness.park_active(cx);
+                assert!(
+                    harness.session_cache.iter().any(|(parked, _)| *parked == busy_id),
+                    "the busy view survives {} later parks",
+                    SESSION_CACHE_LIMIT + 1
+                );
+                let idle = harness.session_cache.iter().filter(|(id, _)| id.starts_with("s-idle-")).count();
+                assert_eq!(idle, SESSION_CACHE_LIMIT, "idle views are still capped");
+                view
+            })
+        });
+        vc.update(|_, cx| {
+            busy.update(cx, |view, cx| {
+                view.fold_provider_events(
+                    vec![provider::ProviderEvent::TurnSettled {
+                        session_id: "s-busy".into(),
+                        turn_id: "t-busy".into(),
+                        outcome: provider::facts::TurnOutcome::Completed,
+                    }],
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| !busy.read(cx).is_sending()), "the parked turn settles");
         lane_restore(state);
     }
 
