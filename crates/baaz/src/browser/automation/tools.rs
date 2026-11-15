@@ -124,6 +124,10 @@ pub async fn snapshot(ctx: Ctx, params: Value) -> Result<Value, String> {
 
 /// `browser_navigate`, after the service has checked the URL.
 pub async fn navigate(ctx: Ctx, url: String) -> Result<Value, String> {
+    // Opening another page goes through the same gate as acting on one.
+    if let Some(stopped) = gate_open(&ctx, &url).await {
+        return Ok(stopped);
+    }
     ensure_domains(&ctx).await?;
     let before = ctx.tab.borrow().log.loads();
     let answer = ctx.call("Page.navigate", json!({"url": url})).await?;
@@ -257,26 +261,59 @@ async fn inspect(ctx: &Ctx, node: Option<i64>, snapshot_name: &str) -> Target {
     }
 }
 
-/// Stops for the person when `reason` applies. `Ok(None)` means go on.
+/// Stops for the person when [`policy::decide`] says so. `None` means go on.
 ///
 /// Settings › Browser › Agents (R3) shapes it: a site's Never refuses
-/// outright and its Always never asks; under Ask every action asks, under
-/// Auto only the always-ask kinds (docs/27 §6.2).
+/// outright and its Always never asks; a person's tab under Ask first asks
+/// at each new host; under Ask every action asks, under Auto only the
+/// always-ask kinds (docs/27 §6.2, docs/82 0.12).
 async fn gate(ctx: &Ctx, target: &Target) -> Option<Value> {
+    let url = page_url(ctx).await.unwrap_or_default();
+    let action = policy::Action::Page(policy::classify(target));
+    gate_on(ctx, &url, action, &target.name).await.map(|reason| match reason {
+        Some(reason) => policy::stopped_answer(reason, target),
+        None => policy::refused_answer(&policy::host_of(&url)),
+    })
+}
+
+/// [`gate`] for opening `url` (navigation, a cookie-bearing fetch).
+async fn gate_open(ctx: &Ctx, url: &str) -> Option<Value> {
+    gate_on(ctx, url, policy::Action::Open, url).await.map(|reason| match reason {
+        Some(reason) => policy::stopped_answer(reason, &Target { name: url.to_owned(), ..Target::default() }),
+        None => policy::refused_answer(&policy::host_of(url)),
+    })
+}
+
+/// The shared half: `None` goes on; `Some(None)` is a site refusal;
+/// `Some(Some(reason))` is the person declining. An allowed ask remembers
+/// the host for this tab, so a person's tab asks once per host.
+async fn gate_on(ctx: &Ctx, url: &str, action: policy::Action, detail: &str) -> Option<Option<Reason>> {
     let prefs = crate::browser::agents::current();
-    let host = page_url(ctx).await.map(|url| policy::host_of(&url)).unwrap_or_default();
-    match prefs.site(&host) {
-        Some(crate::browser::agents::SiteRule::Never) => return Some(policy::refused_answer(&host)),
-        Some(crate::browser::agents::SiteRule::Always) => return None,
-        None => {}
-    }
-    let reason = match policy::classify(target) {
-        Some(reason) => reason,
-        None if prefs.act == crate::browser::agents::ActMode::Ask => policy::Reason::Act,
-        None => return None,
+    let host = policy::host_of(url);
+    let (persons_tab, allowed_in_tab) = {
+        let tab = ctx.tab.borrow();
+        (tab.persons_tab, tab.allowed_hosts.contains(&host))
     };
-    let allowed = ask(ctx, reason, &target.name).await;
-    (!allowed).then(|| policy::stopped_answer(reason, target))
+    match policy::decide(&prefs, &host, policy::is_local(url), persons_tab, allowed_in_tab, action) {
+        policy::Decision::Go => None,
+        policy::Decision::Refuse => Some(None),
+        policy::Decision::Ask(reason) => {
+            if !ask(ctx, reason, detail).await {
+                return Some(Some(reason));
+            }
+            ctx.tab.borrow_mut().allowed_hosts.insert(host);
+            // An allowed first use still owes the always-ask kinds their own
+            // question (a Pay in the person's tab asks twice, never zero).
+            if reason == Reason::YourTab {
+                if let policy::Action::Page(Some(kind)) = action {
+                    if !ask(ctx, kind, detail).await {
+                        return Some(Some(kind));
+                    }
+                }
+            }
+            None
+        }
+    }
 }
 
 async fn ask(ctx: &Ctx, reason: Reason, detail: &str) -> bool {
@@ -609,6 +646,10 @@ pub async fn run(ctx: Ctx, params: Value) -> Result<Value, String> {
 /// `browser_fetch`: a GET with the page's cookies, opening no tab.
 pub async fn fetch(ctx: Ctx, params: Value) -> Result<Value, String> {
     let url = params.get("url").and_then(Value::as_str).ok_or("browser_fetch needs url")?;
+    // A fetch carries the page's cookies: the same gate as opening the page.
+    if let Some(stopped) = gate_open(&ctx, url).await {
+        return Ok(stopped);
+    }
     let max = params.get("max_chars").and_then(Value::as_u64).unwrap_or(20_000);
     let body = format!(
         "const r = await fetch({}, {{credentials: 'include'}}); const t = await r.text(); return {{status: r.status, type: r.headers.get('content-type'), text: t.slice(0, {max})}}",
@@ -786,6 +827,42 @@ mod tests {
         let outcome = run_deciding(Job::new(agent, |ctx| act(ctx, json!({"action":"click","ref":"e1"}))), page, |_| true);
         assert_eq!(outcome.asks.len(), 1);
         assert!(outcome.calls.iter().any(|(method, _)| method == "Input.dispatchMouseEvent"));
+    }
+
+    /// docs/82 0.12, Your own tabs › Ask first (the default): in one of the
+    /// person's tabs, the agent's first action at a host asks; a "Don't
+    /// allow" does nothing; an "Allow" goes on and the next action at the
+    /// same host does not ask again.
+    #[test]
+    fn a_persons_tab_asks_once_per_host_before_the_first_action() {
+        let agent = tab();
+        agent.borrow_mut().persons_tab = true;
+        let _ = run_job(Job::new(agent.clone(), |ctx| snapshot(ctx, json!({}))), page);
+        let denied = run_deciding(Job::new(agent.clone(), |ctx| act(ctx, json!({"action":"click","ref":"e2"}))), page, |_| false);
+        assert_eq!(denied.asks.len(), 1);
+        assert_eq!(denied.asks[0].kind, "Use your tab");
+        assert_eq!(denied.result.unwrap()["stopped"], "needs_approval");
+        assert!(!denied.calls.iter().any(|(method, _)| method == "Input.dispatchMouseEvent"), "nothing clicked");
+        let allowed = run_deciding(Job::new(agent.clone(), |ctx| act(ctx, json!({"action":"click","ref":"e2"}))), page, |_| true);
+        assert_eq!(allowed.asks.len(), 1);
+        assert!(allowed.calls.iter().any(|(method, _)| method == "Input.dispatchMouseEvent"));
+        let again = run_deciding(Job::new(agent, |ctx| act(ctx, json!({"action":"click","ref":"e2"}))), page, |_| false);
+        assert!(again.asks.is_empty(), "allowed once on this host in this tab");
+    }
+
+    /// Opening a page in the person's tab at a new host asks too.
+    #[test]
+    fn navigating_a_persons_tab_to_a_new_host_asks() {
+        let agent = tab();
+        agent.borrow_mut().persons_tab = true;
+        let outcome = run_deciding(
+            Job::new(agent, |ctx| navigate(ctx, "https://elsewhere.example/".into())),
+            page,
+            |_| false,
+        );
+        assert_eq!(outcome.asks.len(), 1);
+        assert_eq!(outcome.asks[0].kind, "Use your tab");
+        assert!(!outcome.calls.iter().any(|(method, _)| method == "Page.navigate"), "not navigated");
     }
 
     #[test]

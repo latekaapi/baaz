@@ -140,7 +140,10 @@ fn browse_centre_has_its_own_visibility_and_bounds() {
 #[test]
 fn mode_and_sidebar_persist_with_sessions_default() {
     let layout = source("layout.rs");
-    assert!(layout.contains("#[serde(rename = \"mode\", default)]"), "the mode persists");
+    assert!(
+        layout.contains("#[serde(rename = \"mode\", default, deserialize_with = \"crate::store::lenient\")]"),
+        "the mode persists, and an unknown stored mode falls back to the default"
+    );
     assert!(layout.contains("#[serde(rename = \"sidebarOpen\", default"), "the sidebar's state persists");
     assert!(!layout.contains("modeMemory\", default"), "no mode keeps a layout of its own");
 }

@@ -1665,6 +1665,18 @@ impl SessionView {
         crate::providers::gate(self.provider_kind(), provider::Capability::TurnControl)
     }
 
+    /// The folder this session runs in, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn workspace_for_tests(&self) -> &str {
+        &self.workspace
+    }
+
+    /// Whether this session's provider offers `capability` (docs/82 0.7):
+    /// what every control that sends a command asks first.
+    pub(crate) fn offers(&self, capability: provider::Capability) -> bool {
+        crate::providers::offers(self.provider_kind(), capability)
+    }
+
     /// The question-answer control's gate, same contract as [`Self::steer_gate`].
     pub fn questions_gate(&self) -> Option<String> {
         crate::providers::gate(self.provider_kind(), provider::Capability::Questions)
@@ -2607,6 +2619,18 @@ impl SessionView {
     /// the wire.
     pub(crate) fn is_starting(&self) -> bool {
         matches!(self.start, StartState::Starting(_))
+    }
+
+    /// Whether dropping this view would lose work: a turn in flight, an
+    /// approval or question waiting on the person, or a start still on the
+    /// wire. The parked-view cap never evicts such a view (docs/81 A F1).
+    pub(crate) fn must_stay_alive(&self) -> bool {
+        self.is_sending()
+            || self.is_starting()
+            || self.newest_pending_approval().is_some()
+            || !self.external_approvals.pending().is_empty()
+            || !self.external_questions.is_empty()
+            || self.newest_pending_question().is_some()
     }
 
     /// The banner's text, for tests that check what a failure said.

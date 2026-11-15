@@ -16,7 +16,6 @@ use aui::util::ScrollAxisLock as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -998,8 +997,9 @@ fn open_path(path: &Path, cx: &mut App) {
 /// Select `path` in Finder: the card's "Reveal in Finder" control. A
 /// missing path does nothing.
 fn reveal_in_finder(path: &Path) {
+    use std::ffi::OsStr;
     if std::fs::metadata(path).is_ok() {
-        let _ = Command::new("open").arg("-R").arg(path).spawn();
+        let _ = crate::system_open::open_detached([OsStr::new("-R"), path.as_os_str()]);
     }
 }
 

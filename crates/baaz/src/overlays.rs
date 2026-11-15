@@ -52,7 +52,7 @@ pub enum DialogAction {
     /// sessions stay on disk and move to Unfiled).
     RemoveProject,
     /// Quit the app after confirming a still-running terminal command (D52).
-    QuitWithRunningTerminal,
+    QuitWithWorkRunning,
     /// Close the dialog's `archive_target` terminal tab after confirming
     /// its still-running command (D52).
     CloseTerminalTab,
@@ -458,6 +458,22 @@ impl Command {
     ];
 
     /// The command as typed, leading slash included.
+    /// The provider capability the command's work needs, when it needs one
+    /// that not every provider has: the menus offer the command only where
+    /// [`crate::providers::offers`] says so (docs/82 0.7).
+    pub fn needs(&self) -> Option<provider::Capability> {
+        match self {
+            Command::Compact => Some(provider::Capability::CompactSession),
+            Command::Fork => Some(provider::Capability::ForkSession),
+            _ => None,
+        }
+    }
+
+    /// Whether the command is offered on `id`'s sessions.
+    pub fn offered_on(&self, id: crate::providers::ProviderId) -> bool {
+        self.needs().is_none_or(|capability| crate::providers::offers(id, capability))
+    }
+
     pub fn slash(&self) -> &'static str {
         match self {
             Command::Model => "/model",

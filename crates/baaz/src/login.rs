@@ -40,13 +40,10 @@
 //! `--login-steps` run be followed from a log.
 
 use aui::data::secret_field;
-use aui::shell::drag_region;
 use aui::overlay::DialogKind;
 use aui::screens::{login, LoginIntent, LoginMethod, LoginState};
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, Focusable as _, SharedString, Window};
-use gpui_kit::base::v_flex;
+use gpui::{prelude::*, AnyElement, Context, Entity, Focusable as _, SharedString, Window};
 use gpui_kit::base::input::InputState;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
 use provider::{AccountLane, Ack, Command, LoginOutcome, ProviderError};
 
 use crate::app::Harness;
@@ -55,13 +52,6 @@ use crate::overlays::{Dialog, DialogAction};
 use crate::tier::Tier;
 use crate::wire::WireCall;
 use crate::LoginSample;
-
-/// How wide the welcome prose is allowed to run before it wraps.
-///
-/// The sign-in card sets the optical column of this screen; prose much wider
-/// than it reads as a different page sitting above the card rather than the
-/// same one.
-const WELCOME_MEASURE: f32 = 420.0;
 
 /// Where the boot probe got to: sign-in is on the wire now,
 /// so this is the `account/read` answer.
@@ -107,6 +97,17 @@ impl Login {
     /// waiting): closing the sheet cancels it.
     pub(crate) fn flow_running(&self) -> bool {
         matches!(self.state, LoginState::Starting | LoginState::Device { .. })
+    }
+
+    /// The state's log name and the key field, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn state_name(&self) -> &'static str {
+        login_state_name(&self.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn api_key_field(&self) -> Entity<InputState> {
+        self.api_key.clone()
     }
 
     pub(crate) fn reset_to_choose(&mut self) {
@@ -645,80 +646,17 @@ impl Harness {
         }
     }
 
-    /// Escape on the login screen, which has no session stack to walk:
-    /// `Cancel` in `Starting` / `Device`, `Back` in `ApiKey`,
-    /// `ChooseAnother` in `Error`, nothing in the other states.
-    pub(crate) fn login_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.login.state {
-            LoginState::Starting | LoginState::Device { .. } => {
-                self.login_intent(LoginIntent::Cancel, window, cx);
-            }
-            LoginState::ApiKey { .. } => {
-                self.login_intent(LoginIntent::Back, window, cx);
-            }
-            LoginState::Error { .. } => {
-                self.login_intent(LoginIntent::ChooseAnother, window, cx);
-            }
-            _ => {}
-        }
-    }
-
-    /// `--no-connect --login <state>`: the login screen's sample data for
-    /// captures. The URL, the code and the key-shaped field text are the
-    /// example values, never anything the wire sent.
-    pub(crate) fn apply_login_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const URL: &str = "https://example.invalid/device";
-        const CODE: &str = "WXYZ-2946";
-        // A mask with something behind it: the dots the capture wants.
-        const SAMPLE_KEY: &str = "capture-sample-key";
+    /// `--no-connect --login <state>`: sample state for captures — the
+    /// signed-in shell with sample identity, or the first-run connect
+    /// screen. (The whole-window Muse login screen and its five sample
+    /// states are gone, docs/82 0.16.)
+    pub(crate) fn apply_login_sample(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         match self.args.login {
             LoginSample::Choose => {
                 self.login.reset_to_choose();
                 cx.notify();
             }
-            LoginSample::Device => {
-                self.login.url = Some(URL.to_owned());
-                self.login.code = Some(CODE.to_owned());
-                self.login.method = Some(LoginMethod::Account);
-                self.set_login_state(
-                    LoginState::Device { url: URL.into(), code: CODE.into(), expires: None, waiting: true },
-                    cx,
-                );
-            }
-            LoginSample::ApiKey => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::ApiKey { can_submit: true, error: None }, cx);
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
-            }
-            LoginSample::ApiKeyError => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(
-                    LoginState::ApiKey {
-                        can_submit: true,
-                        error: Some("That key was rejected. Check the key and try again.".into()),
-                    },
-                    cx,
-                );
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
-            }
-            LoginSample::Validating => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::Validating, cx);
-            }
-            LoginSample::Error => {
-                self.login.method = Some(LoginMethod::Account);
-                self.set_login_state(
-                    LoginState::Error {
-                        message: "The sign-in request expired before it was approved.".into(),
-                        method: Some(LoginMethod::Account),
-                    },
-                    cx,
-                );
-            }
-            // Past the login screen with sample identity, for captures of
-            // the signed-in shell. No child runs behind it: the chrome
+            // Sample identity, for captures of the signed-in shell. No child runs behind it: the chrome
             // draws, and anything needing the wire quietly does nothing.
             LoginSample::SignedIn => {
                 self.auth = Auth::SignedIn(Identity {
@@ -745,19 +683,9 @@ impl Harness {
         }
     }
 
-
-    /// The Muse sign-in screen: a drag strip standing in for the shell's
-    /// header, the welcome that says what Baaz is, and the sign-in card.
-    ///
-    /// Once the app's first screen, now a sheet over the connect screen (or
-    /// over the shell, from the account menu) and the offline captures'
-    /// sample — so the window chrome the shell's header normally carries
-    /// has to be built here instead. Without the strip the window cannot be
-    /// moved or zoomed at all while signed out, which is what a person meets
-    /// before anything else.
     /// The Muse sign-in component over today's login state: the state (with
     /// the API-key field's live `can_submit`), the field, and the intents.
-    /// The full-window login and the sheet both draw it.
+    /// The sheet draws it.
     fn login_component(&self, cx: &mut Context<Self>) -> aui::screens::Login {
         let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
             this.login_intent(*intent, window, cx);
@@ -797,60 +725,6 @@ impl Harness {
         let card = self.login_component(cx).sheet();
         let card = if crate::clock::deterministic() { card.at_rest() } else { card };
         card.into_any_element()
-    }
-
-    pub(crate) fn render_login(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // A deterministic capture draws the card settled: the login screen's
-        // enter presence never lands on the same frame twice.
-        let card = self
-            .login_component(cx)
-            .subtitle("Baaz signs in over the wire, the same way the muse CLI does.");
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-
-        let p = cx.aui().colors;
-        // The strip matches the shell's header height, so the native traffic
-        // lights — positioned once at window creation for the header row —
-        // sit centred here too rather than floating against a taller gap.
-        let header_h = cx.aui().metrics.header;
-        v_flex()
-            .size_full()
-            .bg(p.bg)
-            .child(drag_region("login-drag").child(div().w_full().h(header_h)))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .w_full()
-                    .items_center()
-                    .justify_center()
-                    .pb(px(crate::app::HERO_LIFT))
-                    .gap(px(scale::SP_6))
-                    .child(crate::mascot::welcome_mascot(window, cx))
-                    .child(
-                        v_flex()
-                            .items_center()
-                            .gap(px(scale::SP_2))
-                            .max_w(px(WELCOME_MEASURE))
-                            .child(div().ui(scale::FS_24).semibold().text_color(p.ink).child("Baaz"))
-                            .child(
-                                div()
-                                    .ui(scale::FS_14)
-                                    .text_color(p.ink_2)
-                                    .text_center()
-                                    .child("An agentic harness: a native window around the coding agent you already run in the terminal."),
-                            )
-                            // What Baaz speaks today, said plainly rather than
-                            // implied by the sign-in card being about Muse.
-                            .child(
-                                div()
-                                    .ui(scale::FS_12)
-                                    .text_color(p.ink_3)
-                                    .text_center()
-                                    .child("Muse Code today. Codex, Claude and more to come."),
-                            ),
-                    )
-                    .child(div().w_full().flex_none().child(card)),
-            )
-            .into_any_element()
     }
 }
 

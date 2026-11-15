@@ -113,7 +113,7 @@ pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
     // correct in a capture while the owner's 43-character prompt put the
     // cursor four cells into the text. Keep this at a realistic width so a
     // capture can fail.
-    let prompt = "latekaapi@owners-MacBook-Pro acme % ";
+    let prompt = "adalovelace@adas-MacBook-Pro.lan acme % ";
     let block = |cmd: &str, output: &str, exit: i32| {
         let cmd = base64::engine::general_purpose::STANDARD.encode(cmd);
         // The newline after `C` is the shell's own: preexec hands the

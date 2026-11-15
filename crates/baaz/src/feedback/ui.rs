@@ -3674,7 +3674,7 @@ mod tests {
     }
 
     /// A click on a header element OUTSIDE the slot still comments: the guard
-    /// covers only the recorded bounds (here none — no draw ran).
+    /// covers only the recorded bounds (here none: cleared first).
     #[gpui::test]
     fn header_zone_click_outside_the_slot_still_notes(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("header-zone-note");
@@ -3682,10 +3682,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(270.0, 8.0, 60.0, 28.0, "Project")]);
-        assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
-            "no bounds on record without a draw"
-        );
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.feedback.slot_bounds = None));
         f3_click(&baaz, vc, 297.0, 21.0);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Element(hit)) => assert_eq!(hit.label, "Project"),

@@ -62,6 +62,8 @@ mod import_ui;
 mod chrome_import_ui;
 mod images;
 mod index;
+mod system_open;
+mod instance;
 mod keymap;
 mod layout;
 mod list_cache;
@@ -138,21 +140,11 @@ const SHOT_DELAY: Duration = Duration::from_millis(600);
 /// text are the example values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoginSample {
-    /// The method choice (the default).
+    /// No sample: the window boots as a launch would (the default).
     #[default]
     Choose,
-    /// The device flow mid-poll, with the example URL and code.
-    Device,
-    /// The API-key form, with a sample string in the masked field.
-    ApiKey,
-    /// The API-key form with an inline rejection.
-    ApiKeyError,
-    /// `account/loginStart {apiKey}` in flight.
-    Validating,
-    /// A failed flow, with both ways out.
-    Error,
-    /// The signed-in shell with sample identity, for captures past the
-    /// login screen (the Projects hero). Sample data only, like the rest.
+    /// The signed-in shell with sample identity, for captures (the
+    /// Projects hero). Sample data only, like the rest.
     SignedIn,
     /// The first-run Connect your providers screen, fed from the scripted
     /// statuses (`BAAZ_PROVIDER_STATUS_SCRIPT`) or all Checking when unset.
@@ -451,11 +443,6 @@ fn parse_args() -> Args {
                 let value = args.next().unwrap_or_default();
                 out.login = match value.as_str() {
                     "choose" => LoginSample::Choose,
-                    "device" => LoginSample::Device,
-                    "apikey" => LoginSample::ApiKey,
-                    "apikey-error" => LoginSample::ApiKeyError,
-                    "validating" => LoginSample::Validating,
-                    "error" => LoginSample::Error,
                     "signed-in" => LoginSample::SignedIn,
                     "connect" => LoginSample::Connect,
                     other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in|connect, not `{other}`")),
@@ -832,6 +819,35 @@ fn main() {
     // Finder launch has no stderr anyone reads (the 2026-10-31 hang left
     // nothing behind).
     crate::log::init_file_log(&crate::store::support_dir());
+    // One Baaz per state directory (docs/81 B D-4): a second launch on the
+    // same directory brings the first forward and leaves, before it reads or
+    // writes any store. `--print-tier` and `--bench` write no store and are
+    // meant to run beside a live window, so they skip the lock.
+    let _instance = {
+        let argv: Vec<String> = std::env::args().collect();
+        let side_tool = argv.iter().any(|arg| arg == "--print-tier" || arg == "--bench");
+        if side_tool {
+            None
+        } else {
+            match crate::instance::acquire(&crate::store::support_dir()) {
+                Ok(crate::instance::Acquire::Owned(lock)) => Some(lock),
+                Ok(crate::instance::Acquire::HeldBy(pid)) => {
+                    let shown = pid.is_some_and(crate::instance::bring_forward);
+                    crate::baaz_log!(
+                        "another Baaz (pid {}) already uses {}; {}",
+                        pid.map(|pid| pid.to_string()).unwrap_or_else(|| "unknown".into()),
+                        crate::store::support_dir().display(),
+                        if shown { "brought it forward" } else { "could not bring it forward" }
+                    );
+                    return;
+                }
+                Err(error) => {
+                    crate::baaz_log!("instance lock failed ({error}); running without it");
+                    None
+                }
+            }
+        }
+    };
     // The Chromium page engine, when the bundle carries it (docs/25 §2):
     // mapped before anything else allocates in earnest, initialised lazily on
     // the first page. Without it the browser pane stays on WKWebView.

@@ -1011,6 +1011,13 @@ impl SessionView {
 
     // ----------------------------------------------------------------- images
 
+    /// An image offered to a provider that takes none (docs/82 0.7): it
+    /// never becomes a chip that would be refused at send.
+    pub(super) fn refuse_images(&mut self) {
+        self.banner = Some(format!("Images are not available in {}.", self.provider_kind().label()));
+        self.banner_action = None;
+    }
+
     /// ⌘V with an image on the clipboard.
     ///
     /// Returns `false` when the clipboard holds no image, so the caller can let
@@ -1035,6 +1042,10 @@ impl SessionView {
             let ext =
                 path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+                if !self.offers(provider::Capability::ImageInput) {
+                    self.refuse_images();
+                    continue;
+                }
                 self.image_seq += 1;
                 let id = format!("img-{}", self.image_seq);
                 // The chip goes up now; the read, the decode and the
@@ -1073,6 +1084,11 @@ impl SessionView {
     }
 
     pub(super) fn attach_bytes(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if !self.offers(provider::Capability::ImageInput) {
+            self.refuse_images();
+            cx.notify();
+            return;
+        }
         self.image_seq += 1;
         let id = format!("img-{}", self.image_seq);
         let chip_name = if name.is_empty() { "pasted image".to_owned() } else { name.to_owned() };

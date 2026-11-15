@@ -153,15 +153,25 @@ pub(crate) fn spawn_pump(
     std::thread::Builder::new()
         .name("provider-claude-code-pump".into())
         .spawn(move || {
+            let mut failed = None;
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                pump_hub.ingest_line_of(epoch, &line);
+                // A fold that panics ends the session like a lost child,
+                // with the poison it left cleared (docs/81 B PM-3).
+                if let Err(message) = provider::guard::guard_line(|| pump_hub.ingest_line_of(epoch, &line)) {
+                    pump_hub.recover_from_panic();
+                    failed = Some(provider::guard::panic_reason("Claude Code", &message));
+                    break;
+                }
             }
             // A turn the child never finished ends here, carded, and
             // the lane learns the connection is gone — unless Baaz
             // hung up on purpose (`shutdown` retired the epoch).
-            let said = stderr.and_then(|tail| exit_card_text(&tail.settled(STDERR_SETTLE)));
-            pump_hub.ingest_end_of_stream(epoch, &exit_reason(said.as_deref()));
+            let reason = failed.unwrap_or_else(|| {
+                let said = stderr.and_then(|tail| exit_card_text(&tail.settled(STDERR_SETTLE)));
+                exit_reason(said.as_deref())
+            });
+            pump_hub.ingest_end_of_stream(epoch, &reason);
         })
         .map_err(|error| std::io::Error::other(error.to_string()))
 }

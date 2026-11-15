@@ -150,6 +150,29 @@ pub struct ClaudeCodeAdapter {
     /// bridge config still rides when a relay is set. Applies to sessions
     /// started after the change.
     use_own_mcp: Mutex<bool>,
+    /// How long Stop waits for the child to close the turn after the
+    /// `interrupt` control request before ending the child instead
+    /// ([`INTERRUPT_GRACE`]; tests shorten it).
+    interrupt_grace: std::time::Duration,
+}
+
+/// How long Stop waits for the child to close its turn after the
+/// `interrupt` control request. Past it, Stop ends the child, marks the turn
+/// interrupted and leaves the session to resume on the next send: Stop
+/// always stops, whether or not this CLI honours the request (docs/82 0.8).
+pub const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// `interrupt`, the host→child control request that stops the running
+/// turn (the CLI's documented stream-json control protocol; the child
+/// answers `control_response` success and ends the turn with a `result`).
+/// Written from the protocol, not yet confirmed live on this machine.
+pub fn interrupt_control_request(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "interrupt"},
+    })
+    .to_string()
 }
 
 /// The host→child control lines the adapter addresses, each answering
@@ -295,6 +318,7 @@ impl ClaudeCodeAdapter {
             version: Mutex::new(None),
             terminal: Mutex::new(None),
             use_own_mcp: Mutex::new(false),
+            interrupt_grace: INTERRUPT_GRACE,
         }
     }
 
@@ -990,6 +1014,76 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Stop the running turn: the `interrupt` control request first, then
+    /// — if the turn is still open after [`Self::interrupt_grace`] — end the
+    /// child and settle the turn interrupted. Blocks for at most the grace;
+    /// commands are dispatched off the UI thread.
+    fn stop_turn(&self, session_id: &str) -> Result<Ack, ProviderError> {
+        self.check_session(session_id)?;
+        if !self.fold.lock().expect("fold mutex").has_live_turn() {
+            return Ok(Ack::Accepted);
+        }
+        let request_id = self.next_control_id();
+        self.fold.lock().expect("fold mutex").note_stopping();
+        let sent = self.send_control(
+            &interrupt_control_request(&request_id),
+            PendingControl::bare(PendingControlKind::Interrupt, request_id.clone()),
+        );
+        if sent.is_ok() {
+            let deadline = std::time::Instant::now() + self.interrupt_grace;
+            while std::time::Instant::now() < deadline {
+                self.hub.drain_confirmations();
+                if !self.fold.lock().expect("fold mutex").has_live_turn() {
+                    self.hub.untrack(&request_id);
+                    return Ok(Ack::Accepted);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        self.hub.untrack(&request_id);
+        self.end_child_interrupted();
+        Ok(Ack::Accepted)
+    }
+
+    /// Stop's fallback: hang the child up on purpose (its end of stream is
+    /// not a loss), close the open turns as interrupted with no error card,
+    /// and leave the session to `--resume` on the next send.
+    fn end_child_interrupted(&self) {
+        use std::sync::atomic::Ordering;
+        self.hub.retire_child(self.hub.child_epoch.load(Ordering::SeqCst));
+        if let Some(mut running) = self.child.lock().expect("child mutex").take() {
+            running.shutdown();
+        }
+        self.hub.forget_pending();
+        // Not a loss the person must hear about: the next send revives the
+        // session with `--resume`, exactly as after a lost child.
+        self.hub.child_lost.store(true, Ordering::SeqCst);
+        let (session_id, deltas, stopped) = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            let session_id = fold.session_id().map(str::to_owned);
+            let (deltas, stopped) = fold.interrupt_live_turns();
+            (session_id, deltas, stopped)
+        };
+        if !deltas.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
+        }
+        if let Some(session_id) = session_id {
+            for turn_id in stopped {
+                let _ = self.tx.send(ProviderEvent::TurnSettled {
+                    session_id: session_id.clone(),
+                    turn_id,
+                    outcome: provider::facts::TurnOutcome::Interrupted,
+                });
+            }
+        }
+    }
+
+    /// Tests: shorten Stop's wait for the child to close the turn.
+    #[cfg(test)]
+    pub(crate) fn set_interrupt_grace(&mut self, grace: std::time::Duration) {
+        self.interrupt_grace = grace;
+    }
+
     fn check_session(&self, session_id: &str) -> Result<(), ProviderError> {
         match self.session_id.lock().expect("session mutex").as_deref() {
             Some(held) if held == session_id => Ok(()),
@@ -1240,8 +1334,16 @@ impl ClaudeCodeAdapter {
         // So do the lines it never answered: its end of stream is
         // epoch-gated (a replaced child's never reaches the fold), so
         // nothing else clears them, and a stale one would pair the new
-        // child's next turn with an old ack.
-        self.fold.lock().expect("fold mutex").forget_submissions();
+        // child's next turn with an old ack. And so do its asks: an answer
+        // under its request id must never reach the new child (PM-14).
+        let (session_id, dropped) = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            fold.forget_submissions();
+            (fold.session_id().map(str::to_owned), fold.drop_pending_asks())
+        };
+        if !dropped.is_empty() {
+            let _ = self.tx.send(ProviderEvent::Deltas { session_id, deltas: dropped });
+        }
         let (launch, fallback) = self.relaunch_launch(launch)?;
         // An effort-swap relaunch is still the same session: a legacy
         // resume keeps the owner's home here too.
@@ -1880,16 +1982,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
                 Ok(Ack::Accepted)
             }
-            // TurnControl is Unverified: interrupt/cancel over stdin was
-            // never probed, and spelling it as success would be the lie this
-            // seam exists to prevent.
-            Command::InterruptTurn { .. } => Err(ProviderError::Rejected {
-                reason: "interrupt over stream-json stdin was never probed; not attempted blind"
-                    .into(),
-            }),
-            Command::CancelTurn { .. } => Err(ProviderError::Rejected {
-                reason: "cancel over stream-json stdin was never probed; not attempted blind".into(),
-            }),
+            // TurnControl is Emulated (docs/82 0.8): ask the child to
+            // interrupt, and if the turn has not closed within the grace,
+            // end the child and mark the turn interrupted — Stop always
+            // stops. Cancel is the same act on this CLI.
+            Command::InterruptTurn { session_id, .. } | Command::CancelTurn { session_id, .. } => {
+                self.stop_turn(&session_id)
+            }
             Command::ReclaimQueued { .. } => Err(ProviderError::Rejected {
                 reason: "no queued-turn lane was probed over stream-json stdin".into(),
             }),
@@ -2091,10 +2190,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn shutdown(&mut self) {
-        if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
+        // Poison-tolerant: the child is hung up even when a panic left the
+        // lock poisoned (docs/81 B PM-3).
+        let mut child = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(running) = child.as_mut() {
             running.shutdown();
         }
-        *self.child.lock().expect("child mutex") = None;
+        *child = None;
     }
 }
 
@@ -3341,6 +3443,66 @@ mod tests {
         assert!(control_cards(&drain_events(&adapter)).is_empty(), "no stale banner");
     }
 
+    /// docs/81 B PM-14: an ask the replaced child raised is gone after a
+    /// relaunch — a late decision for it is refused, never written to the
+    /// new child under the old request id.
+    #[test]
+    fn relaunch_drops_the_old_childs_asks() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.ingest_child_line(
+            r#"{"type":"control_request","request_id":"req-old","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"}}}"#,
+        );
+        assert_eq!(adapter.fold.lock().expect("fold").pending_approvals().len(), 1, "setup: the ask waits");
+        let launch = SessionLaunch {
+            argv: Vec::new(),
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let _ = adapter.relaunch(&launch);
+        assert!(adapter.fold.lock().expect("fold").pending_approvals().is_empty(), "the old ask is dropped");
+        let error = adapter
+            .dispatch(Command::DecideApproval {
+                request_id: "d-1".into(),
+                session_id: "sess-1".into(),
+                approval: "req-old".into(),
+                choice: "allow".into(),
+                feedback: None,
+                stage_token: None,
+            })
+            .expect_err("a decision for the old child's ask is refused");
+        assert!(!format!("{error:?}").is_empty());
+        assert!(
+            !adapter.sent_control.lock().expect("sent").iter().any(|line| line.contains("req-old")),
+            "nothing reached a child under the old id"
+        );
+    }
+
+    /// docs/81 B PM-15: a withdrawn ask (`control_cancel_request`) is no
+    /// longer answerable; an unknown control subtype raises the needs-you
+    /// tap as well as its card.
+    #[test]
+    fn a_withdrawn_ask_leaves_the_queue_and_unknown_controls_are_tapped() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.ingest_child_line(
+            r#"{"type":"control_request","request_id":"req-w","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"ls"}}}"#,
+        );
+        assert_eq!(adapter.fold.lock().expect("fold").pending_approvals().len(), 1);
+        adapter.ingest_child_line(r#"{"type":"control_cancel_request","request_id":"req-w"}"#);
+        assert!(adapter.fold.lock().expect("fold").pending_approvals().is_empty(), "withdrawn");
+        let _ = drain_events(&adapter);
+        adapter.ingest_child_line(r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#);
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::ApprovalRequested { approval_id, .. } if approval_id == "req-x")),
+            "{events:?}"
+        );
+    }
+
     /// A relaunch forgets the replaced child's waiting submissions too: its
     /// end of stream is epoch-gated, so nothing else would, and a stale
     /// entry would name the new child's first turn after an old ack.
@@ -4334,6 +4496,144 @@ mod tests {
             matches!(&error, ProviderError::Unavailable { reason } if reason.contains("respawn")),
             "the revive was attempted: {error:?}"
         );
+    }
+
+    /// The interrupt fixture (`fixtures/claude-code/interrupt.jsonl`): a
+    /// live turn's frames, the child's `control_response` to the host's
+    /// `interrupt` (id `REQUEST_ID`), and the `result` that ends the turn.
+    fn interrupt_fixture() -> Vec<String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/claude-code/interrupt.jsonl");
+        std::fs::read_to_string(path).expect("fixture").lines().map(str::to_owned).collect()
+    }
+
+    /// An adapter holding the fixture's session with its turn open.
+    fn adapter_mid_turn() -> (ClaudeCodeAdapter, Vec<String>) {
+        let lines = interrupt_fixture();
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.fold.lock().expect("fold mutex").set_live(true);
+        adapter.attach_session_for_tests("704fd676-d199-410c-a1d2-03bf3efd46d9");
+        for line in &lines[..lines.len() - 2] {
+            adapter.ingest_child_line(line);
+        }
+        assert!(adapter.fold.lock().expect("fold mutex").has_live_turn(), "setup: the turn is open");
+        (adapter, lines)
+    }
+
+    fn stop(adapter: &ClaudeCodeAdapter) -> Result<Ack, ProviderError> {
+        adapter.dispatch(Command::InterruptTurn {
+            request_id: "i-1".into(),
+            session_id: "704fd676-d199-410c-a1d2-03bf3efd46d9".into(),
+            turn: None,
+            retract: false,
+        })
+    }
+
+    /// docs/82 0.8: Stop sends the protocol's `interrupt`; the child
+    /// answers and ends the turn, which settles Interrupted (not Failed),
+    /// and the child is kept.
+    #[test]
+    fn stop_interrupts_through_the_control_protocol() {
+        let (mut adapter, lines) = adapter_mid_turn();
+        adapter.set_interrupt_grace(std::time::Duration::from_secs(5));
+        let adapter = std::sync::Arc::new(adapter);
+        let _ = drain_events(&adapter);
+        let child = {
+            let adapter = adapter.clone();
+            std::thread::spawn(move || {
+                // The child answers the request it was sent, then ends the turn.
+                let request_id = loop {
+                    let sent = adapter.sent_control.lock().expect("sent").clone();
+                    if let Some(line) = sent.iter().find(|line| line.contains("\"interrupt\"")) {
+                        let value: serde_json::Value = serde_json::from_str(line).expect("json");
+                        break value["request_id"].as_str().expect("id").to_owned();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                adapter.ingest_child_line(&lines[lines.len() - 2].replace("REQUEST_ID", &request_id));
+                adapter.ingest_child_line(&lines[lines.len() - 1]);
+            })
+        };
+        assert_eq!(stop(&adapter).expect("Stop is accepted"), Ack::Accepted);
+        child.join().expect("child thread");
+        assert!(!adapter.fold.lock().expect("fold mutex").has_live_turn(), "the turn ended");
+        assert!(!adapter.hub.child_lost.load(std::sync::atomic::Ordering::SeqCst), "the child is kept");
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::TurnSettled { outcome: provider::facts::TurnOutcome::Interrupted, .. })),
+            "settled Interrupted: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(event, ProviderEvent::TurnSettled { outcome: provider::facts::TurnOutcome::Failed { .. }, .. })),
+            "never Failed: {events:?}"
+        );
+    }
+
+    /// docs/82 0.8, the fallback: a child that does not end the turn within
+    /// the grace is ended; the turn closes Interrupted with no error card
+    /// and no lost-connection report, and the next send resumes.
+    #[test]
+    fn stop_ends_the_child_when_the_interrupt_is_not_honoured() {
+        let (mut adapter, _) = adapter_mid_turn();
+        adapter.set_interrupt_grace(std::time::Duration::from_millis(60));
+        let _ = drain_events(&adapter);
+        assert_eq!(stop(&adapter).expect("Stop is accepted"), Ack::Accepted);
+        assert!(
+            adapter.sent_control.lock().expect("sent").iter().any(|line| line.contains("\"interrupt\"")),
+            "the interrupt was asked for first"
+        );
+        assert!(!adapter.fold.lock().expect("fold mutex").has_live_turn(), "the turn is closed");
+        let events = drain_events(&adapter);
+        let finished = events.iter().any(|event| matches!(event, ProviderEvent::Deltas { deltas, .. } if deltas.iter().any(|d| matches!(d, Delta::TurnFinished { .. }))));
+        assert!(finished, "the open turn finished: {events:?}");
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::TurnSettled { outcome: provider::facts::TurnOutcome::Interrupted, .. })),
+            "settled Interrupted: {events:?}"
+        );
+        assert!(!events.iter().any(|event| matches!(event, ProviderEvent::ConnectionLost { .. })), "not a loss: {events:?}");
+        let carded = events.iter().any(|event| matches!(event, ProviderEvent::Deltas { deltas, .. } if deltas.iter().any(|d| matches!(d, Delta::BlockAdded { block: aui_protocol::Block::Generic { kind, .. }, .. } if kind == crate::CHILD_EXITED_CARD))));
+        assert!(!carded, "no child-exited card for the person's own stop");
+        assert!(
+            adapter.revive_launch("704fd676-d199-410c-a1d2-03bf3efd46d9").is_some(),
+            "the next send resumes the session"
+        );
+    }
+
+    /// docs/81 B PM-3: a fold that panics on the pump ends the session like
+    /// a lost child — the open turn closes, ConnectionLost is reported —
+    /// instead of reading Working forever, and the poisoned lock is usable.
+    #[test]
+    fn a_panicking_fold_ends_the_session_cleanly() {
+        let (adapter, lines) = adapter_mid_turn();
+        let _ = drain_events(&adapter);
+        let epoch = adapter.hub.begin_child();
+        let mut feed = lines[..2].join("\n");
+        feed.push('\n');
+        feed.push_str(crate::controls::TEST_PANIC_LINE);
+        feed.push('\n');
+        // The turn opened before this child; reopen it on this epoch.
+        let pump = crate::child::spawn_pump(std::io::Cursor::new(feed.into_bytes()), &adapter.hub, epoch, None)
+            .expect("pump");
+        pump.join().expect("the pump thread ends without panicking");
+        assert!(adapter.fold.lock().is_ok(), "the poison is cleared");
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::ConnectionLost { reason } if reason.contains("internal error"))),
+            "the session ends as a lost connection: {events:?}"
+        );
+        assert!(!adapter.fold.lock().expect("fold").has_live_turn(), "no turn is left Working");
+        assert!(
+            adapter.revive_launch("704fd676-d199-410c-a1d2-03bf3efd46d9").is_some(),
+            "the next send revives the session"
+        );
+    }
+
+    /// Stop with nothing running is a no-op, not an error.
+    #[test]
+    fn stop_with_no_turn_running_does_nothing() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("704fd676-d199-410c-a1d2-03bf3efd46d9");
+        assert_eq!(stop(&adapter).expect("accepted"), Ack::Accepted);
+        assert!(adapter.sent_control.lock().expect("sent").is_empty(), "nothing to interrupt");
     }
 
     /// A scratch dir unique to one test: removed first, created empty.

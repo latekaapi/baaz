@@ -333,7 +333,9 @@ pub enum Frame {
         cache_write_tokens: Option<u64>,
         /// Reasoning tokens, when reported.
         reasoning_tokens: u64,
-        /// Turn cost in USD (`total_cost_usd`). Real on this provider —
+        /// The process's running cost in USD (`total_cost_usd`), cumulative
+        /// across the turns one child ran — the fold takes the difference
+        /// for the turn (docs/81 B D-1). Real on this provider —
         /// never the muse `0.0` literal (addendum 2026-09-24).
         total_cost_usd: f64,
         /// Wall-clock time in milliseconds (`duration_ms`).
@@ -365,6 +367,13 @@ pub enum Frame {
         subtype: String,
         /// The raw `request` object, kept for inspection.
         raw: Value,
+    },
+    /// A child→host `control_cancel_request`: the child withdrew a control
+    /// request it raised (an ask it no longer waits on). The pending ask
+    /// leaves the answerable queue (docs/81 B PM-15).
+    ControlCancel {
+        /// The withdrawn request's `request_id`.
+        request_id: String,
     },
     /// A child→host `control_response` (e.g. the answer to the host's
     /// `initialize` handshake). Carried so the frame counts balance;
@@ -400,6 +409,10 @@ pub enum Frame {
         note: String,
     },
 }
+
+/// The [`Frame::Ignored`] note of the `SessionStart` hook that opens each
+/// child process: where the CLI's cumulative `total_cost_usd` restarts.
+pub const PROCESS_START_NOTE: &str = "hook_started SessionStart";
 
 /// One `addRules`-style permission suggestion inside a `can_use_tool`
 /// request: the provider-authored "don't ask again" affordance.
@@ -536,6 +549,7 @@ impl Frame {
             | Frame::Ignored { .. }
             | Frame::ControlRequest(_)
             | Frame::ControlUnknown { .. }
+            | Frame::ControlCancel { .. }
             | Frame::ControlResponse { .. } => None,
         }
     }
@@ -1130,6 +1144,14 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 },
                 // The operator's own hooks are noise; so are the spinner,
                 // the token estimates, and the turn summaries.
+                // A `SessionStart` hook starts each child process, before
+                // its first `init`: the fold restarts the process's
+                // running cost from here (docs/81 B D-1).
+                "hook_started"
+                    if value.get("hook_event").and_then(Value::as_str) == Some("SessionStart") =>
+                {
+                    Ok(Frame::Ignored { note: PROCESS_START_NOTE.to_owned() })
+                }
                 other => Ok(Frame::Ignored { note: other.to_owned() }),
             }
         }
@@ -1169,6 +1191,9 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 }),
             }
         }
+        "control_cancel_request" => Ok(Frame::ControlCancel {
+            request_id: value.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        }),
         "control_response" => {
             let response = value.get("response");
             let get = |key: &str| response.and_then(|response| response.get(key));

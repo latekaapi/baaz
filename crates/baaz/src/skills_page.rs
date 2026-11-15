@@ -916,7 +916,7 @@ impl Harness {
                             Err(message) => ("Skill created, validate failed", message),
                         };
                         this.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
-                        if std::process::Command::new("open").arg(&file).spawn().is_err() {
+                        if crate::system_open::open_detached([&file]).is_err() {
                             crate::baaz_log!("could not open {}", file.display());
                         }
                         cx.notify();
@@ -972,7 +972,7 @@ impl Harness {
                                     .and_then(|row| row.disk_path(&root))
                                     .filter(|path| path.is_file());
                                 if let Some(path) = path {
-                                    if std::process::Command::new("open").arg(&path).spawn().is_err() {
+                                    if crate::system_open::open_detached([&path]).is_err() {
                                         crate::baaz_log!("could not open {}", path.display());
                                     }
                                 }
@@ -2551,7 +2551,7 @@ impl Harness {
             SkillDetailIntent::Action(action) if action.as_ref() == "open" => {
                 if let Some(row) = this.skills.catalog.find(&key) {
                     if let Some(path) = row.disk_path(&this.skills_root()) {
-                        if std::process::Command::new("open").arg(&path).spawn().is_err() {
+                        if crate::system_open::open_detached([&path]).is_err() {
                             crate::baaz_log!("could not open {}", path.display());
                         }
                     }

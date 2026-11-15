@@ -1173,13 +1173,18 @@ impl RunningChild {
         let pump = std::thread::Builder::new()
             .name("provider-codex-pump".into())
             .spawn(move || {
+                let mut failed: Option<String> = None;
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     if line.trim().is_empty() {
                         continue;
                     }
                     let Ok(frame) = decode_line(&line) else { continue };
-                    match frame {
+                    // A step that panics ends the session like a lost
+                    // child, with the poison it left cleared (docs/81 B
+                    // PM-3); `stop` says the loop should end on its own.
+                    let mut stop = false;
+                    let stepped = provider::guard::guard_line(|| match frame {
                         Frame::Response { id, result } => {
                             let waiter = pump_shared
                                 .lock()
@@ -1212,7 +1217,7 @@ impl RunningChild {
                             let mode = mcp_gate_mode(chip, wire);
                             if let Some(answer) = read_only_mcp_answer(&id, &method, &params, mode) {
                                 let _ = write_value(&pump_stdin, &answer);
-                                continue;
+                                return;
                             }
                             // Approval requests card their pending approval
                             // on the transcript first, through the same
@@ -1245,11 +1250,23 @@ impl RunningChild {
                             );
                         }
                         Frame::Notification(_) => {
-                            let Ok(mut fold) = fold.lock() else { break };
+                            let Ok(mut fold) = fold.lock() else {
+                                stop = true;
+                                return;
+                            };
                             step_line(&mut fold, &line, &mut |event| {
                                 let _ = events.send(event);
                             });
                         }
+                    });
+                    if let Err(message) = stepped {
+                        fold.clear_poison();
+                        pump_shared.clear_poison();
+                        failed = Some(provider::guard::panic_reason("Codex", &message));
+                        break;
+                    }
+                    if stop {
+                        break;
                     }
                 }
                 // The child's stdout ended: wake every in-flight caller with an
@@ -1262,11 +1279,13 @@ impl RunningChild {
                 if pump_retired.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                let said = stderr.settled(STDERR_SETTLE);
-                let reason = match said.last() {
-                    Some(line) => format!("{CHILD_EXITED_REASON}: {}", line.trim()),
-                    None => CHILD_EXITED_REASON.to_owned(),
-                };
+                let reason = failed.unwrap_or_else(|| {
+                    let said = stderr.settled(STDERR_SETTLE);
+                    match said.last() {
+                        Some(line) => format!("{CHILD_EXITED_REASON}: {}", line.trim()),
+                        None => CHILD_EXITED_REASON.to_owned(),
+                    }
+                });
                 settle_lost_child(&pump_shared, &fold, &events, &reason);
                 pump_lost.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = events.send(ProviderEvent::ConnectionLost { reason });
@@ -1340,9 +1359,25 @@ impl RunningChild {
                 approval_id: item_id,
                 headline,
             });
+        } else if ApprovalKind::from_method(method) == Some(ApprovalKind::Unknown) {
+            // An approval this client cannot read cannot be said yes to,
+            // and parked it would hang the turn forever (the server has no
+            // timeout): declined at once with an error, so the turn goes
+            // on (docs/81 B PM-4). The fold's card says what happened.
+            write(json!({
+                "id": id,
+                "error": {"code": -32601, "message": format!("Baaz cannot answer {method}; declined")},
+            }));
         } else if let Some(kind) = ApprovalKind::from_method(method) {
-            let item_id =
-                params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned();
+            // Keyed by the item it approves; a request naming no item is
+            // keyed by its own JSON-RPC id, so two such requests never
+            // overwrite each other (docs/81 B PM-4).
+            let item_id = params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("rpc-{id}"));
             let headline = kind.headline().to_owned();
             if let Ok(mut shared) = shared.lock() {
                 shared.approvals.insert(item_id.clone(), PendingApproval {
@@ -2273,6 +2308,43 @@ mod tests {
         let shared = Arc::try_unwrap(shared).expect("no other owner").into_inner().expect("mutex");
         let written = Arc::try_unwrap(written).expect("no other owner").into_inner().expect("mutex");
         (written, seen, shared)
+    }
+
+    /// docs/81 B PM-4: an approval on a `*requestApproval` method this
+    /// client does not know is declined at once with an error — the turn
+    /// goes on — and is never parked or raised as answerable.
+    #[test]
+    fn an_unknown_approval_kind_is_declined_at_once() {
+        let (written, seen, shared) = serve_question(
+            "item/somethingNew/requestApproval",
+            json!({"threadId": "t", "turnId": "u", "itemId": "i-1"}),
+        );
+        assert_eq!(written.len(), 1, "answered, never left waiting");
+        assert_eq!(written[0].get("id"), Some(&json!(7)));
+        assert!(written[0].get("error").is_some(), "declined with an error: {:?}", written[0]);
+        assert!(shared.approvals.is_empty(), "nothing parked");
+        assert!(!seen.iter().any(|event| matches!(event, ProviderEvent::ApprovalRequested { .. })), "nothing raised");
+    }
+
+    /// Two approval requests that name no item are parked apart, keyed by
+    /// their JSON-RPC ids.
+    #[test]
+    fn approvals_without_an_item_id_do_not_overwrite_each_other() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (events, _rx) = unbounded();
+        for id in [7, 8] {
+            RunningChild::serve_server_request(
+                &|_value: Value| {},
+                &shared,
+                &events,
+                &json!(id),
+                "item/commandExecution/requestApproval",
+                &json!({"threadId": "t", "turnId": "u"}),
+            );
+        }
+        let shared = shared.lock().expect("shared");
+        assert_eq!(shared.approvals.len(), 2);
+        assert!(shared.approvals.contains_key("rpc-7") && shared.approvals.contains_key("rpc-8"));
     }
 
     #[test]

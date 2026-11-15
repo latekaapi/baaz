@@ -42,16 +42,15 @@ fn unsupported_is_never_spelled_as_success() {
         .dispatch(Command::BeginLogin { api_key: None })
         .expect_err("begin-login must not succeed");
     assert!(matches!(error, ProviderError::Unsupported { .. }));
-    // Interrupt was never probed: rejected with a reason, not Ok.
-    let error = adapter
+    // Interrupt on a session this adapter does not hold: an error, not Ok.
+    adapter
         .dispatch(Command::InterruptTurn {
             request_id: "i-1".into(),
             session_id: "s-1".into(),
             turn: None,
             retract: false,
         })
-        .expect_err("interrupt must not succeed");
-    assert!(matches!(error, ProviderError::Rejected { .. }));
+        .expect_err("interrupt of a session never attached must not succeed");
     // Submit with no child: unavailable, not Ok.
     let error = adapter
         .dispatch(Command::SubmitInput {

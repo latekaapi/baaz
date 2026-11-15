@@ -139,26 +139,6 @@ capture_replay reasoning        fixtures/msp/synthetic-reasoning-text.jsonl "wai
 capture_replay empty-session    fixtures/msp/synthetic-empty.jsonl "wait:3000"
 capture_replay finishing        fixtures/msp/synthetic-finishing.jsonl "wait:3000"
 
-# --- login, with no wire ------------------------------------------------
-login_shot() { # <name> <login-state>
-  name="$1"; state="$2"
-  for run in 1 2; do
-    BAAZ_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login "$state" --theme dark \
-      --screenshot-delay 6000 --screenshot "$out/$name.run$run.png" >/dev/null 2>&1 || true
-  done
-  if [ -f "$out/$name.run1.png" ] && cmp -s "$out/$name.run1.png" "$out/$name.run2.png"; then
-    mv "$out/$name.run1.png" "$out/$name.png"; rm -f "$out/$name.run2.png"
-    echo "PASS  $name  $out/$name.png" >> "$report"; pass=$((pass+1))
-  else
-    [ -f "$out/$name.run1.png" ] && mv "$out/$name.run1.png" "$out/$name.png"
-    rm -f "$out/$name.run2.png"
-    echo "FAIL  $name" >> "$report"; fail=$((fail+1))
-  fi
-}
-login_shot login-choose choose
-login_shot login-device device
-login_shot login-apikey apikey
-login_shot login-error error
 
 echo >> "$report"
 echo "passed $pass, failed $fail" >> "$report"

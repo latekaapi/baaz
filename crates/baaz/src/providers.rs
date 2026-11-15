@@ -185,23 +185,25 @@ pub fn muse_capability_state(version: &str, capability: Capability) -> Capabilit
     provider_muse::capabilities_for_version(version).state(capability).clone()
 }
 
+/// Whether a control that sends a command needing `capability` is offered
+/// on `id`'s sessions: the one test every such control asks (docs/82 0.7).
+/// True only for `Native` and `Emulated`, exactly when the seam attempts it.
+pub fn offers(id: ProviderId, capability: Capability) -> bool {
+    capability_state(id, capability).allows_attempt()
+}
+
+/// What a control says when its provider cannot do it.
+pub fn not_available(id: ProviderId) -> String {
+    format!("Not available in {}.", id.label())
+}
+
 /// What the UI may offer for one capability on one provider: `None` means
-/// offered normally; `Some` carries the typed reason the control shows
-/// beside its disabled state.
-///
-/// `Unavailable` refuses (the gate never lets the command through, so the
-/// control must not invite the press). `Unverified` is attempted everywhere
-/// — the seam never refuses it — so it stays offered but visibly marked:
-/// honest ignorance, never quietly collapsed into either neighbour.
+/// offered normally; `Some` is the line a refused control shows instead
+/// ([`not_available`]). The adapter's own reason stays in its table and the
+/// seam's refusal, for logs — it is written for whoever maintains the
+/// adapter, not for the person at the composer.
 pub fn gate(id: ProviderId, capability: Capability) -> Option<String> {
-    match capability_state(id, capability) {
-        CapabilityState::Native | CapabilityState::Emulated { .. } => None,
-        CapabilityState::Unavailable { reason } => Some(reason),
-        CapabilityState::Unverified => Some(format!(
-            "Unverified on {}: nobody has probed it live, so it is attempted, never refused",
-            id.label()
-        )),
-    }
+    (!offers(id, capability)).then(|| not_available(id))
 }
 
 /// The mode picker's detail line for `mode` on `id`'s sessions: the
@@ -289,13 +291,6 @@ impl ProviderId {
     /// a local view rather than a scripted lane: the capture baselines were
     /// drawn with Muse's local draft, like [`Self::row_mark`]'s.
     pub fn scripted_draft_is_local(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// A session with no project starts in Baaz's default workspace (which
-    /// is not a project, so it files as unfiled), not in the window's
-    /// workspace: Muse works inside a folder.
-    pub fn unfiled_starts_in_default_workspace(self) -> bool {
         matches!(self, ProviderId::Muse)
     }
 
@@ -1662,26 +1657,58 @@ mod tests {
 
     #[test]
     fn the_same_screen_differs_between_providers() {
-        // SteerTurn: Unverified on Claude Code (marked, attempted),
-        // Native on Codex (offered plainly). The point-of-use gates read
-        // this table, so the same control cannot offer the same on both.
-        assert!(gate(ProviderId::ClaudeCode, Capability::SteerTurn).is_some());
+        // SteerTurn: Emulated on Claude Code (sent as its own turn), Native
+        // on Codex — both offered. The point-of-use gates read this table.
+        assert!(gate(ProviderId::ClaudeCode, Capability::SteerTurn).is_none());
         assert!(gate(ProviderId::Codex, Capability::SteerTurn).is_none());
-        assert!(gate(ProviderId::ClaudeCode, Capability::TurnControl).is_some());
         assert!(gate(ProviderId::Codex, Capability::TurnControl).is_none());
         // Questions: Native on Claude Code (AskUserQuestion, executed live),
-        // Unverified on Codex (attempted, marked) — never averaged into one.
+        // refused by the Codex adapter — never averaged into one.
         assert!(gate(ProviderId::ClaudeCode, Capability::Questions).is_none());
-        let codex = gate(ProviderId::Codex, Capability::Questions).expect("gated");
-        assert!(codex.contains("Unverified"), "{codex}");
+        assert_eq!(gate(ProviderId::Codex, Capability::Questions).as_deref(), Some("Not available in Codex."));
     }
 
+    /// docs/82 0.7: one capability truth. A control is offered only where
+    /// the seam would attempt its command, and the table matches what each
+    /// adapter actually does (F D1): no offered control is refused.
     #[test]
-    fn unverified_is_marked_never_collapsed() {
-        // Unverified keeps the typed marker (attempted, not refused);
-        // Unavailable carries the provider's own reason.
-        let marked = gate(ProviderId::ClaudeCode, Capability::SteerTurn).unwrap();
-        assert!(marked.contains("Unverified"));
+    fn offered_controls_match_what_each_adapter_does() {
+        use Capability as C;
+        let offered = |id, c| offers(id, c);
+        // Claude Code: no compact-now, no out-of-turn shell; fork, steer
+        // (as its own turn), images, questions.
+        assert!(!offered(ProviderId::ClaudeCode, C::CompactSession));
+        assert!(!offered(ProviderId::ClaudeCode, C::SessionShell));
+        assert!(offered(ProviderId::ClaudeCode, C::ForkSession));
+        assert!(offered(ProviderId::ClaudeCode, C::SteerTurn));
+        assert!(offered(ProviderId::ClaudeCode, C::ImageInput));
+        // Codex: the adapter refuses fork, compact, shell, question answers
+        // and images; steer and stop are native.
+        for c in [C::ForkSession, C::CompactSession, C::SessionShell, C::Questions, C::ImageInput] {
+            assert!(!offered(ProviderId::Codex, c), "{c:?} on Codex");
+        }
+        assert!(offered(ProviderId::Codex, C::SteerTurn));
+        assert!(offered(ProviderId::Codex, C::TurnControl));
+        // Muse: everything command-backed but the never-cleanly-run shell.
+        for c in [C::ForkSession, C::CompactSession, C::SteerTurn, C::TurnControl, C::ImageInput, C::Questions] {
+            assert!(offered(ProviderId::Muse, c), "{c:?} on Muse");
+        }
+        assert!(!offered(ProviderId::Muse, C::SessionShell));
+        // The words a refused control shows name the provider, nothing else.
+        assert_eq!(gate(ProviderId::Codex, C::ForkSession).as_deref(), Some("Not available in Codex."));
+    }
+
+    /// Slash commands follow the same truth: `/compact` and `/fork` appear
+    /// only where they work.
+    #[test]
+    fn slash_commands_are_offered_per_provider() {
+        use crate::overlays::Command;
+        assert!(!Command::Compact.offered_on(ProviderId::ClaudeCode));
+        assert!(Command::Fork.offered_on(ProviderId::ClaudeCode));
+        assert!(!Command::Compact.offered_on(ProviderId::Codex));
+        assert!(!Command::Fork.offered_on(ProviderId::Codex));
+        assert!(Command::Compact.offered_on(ProviderId::Muse));
+        assert!(Command::Model.offered_on(ProviderId::Codex), "commands that need nothing are always offered");
     }
 
     /// The registry's properties are where a provider's own features are

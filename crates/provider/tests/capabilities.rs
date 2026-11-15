@@ -185,11 +185,16 @@ fn an_adapter_that_overrides_everything_it_can_still_cannot_answer_ok() {
     }
 }
 
+/// docs/82 0.7: one capability truth. `Unverified` is refused at the gate
+/// like `Unavailable` (typed `Unsupported`, never reaching the adapter), so
+/// the app never offers a control that may come back refused.
 #[test]
-fn unverified_is_attempted_not_refused() {
+fn unverified_is_refused_like_unavailable() {
     let provider = Provider::new(ForgetfulAdapter::new());
-    let ack = provider.send(ForgetfulAdapter::steer()).expect("Unverified must be attempted");
-    assert_eq!(ack, Ack::Accepted, "the attempt must reach the adapter");
+    match provider.send(ForgetfulAdapter::steer()) {
+        Err(ProviderError::Unsupported { capability, .. }) => assert_eq!(capability, "steer-input"),
+        other => panic!("Unverified must not reach the adapter, got {other:?}"),
+    }
 }
 
 #[test]
@@ -237,6 +242,6 @@ fn states_carry_reasons_where_one_exists() {
     );
     assert!(CapabilityState::Native.allows_attempt());
     assert!(CapabilityState::Emulated { reason: "x".into() }.allows_attempt());
-    assert!(CapabilityState::Unverified.allows_attempt(), "Unverified is attempted, never refused");
+    assert!(!CapabilityState::Unverified.allows_attempt(), "Unverified is not attempted (docs/82 0.7)");
     assert!(!CapabilityState::Unavailable { reason: "x".into() }.allows_attempt());
 }

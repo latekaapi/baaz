@@ -203,7 +203,7 @@ pub struct SessionsPane {
     #[serde(default)]
     pub open: bool,
     /// Which kind it showed, if it was ever opened.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub kind: Option<RightKind>,
 }
 
@@ -235,7 +235,7 @@ pub struct Layout {
     /// Project once there is more than one adoption or a session that
     /// resolves to none, else Date — and persists the choice the first time
     /// the person toggles it.
-    #[serde(rename = "groupBy", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "groupBy", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub group_by: Option<GroupBy>,
     /// Group ids standing closed: project ids, and `"other"` for the
     /// unfiled group. Every group reads it the same way, and every group
@@ -253,7 +253,7 @@ pub struct Layout {
     #[serde(rename = "searchAllProjects", default = "default_search_all")]
     pub search_all_projects: bool,
     /// The session order inside each group (Sort by).
-    #[serde(rename = "sortBy", default)]
+    #[serde(rename = "sortBy", default, deserialize_with = "crate::store::lenient")]
     pub sort_by: SortBy,
     /// Whether project group rows draw the collapse chevron in the leading
     /// box. Off by default: the row is a plain label.
@@ -332,7 +332,7 @@ pub struct Layout {
     /// Which of the three right-pane kinds was last shown, so reopening
     /// restores it. `None` is "never opened": [`RightKind::Files`]. A stored
     /// pre-merge `diff`/`git` reads back as [`RightKind::Changes`].
-    #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub right_kind: Option<RightKind>,
     /// The two inherit-owner-servers opt-ins, owned by the Settings →
     /// Providers page (see [`UseOwnMcp`]).
@@ -342,7 +342,7 @@ pub struct Layout {
     /// browse. `None` in an old file reads as sessions — today's Baaz —
     /// and `BAAZ_DETERMINISTIC=1` keeps that default, like every other
     /// preference, so captures never depend on the owner's last mode.
-    #[serde(rename = "mode", default)]
+    #[serde(rename = "mode", default, deserialize_with = "crate::store::lenient")]
     pub mode: Mode,
     /// Whether the sidebar stands open: one state for both modes. Open by
     /// default, so a file without the key reads as a fresh window.
@@ -356,7 +356,7 @@ pub struct Layout {
     /// The engine an address commit searches with (B2a-H6): what the
     /// Settings → Browser page owns. Missing reads as Google, like the
     /// old toolbar const.
-    #[serde(rename = "searchEngine", default)]
+    #[serde(rename = "searchEngine", default, deserialize_with = "crate::store::lenient")]
     pub search_engine: crate::browser::toolbar::SearchEngine,
     /// Where downloads land (B2a-H6): `None` is `~/Downloads`. Owned by
     /// the Settings → Browser page's Change row; passed to the CEF
@@ -518,8 +518,7 @@ pub fn read() -> Layout {
 
 /// Write the store, atomically.
 ///
-/// Best-effort: a store that cannot be written loses a width, which is a
-/// nuisance, and never a session, which would be a loss. A deterministic
+/// A failed write is reported ([`crate::store::write_authored`]). A deterministic
 /// capture writes nothing at all: like [`read`], the owner's file must
 /// never gain a capture's widths or modes.
 pub fn write(layout: &Layout) {
@@ -527,7 +526,7 @@ pub fn write(layout: &Layout) {
         return;
     }
     if let Ok(text) = serde_json::to_vec_pretty(layout) {
-        let _ = crate::store::write_atomic(&path(), &text);
+        let _ = crate::store::write_authored(&path(), &text);
     }
 }
 

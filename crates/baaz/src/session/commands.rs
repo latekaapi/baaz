@@ -160,6 +160,14 @@ impl SessionView {
             self.restore_prompt(text, cx);
             return;
         }
+        // Images moved onto a provider that takes none (a switched draft):
+        // the send is held with everything in place, never refused after it
+        // left (docs/82 0.7).
+        if !self.images.is_empty() && !self.offers(provider::Capability::ImageInput) {
+            self.refuse_images();
+            self.restore_prompt(text, cx);
+            return;
+        }
         // Text plus the composer's attachments travel as one `SubmitInput`,
         // queued behind a running turn by the provider itself.
         self.submit_on_provider(text, cx);

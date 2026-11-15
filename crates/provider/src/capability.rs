@@ -58,13 +58,15 @@ pub enum Capability {
     ReasoningTraces,
     /// Render turns owned by a sub-agent.
     SubagentTurns,
+    /// Take an image as part of a submission or a steer.
+    ImageInput,
 }
 
 impl Capability {
     /// How many capabilities exist. Sizes [`CapabilitySet`]'s table, so a
     /// new variant breaks every declaration site until it is declared —
     /// there is no silent default to fall into.
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     /// Every capability, in declaration order. The order is the table index,
     /// so keep it in sync with the enum order.
@@ -86,6 +88,7 @@ impl Capability {
             Capability::ClientTools,
             Capability::ReasoningTraces,
             Capability::SubagentTurns,
+            Capability::ImageInput,
         ]
     }
 
@@ -111,6 +114,7 @@ impl Capability {
             Capability::ClientTools => "client-tools",
             Capability::ReasoningTraces => "reasoning-traces",
             Capability::SubagentTurns => "subagent-turns",
+            Capability::ImageInput => "image-input",
         }
     }
 }
@@ -126,9 +130,11 @@ impl Capability {
 ///   button cannot say why it is gone. A command whose capability is
 ///   `Unavailable` never returns `Ok` — see [`crate::Provider::send`],
 ///   whose gate enforces this before any adapter code runs.
-/// - `Unverified` — nobody has checked. Honest ignorance: it is attempted,
-///   never refused. Not a synonym for `Unavailable`, and it must never be
-///   quietly collapsed into one.
+/// - `Unverified` — nobody has checked. Honest ignorance, kept apart from
+///   `Unavailable` in what it records, but treated alike at the gate: it is
+///   not attempted and its control is not offered
+///   ([`CapabilityState::allows_attempt`]). Promote a cell to `Native` or
+///   `Emulated` with a fixture, never by guessing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapabilityState {
     /// The provider does this itself.
@@ -143,7 +149,7 @@ pub enum CapabilityState {
         /// Why not — by design or by version.
         reason: String,
     },
-    /// Nobody has checked. Attempted, never refused.
+    /// Nobody has checked. Not attempted until a fixture promotes it.
     Unverified,
 }
 
@@ -162,11 +168,12 @@ impl CapabilityState {
         }
     }
 
-    /// Whether [`crate::Provider::send`] attempts the command.
-    /// Everything but `Unavailable` proceeds — in particular `Unverified`
-    /// is attempted, never refused.
+    /// Whether [`crate::Provider::send`] attempts the command, and whether
+    /// the app offers the control that sends it: only `Native` and
+    /// `Emulated`. `Unverified` is refused like `Unavailable` — a control
+    /// that may fail is not shown (docs/81 F D1; docs/82 rule 13).
     pub fn allows_attempt(&self) -> bool {
-        !matches!(self, CapabilityState::Unavailable { .. })
+        matches!(self, CapabilityState::Native | CapabilityState::Emulated { .. })
     }
 }
 
@@ -237,6 +244,13 @@ impl Command {
                 Capability::SessionConfig
             }
             Command::RunShell { .. } => Capability::SessionShell,
+            // An image in the parts needs the provider to take images; the
+            // text-only form needs only the turn itself.
+            Command::SubmitInput { parts, .. } | Command::SteerInput { parts, .. }
+                if parts.iter().any(|part| matches!(part, crate::SubmissionPart::Image { .. })) =>
+            {
+                Capability::ImageInput
+            }
             Command::SubmitInput { .. } => Capability::SubmitTurn,
             Command::SteerInput { .. } => Capability::SteerTurn,
             Command::InterruptTurn { .. } | Command::CancelTurn { .. } | Command::ReclaimQueued { .. } => {

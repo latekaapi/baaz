@@ -745,6 +745,15 @@ fn wall_ms_since(start: Instant) -> u64 {
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeFold {
     started: HashMap<String, ()>,
+    /// The child process's running `total_cost_usd` at its last `result`:
+    /// the CLI reports cost cumulatively per process, so a turn's own cost
+    /// is the difference (docs/81 B D-1). Back to zero when a process
+    /// starts ([`Self::note_new_process`]).
+    cost_baseline: f64,
+    /// Stop asked the child to interrupt (docs/82 0.8): the error `result`
+    /// that ends the turn is the person's stop, settled `Interrupted` —
+    /// never `Failed`. Cleared by that result.
+    stopping: bool,
     open: Vec<String>,
     /// The turn this CLI turn's assistant messages share: `Some` from the
     /// first message's `TurnStarted` until the `result` frame (or the next
@@ -1327,6 +1336,16 @@ impl ClaudeFold {
                     .or_else(|| model.clone().filter(|name| crate::frame::is_model_id(name)))
                     .or_else(|| self.model.clone())
                     .unwrap_or_default();
+                // The CLI's `total_cost_usd` is the process's running
+                // total: this turn's cost is what it added. A total below
+                // the baseline means a process started unannounced, so the
+                // total is this turn's alone.
+                let turn_cost = if *total_cost_usd >= self.cost_baseline {
+                    *total_cost_usd - self.cost_baseline
+                } else {
+                    *total_cost_usd
+                };
+                self.cost_baseline = *total_cost_usd;
                 let meta = TurnMeta {
                     model: answered,
                     duration_ms: *duration_ms,
@@ -1335,7 +1354,7 @@ impl ClaudeFold {
                         .saturating_add(cache_write_tokens.unwrap_or(0)),
                     tokens_out: *output_tokens,
                     reasoning_tokens: *reasoning_tokens,
-                    cost_usd: *total_cost_usd,
+                    cost_usd: turn_cost,
                     cache_read_tokens: *cache_read_tokens,
                     cache_write_tokens: *cache_write_tokens,
                     cached_tokens: 0,
@@ -1453,6 +1472,9 @@ impl ClaudeFold {
             Frame::ControlUnknown { request_id, subtype, raw } => {
                 self.apply_unknown_control(request_id, subtype, raw)
             }
+            // The child withdrew an ask: it leaves the answerable queue and
+            // its card settles, so a late decision finds nothing (PM-15).
+            Frame::ControlCancel { request_id } => self.withdraw_ask(request_id),
             // A child→host `control_response` (e.g. the answer to our
             // `initialize` handshake). Host-initiated, so nothing about it
             // needs answering — but the answer confirms or refuses one of
@@ -1474,6 +1496,10 @@ impl ClaudeFold {
             // The other lane, by choice (see module docs): parsed, ignored.
             // A mode report renders nothing: [`step_line`] carries it out
             // as its own event.
+            Frame::Ignored { note } if note == crate::frame::PROCESS_START_NOTE => {
+                self.note_new_process();
+                Vec::new()
+            }
             Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => Vec::new(),
         }
     }
@@ -1694,6 +1720,92 @@ impl ClaudeFold {
             Delta::TurnFinished { turn_id, meta }
         }));
         deltas
+    }
+
+    /// Whether a turn is open (a submission answered and not yet settled
+    /// by its `result`): what Stop waits on.
+    pub fn has_live_turn(&self) -> bool {
+        !self.open.is_empty()
+    }
+
+    /// A child process started: its `total_cost_usd` counts from zero.
+    pub fn note_new_process(&mut self) {
+        self.cost_baseline = 0.0;
+    }
+
+    /// Stop asked the child to interrupt: the result that ends the turn is
+    /// read as interrupted ([`step_line`]).
+    pub fn note_stopping(&mut self) {
+        self.stopping = true;
+    }
+
+    /// The child withdrew `request_id` (`control_cancel_request`): it is no
+    /// longer answerable, and its card reads "Not run — withdrawn".
+    fn withdraw_ask(&mut self, request_id: &str) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        self.pending.retain(|request| request.request_id != request_id);
+        self.pending_unknown.retain(|request| request.request_id != request_id);
+        if self.approval_sites.contains_key(request_id) {
+            self.resolve_approval_card(
+                request_id,
+                ApprovalState::Cancelled { reason: Some("withdrawn".to_owned()) },
+                &mut deltas,
+            );
+        }
+        deltas
+    }
+
+    /// A relaunch replaced the child (docs/81 B PM-14): the asks the old
+    /// one raised can never be answered on the new one, so they leave the
+    /// answerable queue and their cards settle "Not run — Claude Code
+    /// restarted" (denied when the person denied them). Without this a
+    /// late decision was written to the new child under the old id.
+    pub fn drop_pending_asks(&mut self) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for request_id in carded {
+            let state = if self.denied.contains(&request_id) {
+                ApprovalState::Denied
+            } else {
+                ApprovalState::Cancelled { reason: Some("Claude Code restarted".to_owned()) }
+            };
+            self.resolve_approval_card(&request_id, state, &mut deltas);
+        }
+        self.pending.clear();
+        self.pending_unknown.clear();
+        deltas
+    }
+
+    /// Stop's fallback (docs/82 0.8): the child is being ended on purpose,
+    /// so every open turn closes as the person's own stop — open approval
+    /// cards settle "Stopped" (denied only when denied), no error card —
+    /// and the ids of the turns it closed come back for their
+    /// `TurnSettled { Interrupted }`.
+    pub fn interrupt_live_turns(&mut self) -> (Vec<Delta>, Vec<String>) {
+        self.stopping = false;
+        self.forget_submissions();
+        let mut deltas = Vec::new();
+        self.resolve_open_thinking(None, &mut deltas);
+        self.flush_agents(&mut deltas);
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for request_id in carded {
+            let state = if self.denied.contains(&request_id) {
+                ApprovalState::Denied
+            } else {
+                ApprovalState::Cancelled { reason: Some("Stopped".to_owned()) }
+            };
+            self.resolve_approval_card(&request_id, state, &mut deltas);
+        }
+        self.pending.clear();
+        self.pending_unknown.clear();
+        self.assistant_turn = None;
+        let open = std::mem::take(&mut self.open);
+        let stopped = open.clone();
+        deltas.extend(open.into_iter().map(|turn_id| {
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            Delta::TurnFinished { turn_id, meta }
+        }));
+        (deltas, stopped)
     }
 
     /// Close every live turn the child left open when its stream ended:
@@ -3309,6 +3421,13 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
             approval_id: request.request_id.clone(),
             headline: approval_headline(request),
         }),
+        // An unknown subtype waits on a decision too: the row must say so,
+        // not only the card (docs/81 B PM-15).
+        Frame::ControlUnknown { request_id, subtype, .. } => Some(ProviderEvent::ApprovalRequested {
+            session_id: session_id.clone().unwrap_or_default(),
+            approval_id: request_id.clone(),
+            headline: format!("Waiting on a request Baaz does not know ({subtype})"),
+        }),
         _ => None,
     };
     // The mode the child reports (`init`, a `status` frame, a control
@@ -3340,12 +3459,16 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
     }
+    // The result ending a turn Stop interrupted is the person's stop, not
+    // a failure (docs/82 0.8).
+    let stopped = line.contains("\"result\"") && std::mem::take(&mut fold.stopping);
     if let (Some(message), Some(turn_id), Some(session_id)) = (failed, failed_turn, session_id.clone()) {
-        emit(ProviderEvent::TurnSettled {
-            session_id,
-            turn_id,
-            outcome: provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false },
-        });
+        let outcome = if stopped {
+            provider::facts::TurnOutcome::Interrupted
+        } else {
+            provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false }
+        };
+        emit(ProviderEvent::TurnSettled { session_id, turn_id, outcome });
     }
     if let Some(tap) = tap {
         emit(tap);
@@ -5417,7 +5540,7 @@ mod tests {
 
     /// W8, three turns live (`resume-replay.jsonl`): three echoes, three
     /// assistant turns, three finishes — each finish carrying its own
-    /// `result` frame's totals, in order.
+    /// `result` frame's tokens, in order, and its own share of the cost.
     #[test]
     fn three_live_turns_finish_three_times_with_own_totals() {
         let lines = fixture_lines("resume-replay.jsonl");
@@ -5435,8 +5558,12 @@ mod tests {
         for ((_, meta), total) in done.iter().zip(want.iter()) {
             assert_eq!(meta.tokens_in, total.0, "each turn billed once");
             assert_eq!(meta.tokens_out, total.1);
-            assert!((meta.cost_usd - total.3).abs() < 1e-9);
         }
+        // docs/81 B D-1: `total_cost_usd` is the process's running total.
+        // Turns 1 and 2 share a process (0.32916, then 0.36583 in all);
+        // turn 3 is a resumed process (0.02443). Each turn records its own.
+        let costs: Vec<f64> = done.iter().map(|(_, meta)| (meta.cost_usd * 1e5).round() / 1e5).collect();
+        assert_eq!(costs, vec![0.32916, 0.03667, 0.02443]);
     }
 
     /// W8, defect 5 (structural half): a turn whose thinking rendered keeps

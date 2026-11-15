@@ -94,9 +94,9 @@ fn version_floor_passes_at_and_above_and_only_below_fails() {
 #[test]
 fn shell_is_unverified_until_a_clean_grant_is_on_record() {
     // No version has grant-log *plus* clean-execution evidence for
-    // `userShell`, so no version declares it `Native`. `Unverified` is
-    // attempted, never refused — the declaration stops guessing without
-    // changing what still sends.
+    // `userShell`, so no version declares it `Native`, and `Unverified` is
+    // neither attempted nor offered. A live link that granted it is
+    // `Native` through `capabilities_for_link`.
     for version in ["1.0.3", "1.1.1", "1.2.1", "1.3.0", "1.4.0"] {
         assert_eq!(
             *capabilities_for_version(version).state(Capability::SessionShell),
@@ -105,8 +105,8 @@ fn shell_is_unverified_until_a_clean_grant_is_on_record() {
         );
     }
     assert!(
-        CapabilityState::Unverified.allows_attempt(),
-        "Unverified is attempted, never refused: the shell still sends"
+        !CapabilityState::Unverified.allows_attempt(),
+        "Unverified is not offered (docs/82 0.7): the `!` shell waits for a clean run on record"
     );
 }
 

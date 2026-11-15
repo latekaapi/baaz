@@ -48,7 +48,7 @@ pub struct ProjectDefaults {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub efforts: std::collections::BTreeMap<String, String>,
     /// The approval mode new sessions start in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub approval_mode: Option<aui_protocol::PermissionMode>,
 }
 
@@ -257,8 +257,8 @@ pub fn read_at(path: &Path) -> Projects {
 
 /// Write the store, atomically.
 ///
-/// Best-effort: a store that cannot be written loses an adoption, which is a
-/// nuisance, and never a session, which would be a loss.
+/// A failed write is reported ([`crate::store::write_authored`]); the file
+/// on disk stays the previous one.
 pub fn write(projects: &Projects) {
     write_at(&path(), projects);
 }
@@ -266,7 +266,7 @@ pub fn write(projects: &Projects) {
 /// [`write()`] against an explicit path, which is what the tests use.
 pub fn write_at(path: &Path, projects: &Projects) {
     if let Ok(text) = serde_json::to_vec_pretty(projects) {
-        let _ = crate::store::write_atomic(path, &text);
+        let _ = crate::store::write_authored(path, &text);
     }
 }
 

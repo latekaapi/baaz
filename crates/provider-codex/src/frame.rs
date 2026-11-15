@@ -59,7 +59,11 @@ pub struct TokenCounts {
 
 /// The `tokenUsage` of `thread/tokenUsage/updated`.
 ///
-/// `total` is cumulative over the thread; `last` covers only the named turn.
+/// `total` is cumulative over the thread; `last` covers only the latest
+/// model request — a turn with tool calls makes several, and sends one
+/// update per request (`fixtures/codex/edit.jsonl`: three for one turn).
+/// A turn's own figure is therefore `total` at its last update minus
+/// `total` before its first ([`TokenCounts::minus`]; docs/81 B F-7).
 /// There is deliberately **no cost field**: the protocol reports tokens,
 /// never money, and a `cost_usd` reading `0.0` would present absence as a
 /// measurement.
@@ -67,16 +71,30 @@ pub struct TokenCounts {
 pub struct TokenUsage {
     /// Cumulative over the thread. Never sum this per turn.
     pub total: TokenCounts,
-    /// This turn only. The per-turn figure.
+    /// The latest model request only — not the turn (see above).
     pub last: TokenCounts,
     /// The model's context window.
     pub model_context_window: u64,
 }
 
 impl TokenUsage {
-    /// The per-turn figure: `last`, not `total`.
-    pub fn per_turn(&self) -> &TokenCounts {
-        &self.last
+    /// The thread's total before this update's request: where a turn's
+    /// count starts when this is the turn's first update.
+    pub fn total_before(&self) -> TokenCounts {
+        self.total.minus(&self.last)
+    }
+}
+
+impl TokenCounts {
+    /// Field by field `self − other`, never below zero.
+    pub fn minus(&self, other: &TokenCounts) -> TokenCounts {
+        TokenCounts {
+            total_tokens: self.total_tokens.saturating_sub(other.total_tokens),
+            input_tokens: self.input_tokens.saturating_sub(other.input_tokens),
+            cached_input_tokens: self.cached_input_tokens.saturating_sub(other.cached_input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(other.output_tokens),
+            reasoning_output_tokens: self.reasoning_output_tokens.saturating_sub(other.reasoning_output_tokens),
+        }
     }
 }
 

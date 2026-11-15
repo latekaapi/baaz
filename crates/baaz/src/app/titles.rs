@@ -510,7 +510,11 @@ impl Harness {
     /// when the switch is on AND the excerpt is poor, the session is idle,
     /// the pair changed, and the last start cooled down. One debounced side
     /// session, same mechanism as a title; never on a running turn.
-    pub(super) fn maybe_rewrite_byline(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `view` is the session whose turn completed — the emitter, which may
+    /// be parked; the open session's byline is never re-judged on another
+    /// session's trigger (docs/81 A F3).
+    pub(super) fn maybe_rewrite_byline(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
         // The muse lane's settled-turn hook doubles as the pack check: a
         // pack turn that ended failed fails its handoff here, before any
         // byline work and independent of the byline switch below. Runs
@@ -519,7 +523,6 @@ impl Harness {
         if !self.layout.auto_summary {
             return;
         }
-        let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
         // The session's own provider rewrites its byline (docs/50 P2).
         if !self.utility_available(self.session_lane_provider(&session_id)) {

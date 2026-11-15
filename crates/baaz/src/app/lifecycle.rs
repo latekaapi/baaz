@@ -40,8 +40,9 @@ pub(crate) fn draft_decision(
     }
 }
 
-/// Which parked ids survive the MRU cap, in order: drafts are never evicted,
-/// everything else keeps most-recent-first up to `limit`.
+/// Which parked ids survive the MRU cap, in order: `drafts` (every view the
+/// caller must keep — drafts and busy views) are never evicted, everything
+/// else keeps most-recent-first up to `limit`.
 pub(crate) fn evict_parked(
     ids: &[String],
     drafts: &std::collections::HashSet<String>,
@@ -705,6 +706,11 @@ impl Harness {
                 Err(_) => 0,
             };
             crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
+            // A failed listing still settles the first load (the sidebar
+            // shows what it has), but never silently (docs/81 A F25).
+            if let Err(error) = &result {
+                crate::baaz_log!("session/list failed: {error}");
+            }
             this.sessions_list_in_flight = false;
             // The first reply replaces the provisional rows wholesale (see
             // `install_provisional_rows`); a later reply whose rows match
@@ -959,13 +965,15 @@ impl Harness {
     pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_search(window, cx);
         if !rest.is_empty() {
-            self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-            // `set_value` does not raise `InputEvent::Change`, which is what
-            // typing goes through, so the query has to be run by hand here.
-            // Without this the step opened the palette, filled the field and
-            // left the empty-query result on screen — a capture of a search
-            // that never ran, which is worse than no capture at all.
-            self.refresh_search(cx);
+            self.search_query.update(cx, |state, cx| {
+                state.set_value(rest.to_owned(), window, cx);
+                // `set_value` raises no `InputEvent::Change`; typing does.
+                // The step raises it on the field, so the query runs through
+                // the same subscription a keystroke does — calling
+                // `refresh_search` by hand here is how a dead subscription
+                // once passed every scripted check (docs/81 A F2).
+                cx.emit(gpui_kit::base::input::InputEvent::Change);
+            });
         }
     }
 
@@ -1749,15 +1757,10 @@ impl Harness {
                 .as_deref()
                 .and_then(|id| self.projects.find_available(id))
                 .map(|project| project.root.to_string_lossy().into_owned());
-            // A Muse session with no project goes to the default workspace,
-            // which is not a project, so it files as unfiled.
-            let workspace = match root {
-                Some(root) => root,
-                None if wanted.unfiled_starts_in_default_workspace() => {
-                    projects::default_workspace().to_string_lossy().into_owned()
-                }
-                None => self.workspace(),
-            };
+            // A session with no project — on any provider — goes to the
+            // default workspace, which is not a project, so it files as
+            // unfiled (docs/81 F C1).
+            let workspace = root.unwrap_or_else(|| self.unfiled_workspace());
             self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
@@ -2618,7 +2621,12 @@ impl Harness {
     ) {
         use provider::ProviderAdapter as _;
         let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
-        let mut adapter = provider::scripted::ScriptedProvider::new();
+        // Each scripted lane its own session: the first keeps `s-scripted`
+        // (probe entries reopen it by that id), later ones are numbered.
+        static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SCRIPTED_LANES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scripted_id = if n == 0 { "s-scripted".to_owned() } else { format!("s-scripted-{}", n + 1) };
+        let mut adapter = provider::scripted::ScriptedProvider::with_session_id(scripted_id);
         let bridged = adapter
             .connect(&conn::connect_info())
             .map_err(|error| error.to_string())
@@ -2753,6 +2761,9 @@ impl Harness {
                 }
             }
         }
+        // Where the session runs: what a scripted check reads to prove a
+        // project-less session never starts in `/` (docs/82 0.9).
+        crate::baaz_log!("provider lane workspace session={session_id} workspace={workspace}");
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         // A provider that pages its history (Muse) attached without it: an
         // existing session's turns page in now.
@@ -3093,6 +3104,9 @@ impl Harness {
         view.update(cx, |view, cx| view.attach_provider(session_id.clone(), provider, events, cx));
         // Recorded before the queue replays, so a send's acceptance finds
         // the record it titles.
+        // Where the session runs: what a scripted check reads to prove a
+        // project-less session never starts in `/` (docs/82 0.9).
+        crate::baaz_log!("provider lane workspace session={session_id} workspace={workspace}");
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         view.update(cx, |view, cx| view.start_landed(window, cx));
         crate::log::trace_mark("provider lane open");
@@ -3141,7 +3155,7 @@ impl Harness {
         }
         let draft = view.read(cx).words_in_hand(cx);
         self.close_view(provisional, cx);
-        self.subscriptions.clear();
+        self.resubscribe_live_views(cx);
         self.session_switch_pending = false;
         let kind = crate::provider_status::FailureKind::classify(provider_id, Some(&failed.error));
         self.provider_open_error = Some(LaunchFailure {
@@ -3159,9 +3173,10 @@ impl Harness {
     /// id onto the id its child minted (Codex's thread id): the parked
     /// view's slot, the drafts and unsent names, the selection and reveal,
     /// the Ask waiting on it, a per-session override (the pane state a
-    /// toggle wrote meanwhile) and any session browser tabs. The view
-    /// renames itself in `attach_provider`. Nothing else can hold the id:
-    /// the draft has no row, no record and no turn until it lands.
+    /// toggle wrote meanwhile), any session browser tabs, and a browser
+    /// chat's line state, used pages and reveal (docs/81 A F4). The view
+    /// renames itself in `attach_provider`. The draft has no row, no
+    /// record and no turn until it lands.
     fn rekey_session(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
         for (id, _) in &mut self.session_cache {
             if id == old {
@@ -3198,6 +3213,22 @@ impl Harness {
         }
         if self.right_kind_migrate.remove(old) {
             self.right_kind_migrate.insert(new.to_owned());
+        }
+        match &mut self.line_ui {
+            super::agent_window::LineUi::Answer { session, .. }
+            | super::agent_window::LineUi::Drafting { session, .. }
+            | super::agent_window::LineUi::Drafted { session, .. }
+                if session == old =>
+            {
+                *session = new.to_owned();
+            }
+            _ => {}
+        }
+        if let Some(pages) = self.browser_chat_pages.remove(old) {
+            self.browser_chat_pages.insert(new.to_owned(), pages);
+        }
+        if let Some((id, _)) = self.reveal_unknown.as_mut().filter(|(id, _)| id == old) {
+            *id = new.to_owned();
         }
         let owner = crate::browser::Owner::Session(old.to_owned());
         let tabs: Vec<_> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
@@ -3449,7 +3480,7 @@ impl Harness {
         }
         self.fail_pending_handoff(reason.clone(), cx);
         self.park_active(cx);
-        self.subscriptions.clear();
+        self.resubscribe_live_views(cx);
         self.session_switch_pending = false;
         // A failed open lands no session: the Ask has nowhere to go.
         self.drop_pending_ask();
@@ -3546,7 +3577,7 @@ impl Harness {
             crate::provider_sessions::remove(&mut self.provider_sessions, &record.session_id);
             self.persist_provider_sessions(cx);
             self.merge_provider_rows();
-            let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+            let workspace = record.workspace.clone().unwrap_or_else(|| self.unfiled_workspace());
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
@@ -4348,10 +4379,12 @@ impl Harness {
         // leaves with it and a re-activated view is never subscribed
         // twice. Parked transcripts never re-render through these: the
         // row-affecting arms read the parked fold without touching its UI.
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        for (_, cached) in &self.session_cache {
-            self.subscriptions.push(cx.subscribe(cached, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.view_subscriptions.clear();
+        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        for other in self.live_views() {
+            if other != view {
+                self.view_subscriptions.push(cx.subscribe(&other, |this, view, event, cx| this.on_session_event(view, event, cx)));
+            }
         }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
@@ -4415,8 +4448,37 @@ impl Harness {
     }
 
     /// Park the outgoing view in the MRU: its event subscription drops with
-    /// `subscriptions`, while its fold, scroll position and draft ride along
+    /// `view_subscriptions`, while its fold, scroll position and draft ride along
     /// in the entity. Hidden, archived and replayed views are never cached.
+    /// Every live view this window holds, once each: the open one, every
+    /// parked one, the browser chat. The one enumeration subscriptions and
+    /// quit go through, so a browser chat is never left out (docs/81 A F5,
+    /// F6) — until stage 1's registry owns them all.
+    pub(crate) fn live_views(&self) -> Vec<Entity<SessionView>> {
+        let mut views: Vec<Entity<SessionView>> = Vec::new();
+        let all = self
+            .active
+            .iter()
+            .chain(self.session_cache.iter().map(|(_, view)| view))
+            .chain(self.browser_chat.iter());
+        for view in all {
+            if !views.contains(view) {
+                views.push(view.clone());
+            }
+        }
+        views
+    }
+
+    /// One subscription per live view ([`Self::live_views`]): after a failed
+    /// open, so a parked turn finishing behind the failure view still
+    /// reaches its row (docs/81 A F17), and when a browser chat is set.
+    pub(crate) fn resubscribe_live_views(&mut self, cx: &mut Context<Self>) {
+        self.view_subscriptions.clear();
+        for view in self.live_views() {
+            self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        }
+    }
+
     fn park_active(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.take() else { return };
         let session_id = view.read(cx).session_id.clone();
@@ -4433,12 +4495,18 @@ impl Harness {
             self.session_cache.insert(0, (session_id, view));
             // Views named in `drafts` are never evicted from the MRU: the
             // draft outlives whatever else was parked since. Nor is a view
-            // still starting — a provider draft whose child has not
-            // answered (project-less ones are in no `drafts`) holds the
-            // sends queued meanwhile, which eviction would lose.
+            // with work in hand (`must_stay_alive`): one still starting — a
+            // provider draft whose child has not answered (project-less
+            // ones are in no `drafts`) holds the sends queued meanwhile —
+            // or one with a turn running or the person's answer pending,
+            // whose drop would shut its lane and kill the child mid-turn
+            // (docs/81 A F1). Only idle views count toward the cap.
             let mut kept: std::collections::HashSet<String> = self.drafts.values().cloned().collect();
             kept.extend(
-                self.session_cache.iter().filter(|(_, view)| view.read(cx).is_starting()).map(|(id, _)| id.clone()),
+                self.session_cache
+                    .iter()
+                    .filter(|(_, view)| view.read(cx).must_stay_alive())
+                    .map(|(id, _)| id.clone()),
             );
             let ids: Vec<String> =
                 self.session_cache.iter().map(|(id, _)| id.clone()).collect();
@@ -4474,8 +4542,7 @@ impl Harness {
     /// ([`Harness::route`]) — so this is best-effort for a session parked
     /// mid-turn, same as every other read of parked state in this module.
     pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
-        self.active.as_ref().is_some_and(|view| view.read(cx).is_sending())
-            || self.session_cache.iter().any(|(_, view)| view.read(cx).is_sending())
+        self.live_views().iter().any(|view| view.read(cx).is_sending())
     }
 
     /// Store a pick as the one every new session starts with, in any
@@ -4660,7 +4727,7 @@ impl Harness {
                 // muse side session the muse lane uses — never a second
                 // provider child.
                 self.maybe_start_title(&session_id, Some(prompt), cx);
-                self.title_from_transcript(cx);
+                self.title_from_transcript(&view, cx);
                 // A late admission — the ack arriving after its turn
                 // already finished — is bookkeeping only (row, record,
                 // title above): the row declines it as a start and
@@ -4769,18 +4836,18 @@ impl Harness {
                 // (owner, 2026-11-12): a session made in the CLI swapped its
                 // first prompt for its last reply on open.
                 if live {
-                    self.record_last_summary(cx);
+                    self.record_last_summary(&view, cx);
                 }
                 // A settled pack turn fails its handoff here, with its
                 // reason on the card and the row — never a silent Active.
                 self.reconcile_pack_turns(cx);
                 if counted {
-                    self.title_from_transcript(cx);
+                    self.title_from_transcript(&view, cx);
                     // The free excerpt just landed; a poor one may earn one
                     // debounced rewrite — idle sessions only, never a
                     // running turn — through the same side session as a
                     // title.
-                    self.maybe_rewrite_byline(cx);
+                    self.maybe_rewrite_byline(&view, cx);
                 }
                 // The lane settled: repaint on this path even if the
                 // view's own notify raced the event delivery (W8c).
@@ -4820,10 +4887,8 @@ impl Harness {
             }
             SessionEvent::TierRecheck => self.probe_tier(true, cx),
             SessionEvent::Rename { name } => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.rename_session(session_id, name.clone(), cx);
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.rename_session(session_id, name.clone(), cx);
             }
             // The person picked a model, effort or approval mode in a
             // session: it becomes the last pick, so the next session — in
@@ -4957,18 +5022,14 @@ impl Harness {
                 self.fail_handoff(session_id.clone(), reason.clone(), cx);
             }
             SessionEvent::RenameStart => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.tasks.push(cx.spawn(async move |this, cx| {
-                        let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
-                    }));
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
+                }));
             }
             SessionEvent::Hide => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.hide_session(session_id, cx);
-                }
+                let session_id = view.read(cx).session_id.clone();
+                self.hide_session(session_id, cx);
             }
             SessionEvent::ToggleEmpty => {
                 self.show_empty = !self.show_empty;
@@ -6397,6 +6458,7 @@ mod tests {
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, off()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -9096,6 +9158,153 @@ done
         lane_restore(state);
     }
 
+    /// docs/81 F C1 / docs/82 0.9: a new session with no project starts in
+    /// the default workspace on every provider — never in the launch
+    /// directory (`/` from Finder).
+    #[gpui::test]
+    fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for provider in [ProviderId::Codex, ProviderId::ClaudeCode, ProviderId::Muse] {
+            let state = lane_state(&format!("unfiled-home-{}", provider.as_str()));
+            let vc = cx.add_empty_window();
+            let baaz = lane_harness(vc, &state.2);
+            vc.update(|_, cx| {
+                baaz.update(cx, |harness, _| {
+                    harness.provider_factory = parking_factory();
+                    mark_muse_up(harness);
+                    // A Finder launch: no `--workspace`, cwd `/`.
+                    harness.args.workspace = std::path::PathBuf::from("/");
+                    harness.args.workspace_explicit = false;
+                    harness.current_project = None;
+                    // First run: nothing adopted, so nothing is current.
+                    harness.projects.current = None;
+                    harness.projects.projects.clear();
+                    harness.new_provider = provider.as_str().to_owned();
+                });
+            });
+            vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+            vc.run_until_parked();
+            let workspace = vc.update(|_, cx| {
+                baaz.read(cx).active.clone().map(|view| view.read(cx).workspace_for_tests().to_owned())
+            });
+            let home = projects::default_workspace().to_string_lossy().into_owned();
+            assert_eq!(workspace.as_deref(), Some(home.as_str()), "{provider:?} starts in the default workspace");
+            lane_restore(state);
+        }
+    }
+
+    /// docs/82 0.14: ⌘Q with a parked session's turn running asks first and
+    /// names it; with nothing running it quits without asking.
+    #[gpui::test]
+    fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("quit-turn-running");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        let asked_idle = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.maybe_confirm_quit(cx)));
+        assert!(!asked_idle, "nothing running: no question");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = SessionHost {
+                    provider_id: ProviderId::Codex.as_str().to_owned(),
+                    workspace: harness.workspace(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| SessionView::new("s-quit".to_owned(), host, window, cx));
+                view.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning { session_id: "s-quit".into(), turn_id: "t".into() }],
+                        cx,
+                    );
+                });
+                harness.park_active(cx);
+                harness.active = Some(view);
+                harness.park_active(cx);
+            });
+        });
+        let asked = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.maybe_confirm_quit(cx)));
+        assert!(asked, "a running turn asks first");
+        let (action, title) = vc
+            .update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|d| (d.action, d.title.to_string())))
+            .expect("a dialog");
+        assert_eq!(action, crate::overlays::DialogAction::QuitWithWorkRunning);
+        assert_eq!(title, "Quit while an agent is working?");
+        lane_restore(state);
+    }
+
+    /// docs/81 A F1: a parked view with a turn running is never evicted —
+    /// dropping it shuts its lane down and kills the child mid-turn. Nine
+    /// later sessions park behind it; it is still alive and settles.
+    #[gpui::test]
+    fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
+        let state = lane_state("busy-never-evicted");
+        let (factory, _commands) = recording_resumable_factory();
+        let (baaz, vc, _project) = provider_draft_window(cx, &state.2, factory);
+        let busy_id = "s-busy".to_owned();
+        let busy = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = SessionHost {
+                    provider_id: ProviderId::Codex.as_str().to_owned(),
+                    workspace: harness.workspace(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| SessionView::new(busy_id.clone(), host, window, cx));
+                view.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning {
+                            session_id: busy_id.clone(),
+                            turn_id: "t-busy".into(),
+                        }],
+                        cx,
+                    );
+                });
+                assert!(view.read(cx).is_sending(), "setup: a turn is running");
+                harness.drafts.clear();
+                harness.park_active(cx);
+                harness.active = Some(view.clone());
+                for n in 0..=SESSION_CACHE_LIMIT {
+                    let host = SessionHost {
+                        provider_id: ProviderId::Codex.as_str().to_owned(),
+                        workspace: harness.workspace(),
+                        overlays: harness.overlays.clone(),
+                        capture: crate::shot::CaptureToken::default(),
+                        terminal_host: None,
+                    };
+                    let other = cx.new(|cx| SessionView::new(format!("s-idle-{n}"), host, window, cx));
+                    harness.park_active(cx);
+                    harness.active = Some(other);
+                }
+                harness.park_active(cx);
+                assert!(
+                    harness.session_cache.iter().any(|(parked, _)| *parked == busy_id),
+                    "the busy view survives {} later parks",
+                    SESSION_CACHE_LIMIT + 1
+                );
+                let idle = harness.session_cache.iter().filter(|(id, _)| id.starts_with("s-idle-")).count();
+                assert_eq!(idle, SESSION_CACHE_LIMIT, "idle views are still capped");
+                view
+            })
+        });
+        vc.update(|_, cx| {
+            busy.update(cx, |view, cx| {
+                view.fold_provider_events(
+                    vec![provider::ProviderEvent::TurnSettled {
+                        session_id: "s-busy".into(),
+                        turn_id: "t-busy".into(),
+                        outcome: provider::facts::TurnOutcome::Completed,
+                    }],
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| !busy.read(cx).is_sending()), "the parked turn settles");
+        lane_restore(state);
+    }
+
     /// New session, open another session, New session again — twice over:
     /// every New session ends on an unsent draft in the centre, never on
     /// the session clicked before it. Run under a muse default and a Codex
@@ -10170,6 +10379,7 @@ done
                 (Capability::ClientTools, off()),
                 (Capability::ReasoningTraces, off()),
                 (Capability::SubagentTurns, off()),
+                (Capability::ImageInput, native.clone()),
             ])
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -10575,6 +10785,36 @@ done
         lane_restore(state);
     }
 
+    /// docs/81 A F6: quit hangs up a browser chat's child too.
+    #[gpui::test]
+    fn quit_hangs_up_the_browser_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f6-chat-quit");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, shared) = y2b2_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                mark_muse_up(harness);
+            });
+        });
+        let chat = y2b2_open(vc, &baaz, ProviderId::Codex);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.take().expect("the lane opened");
+                harness.set_browser_chat(view, cx);
+                assert!(harness.active.is_none() && harness.session_cache.is_empty(), "held by the line alone");
+                harness.shutdown_provider_views(cx);
+            });
+        });
+        vc.run_until_parked();
+        let locked = shared.inner.lock().expect("y2b2");
+        assert!(locked.shutdowns.contains(&chat), "the chat's child hangs up at quit, drew {:?}", locked.shutdowns);
+        drop(locked);
+        lane_restore(state);
+    }
+
     /// Y2b2: quitting (which hangs up every lane child) while the switched
     /// draft's child is still answering: an open that lands after teardown
     /// is hung up, never attached.
@@ -10751,6 +10991,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, native.clone()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -11574,7 +11815,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
@@ -11824,7 +12066,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m2").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Prepared),
@@ -11876,7 +12119,8 @@ done
                         cx,
                     )
                 });
-                harness.maybe_rewrite_byline(cx);
+                let open = harness.active.clone().expect("the open view");
+                harness.maybe_rewrite_byline(&open, cx);
                 let run = harness.handoffs.get("src-m2").expect("the run");
                 assert!(
                     matches!(run.state, aui_protocol::HandoffState::Activated),
@@ -12996,6 +13240,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, native.clone()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -13037,7 +13282,7 @@ done
     /// B3b: a parked session finishing its turn flips its row from Working
     /// to Settled without being activated. Before the fix the second open
     /// cleared the first view's subscription, so the finish reached no one:
-    /// the `subscriptions` count below stays flat and the row keeps reading
+    /// the `view_subscriptions` count below stays flat and the row keeps reading
     /// Working.
     #[gpui::test]
     fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppContext) {
@@ -13083,7 +13328,7 @@ done
                 "setup: the row reads Working before the switch"
             );
         });
-        let subs_before = vc.update(|_, cx| baaz.read(cx).subscriptions.len());
+        let subs_before = vc.update(|_, cx| baaz.read(cx).view_subscriptions.len());
         // Switching away parks the first view; its subscription must stay.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
@@ -13102,7 +13347,7 @@ done
                 "the first view parks instead of closing"
             );
             assert_eq!(
-                harness.subscriptions.len(),
+                harness.view_subscriptions.len(),
                 subs_before + 1,
                 "both live views stay subscribed"
             );
@@ -13136,6 +13381,335 @@ done
                 "Working becomes Settled without activating"
             );
         });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F8: a truncated `sessions.json` is set aside, never
+    /// overwritten, and the window starts with one toast saying so.
+    #[gpui::test]
+    fn a_truncated_sessions_store_is_set_aside_with_a_toast(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f8-truncated");
+        let path = state.2.join("sessions.json");
+        std::fs::write(&path, br#"{"s-1":{"name":"My session","pinn"#).expect("seed");
+        let _ = crate::store::take_problems();
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.raise_store_problems(cx)));
+        let titles: Vec<String> = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).toasts.iter().map(|toast| toast.title.to_string()).collect()
+        });
+        assert_eq!(titles, vec!["sessions.json could not be read".to_owned()]);
+        let aside: Vec<_> = std::fs::read_dir(&state.2)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("sessions.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the damaged file is kept");
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
+        // A write after boot never touches the kept copy.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.set_override("s-2", |meta| meta.pinned = true, cx));
+        });
+        vc.run_until_parked();
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
+        lane_restore(state);
+    }
+
+    /// docs/81 A F9: a store that keeps failing to write raises one toast,
+    /// not one per edit.
+    #[gpui::test]
+    fn repeated_write_failures_raise_one_toast(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f9-write-fails");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let blocked = state.2.join("blocked").join("layout.json");
+        std::fs::create_dir_all(blocked.join("inside")).expect("a directory where the file goes");
+        let _ = crate::store::take_problems();
+        for _ in 0..3 {
+            assert!(crate::store::write_authored(&blocked, b"{}").is_err());
+            vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.raise_store_problems(cx)));
+        }
+        let titles: Vec<String> = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).toasts.iter().map(|toast| toast.title.to_string()).collect()
+        });
+        assert_eq!(titles, vec!["Couldn't save layout.json".to_owned()]);
+        lane_restore(state);
+    }
+
+    /// A plain view standing in for a browser chat, with its record marked.
+    fn chat_view(
+        harness: &mut Harness,
+        id: &str,
+        window: &mut gpui::Window,
+        cx: &mut Context<Harness>,
+    ) -> Entity<SessionView> {
+        let host = SessionHost {
+            provider_id: ProviderId::Codex.as_str().to_owned(),
+            workspace: harness.workspace(),
+            overlays: harness.overlays.clone(),
+            capture: crate::shot::CaptureToken::default(),
+            terminal_host: None,
+        };
+        harness.set_override(id, |meta| {
+            meta.hidden = true;
+            meta.browser_chat = true;
+        }, cx);
+        cx.new(|cx| SessionView::new(id.to_owned(), host, window, cx))
+    }
+
+    /// docs/81 A F5: a browser chat's events reach the window (a Dialog here;
+    /// the ledger, turn count and sign-out banner ride the same path).
+    #[gpui::test]
+    fn a_browser_chat_is_subscribed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f5-chat-subscribed");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let chat = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let chat = chat_view(harness, "s-chat", window, cx);
+                harness.set_browser_chat(chat.clone(), cx);
+                chat
+            })
+        });
+        vc.update(|_, cx| {
+            chat.update(cx, |_, cx| {
+                cx.emit(SessionEvent::Dialog { title: "From the chat".into(), detail: "d".into() });
+            });
+        });
+        vc.run_until_parked();
+        let title = vc.update(|_, cx| {
+            baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|dialog| dialog.title.to_string())
+        });
+        assert_eq!(title.as_deref(), Some("From the chat"), "the chat's event reached on_session_event");
+        lane_restore(state);
+    }
+
+    /// docs/81 A F7: asking again while the chat is busy replaces it on the
+    /// line but keeps the busy view alive (its child is not killed); an
+    /// idle replaced chat is just parked.
+    #[gpui::test]
+    fn a_replaced_busy_browser_chat_stays_alive(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f7-chat-replaced");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let busy = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let busy = chat_view(harness, "s-chat-busy", window, cx);
+                busy.update(cx, |view, cx| {
+                    view.fold_provider_events(
+                        vec![provider::ProviderEvent::TurnRunning {
+                            session_id: "s-chat-busy".into(),
+                            turn_id: "t-1".into(),
+                        }],
+                        cx,
+                    );
+                });
+                harness.set_browser_chat(busy.clone(), cx);
+                let next = chat_view(harness, "s-chat-next", window, cx);
+                harness.set_browser_chat(next, cx);
+                busy
+            })
+        });
+        let weak = busy.downgrade();
+        drop(busy);
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.browser_chat_id(cx).as_deref(), Some("s-chat-next"));
+            assert!(harness.find_view("s-chat-busy", cx).is_some(), "the busy chat is still findable");
+            assert_eq!(harness.live_views().len(), 2, "and still live, and subscribed with the new one");
+        });
+        assert!(weak.upgrade().is_some(), "the busy chat's view was not dropped");
+        // Shown again from its folder: back on the line, out of the MRU.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| assert!(harness.show_browser_chat("s-chat-busy", cx)));
+            let harness = baaz.read(cx);
+            assert!(harness.session_cache.iter().all(|(id, _)| id != "s-chat-busy"), "one holder at a time");
+        });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F4: a Codex-style rename of a browser chat (provisional id
+    /// → minted thread id) moves its line state, used pages and reveal.
+    #[gpui::test]
+    fn a_renamed_browser_chat_keeps_its_line(cx: &mut gpui::TestAppContext) {
+        use super::agent_window::LineUi;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f4-chat-rekey");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.line_ui = LineUi::Answer { question: "q".into(), session: "req-1".into() };
+                harness.browser_chat_pages.insert("req-1".into(), vec![("Page".into(), "https://a.test".into())]);
+                harness.reveal_unknown = Some(("req-1".into(), 3));
+                harness.rekey_session("req-1", "thread-9", cx);
+                assert_eq!(harness.line_ui, LineUi::Answer { question: "q".into(), session: "thread-9".into() });
+                assert!(harness.browser_chat_pages.contains_key("thread-9"));
+                assert!(!harness.browser_chat_pages.contains_key("req-1"));
+                assert_eq!(harness.reveal_unknown, Some(("thread-9".into(), 3)));
+                harness.line_ui = LineUi::Drafting { session: "thread-9".into(), tab: 4 };
+                harness.rekey_session("thread-9", "thread-10", cx);
+                assert_eq!(harness.line_ui, LineUi::Drafting { session: "thread-10".into(), tab: 4 });
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// docs/81 A F3: a parked session finishing a turn this window ran lands
+    /// its own byline and title; the open session's row is untouched (the
+    /// helpers used to read `self.active`).
+    #[gpui::test]
+    fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Block, Session, Turn, TurnMeta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f3-parked-byline");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                mark_muse_up(harness);
+            });
+        });
+        let open = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| {
+                    let workspace = harness.workspace();
+                    harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+                });
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| baaz.read(cx).active.clone().expect("a lane opened"))
+        };
+        let fill = |view: &Entity<SessionView>, ask: &str, reply: &str, cx: &mut gpui::App| {
+            let id = view.read(cx).session_id.clone();
+            let mut session = Session::new(id, aui_protocol::Provider::Claude, "m", "/tmp");
+            session.turns = vec![
+                Turn::User { id: "u1".into(), text: ask.into(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None },
+                Turn::Assistant {
+                    id: "a1".into(),
+                    blocks: vec![Block::Text { text: reply.into(), streaming: false }],
+                    meta: TurnMeta::default(),
+                    timestamp: None,
+                },
+            ];
+            view.update(cx, |view, cx| view.load_fixture(session, cx));
+        };
+        let first = open(vc);
+        let second = open(vc);
+        let (first_id, second_id) =
+            vc.update(|_, cx| (first.read(cx).session_id.clone(), second.read(cx).session_id.clone()));
+        assert_ne!(first_id, second_id);
+        vc.update(|_, cx| {
+            fill(&first, "Parked ask about tests", "Parked reply: all tests pass now.", cx);
+            fill(&second, "Open ask about docs", "Open reply: the docs are rewritten.", cx);
+            baaz.update(cx, |harness, _| {
+                harness.turns_admitted.insert(first_id.clone());
+            });
+            first.update(cx, |_, cx| {
+                cx.emit(SessionEvent::ProviderTurnFinished {
+                    session_id: first_id.clone(),
+                    turn_id: "a1".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let parked = harness.overrides.get(&first_id);
+            assert!(
+                parked.and_then(|m| m.last_ask.as_deref()).is_some_and(|ask| ask.contains("Parked ask")),
+                "the parked session's row gets its own byline: {:?}",
+                parked.and_then(|m| m.last_ask.as_deref())
+            );
+            assert!(
+                parked.and_then(|m| m.derived_title.as_deref()).is_some_and(|t| t.contains("Parked ask")),
+                "the parked session is titled from its own transcript"
+            );
+            let open = harness.overrides.get(&second_id);
+            assert!(open.and_then(|m| m.last_ask.as_deref()).is_none(), "the open session's byline is untouched");
+            assert!(open.and_then(|m| m.derived_title.as_deref()).is_none(), "the open session's title is untouched");
+        });
+        lane_restore(state);
+    }
+
+    /// F2/F17 (docs/81 A): the boot-time field subscriptions — search
+    /// query, Projects and Commands queries, the API-key field — outlive a
+    /// session activation. Before the split, `activate` cleared them with
+    /// the per-view ones, so typing in ⌘⇧F stopped re-querying, the palette
+    /// selections stopped clamping and Enter in the key field did nothing.
+    #[gpui::test]
+    fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) {
+        use gpui_kit::base::input::InputEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("f2-field-subs");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).active.is_some()), "setup: a session is open");
+
+        // Search: a keystroke re-queries (the epoch moves).
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.open_search(window, cx)));
+        let before = vc.update(|_, cx| baaz.read(cx).search_epoch);
+        vc.update(|_, cx| {
+            let field = baaz.read(cx).search_query.clone();
+            field.update(cx, |_, cx| cx.emit(InputEvent::Change));
+        });
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).search_epoch), before + 1, "typing in search re-queries");
+
+        // Projects and Commands: a keystroke clamps a stale selection.
+        for kind in [PaletteKind::Projects, PaletteKind::Commands] {
+            vc.update(|_, cx| {
+                baaz.update(cx, |harness, cx| {
+                    harness.open_palette(kind, cx);
+                    harness.overlays.update(cx, |overlays, _| {
+                        overlays.palette.as_mut().expect("the palette opened").selected = 9_999;
+                    });
+                });
+                let field = match kind {
+                    PaletteKind::Projects => baaz.read(cx).projects_query.clone(),
+                    _ => baaz.read(cx).commands_query.clone(),
+                };
+                field.update(cx, |_, cx| cx.emit(InputEvent::Change));
+            });
+            let selected = vc.update(|_, cx| {
+                baaz.read(cx).overlays.read(cx).palette.as_ref().map(|palette| palette.selected)
+            });
+            assert_eq!(selected, Some(0), "{kind:?}: typing clamps the selection");
+        }
+
+        // API key: Enter submits.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_login_state(aui::screens::LoginState::ApiKey { can_submit: true, error: None }, cx);
+                let field = harness.login.api_key_field();
+                field.update(cx, |state, cx| state.set_value("sk-test-f2", window, cx));
+                field.update(cx, |_, cx| cx.emit(InputEvent::PressEnter { secondary: false, shift: false }));
+            });
+        });
+        assert_ne!(
+            vc.update(|_, cx| baaz.read(cx).login.state_name()),
+            "apikey",
+            "Enter in the key field submits"
+        );
         lane_restore(state);
     }
 
@@ -13581,6 +14155,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, off()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {

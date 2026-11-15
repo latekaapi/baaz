@@ -1565,7 +1565,12 @@ pub struct Harness {
     /// change.
     pub(crate) hover_trace_last_shown: Option<bool>,
     pub(crate) tasks: Vec<Task<()>>,
-    subscriptions: Vec<Subscription>,
+    /// The boot-time text-field subscriptions (rename, search, Projects and
+    /// Commands queries, API key). Made once in `new`, never cleared.
+    field_subscriptions: Vec<Subscription>,
+    /// One `SessionEvent` subscription per live view, rebuilt from the live
+    /// views by `activate` and the failed-open paths.
+    view_subscriptions: Vec<Subscription>,
 }
 
 impl WireCall for Harness {
@@ -1883,7 +1888,8 @@ impl Harness {
             selected_row_bounds: None,
             hover_trace_last_shown: None,
             tasks: Vec::new(),
-            subscriptions: Vec::new(),
+            field_subscriptions: Vec::new(),
+            view_subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_fade_since: None,
             browse_drop_target: None,
@@ -2027,14 +2033,14 @@ impl Harness {
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
         // header title that shares the field.
-        this.subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
         }));
         // Typing in the search palette's query re-queries off the UI thread.
-        this.subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.refresh_search(cx);
             }
@@ -2042,7 +2048,7 @@ impl Harness {
         // Typing in the Projects palette's query only redraws: both sections
         // are filtered synchronously at render, so the selection is clamped
         // to the filtered rows here.
-        this.subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.clamp_projects_selection(cx);
                 cx.notify();
@@ -2051,7 +2057,7 @@ impl Harness {
         // Typing in the Commands palette's query only redraws: the rows are
         // filtered synchronously at render, so the selection is clamped to
         // the filtered rows here.
-        this.subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.clamp_commands_selection(cx);
                 cx.notify();
@@ -2060,7 +2066,7 @@ impl Harness {
         // The API-key field: Enter submits, and any change re-renders the
         // form — `can_submit` is recomputed in `render_login`, so the Sign
         // in button tracks the field's non-empty trimmed text.
-        this.subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
+        this.field_subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
             match event {
                 InputEvent::PressEnter { .. } => this.submit_api_key(cx),
                 InputEvent::Change => cx.notify(),
@@ -2068,6 +2074,27 @@ impl Harness {
             }
         }));
         this.overrides = sessions::read();
+        // A damaged store was set aside while booting, or a background write
+        // fails later: one toast each (docs/81 A F8, F9). The wake channel
+        // is closed in tests, like the status wake: those call
+        // `raise_store_problems` themselves.
+        if !cfg!(test) {
+            this.raise_store_problems(cx);
+        }
+        let mut store_wake = if cfg!(test) {
+            futures::channel::mpsc::unbounded().1
+        } else {
+            crate::store::problem_wake()
+        };
+        this.tasks.push(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while store_wake.next().await.is_some() {
+                while store_wake.try_recv().is_ok() {}
+                if this.update(cx, |this, cx| this.raise_store_problems(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
         // A restart mid-flight still hides every side session: the persisted
         // `side_session` flags rejoin the in-memory record at boot.
         this.side_sessions = this
@@ -2166,6 +2193,17 @@ impl Harness {
         self.current_project()
             .map(|p| p.root.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned())
+    }
+
+    /// Where a session that belongs to no project starts, on every
+    /// provider: the folder `--workspace` named, else the default
+    /// workspace (`~/baaz-sessions`) — never the launch directory, which is
+    /// `/` from Finder (docs/81 F C1).
+    pub(crate) fn unfiled_workspace(&self) -> String {
+        if self.args.workspace_explicit {
+            return self.args.workspace.to_string_lossy().into_owned();
+        }
+        projects::default_workspace().to_string_lossy().into_owned()
     }
 
     /// The current project's id, when one is current.
@@ -2405,16 +2443,11 @@ impl Harness {
         (self.args.offline || self.args.replay.is_some()) && !self.muse_slot.is_ready()
     }
 
-    /// Whether the whole-window login screen is up: only offline and replay
-    /// captures boot into it now; a live launch never gates on Muse.
-    pub(crate) fn login_screen_up(&self) -> bool {
-        !matches!(self.auth, Auth::SignedIn(_)) && (self.args.offline || self.args.replay.is_some()) && !self.show_connect
-    }
-
-    /// Whether the shell is on screen: not behind the connect screen or the
-    /// capture-only login screen. What links from other apps wait for.
+    /// Whether the shell is on screen: not behind the connect screen. What
+    /// links from other apps wait for. (The capture-only whole-window login
+    /// screen is gone, docs/82 0.16: no launch ever showed it.)
     pub(crate) fn shell_up(&self) -> bool {
-        !self.show_connect && !self.login_screen_up()
+        !self.show_connect
     }
 
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
@@ -2515,7 +2548,9 @@ impl Harness {
             }
             _ => return,
         }
-        self.title_from_transcript(cx);
+        if let Some(view) = self.active.clone() {
+            self.title_from_transcript(&view, cx);
+        }
         cx.notify();
     }
 
@@ -4200,7 +4235,7 @@ impl Harness {
                 None,
                 cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                     this.dismiss_browse_popovers(cx);
-                    let _ = std::process::Command::new("/usr/bin/open").arg(crate::layout::browser_download_dir(&this.layout)).status();
+                    let _ = crate::system_open::open_detached([crate::layout::browser_download_dir(&this.layout)]);
                 }),
                 cx,
             );
@@ -4790,8 +4825,8 @@ impl Harness {
         });
         crate::log::trace_mark("replay-folded");
         crate::log::trace_arm_first_frame();
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.view_subscriptions.clear();
+        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
@@ -4861,7 +4896,9 @@ impl Harness {
         // The capture is already folded, and no wire event will ever run
         // `title_from_transcript` for it: without this the replayed row
         // keeps the file's name even when the transcript knows better.
-        self.title_from_transcript(cx);
+        if let Some(view) = self.active.clone() {
+            self.title_from_transcript(&view, cx);
+        }
         self.maybe_run_steps(window, cx);
         cx.notify();
     }
@@ -5912,8 +5949,53 @@ impl Harness {
         cx.notify();
     }
 
-    /// Hang up every provider lane's child this window holds — the open view
-    /// and every parked one. What app quit calls so no `claude` or `codex`
+    /// One toast per store problem ([`crate::store::take_problems`]); a
+    /// problem whose toast is already up is not shown twice, so a store that
+    /// keeps failing to write raises one note, not one per edit.
+    pub(crate) fn raise_store_problems(&mut self, cx: &mut Context<Self>) {
+        use crate::store::StoreProblem;
+        let problems = crate::store::take_problems();
+        if problems.is_empty() {
+            return;
+        }
+        self.overlays.update(cx, |overlays, _| {
+            for problem in problems {
+                let aside_name = |aside: &std::path::Path| {
+                    aside.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                };
+                let (title, body) = match problem {
+                    StoreProblem::SetAside { name, aside, restored: true } => (
+                        format!("Restored {name} from its backup"),
+                        format!("The file could not be read. It was kept as {}.", aside_name(&aside)),
+                    ),
+                    StoreProblem::SetAside { name, aside, restored: false } => (
+                        format!("{name} could not be read"),
+                        format!("Baaz started without it. The file was kept as {}.", aside_name(&aside)),
+                    ),
+                    StoreProblem::EntriesDropped { name, count, aside } => (
+                        format!("Part of {name} could not be read"),
+                        format!(
+                            "{count} {} skipped. The whole file was kept as {}.",
+                            if count == 1 { "entry was" } else { "entries were" },
+                            aside_name(&aside)
+                        ),
+                    ),
+                    StoreProblem::WriteFailed { name, error } => (
+                        format!("Couldn't save {name}"),
+                        format!("{error}. Recent changes are not on disk yet."),
+                    ),
+                };
+                if overlays.toasts.iter().any(|toast| toast.title.as_ref() == title) {
+                    continue;
+                }
+                overlays.toast(title, body);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Hang up every provider lane's child this window holds — the open view,
+    /// every parked one and the browser chat (docs/81 A F6). What app quit calls so no `claude` or `codex`
     /// child outlives the app; dropping the views would do the same through
     /// [`Drop`](crate::session::SessionView), but quit should not rely on
     /// teardown order. Quitting with a switch pending cancels it too, so an
@@ -5925,10 +6007,7 @@ impl Harness {
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
         self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, _| view.shutdown_lane());
-        }
-        for (_, view) in &self.session_cache {
+        for view in self.live_views() {
             view.update(cx, |view, _| view.shutdown_lane());
         }
     }
@@ -6488,19 +6567,13 @@ impl Render for Harness {
         crate::sidebar_view::note_baaz_render();
         crate::log::note_root_render();
         self.on_frame(window, cx);
-        // The login screen owns the whole window; the shell is not built behind
-        // it, so nothing of the signed-in state can leak into a capture.
-        // The connect screen owns it the same way on a first run. Any other
-        // launch renders the shell at once: a slow or signed-out Muse never
-        // gates the window (offline/replay captures still boot into the
-        // login screen for their sample states).
-        let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let showing_login =
-            !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
+        // The connect screen owns the whole window on a first run; the shell
+        // is not built behind it. Any other launch renders the shell at once:
+        // a slow or signed-out Muse never gates the window.
         let body: AnyElement = if self.show_connect {
             aui::shell::place_native_lights(window, cx);
             self.render_connect(window, cx).into_any_element()
-        } else if !showing_login {
+        } else {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
             // `size_full` is what the column wears itself (`render_sidebar`
@@ -6893,9 +6966,6 @@ impl Render for Harness {
                 );
             }
             stack.into_any_element()
-        } else {
-            aui::shell::place_native_lights(window, cx);
-            self.render_login(window, cx).into_any_element()
         };
         // In Browse the overlay window hosts the modals over the live page
         // (`OverlayKind::Modal`): the main window draws neither.
@@ -7410,7 +7480,7 @@ impl Harness {
     fn show_docs(&mut self) {
         match docs_dir() {
             Some(dir) => {
-                if std::process::Command::new("open").arg(dir).spawn().is_err() {
+                if crate::system_open::open_detached([dir]).is_err() {
                     crate::baaz_log!("could not reveal {}", dir.display());
                 }
             }
@@ -7468,12 +7538,8 @@ impl Harness {
             self.close_setup_sheet(cx);
             return;
         }
-        if self.muse_sheet && !self.login_screen_up() {
+        if self.muse_sheet {
             self.close_muse_sheet(window, cx);
-            return;
-        }
-        if self.login_screen_up() {
-            self.login_escape(window, cx);
             return;
         }
         // The Settings page is the first thing Escape takes back:

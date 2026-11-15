@@ -30,6 +30,10 @@ use crate::argv::{argv_for_resume, SessionLaunch};
 use crate::child::StdinWriter;
 use crate::fold::{step_line, ClaudeFold};
 
+/// Tests: the line [`ControlHub::ingest_line`] panics on.
+#[cfg(test)]
+pub(crate) const TEST_PANIC_LINE: &str = "__baaz_test_panic__";
+
 /// How long a host control request waits for the child's `control_response`
 /// before the silence itself counts as a refusal. Ten seconds is generous
 /// for a local child answering a flag flip, and short enough that a
@@ -103,6 +107,10 @@ pub(crate) enum PendingControlKind {
     /// exactly when the mode the child then reports is Read-only — a
     /// refused layer never leaves Read-only quietly unenforced.
     ApplyReadOnly(PermissionMode),
+    /// Stop's `interrupt` request: success needs nothing (the child ends
+    /// the turn with a `result`), and an error or silence is covered by
+    /// Stop's own fallback, which ends the child.
+    Interrupt,
     /// An `mcp_status` query (probed 2026-10-17): success reports the
     /// owner's MCP servers and their tools' annotations, from which the
     /// Read-only layer's MCP denies are refreshed; error or silence is
@@ -295,6 +303,8 @@ impl ControlHub {
     /// epoch its pump reports end of stream under.
     pub(crate) fn begin_child(&self) -> u64 {
         self.child_lost.store(false, Ordering::SeqCst);
+        // A new process reports its cost from zero, hook or no hook.
+        self.fold.lock().expect("fold mutex").note_new_process();
         // A fresh child holds only the layer its argv gave it, and that
         // one carries no MCP denies; its servers are its own, so the last
         // child's answer no longer counts either.
@@ -541,6 +551,22 @@ impl ControlHub {
         }
     }
 
+    /// A fold step panicked on the pump: clear the poison it may have left
+    /// on every lock the hub shares, so the end-of-stream report and the
+    /// next send's revive can still take them (docs/81 B PM-3).
+    pub(crate) fn recover_from_panic(&self) {
+        self.fold.clear_poison();
+        self.pending.clear_poison();
+        self.model.clear_poison();
+        self.effort.clear_poison();
+        self.session_id.clear_poison();
+        self.effort_relaunch_due.clear_poison();
+        self.confirmed_model.clear_poison();
+        self.stdin.clear_poison();
+        self.mcp_sent.clear_poison();
+        self.mcp.clear_poison();
+    }
+
     /// The child of `epoch` is being hung up on purpose: its end of stream
     /// is expected, not a loss. A newer child's epoch is left alone.
     pub(crate) fn retire_child(&self, epoch: u64) {
@@ -583,6 +609,13 @@ impl ControlHub {
     /// Fold one raw child stdout line and confirm whatever it settles: the
     /// one function the live pump and the tests share.
     pub fn ingest_line(&self, line: &str) {
+        // Tests: a line that makes the fold panic while it holds the lock,
+        // as a real fold bug would (docs/81 B PM-3).
+        #[cfg(test)]
+        if line == crate::controls::TEST_PANIC_LINE {
+            let _fold = self.fold.lock().expect("fold mutex");
+            panic!("a test fold panic");
+        }
         {
             let mut fold = self.fold.lock().expect("fold mutex");
             step_line(&mut fold, line, &mut |event| {
@@ -742,6 +775,12 @@ impl ControlHub {
     /// newer request owns the state and answers for itself.
     fn refuse(&self, pending: PendingControl, reason: &str) {
         match pending.kind {
+            PendingControlKind::Interrupt => {
+                eprintln!(
+                    "[provider-claude-code] interrupt {} refused ({}); Stop ends the child instead",
+                    pending.request_id, reason
+                );
+            }
             PendingControlKind::Initialize => {
                 eprintln!(
                     "[provider-claude-code] initialize {} refused ({}); keeping the fallback catalog",

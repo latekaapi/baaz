@@ -212,7 +212,18 @@ impl MuseHub {
                     if core.generation.load(Ordering::SeqCst) != generation {
                         return;
                     }
-                    if !core.forward(event) {
+                    // A fold that panics ends the connection like a lost
+                    // child — every lane hears it — with the poison it left
+                    // cleared, so no Muse session freezes on the routed
+                    // lock (docs/81 B PM-3).
+                    let mut more = true;
+                    if let Err(message) = provider::guard::guard_line(|| more = core.forward(event)) {
+                        core.recover_from_panic();
+                        let reason = provider::guard::panic_reason("Muse", &message);
+                        core.broadcast(ProviderEvent::ConnectionLost { reason });
+                        return;
+                    }
+                    if !more {
                         return;
                     }
                 }
@@ -318,10 +329,13 @@ impl MuseHub {
     /// child is retired first, so its own exit notice never follows.
     pub fn shutdown(&self) {
         self.core.generation.fetch_add(1, Ordering::SeqCst);
-        if self.core.link.lock().expect("link mutex").is_some() {
+        // Poison-tolerant: quit must hang the child up even after a reader
+        // panicked holding a lock (docs/81 B PM-3).
+        self.core.recover_from_panic();
+        if self.core.link.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
             self.core.broadcast(ProviderEvent::ConnectionLost { reason: "the agent process exited".into() });
         }
-        if let Some(link) = self.core.link.lock().expect("link mutex").take() {
+        if let Some(link) = self.core.link.lock().unwrap_or_else(|p| p.into_inner()).take() {
             if let Ok(mut client) = Arc::try_unwrap(link.client) {
                 client.shutdown();
             }
@@ -367,6 +381,19 @@ impl Core {
     }
 
     /// Send `event` to every lane and the connection stream.
+    /// A fold step panicked on the reader: clear the poison it may have
+    /// left on every lock the core shares.
+    fn recover_from_panic(&self) {
+        self.info.clear_poison();
+        self.link.clear_poison();
+        self.pending.clear_poison();
+        self.routed.clear_poison();
+        self.terminal.clear_poison();
+        self.catalog.clear_poison();
+        self.picks.clear_poison();
+        self.usage.clear_poison();
+    }
+
     fn broadcast(&self, event: ProviderEvent) {
         let routed = self.routed.lock().expect("routed mutex");
         for tx in routed.routes.values().chain(routed.watchers.iter()) {
