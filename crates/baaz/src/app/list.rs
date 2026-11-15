@@ -63,9 +63,7 @@ impl Harness {
             && !self.index.contains_key(session_id)
             && !crate::sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides);
         if inert {
-            self.right_save_epoch += 1;
-            self.right_save_pending = false;
-            sessions::write(&self.overrides);
+            sessions::save(&self.overrides);
             cx.notify();
             return;
         }
@@ -100,12 +98,10 @@ impl Harness {
 
     /// What every override edit costs once it is made: the rows rejoin, the
     /// store is written, and the search index is synced around the change.
-    /// The write supersedes any pending debounced one (B7fix2): the armed
-    /// generation is cancelled and can never land stale state over this
-    /// edit. It is snapshotted here and written off the UI thread (perf
-    /// audit 2026-10-16: 110 KB of JSON per pin, rename or title); the
-    /// write generation keeps a late write from landing over a newer one,
-    /// and the quit flush writes synchronously while one is in flight.
+    /// The snapshot is taken here and written off the UI thread (perf audit
+    /// 2026-10-16: 110 KB of JSON per pin, rename or title); it replaces any
+    /// queued pane-state snapshot, so stale state never lands over this
+    /// edit, and the quit flush waits for it ([`crate::store::JsonStore`]).
     fn settle_overrides(&mut self, cx: &mut Context<Self>) {
         self.settle_overrides_scoped(None, cx);
     }
@@ -113,19 +109,8 @@ impl Harness {
     /// [`Self::settle_overrides`] for the sessions `only` names (`None`:
     /// every row): the rejoin and the search sync are scoped alike.
     fn settle_overrides_scoped(&mut self, only: Option<&std::collections::HashSet<String>>, cx: &mut Context<Self>) {
-        self.right_save_epoch += 1;
-        self.right_save_pending = false;
         self.rejoin_scoped(only);
-        let generation = sessions::next_write_generation();
-        let snapshot = self.overrides.clone();
-        self.overrides_writes_in_flight += 1;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().spawn(async move { sessions::write_ordered(generation, &snapshot) }).await;
-            let _ = this.update(cx, |this, _| {
-                this.overrides_writes_in_flight = this.overrides_writes_in_flight.saturating_sub(1);
-            });
-        })
-        .detach();
+        sessions::save(&self.overrides);
         match only {
             Some(ids) => self.rebuild_search_index_for(ids, cx),
             None => self.rebuild_search_index(cx),
@@ -134,25 +119,12 @@ impl Harness {
     }
 
     /// Write the provider records (`provider-sessions.json`) off the UI
-    /// thread: snapshotted here, written on the background executor in
-    /// generation order like `sessions.json` ([`Self::settle_overrides`]),
-    /// so a late write never lands stale records over a newer one, and the
-    /// store can grow (a record per opened Muse session, docs/70) without
-    /// costing a frame. The quit flush writes synchronously while one is in
-    /// flight ([`Self::flush_right_save`]).
-    pub(crate) fn persist_provider_sessions(&mut self, cx: &mut Context<Self>) {
-        let generation = crate::provider_sessions::next_write_generation();
-        let snapshot = self.provider_sessions.clone();
-        self.provider_sessions_writes_in_flight += 1;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .spawn(async move { crate::provider_sessions::write_ordered(generation, &snapshot) })
-                .await;
-            let _ = this.update(cx, |this, _| {
-                this.provider_sessions_writes_in_flight = this.provider_sessions_writes_in_flight.saturating_sub(1);
-            });
-        })
-        .detach();
+    /// thread: the snapshot is taken here and queued on the store's writer,
+    /// so a later snapshot always wins and the store can grow (a record per
+    /// opened Muse session, docs/70) without costing a frame. The quit
+    /// flush waits for it ([`Self::flush_stores`]).
+    pub(crate) fn persist_provider_sessions(&mut self, _cx: &mut Context<Self>) {
+        crate::provider_sessions::save(&self.provider_sessions);
     }
 
     /// Forget `project_id` on every session that carries it, settled once:

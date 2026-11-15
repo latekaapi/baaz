@@ -345,7 +345,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
 pub fn run() -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("baaz-perf-turn-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    if std::env::var_os("BAAZ_STATE_DIR").is_none() {
+    if crate::store::state_dir_override().is_none() {
         std::env::set_var("BAAZ_STATE_DIR", &dir);
     }
     let mut cx = gpui::TestAppContext::single();

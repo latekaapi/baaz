@@ -10,20 +10,18 @@
 //! best-effort.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 /// How many prompts are remembered per workspace.
 const CAP: usize = 200;
 
-/// `~/Library/Application Support/baaz/history.json`, honouring
-/// `BAAZ_STATE_DIR` like every other store.
-pub fn path() -> PathBuf {
-    crate::store::support_dir().join("history.json")
-}
+/// The prompts' one writer ([`crate::store::JsonStore`]). A file that does
+/// not parse is set aside and reported, never overwritten by the next send
+/// (it used to read as empty and be replaced).
+static STORE: crate::store::JsonStore<BTreeMap<String, Vec<String>>> =
+    crate::store::JsonStore::new("history.json");
 
 fn read_all() -> BTreeMap<String, Vec<String>> {
-    let Ok(text) = std::fs::read_to_string(path()) else { return BTreeMap::new() };
-    serde_json::from_str(&text).unwrap_or_default()
+    STORE.read()
 }
 
 /// Every prompt sent in `workspace`, oldest first.
@@ -67,12 +65,7 @@ fn is_recent_duplicate(entries: &[String], text: &str) -> bool {
 }
 
 fn write_all(all: &BTreeMap<String, Vec<String>>) {
-    let path = path();
-    // Atomic like every other store write: a crash mid-send leaves the
-    // previous history rather than half of the next one.
-    if let Ok(text) = serde_json::to_string_pretty(all) {
-        let _ = crate::store::write_atomic(&path, text.as_bytes());
-    }
+    let _ = STORE.write_now(all);
 }
 
 /// Where the composer is in the history it is walking.
@@ -201,11 +194,11 @@ mod tests {
         let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", &dir);
-        assert_eq!(path(), dir.join("history.json"));
+        assert_eq!(STORE.path(), dir.join("history.json"));
         let entries = append("/work/a", "hello");
         assert_eq!(entries, vec!["hello".to_owned()]);
         assert_eq!(read("/work/a"), vec!["hello".to_owned()]);
-        assert!(path().is_file());
+        assert!(STORE.path().is_file());
         let _ = std::fs::remove_dir_all(&dir);
         match old {
             Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),

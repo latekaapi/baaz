@@ -141,12 +141,19 @@ pub fn scrub_overrides_for(parent_had_entrypoint: bool) -> Vec<(String, String)>
         .collect()
 }
 
+/// `BAAZ_STATE_DIR` when it is set and not empty: the one reading of the
+/// variable, shared with the app's store (`baaz::store::state_dir_override`)
+/// so the two never disagree about where state lives.
+pub fn state_dir_override() -> Option<PathBuf> {
+    std::env::var_os("BAAZ_STATE_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from)
+}
+
 /// Baaz's own state dir: `BAAZ_STATE_DIR` when set non-empty, else
 /// `~/Library/Application Support/baaz`. The Baaz-owned provider homes
 /// (`claude-home`, `codex-home`) live directly under this.
 pub fn state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("BAAZ_STATE_DIR").filter(|dir| !dir.is_empty()) {
-        return PathBuf::from(dir);
+    if let Some(dir) = state_dir_override() {
+        return dir;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join("Library").join("Application Support").join("baaz")

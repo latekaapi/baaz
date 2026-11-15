@@ -3647,6 +3647,9 @@ mod tests {
     /// sidebar).
     #[test]
     fn a_session_another_client_made_is_not_listed() {
+        // Reads the state dir (`support_dir`), so it holds the lock the
+        // tests that point `BAAZ_STATE_DIR` elsewhere hold.
+        let _guard = crate::store::test_env_lock();
         let projects = Projects::default();
         let made_by = |creator: Option<&str>| IndexEntry {
             title: "You are writing items for an exam".into(),

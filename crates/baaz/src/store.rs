@@ -23,11 +23,20 @@
 
 use std::path::PathBuf;
 
+/// The state directory a run named with `BAAZ_STATE_DIR` — the one place
+/// that reads the variable, shared with the provider crate's resolver
+/// ([`provider::child_env::state_dir_override`]) so every caller agrees. An
+/// empty value is unset: `BAAZ_STATE_DIR=""` used to write relative to the
+/// working directory (docs/81 B D-9).
+pub fn state_dir_override() -> Option<PathBuf> {
+    provider::child_env::state_dir_override()
+}
+
 /// `~/Library/Application Support/baaz`, honouring `BAAZ_STATE_DIR` so a
 /// test can point the whole store somewhere disposable.
 pub fn support_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("BAAZ_STATE_DIR") {
-        return PathBuf::from(dir);
+    if let Some(dir) = state_dir_override() {
+        return dir;
     }
     // A test that forgot to point the store somewhere disposable must never
     // write the person's real state: `cargo test` once rewrote their
@@ -59,7 +68,7 @@ fn capture_state_dir() -> PathBuf {
 /// per shot, and 1,079 had piled up before this. Only ever the capture dir:
 /// a capture with its own `BAAZ_STATE_DIR` and every real run are untouched.
 pub fn remove_capture_state() {
-    if crate::clock::deterministic() && std::env::var_os("BAAZ_STATE_DIR").is_none() {
+    if crate::clock::deterministic() && state_dir_override().is_none() {
         let _ = std::fs::remove_dir_all(capture_state_dir());
     }
 }
@@ -137,7 +146,7 @@ pub enum StateMigration {
 /// and nothing is overwritten. Never fails startup: every outcome is logged
 /// and returned, and the app continues against whatever is on disk.
 pub fn migrate_legacy_support_dir() -> StateMigration {
-    if std::env::var_os("BAAZ_STATE_DIR").is_some() {
+    if state_dir_override().is_some() {
         return StateMigration::NotNeeded;
     }
     let outcome = migrate_support_dir_at(&default_support_dir(), &legacy_default_support_dir());
@@ -353,6 +362,22 @@ pub fn write_authored(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
 /// renamed to `<name>.corrupt-<unix secs>` — never overwritten — and
 /// reported; its `.bak` is read in its place when that parses.
 pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
+    read_migrated(path, |value| value)
+}
+
+/// [`read_json`] with a migration step between the parse and the type: the
+/// file's JSON passes through `migrate` first, so an older layout can be
+/// rewritten into the current one before it is read (the [`JsonStore`]
+/// version hook). A file whose migrated value still does not fit `T` is set
+/// aside like one that does not parse.
+pub fn read_migrated<T: serde::de::DeserializeOwned + Default>(
+    path: &std::path::Path,
+    migrate: fn(serde_json::Value) -> serde_json::Value,
+) -> T {
+    let parse = |text: &str| -> Result<T, String> {
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        serde_json::from_value(migrate(value)).map_err(|error| error.to_string())
+    };
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return T::default(),
@@ -361,7 +386,7 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Pat
             return T::default();
         }
     };
-    let error = match serde_json::from_str(&text) {
+    let error = match parse(&text) {
         Ok(value) => return value,
         Err(error) => error,
     };
@@ -376,9 +401,7 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Pat
     if std::fs::rename(path, &aside).is_err() {
         let _ = std::fs::copy(path, &aside);
     }
-    let restored: Option<T> = std::fs::read_to_string(backup_path(path))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok());
+    let restored: Option<T> = std::fs::read_to_string(backup_path(path)).ok().and_then(|text| parse(&text).ok());
     report(StoreProblem::SetAside { name: file_name(path), aside, restored: restored.is_some() });
     restored.unwrap_or_default()
 }
@@ -430,6 +453,248 @@ pub fn read_json_map<V: serde::de::DeserializeOwned>(path: &std::path::Path) -> 
     kept
 }
 
+/// One JSON file in the state directory, and the one way it is written
+/// (docs/82 1.7, audit A R2).
+///
+/// Every store used to hand-roll its own ordering: a debounce epoch for
+/// the pane state, another for the tabs, an in-flight counter for each
+/// background writer the quit had to wait for, and three copies of a
+/// generation check. One of them took its generation on the background
+/// thread, after the snapshot, so a later snapshot could lose to an
+/// earlier one (docs/81 A F10). A `JsonStore` owns all of that:
+///
+/// * [`Self::save`] / [`Self::save_soon`] take the generation and resolve
+///   the path **when the snapshot is taken**, on the caller's thread, and
+///   hand the value to the store's one writer thread. Newest wins: a
+///   snapshot queued behind a newer one is never written.
+/// * `save_soon` waits the store's delay first, so a burst (Files
+///   navigation, tab titles) coalesces into one write.
+/// * [`Self::write_now`] writes on the caller's thread, ordered against the
+///   writer; [`Self::flush`] blocks until everything queued is on disk (the
+///   quit and window-close durability point).
+/// * Writes go through [`write_authored`] (`.bak` first, a failure
+///   reported); reads through [`read_migrated`] (quarantine on a bad parse,
+///   the `.bak` read instead, and the store's migration hook).
+pub struct JsonStore<T> {
+    /// The path under the state directory (`"tabs.json"`,
+    /// `"Browser/tabs.json"`), resolved against [`support_dir`] per call so
+    /// a run that names its own `BAAZ_STATE_DIR` is honoured.
+    name: &'static str,
+    /// How long [`Self::save_soon`] waits for more changes (750 ms unless
+    /// the store says).
+    delay: std::time::Duration,
+    /// The version hook: the file's JSON before it is read as `T`.
+    migrate: fn(serde_json::Value) -> serde_json::Value,
+    /// How the value becomes bytes (pretty JSON unless the store says).
+    encode: fn(&T) -> Option<Vec<u8>>,
+    /// The next snapshot's generation.
+    next: std::sync::atomic::AtomicU64,
+    queue: std::sync::Mutex<Queue<T>>,
+    changed: std::sync::Condvar,
+    writer: std::sync::OnceLock<()>,
+}
+
+struct Queue<T> {
+    /// The newest snapshot not yet written, one per path. A store has one
+    /// path in a run; tests point `BAAZ_STATE_DIR` at several, and one
+    /// test's write must never stand for another's.
+    pending: Vec<Pending<T>>,
+    /// The newest generation on disk, per path.
+    written: Vec<(PathBuf, u64)>,
+    /// The writer holds a snapshot it took off the queue.
+    writing: bool,
+}
+
+impl<T> Queue<T> {
+    fn written(&self, path: &std::path::Path) -> u64 {
+        self.written.iter().find(|(written, _)| written == path).map(|(_, generation)| *generation).unwrap_or(0)
+    }
+
+    fn mark_written(&mut self, path: &std::path::Path, generation: u64) {
+        match self.written.iter_mut().find(|(written, _)| written == path) {
+            Some((_, newest)) => *newest = (*newest).max(generation),
+            None => self.written.push((path.to_owned(), generation)),
+        }
+    }
+}
+
+struct Pending<T> {
+    generation: u64,
+    path: PathBuf,
+    value: T,
+    /// Not before this instant ([`JsonStore::save_soon`]).
+    due: std::time::Instant,
+}
+
+fn pretty<T: serde::Serialize>(value: &T) -> Option<Vec<u8>> {
+    serde_json::to_vec_pretty(value).ok()
+}
+
+fn identity(value: serde_json::Value) -> serde_json::Value {
+    value
+}
+
+impl<T> JsonStore<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Default + Send + 'static,
+{
+    /// A store for `name` under the state directory.
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            delay: std::time::Duration::from_millis(750),
+            migrate: identity,
+            encode: pretty::<T>,
+            next: std::sync::atomic::AtomicU64::new(1),
+            queue: std::sync::Mutex::new(Queue { pending: Vec::new(), written: Vec::new(), writing: false }),
+            changed: std::sync::Condvar::new(),
+            writer: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The version hook: rewrite an older file's JSON before it is read.
+    pub const fn with_migration(mut self, migrate: fn(serde_json::Value) -> serde_json::Value) -> Self {
+        self.migrate = migrate;
+        self
+    }
+
+    /// How the value becomes bytes, for a store that keeps only part of it
+    /// (`None` writes nothing).
+    pub const fn with_encoding(mut self, encode: fn(&T) -> Option<Vec<u8>>) -> Self {
+        self.encode = encode;
+        self
+    }
+
+    /// The file's path now.
+    pub fn path(&self) -> PathBuf {
+        support_dir().join(self.name)
+    }
+
+    /// The stored value, or the default ([`read_migrated`]). Blocking.
+    pub fn read(&self) -> T {
+        read_migrated(&self.path(), self.migrate)
+    }
+
+    /// Queue `value` for the writer thread, written as soon as it gets to it.
+    pub fn save(&'static self, value: T) {
+        self.enqueue(value, std::time::Duration::ZERO);
+    }
+
+    /// Queue `value` to be written after the store's delay, unless a newer
+    /// snapshot replaces it first. A change already waiting keeps its
+    /// earlier due time, so a constant stream still lands every delay.
+    pub fn save_soon(&'static self, value: T) {
+        self.enqueue(value, self.delay);
+    }
+
+    /// Write `value` on this thread, ordered after every snapshot taken
+    /// before it. Blocking.
+    pub fn write_now(&self, value: &T) -> std::io::Result<()> {
+        let generation = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = self.path();
+        let mut queue = self.lock();
+        while queue.writing {
+            queue = self.changed.wait(queue).unwrap_or_else(|p| p.into_inner());
+        }
+        // A snapshot queued for this file is older than this one: drop it.
+        queue.pending.retain(|pending| pending.path != path || pending.generation > generation);
+        let result = self.write_bytes(&path, value);
+        if result.is_ok() {
+            queue.mark_written(&path, generation);
+        }
+        self.changed.notify_all();
+        result
+    }
+
+    /// Block until every queued snapshot is on disk (or failed).
+    pub fn flush(&self) {
+        let mut queue = self.lock();
+        let now = std::time::Instant::now();
+        for pending in &mut queue.pending {
+            pending.due = now;
+        }
+        self.changed.notify_all();
+        while !queue.pending.is_empty() || queue.writing {
+            queue = self.changed.wait(queue).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queue<T>> {
+        self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_bytes(&self, path: &std::path::Path, value: &T) -> std::io::Result<()> {
+        match (self.encode)(value) {
+            Some(bytes) => write_authored(path, &bytes),
+            None => Ok(()),
+        }
+    }
+
+    fn enqueue(&'static self, value: T, wait: std::time::Duration) {
+        let generation = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = self.path();
+        let due = std::time::Instant::now() + wait;
+        {
+            let mut queue = self.lock();
+            match queue.pending.iter_mut().find(|pending| pending.path == path) {
+                // Newest wins; a change already waiting keeps its due time.
+                Some(older) => {
+                    older.generation = generation;
+                    older.value = value;
+                    older.due = older.due.min(due);
+                }
+                None => queue.pending.push(Pending { generation, path, value, due }),
+            }
+            self.changed.notify_all();
+        }
+        self.writer.get_or_init(|| self.start_writer());
+    }
+
+    fn start_writer(&'static self) {
+        let spawned = std::thread::Builder::new()
+            .name(format!("store:{}", self.name))
+            .spawn(move || self.run_writer());
+        if let Err(error) = spawned {
+            crate::baaz_log!("store: no writer for {}: {error}", self.name);
+        }
+    }
+
+    fn run_writer(&'static self) {
+        let mut queue = self.lock();
+        loop {
+            let next = queue
+                .pending
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, pending)| pending.due)
+                .map(|(ix, pending)| (ix, pending.due));
+            let Some((ix, due)) = next else {
+                queue = self.changed.wait(queue).unwrap_or_else(|p| p.into_inner());
+                continue;
+            };
+            let now = std::time::Instant::now();
+            if due > now {
+                queue = self.changed.wait_timeout(queue, due - now).unwrap_or_else(|p| p.into_inner()).0;
+                continue;
+            }
+            let pending = queue.pending.remove(ix);
+            if pending.generation <= queue.written(&pending.path) {
+                self.changed.notify_all();
+                continue;
+            }
+            queue.writing = true;
+            drop(queue);
+            let result = self.write_bytes(&pending.path, &pending.value);
+            queue = self.lock();
+            queue.writing = false;
+            if result.is_ok() {
+                queue.mark_written(&pending.path, pending.generation);
+            }
+            self.changed.notify_all();
+        }
+    }
+}
+
 /// Serializes the tests that point `BAAZ_STATE_DIR` at a temp dir: two
 /// tests pointing it at two dirs at once would read each other's state.
 ///
@@ -446,6 +711,99 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ORDERED: JsonStore<Vec<u32>> = JsonStore::new("ordered.json");
+
+    fn in_temp_state(tag: &str) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf) {
+        let guard = test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        let dir = std::env::temp_dir().join(format!("baaz-json-store-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    fn restore(old: Option<std::ffi::OsString>, dir: PathBuf) {
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/81 A F10: a snapshot taken before a newer one never lands over
+    /// it, however the writes are timed.
+    #[test]
+    fn an_older_snapshot_never_wins_the_file() {
+        let (_guard, old, dir) = in_temp_state("order");
+        ORDERED.save_soon(vec![1]);
+        ORDERED.write_now(&vec![2]).expect("the newer snapshot writes");
+        ORDERED.flush();
+        assert_eq!(ORDERED.read(), vec![2], "the queued older snapshot was dropped");
+        // Several quick saves coalesce; the newest lands.
+        ORDERED.save_soon(vec![3]);
+        ORDERED.save_soon(vec![4]);
+        ORDERED.save(vec![5]);
+        ORDERED.flush();
+        assert_eq!(ORDERED.read(), vec![5]);
+        restore(old, dir);
+    }
+
+    /// A delayed save lands on its own once the delay passes.
+    #[test]
+    fn a_delayed_save_lands_without_a_flush() {
+        let (_guard, old, dir) = in_temp_state("delay");
+        ORDERED.save_soon(vec![7]);
+        assert!(!ORDERED.path().exists(), "nothing is written before the delay");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ORDERED.read() != vec![7] && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(ORDERED.read(), vec![7]);
+        restore(old, dir);
+    }
+
+    /// Two state directories (two tests, or a test and a capture) never
+    /// stand for each other: a write to one does not drop the other's.
+    #[test]
+    fn each_file_keeps_its_own_order() {
+        let (_guard, old, dir) = in_temp_state("paths-a");
+        ORDERED.save_soon(vec![10]);
+        let other = std::env::temp_dir().join(format!("baaz-json-store-paths-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        std::env::set_var("BAAZ_STATE_DIR", &other);
+        ORDERED.write_now(&vec![20]).expect("write");
+        ORDERED.flush();
+        assert_eq!(ORDERED.read(), vec![20]);
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        assert_eq!(ORDERED.read(), vec![10], "the first directory's save still landed");
+        let _ = std::fs::remove_dir_all(&other);
+        restore(old, dir);
+    }
+
+    /// The version hook runs between the parse and the type.
+    #[test]
+    fn the_migration_hook_reads_an_older_layout() {
+        fn wrap(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(_) => value,
+                bare => serde_json::json!({ "items": bare }),
+            }
+        }
+        #[derive(Default, serde::Deserialize, PartialEq, Debug)]
+        struct Current {
+            items: Vec<u32>,
+        }
+        let dir = std::env::temp_dir().join(format!("baaz-migration-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.json");
+        std::fs::write(&path, "[1,2]").unwrap();
+        let read: Current = read_migrated(&path, wrap);
+        assert_eq!(read, Current { items: vec![1, 2] });
+        assert!(path.exists(), "a file the hook can read is never set aside");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_rename_replaces_the_previous_contents_and_leaves_no_temporary() {

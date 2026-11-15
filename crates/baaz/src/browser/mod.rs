@@ -570,67 +570,26 @@ impl Harness {
         self.terminal_service.register_tab_page(key, id.0, state.clone());
         self.browser.agent_tabs.insert(key.to_owned(), id);
     }
-
-    /// Arm the debounced `tabs.json` write: the first change in a dirty
-    /// spell arms one 750 ms window, and the window serialises the CURRENT
-    /// tabs when it fires — a switch inside the window lands on disk
-    /// instead of being overwritten by stale state. Changes inside the
-    /// window only mark dirty (no re-arm), which is the max-delay cap: a
-    /// constantly-changing title lands on disk at most 750 ms after the
-    /// spell starts instead of postponing the write forever. The write
-    /// itself runs off the UI thread, like the sessions write. Each armed
-    /// snapshot carries a monotonic generation, and the writer skips a
-    /// snapshot older than the last written — two saves finishing out of
-    /// order can never let the older state win.
-    pub(crate) fn schedule_tabs_write(&mut self, cx: &mut Context<Self>) {
-        if self.browser.tabs_save_pending {
-            return;
-        }
-        self.browser.tabs_save_pending = true;
-        self.browser.tabs_save_epoch += 1;
-        let epoch = self.browser.tabs_save_epoch;
-        let generation = tabs::next_tabs_generation();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(750))
-                .await;
-            let snapshot = this
-                .update(cx, |this, _| {
-                    if this.browser.tabs_save_epoch != epoch {
-                        return None;
-                    }
-                    this.browser.tabs_save_pending = false;
-                    Some(this.browser.tabs.clone())
-                })
-                .unwrap_or(None);
-            let Some(snapshot) = snapshot else {
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    tabs::write_tabs_snapshot_generation(generation, &snapshot);
-                })
-                .await;
-        })
-        .detach();
+    /// Queue `tabs.json` behind a tab change: the tabs store's delayed
+    /// save (750 ms), so a spell of changes — a title that keeps changing,
+    /// a burst of opens — coalesces into one write off the UI thread, the
+    /// newest snapshot wins, and a constant stream still lands within the
+    /// delay of its first change ([`crate::store::JsonStore`]).
+    pub(crate) fn schedule_tabs_write(&mut self, _cx: &mut Context<Self>) {
+        tabs::save_soon(&self.browser.tabs);
     }
 
     /// Land the tabs durably, synchronously: the quit and window-close
-    /// durability point, next to the layout/sessions flushes. Writes the
-    /// CURRENT model under a generation newer than any armed snapshot —
-    /// a save still in flight can never land after this and win — then
-    /// cancels the armed debounce, whose snapshot is stale by definition.
-    /// A no-op when the tabs never loaded, so a quit that never touched
-    /// the browser still writes nothing; otherwise the in-memory-only
-    /// `last_shown` stamps land here at the latest.
+    /// durability point, next to the session stores' flush. Writes the
+    /// CURRENT model, superseding anything queued. A no-op when the tabs
+    /// never loaded, so a quit that never touched the browser writes
+    /// nothing; otherwise the in-memory-only `last_shown` stamps land here
+    /// at the latest.
     pub(crate) fn flush_tabs_save(&mut self) {
-        self.browser.tabs_save_epoch += 1;
-        self.browser.tabs_save_pending = false;
         if !self.browser.tabs_loaded {
             return;
         }
-        let generation = tabs::next_tabs_generation();
-        tabs::write_tabs_snapshot_generation(generation, &self.browser.tabs);
+        tabs::write(&self.browser.tabs);
     }
 
     /// The webview for `key`, creating it on first use. `key` names an
@@ -4580,10 +4539,6 @@ pub(crate) struct BrowserRegistry {
     /// registry is built before `sessions.json` is read, so the first
     /// browser use loads.
     pub tabs_loaded: bool,
-    /// The debounced `tabs.json` write's generation; only the latest fires.
-    pub tabs_save_epoch: u64,
-    /// Whether a `tabs.json` write is armed.
-    pub tabs_save_pending: bool,
     /// The tab the agent tools act on per session key, so discard never
     /// drops the agent's active tab and switches re-register it.
     pub agent_tabs: HashMap<String, TabId>,
@@ -4731,8 +4686,6 @@ impl BrowserRegistry {
             shot_pending: HashSet::new(),
             tabs: Tabs::default(),
             tabs_loaded: false,
-            tabs_save_epoch: 0,
-            tabs_save_pending: false,
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
             progress_hole: Default::default(),

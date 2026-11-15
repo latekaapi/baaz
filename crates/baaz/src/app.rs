@@ -506,7 +506,7 @@ pub fn set_menus(cx: &mut App) {
                                 .downcast::<Harness>()
                                 .map(|harness| {
                                     harness.update(cx, |this, _| {
-                                        this.flush_right_save();
+                                        this.flush_stores();
                                         this.flush_tabs_save();
                                         this.persist_layout();
                                     })
@@ -927,22 +927,6 @@ pub struct Harness {
     /// Whether the window's traffic lights are hidden now (closed sidebar,
     /// no peek), so the native call runs only on a change.
     pub(crate) lights_hidden: bool,
-    /// Generation of the debounced right-pane `sessions.json` write (B7):
-    /// every cheap right-state persist bumps it and arms a delayed
-    /// off-thread write; only the latest generation writes, so quick
-    /// toggles coalesce into one. Never persists.
-    pub(crate) right_save_epoch: u64,
-    /// Whether a cheap right-pane persist still owes its debounced disk
-    /// write (B7fix): set when the write is armed, cleared when it lands
-    /// or when [`Self::flush_right_save`] lands it early on session switch.
-    pub(crate) right_save_pending: bool,
-    /// Override writes snapshotted by `settle_overrides` and not yet on
-    /// disk; while any is, the quit flush writes synchronously.
-    pub(crate) overrides_writes_in_flight: usize,
-    /// `provider-sessions.json` writes still on the background executor
-    /// ([`Self::persist_provider_sessions`]): the quit flush writes the
-    /// store synchronously while any is out.
-    pub(crate) provider_sessions_writes_in_flight: usize,
     /// The last right-pane snapshot landed, hashed: an identical refresh
     /// skips the redraw.
     pub(crate) right_snapshot_print: Option<u64>,
@@ -1752,10 +1736,6 @@ impl Harness {
             pending_pr_body: None,
             peek_pinned: false,
             lights_hidden: false,
-            right_save_epoch: 0,
-            right_save_pending: false,
-            overrides_writes_in_flight: 0,
-            provider_sessions_writes_in_flight: 0,
             right_snapshot_print: None,
             right_watch: None,
             right_refresh_again: false,
@@ -2941,63 +2921,25 @@ impl Harness {
         self.schedule_overrides_write(cx);
     }
 
-    /// Arm the debounced off-thread `sessions.json` write behind the cheap
-    /// right-pane persists. Only the latest generation writes, so a burst
-    /// of toggles, expansions and navigations coalesces into one write —
-    /// and a toggle never blocks its own animation frame on the store.
-    /// Newest wins (B7fix2): the write serialises the CURRENT overrides at
-    /// fire time, never an armed snapshot — a rename, pin or archive that
-    /// lands inside the window is on disk, not overwritten by stale state.
-    /// Arming clones nothing: Files expand/select/navigation only bump the
-    /// generation, and the single surviving write clones once.
-    pub(crate) fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
-        self.right_save_epoch += 1;
-        self.right_save_pending = true;
-        let epoch = self.right_save_epoch;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(750)).await;
-            let snapshot = this
-                .update(cx, |this, _| {
-                    if this.right_save_epoch != epoch {
-                        return None;
-                    }
-                    this.right_save_pending = false;
-                    Some(this.overrides.clone())
-                })
-                .unwrap_or(None);
-            let Some(snapshot) = snapshot else {
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    crate::sessions::write(&snapshot);
-                })
-                .await;
-        })
-        .detach();
+    /// The cheap right-pane persists' write: a snapshot queued on the
+    /// sessions store after its delay, so a burst of toggles, expansions and
+    /// navigations coalesces into one write and a toggle never blocks its
+    /// own animation frame on the disk. Newest wins: a rename, pin or
+    /// archive saved inside the window replaces this snapshot
+    /// ([`crate::store::JsonStore`]).
+    pub(crate) fn schedule_overrides_write(&mut self, _cx: &mut Context<Self>) {
+        crate::sessions::save_soon(&self.overrides);
     }
 
-    /// Land a pending cheap right-pane write synchronously (B7fix): the
-    /// outgoing session's debounced state reaches `sessions.json` before the
-    /// incoming session's state loads in [`Self::restore_right_for_session`].
-    /// A bare `sessions::write` — no `rejoin`, no search rebuild, no notify —
-    /// and a no-op when nothing is pending, so plain opens write nothing.
-    /// The in-flight debounce is cancelled: the disk already leads it.
-    /// Also the quit and window-close durability point (B7fix2): `QuitApp`,
-    /// the red-dot close and the app-quit hook all land here, so up to
-    /// 750 ms of pane state never dies with the process.
-    pub(crate) fn flush_right_save(&mut self) {
-        // The provider records' background write rides the same
-        // durability point: a quit with one in flight lands it now.
-        if self.provider_sessions_writes_in_flight > 0 {
-            crate::provider_sessions::write(&self.provider_sessions);
-        }
-        if !self.right_save_pending && self.overrides_writes_in_flight == 0 {
-            return;
-        }
-        self.right_save_epoch += 1;
-        crate::sessions::write(&self.overrides);
-        self.right_save_pending = false;
+    /// Land every queued session-store write now (B7fix, B7fix2): on a
+    /// session switch, so the outgoing session's pane state is on disk
+    /// before the incoming one's is restored, and at quit and window
+    /// close (`QuitApp`, the red-dot close and the app-quit hook), so no
+    /// queued pane state or provider record dies with the process. Blocks
+    /// only while a write is queued; with nothing queued it returns at once.
+    pub(crate) fn flush_stores(&mut self) {
+        crate::provider_sessions::flush();
+        crate::sessions::flush();
     }
 
     /// Build the Browser webview outside `render` after an open action
@@ -3117,7 +3059,7 @@ impl Harness {
         // B7fix: the outgoing session's debounced pane state lands on disk
         // before the incoming session's loads — a switch is the durability
         // point the toggle gesture itself must not pay for.
-        self.flush_right_save();
+        self.flush_stores();
         let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
         if self.layout.right_open != open {
@@ -7981,9 +7923,9 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
         assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
-        let (right_open, terminal_open, overrides, pending) = vc.update(|_, cx| {
+        let (right_open, terminal_open, overrides) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone(), h.right_save_pending)
+            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone())
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
@@ -7997,7 +7939,6 @@ mod tests {
             assert_eq!(h.layout.right_open, right_open, "toggle_right changed hidden state");
             assert_eq!(h.layout.terminal_open, terminal_open, "a dock command changed hidden state");
             assert!(h.overrides == overrides, "a per-session pane record was written");
-            assert_eq!(h.right_save_pending, pending, "a pane write was armed");
             assert!(h.settings_page.open, "a guarded command closed Settings");
         });
         // The matching palette action is ignored the same way: it neither
@@ -8162,8 +8103,8 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         Harness::reset_search_rebuild_count();
         assert!(
-            !crate::sessions::path().exists(),
-            "the hermetic store starts with no sessions.json"
+            !crate::sessions::stored(),
+            "the hermetic store starts with no session files"
         );
         // Open on Browser: the webview is prepared on the toggle, before
         // any frame — never as a render side effect.
@@ -8178,7 +8119,7 @@ mod tests {
             "opening the pane must not rebuild the search index"
         );
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "opening the pane must not synchronously write sessions.json"
         );
         // The in-memory state still lands at once: the cheap path defers
@@ -8201,7 +8142,7 @@ mod tests {
             "closing the pane must not rebuild the search index"
         );
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "closing the pane must not synchronously write sessions.json"
         );
         restore_state(state);
@@ -8222,13 +8163,14 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "the toggle itself still writes nothing synchronously"
         );
-        // Past the 750 ms debounce: the test clock jumps it (the harness
-        // clock is virtual — wall-clock sleeping never fires the timer),
-        // then the executors settle and the off-thread write lands.
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(850));
+        // Past the store's 750 ms delay (real time: the store's writer is
+        // a thread, not the test executor), then whatever is still queued
+        // lands.
+        std::thread::sleep(std::time::Duration::from_millis(850));
+        crate::sessions::flush();
         let mut disk = crate::sessions::read();
         for _ in 0..10 {
             if disk.get("s-1").and_then(|meta| meta.right.clone()).is_some() {
@@ -9251,9 +9193,11 @@ mod tests {
                 h.set_override("s-1", |meta| meta.name = Some("Renamed".to_owned()), cx)
             })
         });
-        // Past the 750 ms debounce: settle the executors the way the
-        // persist test does, so the (cancelled) debounce runs its course.
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(850));
+        // Past the store's 750 ms delay (real time: the store's writer is
+        // a thread, not the test executor), then whatever is still queued
+        // lands.
+        std::thread::sleep(std::time::Duration::from_millis(850));
+        crate::sessions::flush();
         for _ in 0..10 {
             vc.run_until_parked();
         }
@@ -9272,7 +9216,7 @@ mod tests {
 
     /// B7fix2: quitting flushes the pending pane save. The toggle arms the
     /// debounced write and stores nothing synchronously; the quit and
-    /// window-close paths land it through `flush_right_save`, so the pane
+    /// window-close paths land it through `flush_stores`, so the pane
     /// survives a Cmd-Q inside the 750 ms window.
     #[gpui::test]
     fn quit_flushes_the_pending_pane_save(cx: &mut gpui::TestAppContext) {
@@ -9285,15 +9229,11 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "the toggle itself still writes nothing synchronously"
         );
         // What `QuitApp`, the red-dot close and the app-quit hook call.
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.flush_right_save()));
-        assert!(
-            !vc.update(|_, cx| baaz.read(cx).right_save_pending),
-            "the flush clears the pending write"
-        );
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.flush_stores()));
         assert_eq!(
             crate::sessions::read().get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {

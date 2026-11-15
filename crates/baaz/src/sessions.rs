@@ -155,85 +155,132 @@ pub struct SessionMeta {
     pub right: Option<RightState>,
 }
 
-impl SessionMeta {
-    /// Whether this entry still says anything, which is what decides if it is
-    /// worth keeping in the file.
-    fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && !self.hidden
-            && self.derived_title.is_none()
-            && self.generated_title.is_none()
-            && !self.title_attempted
-            && !self.side_session
-            && !self.browser_chat
-            && !self.pinned
-            && !self.archived
-            && self.last_summary.is_none()
-            && self.last_ask.is_none()
-            && self.last_error.is_none()
-            && self.project.is_none()
-            && self.handoff_to.is_none()
-            && self.handoff_from.is_none()
-            && self.handoff_from_provider.is_none()
-            && self.handoff_title.is_none()
-            && self.right.is_none()
-    }
-}
-
 /// Every override this window knows, keyed by session id.
 pub type Overrides = HashMap<String, SessionMeta>;
 
-/// `~/Library/Application Support/baaz/sessions.json`.
-pub fn path() -> PathBuf {
-    crate::store::support_dir().join("sessions.json")
-}
+/// The person's own facts about each session — name, hidden, pinned,
+/// archived, project, chain links — in `session-meta.json`; everything
+/// that can be regenerated — titles, byline, last error, pane state — in
+/// `session-cache.json` (docs/82 1.7, docs/81 A F11). Before the split one
+/// `sessions.json` held both and was rewritten whole (about 110 KB) after
+/// every finished turn and every pane navigation, which exposed the part
+/// that cannot be regenerated to every one of those writes.
+const FACT_FIELDS: &[&str] = &[
+    "name",
+    "hidden",
+    "sideSession",
+    "browserChat",
+    "pinned",
+    "archived",
+    "project",
+    "handoffTo",
+    "handoffFrom",
+    "handoffFromProvider",
+    "handoffTitle",
+];
 
-/// Read the store, entry by entry ([`crate::store::read_json_map`]).
-/// Blocking; call it off the UI thread.
-pub fn read() -> Overrides {
-    crate::store::read_json_map(&path())
-}
+static FACTS: crate::store::JsonStore<Overrides> =
+    crate::store::JsonStore::new("session-meta.json").with_encoding(encode_facts);
+static CACHE: crate::store::JsonStore<Overrides> =
+    crate::store::JsonStore::new("session-cache.json").with_encoding(encode_cache);
 
-/// Write the store, atomically, dropping entries that no longer say anything.
-///
-/// A store that cannot be written raises one toast ([`crate::store`]); the
-/// file on disk stays the previous one.
-pub fn write(overrides: &Overrides) {
-    write_ordered(next_write_generation(), overrides);
-}
+/// The file that held both halves before the split: read once when the
+/// split files do not exist yet, and left on disk as it was.
+const LEGACY: &str = "sessions.json";
 
-/// Every write's place in line: taken on the UI thread when the state is
-/// snapshotted, so a write landing late on a background thread can be
-/// recognised as older than one already on disk.
-static WRITE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// The newest generation on disk; held while writing, so writes are one at
-/// a time.
-static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-
-/// The next write generation (see [`write_ordered`]).
-pub fn next_write_generation() -> u64 {
-    WRITE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
-}
-
-/// Write `overrides` unless a newer generation already reached the disk.
-///
-/// What lets an override edit write off the UI thread: two quick edits may
-/// finish their background writes in either order, and the older one is
-/// then skipped instead of landing stale state over the newer.
-pub fn write_ordered(generation: u64, overrides: &Overrides) {
-    let Ok(mut written) = WRITTEN.lock() else { return };
-    if generation <= *written {
-        return;
-    }
-    let kept: Overrides =
-        overrides.iter().filter(|(_, meta)| !meta.is_empty()).map(|(k, v)| (k.clone(), v.clone())).collect();
-    // A failed write is reported by the store and leaves the generation
-    // where it was, so the next edit writes again (docs/81 A F9).
-    if let Ok(text) = serde_json::to_vec_pretty(&kept) {
-        if crate::store::write_authored(&path(), &text).is_ok() {
-            *written = generation;
+/// The entries' fields `keep` names, as JSON; entries that say nothing are
+/// dropped.
+fn project(overrides: &Overrides, keep: impl Fn(&str) -> bool) -> Option<Vec<u8>> {
+    let mut out = serde_json::Map::new();
+    for (id, meta) in overrides {
+        let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else { continue };
+        let kept: serde_json::Map<String, serde_json::Value> =
+            fields.into_iter().filter(|(key, value)| keep(key) && !value.is_null()).collect();
+        if !kept.is_empty() {
+            out.insert(id.clone(), serde_json::Value::Object(kept));
         }
     }
+    serde_json::to_vec_pretty(&out).ok()
+}
+
+fn encode_facts(overrides: &Overrides) -> Option<Vec<u8>> {
+    project(overrides, |key| FACT_FIELDS.contains(&key))
+}
+
+fn encode_cache(overrides: &Overrides) -> Option<Vec<u8>> {
+    project(overrides, |key| !FACT_FIELDS.contains(&key))
+}
+
+/// Both halves' paths, facts first.
+pub fn paths() -> [PathBuf; 2] {
+    [FACTS.path(), CACHE.path()]
+}
+
+/// Whether either half is on disk.
+pub fn stored() -> bool {
+    paths().iter().any(|path| path.exists())
+}
+
+/// Read the store: both halves merged entry by entry, each entry lenient
+/// ([`crate::store::read_json_map`]). With neither half on disk, the
+/// pre-split `sessions.json` is read instead. Blocking; call it off the UI
+/// thread.
+pub fn read() -> Overrides {
+    if !stored() {
+        let legacy = crate::store::support_dir().join(LEGACY);
+        if legacy.exists() {
+            return crate::store::read_json_map(&legacy);
+        }
+        return Overrides::new();
+    }
+    let mut merged: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
+    for path in paths() {
+        let half: HashMap<String, serde_json::Value> = crate::store::read_json_map(&path);
+        for (id, value) in half {
+            if let serde_json::Value::Object(fields) = value {
+                merged.entry(id).or_default().extend(fields);
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .filter_map(|(id, fields)| {
+            match serde_json::from_value::<SessionMeta>(serde_json::Value::Object(fields)) {
+                Ok(meta) => Some((id, meta)),
+                Err(error) => {
+                    crate::baaz_log!("store: session {id:?} does not parse ({error}); dropped");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Write both halves now, in order with every queued save. Blocking; the
+/// quit flush and tests. A failed write is reported by the store and the
+/// file on disk stays the previous one.
+pub fn write(overrides: &Overrides) {
+    let _ = FACTS.write_now(overrides);
+    let _ = CACHE.write_now(overrides);
+}
+
+/// Queue both halves for the store's writer thread: the snapshot is taken
+/// now, so a later edit always wins (docs/81 A F10).
+pub fn save(overrides: &Overrides) {
+    FACTS.save(overrides.clone());
+    CACHE.save(overrides.clone());
+}
+
+/// [`save`] after the store's delay, coalescing a burst of pane changes
+/// into one write. Only the cache half changes in such a burst.
+pub fn save_soon(overrides: &Overrides) {
+    CACHE.save_soon(overrides.clone());
+}
+
+/// Land every queued write (quit, window close).
+pub fn flush() {
+    FACTS.flush();
+    CACHE.flush();
 }
 
 /// A `userShell` command turned into a row's title (finding F10).
@@ -285,24 +332,77 @@ pub fn first_user_title(submissions: &[&str], turns: &[aui_protocol::Turn]) -> O
 mod tests {
     use super::*;
 
+    fn written(encode: fn(&Overrides) -> Option<Vec<u8>>, overrides: &Overrides) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_slice(&encode(overrides).expect("encodes")).expect("an object")
+    }
+
     #[test]
     fn an_entry_that_says_nothing_is_not_written() {
         let mut overrides = Overrides::new();
         overrides.insert("empty".into(), SessionMeta::default());
         overrides.insert("named".into(), SessionMeta { name: Some("x".into()), ..SessionMeta::default() });
-        let kept: Vec<&String> = overrides.iter().filter(|(_, m)| !m.is_empty()).map(|(k, _)| k).collect();
-        assert_eq!(kept, vec!["named"]);
+        let facts = written(encode_facts, &overrides);
+        assert_eq!(facts.keys().collect::<Vec<_>>(), vec!["named"]);
+        assert!(written(encode_cache, &overrides).is_empty(), "a name is not cache");
     }
 
+    /// docs/82 1.7: the person's facts and the regenerable cache go to
+    /// different files, and reading them back merges them.
     #[test]
-    fn pin_archive_and_summary_all_keep_their_entry() {
-        for meta in [
-            SessionMeta { pinned: true, ..SessionMeta::default() },
-            SessionMeta { archived: true, ..SessionMeta::default() },
-            SessionMeta { last_summary: Some("did a thing".into()), ..SessionMeta::default() },
-        ] {
-            assert!(!meta.is_empty());
+    fn facts_and_cache_split_and_merge_back() {
+        let _guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        let dir = std::env::temp_dir().join(format!("baaz-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        let mut overrides = Overrides::new();
+        overrides.insert(
+            "a".into(),
+            SessionMeta {
+                name: Some("Kept".into()),
+                pinned: true,
+                last_summary: Some("did a thing".into()),
+                ..SessionMeta::default()
+            },
+        );
+        overrides.insert("b".into(), SessionMeta { archived: true, ..SessionMeta::default() });
+        let facts = written(encode_facts, &overrides);
+        let cache = written(encode_cache, &overrides);
+        assert!(facts["a"].get("lastSummary").is_none() && cache["a"].get("name").is_none());
+        assert_eq!(facts["b"]["archived"], serde_json::Value::Bool(true));
+        assert!(cache.get("b").is_none());
+        write(&overrides);
+        assert!(paths().iter().all(|path| path.exists()));
+        assert_eq!(read(), overrides);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store from before the split is read once, and left where it was.
+    #[test]
+    fn a_pre_split_file_is_read_and_kept() {
+        let _guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        let dir = std::env::temp_dir().join(format!("baaz-presplit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        let legacy = dir.join("sessions.json");
+        std::fs::write(&legacy, r#"{"a":{"name":"Old","lastSummary":"s"}}"#).unwrap();
+        let back = read();
+        assert_eq!(back["a"].name.as_deref(), Some("Old"));
+        assert_eq!(back["a"].last_summary.as_deref(), Some("s"));
+        write(&back);
+        assert_eq!(read(), back, "the split files read the same");
+        assert!(legacy.exists(), "the old file is never deleted");
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -339,7 +439,7 @@ mod tests {
             }),
             ..SessionMeta::default()
         };
-        assert!(!meta.is_empty(), "a stored pane keeps its entry");
+        assert!(written(encode_cache, &Overrides::from([("s".to_owned(), meta.clone())])).contains_key("s"), "a stored pane keeps its entry");
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains("\"right\":{"));
         assert!(text.contains("\"open\":true"));
@@ -353,7 +453,6 @@ mod tests {
         // Old files without the pane still read, showing the pane closed.
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
         assert!(old.right.is_none());
-        assert!(SessionMeta::default().is_empty());
     }
 
     /// docs/81 A F8: an entry a newer build wrote with a pane kind this

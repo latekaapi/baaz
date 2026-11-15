@@ -103,7 +103,20 @@ pub type ProviderSessionStore = HashMap<String, ProviderSessionRecord>;
 
 /// `~/Library/Application Support/baaz/provider-sessions.json`.
 pub fn path() -> PathBuf {
-    crate::store::support_dir().join("provider-sessions.json")
+    STORE.path()
+}
+
+/// The records' one writer ([`crate::store::JsonStore`]). A deterministic
+/// capture never writes: its sessions are scripted, and they must not land
+/// in the owner's store.
+static STORE: crate::store::JsonStore<ProviderSessionStore> =
+    crate::store::JsonStore::new("provider-sessions.json").with_encoding(encode);
+
+fn encode(store: &ProviderSessionStore) -> Option<Vec<u8>> {
+    if deterministic() {
+        return None;
+    }
+    serde_json::to_vec_pretty(store).ok()
 }
 
 /// Read the store. Blocking; call it off the UI thread.
@@ -127,50 +140,21 @@ fn deterministic() -> bool {
     std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
-/// Write the store, atomically, now. Like [`crate::sessions::write`], a
-/// failed write is reported and the file on disk stays the previous one. The window writes through
-/// [`write_ordered`] off the UI thread instead; this is the synchronous
-/// form (the quit flush, a view's own display-text write, tests), and it
-/// takes its place in the same generation line.
-///
-/// A deterministic capture never writes: its sessions are scripted, and they
-/// must not land in the owner's store.
+/// Write the records now, in order with every queued save. Blocking: the
+/// quit flush, a view's own display-text write, tests. A failed write is
+/// reported and the file on disk stays the previous one.
 pub fn write(store: &ProviderSessionStore) {
-    write_ordered(next_write_generation(), store);
+    let _ = STORE.write_now(store);
 }
 
-/// Every write's place in line, taken on the UI thread when the store is
-/// snapshotted: a write landing late on a background thread is recognised
-/// as older than one already on disk (the `sessions.json` writer's rule,
-/// docs/51 #10).
-static WRITE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// The newest generation on disk; held while writing, so writes are one at
-/// a time.
-static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-
-/// The next write generation (see [`write_ordered`]).
-pub fn next_write_generation() -> u64 {
-    WRITE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+/// Queue the records for the store's writer thread (the window's path).
+pub fn save(store: &ProviderSessionStore) {
+    STORE.save(store.clone());
 }
 
-/// Write `store` unless a newer generation already reached the disk: what
-/// lets the window write off the UI thread, where two quick writes may
-/// finish in either order — the older one is skipped instead of landing
-/// stale records over the newer.
-pub fn write_ordered(generation: u64, store: &ProviderSessionStore) {
-    if deterministic() {
-        return;
-    }
-    let Ok(mut written) = WRITTEN.lock() else { return };
-    if generation <= *written {
-        return;
-    }
-    // A failed write is reported and leaves the generation where it was.
-    if let Ok(text) = serde_json::to_vec_pretty(store) {
-        if crate::store::write_authored(&path(), &text).is_ok() {
-            *written = generation;
-        }
-    }
+/// Land every queued write (quit, window close).
+pub fn flush() {
+    STORE.flush();
 }
 
 /// Insert or refresh the record of a session a provider lists itself (a

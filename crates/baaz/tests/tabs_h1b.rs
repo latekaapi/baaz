@@ -31,47 +31,20 @@ fn quit_flushes_a_pending_tabs_write_in_both_quit_paths() {
     }
 }
 
-/// The debounced write leaves the UI thread (like the sessions write) and
-/// arms only one window per dirty spell, so a constantly-changing title
-/// cannot postpone the write forever. Every snapshot carries a monotonic
-/// generation and the writer drops stale ones, so two saves finishing out
-/// of order can never let the older state win — and the quit flush lands
-/// the current model synchronously under a newer generation, never a
-/// no-op while a save is in flight.
+/// The debounced write leaves the UI thread through the tabs store's one
+/// writer (docs/82 1.7): `save_soon` queues a snapshot that waits the
+/// store's delay, a newer one replaces it while keeping the first due time
+/// (the max-delay cap), and the quit flush writes the current model
+/// synchronously, superseding anything queued. The ordering and the cap
+/// themselves are tested on the store (`store::tests`).
 #[test]
 fn the_debounced_tabs_write_leaves_the_ui_thread_with_a_cap() {
     let body = source("browser/mod.rs");
-    assert!(
-        body.contains(
-            "cx.background_executor()\n                .spawn(async move {\n                    tabs::write_tabs_snapshot_generation(generation, &snapshot);"
-        ),
-        "the tabs snapshot saves off the UI thread, generation-ordered"
-    );
-    assert!(
-        body.contains("if self.browser.tabs_save_pending {\n            return;"),
-        "one armed window per dirty spell: the max-delay cap"
-    );
-    assert!(
-        body.contains("fn flush_tabs_save"),
-        "a synchronous quit-time flush exists"
-    );
-    assert!(
-        body.contains("write_tabs_snapshot_generation(generation, &self.browser.tabs);"),
-        "the quit flush writes the current model synchronously under a newer generation"
-    );
-    assert!(
-        !body.contains("if !self.browser.tabs_save_pending {\n            return;"),
-        "the quit flush is never a no-op while a save is in flight"
-    );
+    assert!(body.contains("tabs::save_soon(&self.browser.tabs);"), "the tab change queues a delayed save");
+    assert!(body.contains("fn flush_tabs_save"), "a synchronous quit-time flush exists");
+    assert!(body.contains("tabs::write(&self.browser.tabs);"), "the quit flush writes the current model now");
     let tabs = source("browser/tabs.rs");
-    assert!(
-        tabs.contains("static TABS_LAST_WRITTEN: Mutex<u64>"),
-        "one lock serialises racing snapshots"
-    );
-    assert!(
-        tabs.contains("if generation <= *last {\n        return false;"),
-        "a snapshot older than the last written is skipped"
-    );
+    assert!(tabs.contains("JsonStore::new(\"Browser/tabs.json\")"), "tabs.json has one writer");
 }
 
 /// Closing the last tab unregisters the agent tools, and discarding a
@@ -166,7 +139,7 @@ fn deterministic_captures_never_touch_tabs_json() {
         "deterministic loads read nothing"
     );
     assert!(
-        tabs.contains("if deterministic() {\n        return false;"),
+        tabs.contains("if deterministic() {\n        return None;"),
         "deterministic saves write nothing"
     );
 }

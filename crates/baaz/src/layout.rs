@@ -483,9 +483,16 @@ impl Default for Layout {
     }
 }
 
-/// `~/Library/Application Support/baaz/layout.json`.
-pub fn path() -> PathBuf {
-    crate::store::support_dir().join("layout.json")
+/// The layout's one writer ([`crate::store::JsonStore`]); a deterministic
+/// capture writes nothing (see [`write`]).
+static STORE: crate::store::JsonStore<Layout> =
+    crate::store::JsonStore::new("layout.json").with_encoding(encode);
+
+fn encode(layout: &Layout) -> Option<Vec<u8>> {
+    if crate::clock::deterministic() {
+        return None;
+    }
+    serde_json::to_vec_pretty(layout).ok()
 }
 
 /// Read the store. Blocking; call it off the UI thread.
@@ -501,7 +508,7 @@ pub fn read() -> Layout {
     if crate::clock::deterministic() {
         return Layout::default();
     }
-    crate::store::read_json(&path())
+    STORE.read()
 }
 
 /// Write the store, atomically.
@@ -510,12 +517,7 @@ pub fn read() -> Layout {
 /// capture writes nothing at all: like [`read`], the owner's file must
 /// never gain a capture's widths or modes.
 pub fn write(layout: &Layout) {
-    if crate::clock::deterministic() {
-        return;
-    }
-    if let Ok(text) = serde_json::to_vec_pretty(layout) {
-        let _ = crate::store::write_authored(&path(), &text);
-    }
+    let _ = STORE.write_now(layout);
 }
 
 /// The width the shell should open at: the stored one, clamped into the

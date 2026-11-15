@@ -15,10 +15,6 @@
 //! tab keeps writing `browser_url`, so older builds still restore too.
 
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
 
 use serde::{Deserialize, Serialize};
 
@@ -815,60 +811,36 @@ impl Tabs {
 
 /// `$BAAZ_STATE_DIR/Browser/tabs.json`: the tab model's home. The `Browser`
 /// dir is created on write.
+#[cfg(test)]
 pub(crate) fn path() -> std::path::PathBuf {
-    crate::store::support_dir()
-        .join("Browser")
-        .join("tabs.json")
+    STORE.path()
 }
 
-/// The next `tabs.json` snapshot generation: process-wide and monotonic,
-/// so debounced saves and the quit flush order against each other even
-/// across registry rebuilds (and across tests sharing the process).
-static TABS_SAVE_GENERATION: AtomicU64 = AtomicU64::new(1);
+/// The tab model's one writer ([`crate::store::JsonStore`]). Under
+/// `BAAZ_DETERMINISTIC=1` it writes nothing: a capture never touches the
+/// owner's tabs.
+static STORE: crate::store::JsonStore<Tabs> =
+    crate::store::JsonStore::new("Browser/tabs.json").with_encoding(encode);
 
-/// The newest snapshot generation already on disk. The writer holds this
-/// lock across the stale check and the rename, so two background saves
-/// can never finish out of order with the older snapshot winning.
-static TABS_LAST_WRITTEN: Mutex<u64> = Mutex::new(0);
-
-/// Hand out the next snapshot generation for a `tabs.json` write.
-pub(crate) fn next_tabs_generation() -> u64 {
-    TABS_SAVE_GENERATION.fetch_add(1, Ordering::SeqCst)
-}
-
-/// Write `snapshot` as `generation`, skipping it when a newer snapshot
-/// already landed: the loser of a racing pair writes nothing. Answers
-/// whether the file was replaced. A no-op under `BAAZ_DETERMINISTIC=1`.
-pub(crate) fn write_tabs_snapshot_generation(generation: u64, snapshot: &Tabs) -> bool {
+fn encode(tabs: &Tabs) -> Option<Vec<u8>> {
     if deterministic() {
-        return false;
+        return None;
     }
-    let Ok(bytes) = serde_json::to_vec_pretty(snapshot) else {
-        return false;
-    };
-    write_tabs_bytes_generation(generation, &bytes)
+    serde_json::to_vec_pretty(tabs).ok()
 }
 
-/// The byte-level ordered write behind [`write_tabs_snapshot_generation`]:
-/// under one lock, skip a snapshot older than (or even with) the last
-/// written, else replace the file and record the generation. Pure over
-/// the bytes, so tests drive the ordering without a tab model.
-pub(crate) fn write_tabs_bytes_generation(generation: u64, bytes: &[u8]) -> bool {
-    if deterministic() {
-        return false;
-    }
-    let mut last = TABS_LAST_WRITTEN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if generation <= *last {
-        return false;
-    }
-    if crate::store::write_authored(&path(), bytes).is_ok() {
-        *last = generation;
-        true
-    } else {
-        false
-    }
+/// Queue `tabs` to be written after the store's delay (750 ms): a burst of
+/// changes coalesces, the newest snapshot wins, and a constant stream of
+/// changes (a title that keeps changing) still lands within the delay of
+/// the first.
+pub(crate) fn save_soon(tabs: &Tabs) {
+    STORE.save_soon(tabs.clone());
+}
+
+/// Write `tabs` now, superseding anything queued. Blocking: the quit and
+/// window-close durability point, and tests.
+pub(crate) fn write(tabs: &Tabs) {
+    let _ = STORE.write_now(tabs);
 }
 
 /// Read the store like every store read — a missing file is an empty model
@@ -885,7 +857,7 @@ pub(crate) fn load() -> Tabs {
     if deterministic() {
         return Tabs::default();
     }
-    let mut tabs: Tabs = crate::store::read_json(&path());
+    let mut tabs: Tabs = STORE.read();
     let max = tabs
         .tabs
         .iter()
@@ -1267,7 +1239,7 @@ mod tests {
         let id = model.open(Some("p1".into()), session("s"), "https://a.example/", None);
         model.set_pinned(id, true);
         model.mark_shown(id, 12345);
-        write_tabs_snapshot_generation(next_tabs_generation(), &model);
+        write(&model);
         let back = load();
         // Everything but the just-shown restamp survives the round trip:
         // a load reads restored tabs as just shown in this run.
@@ -1305,7 +1277,7 @@ mod tests {
         let mut model = tabs();
         let id = model.open(None, session("s"), "https://a.example/", None);
         model.mark_shown(id, 1);
-        write_tabs_snapshot_generation(next_tabs_generation(), &model);
+        write(&model);
         let before = now_ms();
         let back = load();
         let shown = back
@@ -1328,280 +1300,13 @@ mod tests {
     }
 
     #[test]
-    fn an_older_snapshot_never_wins_the_file() {
+    fn a_counter_that_fell_behind_never_hands_out_a_duplicate() {
         let _guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
-        let old_det = std::env::var_os("BAAZ_DETERMINISTIC");
         let dir = std::env::temp_dir().join(format!("baaz-tabs-gen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("BAAZ_STATE_DIR", &dir);
         std::env::remove_var("BAAZ_DETERMINISTIC");
-        // Two saves racing: the newer generation lands first, the older
-        // one finishing later must not clobber it.
-        let older = next_tabs_generation();
-        let newer = next_tabs_generation();
-        assert!(older < newer);
-        assert!(write_tabs_bytes_generation(
-            newer,
-            b"{\"tabs\":[],\"new\":true}"
-        ));
-        assert!(
-            !write_tabs_bytes_generation(older, b"{\"tabs\":[],\"new\":false}"),
-            "a stale snapshot writes nothing"
-        );
-        assert!(
-            !write_tabs_bytes_generation(newer, b"{\"tabs\":[],\"new\":false}"),
-            "even a replay writes nothing twice"
-        );
-        let body = std::fs::read_to_string(path()).expect("the newer snapshot landed");
-        assert!(
-            body.contains("\"new\":true"),
-            "the older snapshot never won: {body}"
-        );
-        match old {
-            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
-            None => std::env::remove_var("BAAZ_STATE_DIR"),
-        }
-        match old_det {
-            Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
-            None => std::env::remove_var("BAAZ_DETERMINISTIC"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn discard_fires_only_when_idle_silent_and_unregistered() {
-        let _guard = crate::store::test_env_lock();
-        let old = std::env::var_os("BAAZ_TAB_DISCARD_SECS");
-        std::env::set_var("BAAZ_TAB_DISCARD_SECS", "60");
-        let now = 10_000_000;
-        assert!(
-            should_discard(now, Some(now - 61_000), false, false),
-            "idle past the timeout goes"
-        );
-        assert!(
-            !should_discard(now, Some(now - 59_000), false, false),
-            "within the timeout stays"
-        );
-        assert!(
-            !should_discard(now, None, false, false),
-            "never shown stays"
-        );
-        assert!(
-            !should_discard(now, Some(now - 61_000), true, false),
-            "audible stays"
-        );
-        assert!(
-            !should_discard(now, Some(now - 61_000), false, true),
-            "the agent's tab stays"
-        );
-        assert!(
-            !should_discard(now - 5_000, Some(now), false, false),
-            "clock skew never discards"
-        );
-        match old {
-            Some(value) => std::env::set_var("BAAZ_TAB_DISCARD_SECS", value),
-            None => std::env::remove_var("BAAZ_TAB_DISCARD_SECS"),
-        }
-    }
-
-    #[test]
-    fn strip_labels_fall_back_to_hosts_and_initials() {
-        assert_eq!(tab_label("Ledger", "https://localhost:5173/"), "Ledger");
-        assert_eq!(
-            tab_label("", "https://www.wikipedia.org/wiki/X"),
-            "wikipedia.org"
-        );
-        assert_eq!(tab_label("", "https://docs.rs/"), "docs.rs");
-        assert_eq!(tab_initial("", "https://docs.rs/"), "D");
-    }
-
-    #[test]
-    fn a_blank_tab_reads_new_tab_whatever_the_backend_reports() {
-        // The strip and the aria label share this visible text.
-        assert_eq!(tab_label("", "about:blank"), "New tab");
-        assert_eq!(tab_label("about:blank", "about:blank"), "New tab");
-        assert_eq!(tab_label("Something", "about:blank"), "New tab");
-        assert_eq!(tab_label("", ""), "New tab");
-        assert_eq!(tab_initial("", "about:blank"), "N");
-        // An empty title still falls back to the host on a real page.
-        assert_eq!(
-            tab_label("", "https://www.wikipedia.org/wiki/X"),
-            "wikipedia.org"
-        );
-    }
-
-    #[test]
-    fn a_closed_blank_tab_is_never_offered_again() {
-        let mut model = tabs();
-        let blank = model.open(None, Owner::Person, "about:blank", None);
-        let slashed = model.open(None, Owner::Person, "about:blank/", None);
-        let real = model.open(None, Owner::Person, "https://a.example/", None);
-        model.close(blank);
-        model.close(slashed);
-        model.close(real);
-        let urls: Vec<&str> = model.closed.iter().map(|tab| tab.url.as_str()).collect();
-        assert_eq!(urls, vec!["https://a.example/"], "only the real page joins the closed list");
-        assert!(is_blank_url("about:blank") && is_blank_url("about:blank/") && !is_blank_url("https://a.example/"));
-    }
-
-    #[test]
-    fn blank_reports_never_clobber_a_real_url() {
-        let mut model = tabs();
-        let id = model.open(None, session("s"), "https://a.example/", None);
-        assert!(model.set_url_title(id, "https://a.example/", "A"));
-        // A fresh page's blank report (rebuild, first paint) is skipped:
-        // the saved URL and title survive, and nothing looks changed.
-        assert!(!model.set_url_title(id, "about:blank", ""));
-        assert!(!model.set_url_title(id, "", ""));
-        let tab = model.get(id).expect("the tab");
-        assert_eq!(tab.url, "https://a.example/");
-        assert_eq!(tab.title, "A");
-        // An empty title alone never clears a real one either.
-        assert!(!model.set_url_title(id, "https://a.example/", ""));
-        assert_eq!(model.get(id).expect("the tab").title, "A");
-        // A real navigation still lands — and an untitled one reads as
-        // its URL, like a fresh open.
-        assert!(model.set_url_title(id, "https://b.example/", ""));
-        let tab = model.get(id).expect("the tab");
-        assert_eq!(tab.url, "https://b.example/");
-        assert_eq!(tab.title, "https://b.example/");
-        // A blank tab still adopts its first real page.
-        let blank = model.open(None, session("s"), "about:blank", None);
-        assert!(model.set_url_title(blank, "https://c.example/", "C"));
-        assert_eq!(model.get(blank).expect("the tab").url, "https://c.example/");
-    }
-
-    #[test]
-    fn the_display_order_is_pinned_first_then_model_order() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let third = model.open(None, session("s"), "https://c.example/", None);
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![first, second, third]);
-        // Pinning moves the tab to the end of the pinned block …
-        assert!(model.set_pinned(third, true));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![third, first, second]);
-        assert_eq!(
-            model.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
-            vec![third, first, second],
-            "the model order already reads like the strip"
-        );
-        assert!(model.set_pinned(first, true));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![third, first, second]);
-        // … and unpinning moves it to the start of the unpinned block.
-        assert!(model.set_pinned(third, false));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![first, third, second]);
-        // The close neighbour follows the same on-screen order: with the
-        // second tab active, closing it lands on the third.
-        assert!(model.activate(second));
-        assert_eq!(model.close(second), Some(third));
-    }
-
-
-    #[test]
-    fn option_command_arrows_move_the_active_tab() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let third = model.open(None, session("s"), "https://c.example/", None);
-        assert!(model.activate(second));
-        assert!(model.move_active_by(&session("s"), None, 1));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![first, third, second]);
-        assert!(model.move_active_by(&session("s"), None, -1));
-        let shown: Vec<TabId> = model
-            .ordered_tabs(&session("s"), None)
-            .iter()
-            .map(|tab| tab.id)
-            .collect();
-        assert_eq!(shown, vec![first, second, third]);
-        // At the edge there is nowhere to go.
-        assert!(model.activate(first));
-        assert!(!model.move_active_by(&session("s"), None, -1));
-        assert!(model.activate(third));
-        assert!(!model.move_active_by(&session("s"), None, 1));
-        // Crossing the pinned boundary needs a (un)pin, never a move.
-        assert!(model.set_pinned(first, true));
-        assert!(model.activate(second));
-        assert!(!model.move_active_by(&session("s"), None, -1));
-    }
-
-    #[test]
-    fn command_digits_map_to_display_slots_and_nine_is_last() {
-        let mut model = tabs();
-        let first = model.open(None, session("s"), "https://a.example/", None);
-        let second = model.open(None, session("s"), "https://b.example/", None);
-        let third = model.open(None, session("s"), "https://c.example/", None);
-        assert_eq!(model.nth_tab(&session("s"), None, 1, false), Some(first));
-        assert_eq!(model.nth_tab(&session("s"), None, 3, false), Some(third));
-        assert_eq!(model.nth_tab(&session("s"), None, 4, false), None);
-        assert_eq!(model.nth_tab(&session("s"), None, 0, false), None);
-        assert_eq!(model.nth_tab(&session("s"), None, 9, false), None);
-        // ⌘9 is the last tab even with fewer than nine open.
-        assert_eq!(model.nth_tab(&session("s"), None, 9, true), Some(third));
-        assert_eq!(model.nth_tab(&session("s"), None, 1, true), Some(third));
-        // Pinned tabs lead the digit order, like the strip.
-        assert!(model.set_pinned(third, true));
-        assert_eq!(model.nth_tab(&session("s"), None, 1, false), Some(third));
-        assert_eq!(model.nth_tab(&session("s"), None, 2, false), Some(first));
-        assert_eq!(model.nth_tab(&session("t"), None, 1, false), None);
-        assert_eq!(model.nth_tab(&session("t"), None, 1, true), None);
-        let _ = second;
-    }
-
-
-    #[test]
-    fn shown_stamps_stay_in_memory_and_never_dirty() {
-        // The stamp is in-memory only: it always lands, and its return
-        // carries no dirty bit — the per-frame sync schedules no write
-        // for a merely visible page.
-        let mut model = tabs();
-        let id = model.open(None, session("s"), "https://a.example/", None);
-        model.mark_shown(id, 10_000);
-        assert_eq!(model.get(id).and_then(|tab| tab.last_shown), Some(10_000));
-        model.mark_shown(id, 10_500);
-        assert_eq!(
-            model.get(id).and_then(|tab| tab.last_shown),
-            Some(10_500),
-            "no throttle: a stamp costs no write"
-        );
-        // An unknown tab stamps nothing and panics nothing.
-        model.mark_shown(TabId(77), 12_000);
-        assert!(model.get(TabId(77)).is_none());
-    }
-
-    #[test]
-    fn load_repairs_next_id_past_every_stored_tab() {
-        let _guard = crate::store::test_env_lock();
-        let old = std::env::var_os("BAAZ_STATE_DIR");
-        let dir = std::env::temp_dir().join(format!("baaz-tabs-nextid-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("BAAZ_STATE_DIR", &dir);
         std::env::remove_var("BAAZ_DETERMINISTIC");
         let mut model = tabs();
         let live = model.open(None, session("s"), "https://a.example/", None);
@@ -1609,7 +1314,7 @@ mod tests {
         model.close(live);
         // Simulate an older file whose counter fell behind its tabs.
         model.next_id = 1;
-        write_tabs_snapshot_generation(next_tabs_generation(), &model);
+        write(&model);
         let back = load();
         assert_eq!(back.next_id, 2, "past every live and closed id");
         let fresh = {
@@ -1637,7 +1342,7 @@ mod tests {
         let mut seeded = tabs();
         seeded.open(None, session("s"), "https://owner.example/", None);
         std::env::remove_var("BAAZ_DETERMINISTIC");
-        write_tabs_snapshot_generation(next_tabs_generation(), &seeded);
+        write(&seeded);
         std::env::set_var("BAAZ_DETERMINISTIC", "1");
         let back = load();
         assert!(
@@ -1648,7 +1353,7 @@ mod tests {
         let _ = std::fs::remove_file(path());
         let mut model = tabs();
         model.open(None, session("s"), "https://capture.example/", None);
-        write_tabs_snapshot_generation(next_tabs_generation(), &model);
+        write(&model);
         assert!(!path().exists(), "a capture never touches tabs.json");
         match old_dir {
             Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),

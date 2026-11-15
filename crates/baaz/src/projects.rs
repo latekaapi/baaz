@@ -240,19 +240,28 @@ fn is_default_picks(picks: &ProjectDefaults) -> bool {
     *picks == ProjectDefaults::default()
 }
 
-/// `~/Library/Application Support/baaz/projects.json`.
-pub fn path() -> PathBuf {
-    crate::store::support_dir().join("projects.json")
+/// The adoptions' one writer ([`crate::store::JsonStore`]), with the
+/// version hook.
+static STORE: crate::store::JsonStore<Projects> =
+    crate::store::JsonStore::new("projects.json").with_migration(migrate);
+
+/// The version hook: a file older than [`VERSION`] is brought forward here
+/// before it is read. Files without the field (version 0) share version
+/// 1's layout, so today this only stamps the version; the next schema
+/// change adds its step here rather than in a scattered default.
+fn migrate(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(fields) = value.as_object_mut() {
+        let stored = fields.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        if stored < u64::from(VERSION) {
+            fields.insert("version".into(), VERSION.into());
+        }
+    }
+    value
 }
 
 /// Read the store. Blocking; call it off the UI thread.
 pub fn read() -> Projects {
-    read_at(&path())
-}
-
-/// [`read`] against an explicit path, which is what the tests use.
-pub fn read_at(path: &Path) -> Projects {
-    crate::store::read_json(path)
+    STORE.read()
 }
 
 /// Write the store, atomically.
@@ -260,14 +269,7 @@ pub fn read_at(path: &Path) -> Projects {
 /// A failed write is reported ([`crate::store::write_authored`]); the file
 /// on disk stays the previous one.
 pub fn write(projects: &Projects) {
-    write_at(&path(), projects);
-}
-
-/// [`write()`] against an explicit path, which is what the tests use.
-pub fn write_at(path: &Path, projects: &Projects) {
-    if let Ok(text) = serde_json::to_vec_pretty(projects) {
-        let _ = crate::store::write_authored(path, &text);
-    }
+    let _ = STORE.write_now(projects);
 }
 
 /// Now, as the store spells it: RFC3339 UTC to the second.
@@ -355,7 +357,7 @@ pub fn canonical_str(root: &str) -> String {
 /// keeps its default workspace inside that directory instead, so a
 /// disposable run never creates or writes in the real one.
 pub fn default_workspace() -> PathBuf {
-    if std::env::var_os("BAAZ_STATE_DIR").is_some() {
+    if crate::store::state_dir_override().is_some() {
         return crate::store::support_dir().join("workspace");
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -836,7 +838,7 @@ mod tests {
         projects.find(&id).expect("added");
         write(&projects);
         // The file names its fields the design's camelCase.
-        let text = std::fs::read_to_string(path()).expect("projects.json");
+        let text = std::fs::read_to_string(STORE.path()).expect("projects.json");
         assert!(text.contains("\"addedAt\""), "addedAt must be camelCase: {text}");
         assert!(text.contains("\"lastOpenedAt\""), "lastOpenedAt must be camelCase: {text}");
         assert!(!text.contains("modelId"), "an empty default writes no modelId: {text}");
@@ -1057,7 +1059,7 @@ mod tests {
         let dir = state_dir("corrupt");
         let (guard, old) = with_state_dir(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(path(), b"not json").expect("corrupt file");
+        std::fs::write(STORE.path(), b"not json").expect("corrupt file");
         let projects = read();
         assert!(projects.projects.is_empty());
         assert!(projects.current.is_none());
@@ -1249,14 +1251,14 @@ mod tests {
         let (guard, old) = with_state_dir(&dir);
         let (base, projects) = availability_store("availability-quiet-store");
         write(&projects);
-        let before = std::fs::read(path()).expect("projects.json");
+        let before = std::fs::read(STORE.path()).expect("projects.json");
         // Every read in the listing path, twice over for the cache.
         let _ = projects.sorted_available();
         let _ = projects.sorted_available();
         let _ = projects.resolve_available(None, Some("gone"));
         let _ = projects.most_recent_available();
         let _ = projects.effective_current();
-        assert_eq!(std::fs::read(path()).expect("projects.json"), before);
+        assert_eq!(std::fs::read(STORE.path()).expect("projects.json"), before);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&base);
         restore_state_dir(guard, old);

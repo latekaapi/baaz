@@ -760,7 +760,7 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
                                         .clone()
                                         .downcast::<crate::app::Harness>()
                                         .map(|harness| {
-                                            harness.update(cx, |this, _| this.flush_right_save())
+                                            harness.update(cx, |this, _| this.flush_stores())
                                         })
                                         .unwrap_or(())
                                 })
@@ -1004,7 +1004,7 @@ fn main() {
                                             // runs (a quit with a Peek open
                                             // SIGSEGV'd in shutdown, 11 Nov).
                                             this.close_peek(cx);
-                                            this.flush_right_save();
+                                            this.flush_stores();
                                             this.flush_tabs_save();
                                             this.persist_layout();
                                         })
