@@ -2182,10 +2182,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn shutdown(&mut self) {
-        if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
+        // Poison-tolerant: the child is hung up even when a panic left the
+        // lock poisoned (docs/81 B PM-3).
+        let mut child = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(running) = child.as_mut() {
             running.shutdown();
         }
-        *self.child.lock().expect("child mutex") = None;
+        *child = None;
     }
 }
 
@@ -4524,6 +4527,35 @@ mod tests {
         assert!(
             adapter.revive_launch("704fd676-d199-410c-a1d2-03bf3efd46d9").is_some(),
             "the next send resumes the session"
+        );
+    }
+
+    /// docs/81 B PM-3: a fold that panics on the pump ends the session like
+    /// a lost child — the open turn closes, ConnectionLost is reported —
+    /// instead of reading Working forever, and the poisoned lock is usable.
+    #[test]
+    fn a_panicking_fold_ends_the_session_cleanly() {
+        let (adapter, lines) = adapter_mid_turn();
+        let _ = drain_events(&adapter);
+        let epoch = adapter.hub.begin_child();
+        let mut feed = lines[..2].join("\n");
+        feed.push('\n');
+        feed.push_str(crate::controls::TEST_PANIC_LINE);
+        feed.push('\n');
+        // The turn opened before this child; reopen it on this epoch.
+        let pump = crate::child::spawn_pump(std::io::Cursor::new(feed.into_bytes()), &adapter.hub, epoch, None)
+            .expect("pump");
+        pump.join().expect("the pump thread ends without panicking");
+        assert!(adapter.fold.lock().is_ok(), "the poison is cleared");
+        let events = drain_events(&adapter);
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::ConnectionLost { reason } if reason.contains("internal error"))),
+            "the session ends as a lost connection: {events:?}"
+        );
+        assert!(!adapter.fold.lock().expect("fold").has_live_turn(), "no turn is left Working");
+        assert!(
+            adapter.revive_launch("704fd676-d199-410c-a1d2-03bf3efd46d9").is_some(),
+            "the next send revives the session"
         );
     }
 

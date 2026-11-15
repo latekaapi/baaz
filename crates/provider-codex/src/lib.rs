@@ -1386,10 +1386,13 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn shutdown(&mut self) {
-        if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
+        // Poison-tolerant: the child is hung up even when a panic left the
+        // lock poisoned (docs/81 B PM-3).
+        let mut child = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(running) = child.as_mut() {
             running.shutdown();
         }
-        *self.child.lock().expect("child mutex") = None;
+        *child = None;
     }
 }
 

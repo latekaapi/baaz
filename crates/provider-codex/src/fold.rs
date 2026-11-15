@@ -1693,9 +1693,9 @@ impl CodexFold {
             &turn_id,
             Block::Generic {
                 kind: "codex-approval".into(),
-                status: "pending".into(),
+                status: "error".into(),
                 text: format!(
-                    "The server asked for an approval this client does not know how to answer ({method})."
+                    "Codex asked for an approval Baaz does not know how to answer ({method}), so it was declined."
                 ),
             },
             &mut deltas,

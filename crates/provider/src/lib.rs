@@ -46,6 +46,7 @@ pub mod env_path;
 mod error;
 mod event;
 pub mod facts;
+pub mod guard;
 pub mod scripted;
 #[cfg(target_os = "macos")]
 pub mod session_spawn;

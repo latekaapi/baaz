@@ -144,7 +144,7 @@ pub trait ProviderCall: WireCall {
     {
         self.wire_call(
             cx,
-            move || provider.lock().expect("provider mutex").send(command),
+            move || provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).send(command),
             then,
         );
     }
@@ -162,7 +162,7 @@ pub trait ProviderCall: WireCall {
     {
         self.wire_call_in(
             cx,
-            move || provider.lock().expect("provider mutex").send(command),
+            move || provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).send(command),
             then,
         );
     }

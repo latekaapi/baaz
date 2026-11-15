@@ -182,9 +182,8 @@ impl SessionView {
     /// through [`Drop`].
     pub(crate) fn shutdown_lane(&mut self) {
         if let Lane::Provider(lane) = &self.lane {
-            if let Ok(mut provider) = lane.provider.lock() {
-                provider.shutdown();
-            }
+            // A poisoned lock still hangs the child up (docs/81 B PM-3).
+            lane.provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).shutdown();
         }
     }
 
