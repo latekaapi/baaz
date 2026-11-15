@@ -2070,7 +2070,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         );
         let mut body = v_flex().w_full().gap(px(scale::SP_2));
         if let Some(detail) = failure.kind.detail(&failure.message, &sentence, &failure.stderr_excerpt) {
-            body = body.child(div().ui(scale::FS_12).text_color(p.ink_3).child(detail));
+            body = body.child(div().ui(scale::FS_12).text_color(p.fg_muted).child(detail));
         }
         if !failure.stderr_excerpt.is_empty() {
             // The child's own last words, verbatim and at most twelve lines.
@@ -2088,7 +2088,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .border_1()
                     .border_color(p.line)
                     .mono(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child(failure.stderr_excerpt[lines..].join("\n")),
             );
         }
@@ -3053,7 +3053,7 @@ impl SessionView {
         let p = cx.aui().colors;
         let cards: Vec<AnyElement> = approvals
             .into_iter()
-            .map(|approval| self.render_external_card(&approval, p.ink_2, p.ink_3, cx))
+            .map(|approval| self.render_external_card(&approval, p.fg_muted, p.fg_muted, cx))
             .collect();
         Some(
             div()

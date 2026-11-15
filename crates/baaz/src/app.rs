@@ -3823,7 +3823,7 @@ impl Harness {
             .px(metrics.item_px)
             .gap(metrics.gap)
             .child(div().flex_1().min_w_0().truncate().ui(scale::FS_12).child(label.to_owned()))
-            .children(hint.map(|hint| div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(hint.to_owned())));
+            .children(hint.map(|hint| div().flex_none().ui(scale::FS_11).text_color(p.fg_muted).child(hint.to_owned())));
         interactive(id, content).role("menuitem").label(label.to_owned()).on_click(click)
     }
 
@@ -3906,7 +3906,7 @@ impl Harness {
                     .flex_1()
                     .min_w_0()
                     .gap(px(scale::SP_2))
-                    .child(icon(IconName::Search).size(px(scale::ICON_COMPACT)).color(p.ink_3))
+                    .child(icon(IconName::Search).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
                     .child(
                         a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w_0(),
                     ),
@@ -3918,7 +3918,7 @@ impl Harness {
                         .id("browse-find-count")
                         .flex_none()
                         .ui(scale::FS_12)
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label(format!("{active} of {total} matches"))
                         .child(text),
@@ -3930,7 +3930,7 @@ impl Harness {
                         .id("browse-find-count")
                         .flex_none()
                         .ui(scale::FS_12)
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label("No matches yet")
                         .child("…"),
@@ -3994,7 +3994,7 @@ impl Harness {
             .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Permission request")
-            .child(icon(IconName::Globe).size(px(scale::ICON_COMPACT)).color(p.ink_2))
+            .child(icon(IconName::Globe).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
             .child(
                 div()
                     .id("browse-permission-host")
@@ -4066,7 +4066,7 @@ impl Harness {
             .role(gpui::Role::Group)
             .aria_label("This page stopped")
             .child(div().ui(scale::FS_14).text_color(p.ink).child("This page stopped"))
-            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(reason))
+            .child(div().ui(scale::FS_12).text_color(p.fg_muted).child(reason))
             .child(reload)
             .into_any_element()
     }
@@ -4088,7 +4088,7 @@ impl Harness {
         if downloads.is_empty() {
             // R4: the button is always in the footer; an empty list says so.
             menu = menu.child(
-                div().w_full().px(cx.aui().metrics.item_px).py(px(scale::SP_2)).ui(scale::FS_13).text_color(p.ink_3).child("No downloads yet."),
+                div().w_full().px(cx.aui().metrics.item_px).py(px(scale::SP_2)).ui(scale::FS_13).text_color(p.fg_muted).child("No downloads yet."),
             );
             let folder = self.browse_menu_row(
                 "browse-downloads-folder",
@@ -4136,7 +4136,7 @@ impl Harness {
                     div()
                         .id(("browse-download-line", id))
                         .ui(scale::FS_11)
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label(detail.clone())
                         .child(detail),
@@ -4229,7 +4229,7 @@ impl Harness {
                 .px(cx.aui().metrics.item_px)
                 .py(px(scale::SP_2))
                 .role_in(TextRole::Body, cx)
-                .text_color(p.ink_2)
+                .text_color(p.fg_muted)
                 .child("Chrome extensions don’t run in Baaz yet. Ads and trackers are blocked without one."),
         );
         let settings = self.browse_menu_row(
@@ -4815,7 +4815,7 @@ impl Harness {
                         div()
                             .w_full()
                             .ui(scale::FS_12)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child("Loading history…"),
                     ),
             )
@@ -5051,7 +5051,7 @@ impl Harness {
     /// one 560 column a quarter of the way down holds:
     /// - the Field inline on FF's composer chrome (`input-message.tsx`: p-2,
     ///   container radius, subtitle 14/20; surface-3, edge = foreground 20 %
-    ///   when focused, else the border; shadow-3 over the picture);
+    ///   when focused, else the border; the float shadow over the picture);
     /// - "Pick up where you left off" as FF menu rows (36 tall, px-2, gap-2,
     ///   item radius; muted at rest, foreground when hovered) on a panel.
     ///
@@ -5207,8 +5207,9 @@ impl Harness {
             });
             let list = list.on_press(move |index, w, cx| press(&index, w, cx)).on_activate(move |index, w, cx| open(&index, w, cx));
             rows = rows.child(list);
-            // The frosted panel: surface-1 at 62 % with FF's shadow-3 ring.
-            let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).shadow(p.floating_shadow()).child(rows));
+            // The frosted panel: the ground at 62 %, a `line-strong` edge and
+            // the float shadow (docs/83 §2.3).
+            let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).border_1().border_color(p.line_strong).shadow(p.floating_shadow()).child(rows));
             column = column.child(panel);
         }
         let radius = if self.browse_page_card() { px(scale::SHAPE_CONTAINER) } else { Pixels::ZERO };
@@ -5427,7 +5428,7 @@ impl Harness {
             .child(
                 div()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child("No tabs — ⌘T for a new tab"),
             )
             .child(button("browse-new-tab", "New tab").primary().on_click(new_tab))
@@ -5922,8 +5923,8 @@ impl Harness {
             .pb(px(HERO_LIFT))
             .px(px(scale::SP_7))
             .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink).child(title))
-            .child(div().ui(scale::FS_13).text_color(p.ink_2).child(sentence))
-            .children(detail.map(|detail| div().ui(scale::FS_12).text_color(p.ink_3).child(detail)));
+            .child(div().ui(scale::FS_13).text_color(p.fg_muted).child(sentence))
+            .children(detail.map(|detail| div().ui(scale::FS_12).text_color(p.fg_muted).child(detail)));
         if !failure.stderr_excerpt.is_empty() {
             // The child's own last words, verbatim and at most twelve
             // lines: what a person (or a bug report) needs to tell a
@@ -5943,7 +5944,7 @@ impl Harness {
                     .border_1()
                     .border_color(p.line)
                     .mono(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child(failure.stderr_excerpt.join("\n")),
             );
         }
@@ -5997,11 +5998,11 @@ impl Harness {
                 .pb(px(HERO_LIFT))
                 .on_drop(drop)
                 .child(crate::mascot::boot_mascot(window, cx))
-                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Ready when you are"))
+                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.fg_muted).child("Ready when you are"))
                 .child(
                     div()
                         .ui(scale::FS_12)
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .child("Start a session now, or add a project folder to work in."),
                 )
                 .child(
@@ -6021,11 +6022,11 @@ impl Harness {
             .gap(px(scale::SP_4))
             .pb(px(HERO_LIFT))
             .child(crate::mascot::boot_mascot(window, cx))
-            .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child(self.workspace_name()))
+            .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.fg_muted).child(self.workspace_name()))
             .child(
                 div()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child("Pick a session on the left, or \u{2318}N to start one."),
             )
             .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new))

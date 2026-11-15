@@ -2587,7 +2587,7 @@ impl crate::app::Harness {
                 div()
                     .flex_none()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_2)
+                    .text_color(p.fg_muted)
                     .whitespace_nowrap()
                     .child(format!("Saved · {} {unit} — path copied", flash.notes)),
             )
@@ -2653,7 +2653,7 @@ impl crate::app::Harness {
                     .child(
                         div()
                             .mono(scale::FS_12)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child(subtitle),
                     ),
             )
@@ -2686,7 +2686,7 @@ impl crate::app::Harness {
             .child(
                 div()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child("↵ save · ⇧↵ new line · Esc cancel"),
             );
         // A popover: the one floating panel (docs/83 §7).

@@ -118,23 +118,23 @@ impl Harness {
         let weak = cx.weak_entity();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
-        let line = |text: String, faint: bool| {
+        let line = |text: String| {
             div()
                 .px(px(SHEET_PAD_X))
                 .pt(px(scale::SP_4))
                 .role_in(TextRole::Caption, cx)
-                .text_color(if faint { p.ink_3 } else { p.ink_2 })
+                .text_color(p.fg_muted)
                 .child(text)
                 .into_any_element()
         };
         match &sheet.stage {
             Stage::Choose if sheet.profiles.is_empty() => {
-                body.push(line("Chrome isn’t on this Mac, or has no profile yet.".into(), false));
+                body.push(line("Chrome isn’t on this Mac, or has no profile yet.".into()));
                 let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
                 actions.push(button("chrome-import-ok", "Close").on_click(move |e, w, cx| close(e, w, cx)).into_any_element());
             }
             Stage::Choose => {
-                body.push(line("Baaz reads a copy of Chrome’s files; Chrome is never changed.".into(), false));
+                body.push(line("Baaz reads a copy of Chrome’s files; Chrome is never changed.".into()));
                 // The profile: a row per profile when there are several.
                 if sheet.profiles.len() > 1 {
                     let mut list = v_flex().mx(px(SHEET_PAD_X - LIST_INSET)).mt(px(scale::SP_3)).gap(px(ROW_GAP));
@@ -156,7 +156,7 @@ impl Harness {
                     }
                     body.push(list.into_any_element());
                 } else {
-                    body.push(line(format!("Profile: {}", sheet.profiles[0].name), true));
+                    body.push(line(format!("Profile: {}", sheet.profiles[0].name)));
                 }
                 let counts = sheet.counts.clone();
                 let word = |n: Option<u64>| n.map(|n| crate::import_ui::thousands(n as usize)).unwrap_or_else(|| "…".into());
@@ -178,7 +178,7 @@ impl Harness {
                         .control(
                             h_flex()
                                 .gap(px(scale::SP_4))
-                                .child(div().role_in(TextRole::Body, cx).text_color(p.ink_2).child(word(n)))
+                                .child(div().role_in(TextRole::Body, cx).text_color(p.fg_muted).child(word(n)))
                                 .child(
                                     checkbox(SharedString::from(format!("{id}-box")), if on { CheckboxState::On } else { CheckboxState::Off }, false)
                                         .accessibility_label(SharedString::from(format!("{label}, {}", word(n))))
@@ -201,7 +201,7 @@ impl Harness {
                         1,
                     ));
                 body.push(rows.into_any_element());
-                body.push(line("Passwords and sign-ins are not imported: Chrome keeps them to itself. You sign in to each site once.".into(), true));
+                body.push(line("Passwords and sign-ins are not imported: Chrome keeps them to itself. You sign in to each site once.".into()));
                 let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
                 let go = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.run_chrome_import(cx));
                 let ready = counts.is_some() && (sheet.bookmarks || sheet.history);
@@ -228,7 +228,7 @@ impl Harness {
                 } else {
                     "No new bookmarks: this profile had none Baaz did not already have. Pages you already had are not counted twice."
                 };
-                body.push(line(note.into(), false));
+                body.push(line(note.into()));
                 let undo = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.undo_chrome_import(cx));
                 let ok = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
                 actions.push(button("chrome-import-undo", "Undo import").ghost().on_click(move |e, w, cx| undo(e, w, cx)).into_any_element());

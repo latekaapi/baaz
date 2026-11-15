@@ -1920,7 +1920,7 @@ fn skill_load_row(id: ElementId, name: &str, folds: &Folds, cx: &mut App) -> Any
     // page on it (the owner kept the click, 2026-10-14), so it carries no
     // chevron.
     let scope = folds.skill_scopes.get(name).cloned();
-    let mut row = aui::transcript::quiet_status_row(id, aui_icons::icon(IconName::Sparkle).size(px(14.0)).color(p.ink_2))
+    let mut row = aui::transcript::quiet_status_row(id, aui_icons::icon(IconName::Sparkle).size(px(14.0)).color(p.fg_muted))
         .part(div().flex_none().child("Loaded skill"))
         .part(div().flex_none().mono(scale::FS_12).child(name.to_owned()));
     if let Some(scope) = scope {
@@ -2673,14 +2673,15 @@ pub fn empty_state(provider: crate::providers::ProviderId, display: &str, cx: &m
                 .size(px(48.0))
                 .rounded(px(12.0))
                 .bg(p.surface_3)
-                .shadow(p.edge())
+                .border_1()
+                .border_color(p.line)
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(aui_icons::provider_mark(provider.icon()).size(px(24.0))),
         )
         .child(div().mt(px(12.0)).ui(scale::FS_16).font_weight(gpui::FontWeight::SEMIBOLD).text_color(p.ink).child(display.to_owned()))
-        .child(div().mt(px(6.0)).ui(scale::FS_13).text_color(p.ink_2).child(provider.composer_placeholder()))
+        .child(div().mt(px(6.0)).ui(scale::FS_13).text_color(p.fg_muted).child(provider.composer_placeholder()))
         .into_any_element()
 }
 

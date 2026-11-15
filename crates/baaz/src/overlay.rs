@@ -157,9 +157,9 @@ const FIELD_TOP: f32 = 68.0;
 const FIELD_MAX_H: f32 = 46.0 + 512.0 + 32.0 + 2.0;
 
 /// The clear margin around every overlay panel inside its window: room for
-/// FF's shadow-3 (a 1 px outer ring and a drop reaching 4.5 px below), which
-/// the window's edge would otherwise clip — the panel's only edge, since the
-/// window draws none of its own ([`drop_native_chrome`]). 6 px: `SP_1` is
+/// the near part of the float shadow, which the window's edge would
+/// otherwise clip (the panel's edge is its own 1 px `line-strong` border;
+/// the window draws none of its own, [`drop_native_chrome`]). 6 px: `SP_1` is
 /// 2 px, and the 2 px margin it was clipped the drop (and the dropdown's
 /// 4 px enter slide).
 pub(crate) const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;

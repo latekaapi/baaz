@@ -917,7 +917,7 @@ impl Harness {
                 trail = trail.child(div().flex_none().ui(scale::FS_13).text_color(p.ink_4).child("/"));
             }
             let last = index + 1 == crumbs.len();
-            let crumb_el = div().flex_none().ui(scale::FS_13).text_color(if last { p.ink } else { p.ink_3 }).child(crumb.clone());
+            let crumb_el = div().flex_none().ui(scale::FS_13).text_color(if last { p.ink } else { p.fg_muted }).child(crumb.clone());
             // Every crumb but the page itself is a link to its page (owner,
             // 2026-10-29: the crumbs looked clickable and were not).
             let crumb_el = match settings_crumb_target(&self.settings_page.section, index) {
@@ -1035,7 +1035,7 @@ impl Harness {
                         div()
                             .flex_none()
                             .ui(scale::FS_13)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child(blurb.to_string()),
                     )
                     .child(body),
@@ -1161,7 +1161,7 @@ impl Harness {
         let mut anchor = div().relative().flex_none();
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
         let mut chip = button("settings-assistant-model", chip_label)
-            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)).color(p.ink_2))
+            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
             .menu_open(self.assistant_menu_open)
             .accessibility_label(format!("Assistant model, {chip_label}. Change"))
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
@@ -1508,7 +1508,7 @@ impl Harness {
                     .w_full()
                     .flex_none()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child("Links from other apps open as person tabs in Browse.".to_string()),
             )
             .into_any_element()
@@ -1552,7 +1552,7 @@ impl Harness {
                     .w_full()
                     .flex_none()
                     .ui(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child("Grouping and sort live in the sidebar's view menu.".to_string()),
             )
             .into_any_element()
@@ -1617,7 +1617,7 @@ impl Harness {
                         div()
                             .flex_1()
                             .role_in(TextRole::Caption, cx)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child("Signing a CLI out signs it out on this Mac.".to_string()),
                     )
                     .child(
@@ -1839,7 +1839,7 @@ impl Harness {
                         .id("settings-archived-empty")
                         .w_full()
                         .ui(scale::FS_13)
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label("No archived sessions")
                         .child("No archived sessions.".to_string()),

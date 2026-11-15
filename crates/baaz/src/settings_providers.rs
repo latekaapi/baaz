@@ -548,7 +548,7 @@ impl Harness {
         let mut text = v_flex().flex_1().min_w_0().child(
             gpui::div().text_color(p.ink).ui(scale::FS_13).semibold().child(SharedString::from(title)),
         ).child(
-            gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
+            gpui::div().text_color(p.fg_muted).ui(scale::FS_12).child(
                 "Sessions you started in Baaz before this update still sit in your Claude and Codex \
                  folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them \
                  resumable here; nothing is deleted. Codex for Mac may keep stale entries until you \
@@ -560,7 +560,7 @@ impl Harness {
             for path in crate::session_migration::row_paths(plan) {
                 list = list.child(
                     gpui::div()
-                        .text_color(p.ink_3)
+                        .text_color(p.fg_muted)
                         .ui(scale::FS_12)
                         .child(SharedString::from(path)),
                 );

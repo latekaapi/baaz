@@ -1555,7 +1555,7 @@ impl Harness {
                     .on_click(open_menu),
             )
             .child(div().flex_1())
-            .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Search"))
+            .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Search"))
             .child(
                 aui::data::field_frame("skills-search-field", &self.skills_query, window, cx)
                     .flex_none()
@@ -1591,7 +1591,7 @@ impl Harness {
                     .px(px(SKILLS_ROW_INSET))
                     .pt(px(scale::SP_2))
                     .role_in(TextRole::Caption, cx)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child(line.to_owned()),
             );
         }
@@ -1653,7 +1653,7 @@ impl Harness {
                     .on_select(move |index, window, cx| pick_filter(&index, window, cx)),
             )
             .child(div().flex_1())
-            .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Hide off"))
+            .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Hide off"))
             .child(
                 switch("skills-hide-off", self.skills.hide_off, false)
                     .accessibility_label("Hide off")
@@ -1989,7 +1989,7 @@ impl Harness {
                 v_flex()
                     .w_full()
                     .gap(px(scale::SP_2))
-                    .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Name"))
+                    .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Name"))
                     .child(
                         aui::data::field_frame("skills-new-name-field", &self.skills_new_name, window, cx)
                             .flex_none()
@@ -2009,7 +2009,7 @@ impl Harness {
                             .flex_none()
                             .w_full()
                             .ui(scale::FS_12)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child("Lowercase letters, digits, hyphens · up to 64."),
                     ),
             )
@@ -2017,7 +2017,7 @@ impl Harness {
                 v_flex()
                     .w_full()
                     .gap(px(scale::SP_2))
-                    .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Description"))
+                    .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Description"))
                     .child(
                         aui::data::field_frame("skills-new-desc-field", &self.skills_new_desc, window, cx)
                             .flex_none()
@@ -2036,7 +2036,7 @@ impl Harness {
                             .flex_none()
                             .w_full()
                             .ui(scale::FS_12)
-                            .text_color(p.ink_3)
+                            .text_color(p.fg_muted)
                             .child("Say what it does and when to use it."),
                     ),
             )
@@ -2108,17 +2108,17 @@ impl Harness {
             .gap(px(scale::SP_3))
             .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Install skill"))
             .child(div().flex_none().w_full().ui(scale::FS_13).medium().text_color(p.ink).child(name))
-            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink_3).child(description))
+            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.fg_muted).child(description))
             .child(
                 div()
                     .flex_none()
                     .w_full()
                     .mono(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.fg_muted)
                     .child(format!("~{} tokens at startup · {}", format_tokens(tokens), dir)),
             )
             .child(
-                div().flex_none().w_full().mono(scale::FS_12).text_color(p.ink_3).child(file_list),
+                div().flex_none().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(file_list),
             )
             .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(diagnostics))
             .child(
@@ -2126,7 +2126,7 @@ impl Harness {
                     .accessibility_label("Where the skill lands")
                     .on_select(move |index, window, cx| pick_scope(&index, window, cx)),
             )
-            .child(div().flex_none().w_full().ui(scale::FS_12).text_color(p.ink_3).child(hint))
+            .child(div().flex_none().w_full().ui(scale::FS_12).text_color(p.fg_muted).child(hint))
             .child(
                 h_flex()
                     .flex_none()
@@ -2169,7 +2169,7 @@ impl Harness {
                         .text_color(p.ink)
                         .child(format!("Import from {}", source.label())),
                 )
-                .child(div().flex_none().ui(scale::FS_13).text_color(p.ink_3).child("Reading skills…"))
+                .child(div().flex_none().ui(scale::FS_13).text_color(p.fg_muted).child("Reading skills…"))
                 .child(
                     h_flex().flex_none().w_full().justify_end().child(
                         button("skills-import-cancel", "Cancel")
@@ -2243,7 +2243,7 @@ impl Harness {
             .gap(px(scale::SP_3))
             .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Remove skill"))
             .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(headline))
-            .child(div().flex_none().w_full().mono(scale::FS_12).text_color(p.ink_3).child(detail))
+            .child(div().flex_none().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(detail))
             .child(
                 h_flex()
                     .flex_none()
@@ -2401,9 +2401,9 @@ impl Harness {
             )
             .into_any_element(),
             _ if self.skills.detail_loading => {
-                div().w_full().ui(scale::FS_13).text_color(p.ink_3).child("Loading…").into_any_element()
+                div().w_full().ui(scale::FS_13).text_color(p.fg_muted).child("Loading…").into_any_element()
             }
-            _ => div().w_full().ui(scale::FS_13).text_color(p.ink_3).child("No preview available.").into_any_element(),
+            _ => div().w_full().ui(scale::FS_13).text_color(p.fg_muted).child("No preview available.").into_any_element(),
         };
         // Virtual skills read through `inspect`, which carries no body —
         // the section says whose preview it is (D60, K2 gap).
@@ -2414,7 +2414,7 @@ impl Harness {
         if !files.is_empty() {
             detail = detail.section(
                 "Files",
-                div().w_full().mono(scale::FS_12).text_color(p.ink_3).child(files.join("\n")),
+                div().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(files.join("\n")),
             );
         }
 
@@ -2436,7 +2436,7 @@ impl Harness {
             let mut menu = v_flex().w_full().gap(px(scale::SP_2));
             if skill.section() == ScopeSection::Personal {
                 menu = menu.child(
-                    div().w_full().ui(scale::FS_12).text_color(p.ink_3).child("Personal skills apply to every project."),
+                    div().w_full().ui(scale::FS_12).text_color(p.fg_muted).child("Personal skills apply to every project."),
                 );
             }
             let disk = skill.disk_path(&root);
@@ -2564,8 +2564,8 @@ impl Harness {
             .justify_center()
             .gap(px(scale::SP_3))
             .py(px(EMPTY_PAD_Y))
-            .child(div().role_in(TextRole::Subtitle, cx).text_color(p.ink_2).child("Nothing here"))
-            .child(div().role_in(TextRole::Body, cx).text_color(p.ink_3).child(copy))
+            .child(div().role_in(TextRole::Subtitle, cx).text_color(p.fg_muted).child("Nothing here"))
+            .child(div().role_in(TextRole::Body, cx).text_color(p.fg_muted).child(copy))
             .into_any_element()
     }
 }

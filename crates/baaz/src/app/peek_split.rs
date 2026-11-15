@@ -184,7 +184,11 @@ impl Harness {
                         .w(relative(PEEK_W))
                         .h(relative(PEEK_H))
                         .rounded(px(12.0))
-                        .shadow(p.shadow(3))
+                        // It floats over the scrim: a `line-strong` edge and
+                        // the one float shadow (docs/83 §2.3).
+                        .border_1()
+                        .border_color(p.line_strong)
+                        .shadow(p.floating_shadow())
                         .overflow_hidden()
                         .child(pane)
                         .child(
@@ -212,8 +216,13 @@ impl Harness {
                                 .pr(px(scale::SP_1))
                                 .py(px(scale::SP_1))
                                 .rounded(px(scale::R_LG))
-                                .bg(gpui::rgba(0x1b1b1ff0))
-                                .shadow(p.shadow(2))
+                                // Dark in both themes (its text is white over
+                                // the scrim): the dark overlay, its edge and
+                                // the float shadow.
+                                .bg(aui_tokens::dark().overlay)
+                                .border_1()
+                                .border_color(aui_tokens::dark().line_strong)
+                                .shadow(p.floating_shadow())
                                 .child(div().role_in(TextRole::Caption, cx).text_color(gpui::white().opacity(0.85)).child(caption))
                                 .child(
                                     div()

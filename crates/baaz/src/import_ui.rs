@@ -724,8 +724,8 @@ impl Harness {
             .gap(px(scale::SP_3))
             .px(px(CARD_PAD_X))
             .py(px(CARD_PAD_Y))
-            .text_color(p.ink_2)
-            .child(icon(IconName::Clock).size(px(scale::ICON_COMPACT)).color(p.ink_2))
+            .text_color(p.fg_muted)
+            .child(icon(IconName::Clock).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
             .child(div().flex_1().min_w_0().role_in(TextRole::Caption, cx).child(line.text.clone()));
         if let Some(label) = line.button {
             let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_import_sheet(cx));
@@ -823,7 +823,7 @@ impl Harness {
                 .px(px(SHEET_PAD_X))
                 .pt(px(scale::SP_4))
                 .role_in(TextRole::Caption, cx)
-                .text_color(p.ink_2)
+                .text_color(p.fg_muted)
                 .child("Looking for earlier sessions on this Mac…")
                 .into_any_element();
             let go = button("import-sheet-go", "Import")
@@ -840,7 +840,7 @@ impl Harness {
                 .px(px(SHEET_PAD_X))
                 .pt(px(scale::SP_4))
                 .role_in(TextRole::Caption, cx)
-                .text_color(p.ink_2)
+                .text_color(p.fg_muted)
                 .child(
                     "Earlier Claude Code and Codex sessions, by the folder they ran in. Folders that are Baaz \
                      projects are ticked.",
@@ -880,7 +880,7 @@ impl Harness {
                     .flex()
                     .items_center()
                     .role_in(TextRole::Caption, cx)
-                    .text_color(p.ink_2)
+                    .text_color(p.fg_muted)
                     .child(if plan.sessions.is_empty() {
                         "No earlier sessions on this Mac that are not in Baaz already."
                     } else {
@@ -960,7 +960,7 @@ impl Harness {
                 .child(div().text_color(p.ink).child("Skip scripted runs"))
                 .child(
                     div()
-                        .text_color(p.ink_2)
+                        .text_color(p.fg_muted)
                         .child(format!("(claude -p, codex exec · {})", thousands(scripted))),
                 )
                 .into_any_element(),
@@ -1014,7 +1014,7 @@ impl Harness {
             .role(gpui::Role::Status)
             .aria_label(format!("Importing {} of {}, {folder}", thousands(done), thousands(total)))
             .child(div().text_color(p.ink).child(format!("Importing {} of {}…", thousands(done), thousands(total))))
-            .child(div().text_color(p.ink_2).child(folder));
+            .child(div().text_color(p.fg_muted).child(folder));
         let bar = div()
             .id("import-progress-bar")
             .mx(px(SHEET_PAD_X))
@@ -1058,7 +1058,7 @@ impl Harness {
             .role_in(TextRole::Body, cx)
             .child(div().text_color(p.ink).child(result_line(run)));
         if unreadable > 0 {
-            big = big.child(div().text_color(p.ink_2).child(format!(
+            big = big.child(div().text_color(p.fg_muted).child(format!(
                 "{} couldn\u{2019}t be read and {} left out.",
                 thousands(unreadable),
                 if unreadable == 1 { "was" } else { "were" }
@@ -1084,7 +1084,7 @@ impl Harness {
             };
             note = note
                 .child(
-                    interactive("import-show-unreadable", div().underline().text_color(p.ink_2).child(label.clone()))
+                    interactive("import-show-unreadable", div().underline().text_color(p.fg_muted).child(label.clone()))
                         .label(format!("{label}, the files that could not be read"))
                         .on_click(move |event, window, cx| toggle(event, window, cx)),
                 )
@@ -1109,7 +1109,7 @@ impl Harness {
                         .truncate()
                         .font_family(scale::FONT_MONO)
                         .text_px(scale::FS_11)
-                        .text_color(p.ink_2)
+                        .text_color(p.fg_muted)
                         .child(crate::layout::tilde_path(path)),
                 );
             }
@@ -1214,7 +1214,7 @@ fn folder_row(
                 .flex_none()
                 .gap(px(scale::SP_2))
                 .items_center()
-                .text_color(p.ink_2)
+                .text_color(p.fg_muted)
                 .child(provider_mark(provider.icon()).size(px(scale::ICON_COMPACT)))
                 .child(thousands(n)),
         );
