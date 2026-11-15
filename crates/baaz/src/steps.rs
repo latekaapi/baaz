@@ -96,7 +96,7 @@
 //! | `empty` | list sessions with no turns anyway |
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
-//! | `peek` | hold the v3 peek open (or release it) while the sidebar is closed — a capture aid, no hover |
+//! | `sidebar-peek` | hold the sidebar peek open (or release it) while the sidebar is closed — a capture aid, no hover |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `right:<browser\|changes\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown fails the step, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty fails the step, free |
@@ -418,7 +418,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, rest, _, cx| this.step_transcript_scroll_sweep(rest, cx),
     },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| { this.toggle_sidebar(cx); Ok(()) } },
-    WindowVerb { verb: "peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); Ok(()) } },
+    // Was `peek`, which the Browse link verb above shadowed, so it never ran.
+    WindowVerb { verb: "sidebar-peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); Ok(()) } },
     WindowVerb { verb: "overflow", run: |this, _, _, cx| { this.open_menu(MenuKind::Overflow, cx); Ok(()) } },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| { this.open_menu(MenuKind::ViewOptions, cx); Ok(()) } },
     WindowVerb { verb: "account", run: |this, _, _, cx| { this.open_menu(MenuKind::Account, cx); Ok(()) } },

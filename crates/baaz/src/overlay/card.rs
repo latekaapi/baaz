@@ -32,8 +32,8 @@ impl Harness {
             CardUi::Column => {
                 // The column takes the strip the page gave up beside it
                 // (`browse_centre_page_rect` shrinks the page by it).
-                // The strip right of the page, the sheet's height (the page
-                // rect already sits inside the sheet).
+                // The strip right of the page, the page's height (the page
+                // rect is the centre column, docs/83 §3).
                 let left = page.right() + gpui::px(6.0);
                 Some(Bounds::new(origin + gpui::point(left, page.top()), gpui::size(gpui::px(COLUMN_W), page.size.height)))
             }

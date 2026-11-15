@@ -44,11 +44,10 @@ use crate::wire::WireCall;
 /// page's own actions instead of the composer's (docs/16-keymap.md).
 pub(crate) const SKILLS_CONTEXT: &str = "HarnessSkills";
 
-/// Where the page's own header starts: below the sheet's title row and the
-/// fade under it, the inset the Settings column takes. The window's top bar
-/// floats over the centre sheet, so a smaller inset drew "Skills · project
-/// · Search · Add skill" dimmed and half under the bar (2026-10-30).
-pub(crate) const SKILLS_HEADER_TOP: f32 = aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW;
+/// Where the page's own header starts under the centre header's line: the
+/// inset the Settings column's heading takes ([`crate::settings::SETTINGS_COLUMN_TOP`]).
+/// The centre's content begins under that header, so nothing draws under the bar.
+pub(crate) const SKILLS_HEADER_TOP: f32 = crate::settings::SETTINGS_COLUMN_TOP;
 
 /// The Skills page's rows inset their text 12 px from the column (the
 /// header, the filter row, every list row).

@@ -150,17 +150,16 @@ fn reply_complete(turn: &Turn) -> bool {
     }
     saw_text
 }
-/// Top inset: the first turn starts under the sheet's own 32 px title row
-/// (the transcript scrolls under it through the fade) — canvas "Baaz v3"
-/// measured: the first turn's top 80 below the sheet's top when open. One
-/// value for both states: closed (the pill, canvas 100) would re-measure the
-/// list's first item on every toggle.
-const TRANSCRIPT_PAD_TOP: f32 = 80.0;
+/// Top inset: the list starts under the centre header's line (docs/83 §3),
+/// and the first turn sits this far below it — the 48 it sat below the v3
+/// sheet's 32 px title row (canvas "Baaz v3": 80 from the sheet's top), kept
+/// until task 2.6 sets the centre column. One value for both sidebar states.
+const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7 + scale::SP_5;
 /// Between blocks of one turn, and between turns: the 16 / 26 reading
 /// scale's rhythm (owner 2026-10-14; were 8 and 16).
 const BLOCK_GAP: f32 = 14.0;
 const TURN_GAP: f32 = 28.0;
-/// The space under the composer's controls row to the sheet's bottom edge:
+/// The space under the composer's controls row to the column's bottom edge:
 /// 20 (owner 2026-10-14, Claude's shape: the field, its controls under it,
 /// then air).
 const COMPOSER_BOTTOM: f32 = 20.0;
@@ -192,8 +191,8 @@ const POPOVER_GAP: f32 = 8.0;
 /// every client command **and** every installed skill, and a workspace with
 /// twenty skills would otherwise reach past the top of the window.
 const POPOVER_MAX_H: f32 = 560.0;
-/// What a caret menu's rows cannot have of the window's height: the sheet's
-/// insets and title row with a margin (6 + 6 + 32 + 12), the composer band
+/// What a caret menu's rows cannot have of the window's height: the centre
+/// header with a margin (44 + 12), the composer band
 /// (a two-line composer, 12 under it, status row: ~140), the popover gap and
 /// the panel's padding and footer (8 + 12 + 30).
 const CARET_MENU_CHROME: f32 = 56.0 + 140.0 + 50.0;

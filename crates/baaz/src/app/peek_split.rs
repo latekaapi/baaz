@@ -40,8 +40,8 @@ impl Harness {
             return Err(page);
         };
         let state = self.ensure_tab_page(crate::browser::HOME_KEY, partner, window, cx);
-        let radius = if self.browse_page_card() { aui::shell::SHEET_RADIUS } else { 0.0 };
-        state.update(cx, |state, _| state.set_corner_radius(radius));
+        // Each half is page, square at the column's edges (docs/83 §3).
+        state.update(cx, |state, _| state.set_corner_radius(0.0));
         let harness = cx.weak_entity();
         let other = aui_webview::webview_pane("browse-split-page", &state)
             .without_nav()

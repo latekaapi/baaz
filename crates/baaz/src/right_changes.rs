@@ -890,9 +890,9 @@ pub(crate) fn changes_screen(
             })
         })
         .flatten();
-    let mut screen = div().relative().size_full().bg(p.surface_2).child(body);
+    let mut screen = div().relative().size_full().bg(p.surface_1).child(body);
     if let Some(row) = sticky {
-        screen = screen.child(div().absolute().top_0().left(px(LIST_INSET)).right(px(LIST_INSET)).bg(p.surface_2).child(row));
+        screen = screen.child(div().absolute().top_0().left(px(LIST_INSET)).right(px(LIST_INSET)).bg(p.surface_1).child(row));
     }
     (None, screen.child(commit_foot(foot_el, cx)).into_any_element())
 }

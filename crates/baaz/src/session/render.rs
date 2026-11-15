@@ -138,9 +138,9 @@ impl SessionView {
             }
         }
         let composer = self.render_composer(cx);
-        // v3: the composer is a raised card on the transcript's measure,
-        // 12 px inside the sheet's bottom (18 from the window, the pills'
-        // 18 from the top); no pane-wide band or hairline.
+        // The composer is a card on the transcript's measure,
+        // COMPOSER_BOTTOM above the column's bottom; no pane-wide band or
+        // hairline.
         div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(COMPOSER_BOTTOM)).child(
             div()
                 .w_full()
@@ -858,7 +858,7 @@ impl SessionView {
             .flex()
             .flex_col()
             .px(px(TRANSCRIPT_PAD_X))
-            // No bottom padding: the list runs to the sheet's edge, under
+            // No bottom padding: the list runs to the column's edge, under
             // the floating composer; its tail row carries the inset.
             .key_context(TRANSCRIPT_CONTEXT)
             // The quote flow (docs/43 §0): the press and the release in the
@@ -2242,8 +2242,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let overlays = self.overlays.read(cx);
         let menu = overlays.menu.as_ref()?;
         let (kind, selected, filter) = (menu.kind, menu.selected, menu.filter.clone());
-        // The rows' cap: the room above the composer, under the sheet's
-        // title row, less the panel's padding and footer — so the whole
+        // The rows' cap: the room above the composer, under the centre
+        // header, less the panel's padding and footer — so the whole
         // panel, footer and bottom corners included, always fits. The
         // panel is never clipped from outside (owner 2026-10-14: an outer
         // 560 px clip around a 560 px row column cut the footer and the
@@ -4592,8 +4592,9 @@ impl SessionView {
         let first_top = f32::from(anchor.start.y - bounds.origin.y + dy) - 13.0;
         let last_bottom = f32::from(anchor.end.y - bounds.origin.y + dy) + 13.0;
         let top = aui::transcript::quote_bar_top(first_top, last_bottom);
-        // Hidden while its anchor is under the title row or the composer.
-        if first_top < 32.0 || top > f32::from(bounds.size.height) - 150.0 {
+        // Hidden while its anchor is above the list's top (the list starts
+        // under the centre header, docs/83 §3) or under the composer.
+        if first_top < 0.0 || top > f32::from(bounds.size.height) - 150.0 {
             return None;
         }
         let measure_left = (f32::from(bounds.size.width) - TRANSCRIPT_MEASURE).max(0.0) / 2.0;

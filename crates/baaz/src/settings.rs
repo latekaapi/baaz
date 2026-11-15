@@ -93,10 +93,14 @@ const SHORTCUT_SEARCH_W: f32 = 280.0;
 /// The Settings column's side padding.
 pub(crate) const SETTINGS_COLUMN_PAD_X: f32 = scale::SP_5;
 
-/// Where the Settings nav's Back row starts inside the sidebar column: past
-/// the fade the shell lays over the column's top ([`aui::shell::LIST_FADE`]),
-/// the Skills header's and the Settings column's rule for the same cover.
-pub(crate) const SETTINGS_NAV_TOP: f32 = aui::shell::LIST_FADE;
+/// Where the Settings nav's Back row starts inside the sidebar column, under
+/// the chrome row's line: the list inset (docs/83 §2.5), as the sidebar's own
+/// rows start. The flat shell lays no fade over the column's top.
+pub(crate) const SETTINGS_NAV_TOP: f32 = LIST_INSET;
+/// Where the Settings column's heading starts under the centre header's
+/// line (the column's content begins under the header); the Skills page's
+/// header takes the same inset.
+pub(crate) const SETTINGS_COLUMN_TOP: f32 = scale::SP_6;
 
 /// The page's sections, in list order (a muted divider before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
@@ -841,16 +845,15 @@ impl Harness {
         let list = v_flex()
             .id("settings-nav")
             .size_full()
-            .bg(p.surface_1)
+            .bg(p.sidebar)
             .child(
                 div()
                     .debug_selector(|| "settings-back".into())
                     .flex_none()
                     .mx(px(LIST_INSET))
-                    // Below the column's top fade: the shell starts this
-                    // column under its chrome row and lays LIST_FADE of
-                    // fade over its top, so an 8 px margin left Back half
-                    // dimmed under the bar (owner, 2026-10-31).
+                    // The shell starts this column under its chrome row
+                    // and that row's line; Back sits the list inset below
+                    // it, as the sidebar's first row does.
                     .mt(px(SETTINGS_NAV_TOP))
                     .mb(px(scale::SP_2))
                     .child(
@@ -1014,10 +1017,9 @@ impl Harness {
                     .max_w(px(SETTINGS_COLUMN_MAX))
                     .h_full()
                     .overflow_y_scroll()
-                    // Below the sheet's title row and its fade, so the page
-                    // heading sits on clear ground at rest (the fade dimmed
-                    // it when this was the row's 32).
-                    .pt(px(aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW))
+                    // The centre's content starts under its header's line;
+                    // the heading sits this far below it.
+                    .pt(px(SETTINGS_COLUMN_TOP))
                     .px(px(SETTINGS_COLUMN_PAD_X))
                     .pb(px(scale::SP_5))
                     .gap(px(scale::SP_4))

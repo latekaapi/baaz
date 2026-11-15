@@ -252,7 +252,7 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
                     .bottom(px(0.0))
                     .left(px(0.0))
                     .right(px(0.0))
-                    .bg(p.surface_2)
+                    .bg(p.surface_1)
                     .child(error),
             )
             .into_any_element(),

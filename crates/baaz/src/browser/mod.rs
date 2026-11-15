@@ -169,45 +169,25 @@ fn centre_visibility(base: BrowserVisibility, shown: bool, live: bool, chrome_po
     }
 }
 
-/// The shell header's height in pixels: the columns — and the browser
-/// pane — hang under it. The centre column's height is the window minus
-/// this same 44 px.
-const HEADER_PX: f32 = 44.0;
+/// The shell header's height in pixels (docs/83 §2.5: the bar, 44 incl.
+/// its line): the centre's content and the right pane's page hang under it.
+const HEADER_PX: f32 = aui_tokens::scale::BAR_DEFAULT;
 
-/// The webview's nav row (back, forward, reload, address), which aui-webview
-/// draws at a 38 px minimum above the native page.
-const BROWSER_NAV_PX: f32 = 38.0;
+/// A region divider (docs/83 §1 rule 2): the right column's 1 px left edge,
+/// which the pane's page sits past.
+const DIVIDER_PX: f32 = 1.0;
 
-
-/// The Browse page card's inset — v3's sheet inset: 6 px from the window,
-/// the sidebar column and the right sheet (canvas "Baaz v3").
-pub(crate) const PAGE_CARD_INSET: f32 = aui::shell::SHEET_INSET;
-
-/// v3: the page's rect on the sheet for the window's `content` box, a
-/// `sidebar` column (0 when closed), a `right` column including its own 6 px
-/// gap (0 when closed) and the open dock under the page. Pure, for tests.
-pub(crate) fn sheet_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: Pixels, dock: Pixels) -> Bounds<Pixels> {
-    let inset = gpui::px(PAGE_CARD_INSET);
-    let right_gap = if right > gpui::px(0.0) { right } else { inset };
+/// The Browse page's rect for the window's `content` box: the flat shell's
+/// centre column edge to edge (docs/83 §3) — past the `sidebar` column (0
+/// when closed; its divider is its own last pixel), short of the `right`
+/// column (0 when closed; its divider is its own first pixel) and above the
+/// open dock. Pure, for tests.
+pub(crate) fn column_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: Pixels, dock: Pixels) -> Bounds<Pixels> {
     Bounds {
-        origin: Point { x: content.origin.x + sidebar + inset, y: content.origin.y + inset },
+        origin: Point { x: content.origin.x + sidebar, y: content.origin.y },
         size: gpui::size(
-            (content.size.width - sidebar - inset - right_gap).max(gpui::px(0.0)),
-            (content.size.height - inset * 2.0 - dock).max(gpui::px(0.0)),
-        ),
-    }
-}
-
-/// The native page's rect inside the card for the centre `page` rect: the
-/// whole card, inset on top, right and bottom. The card has no hairline
-/// (FF `variant=inset`), so the page meets its edge.
-pub(crate) fn page_card_rect(page: Bounds<Pixels>) -> Bounds<Pixels> {
-    let inset = gpui::px(PAGE_CARD_INSET);
-    Bounds {
-        origin: Point { x: page.origin.x, y: page.origin.y + inset },
-        size: gpui::size(
-            (page.size.width - inset).max(gpui::px(0.0)),
-            (page.size.height - inset * 2.0).max(gpui::px(0.0)),
+            (content.size.width - sidebar - right).max(gpui::px(0.0)),
+            (content.size.height - dock).max(gpui::px(0.0)),
         ),
     }
 }
@@ -227,22 +207,21 @@ fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
     }
 }
 
-/// The browser pane's rectangle in window coordinates, derived from the
-/// window's content box: the pane hangs off the content's right edge,
-/// under the header, `right_width` wide. Pure so tests can drive it.
+/// The browser pane's page in window coordinates, derived from the window's
+/// content box: the right column hangs off the content's right edge,
+/// `right_width` wide, its first pixel the divider; the page sits under the
+/// pane's one bar (the column's 44 px header, [`aui::workbench::PAGE_NAV_H`]).
+/// Pure so tests can drive it.
 pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) -> Bounds<Pixels> {
-    // v3: the right pane is a second sheet — 6 px in from the window on
-    // top, right and bottom (its left gap is the column's own 6), its
-    // header row inside it.
-    let inset = gpui::px(PAGE_CARD_INSET);
+    let bar = gpui::px(aui::workbench::PAGE_NAV_H);
     Bounds {
         origin: Point {
-            x: content.origin.x + content.size.width - right_width,
-            y: content.origin.y + inset + gpui::px(HEADER_PX),
+            x: content.origin.x + content.size.width - right_width + gpui::px(DIVIDER_PX),
+            y: content.origin.y + bar,
         },
         size: gpui::size(
-            (right_width - inset).max(gpui::px(0.0)),
-            (content.size.height - inset * 2.0 - gpui::px(HEADER_PX)).max(gpui::px(0.0)),
+            (right_width - gpui::px(DIVIDER_PX)).max(gpui::px(0.0)),
+            (content.size.height - bar).max(gpui::px(0.0)),
         ),
     }
 }
@@ -754,9 +733,9 @@ impl Harness {
         if !self.layout.terminal_open {
             return gpui::px(0.0);
         }
-        // The centre column is the sheet: the window less the 6 px inset
-        // top and bottom.
-        let centre_height = f32::from(window.bounds().size.height).max(0.0) - 2.0 * PAGE_CARD_INSET;
+        // The centre column runs the window's height (the flat shell has
+        // no inset, docs/83 §3).
+        let centre_height = f32::from(window.bounds().size.height).max(0.0);
         let want =
             self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
         gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
@@ -824,34 +803,21 @@ impl Harness {
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
     fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
-        // v3: the page is the sheet — 6 px in from the window, the sidebar
-        // column and the right sheet; the dock below it inside the column.
+        // Flat (docs/83 §3): the page is the centre column edge to edge —
+        // between the sidebar column and the right column, the dock below
+        // it inside the column.
         if !self.settings_open() {
             let sidebar = if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
-            let mut right = if self.layout.right_open { gpui::px(self.right_resize.width) + gpui::px(2.0 * PAGE_CARD_INSET) } else { gpui::px(0.0) };
+            let mut right = if self.layout.right_open { gpui::px(self.right_resize.width) } else { gpui::px(0.0) };
             // The docked agent column takes its strip beside the page (R3):
-            // the page gives it up rather than sitting under it.
+            // the page gives it up rather than sitting under it (the card
+            // window puts the column 6 past the page's right edge).
             if self.mode == crate::layout::Mode::Browse && self.card_ui == crate::app::agent_window::CardUi::Column {
-                // `sheet_page_rect` reads a zero `right` as the plain inset.
-                let base = if right > gpui::px(0.0) { right } else { gpui::px(PAGE_CARD_INSET) };
-                right = base + gpui::px(crate::app::agent_window::COLUMN_W + 6.0);
+                right += gpui::px(crate::app::agent_window::COLUMN_W + 6.0);
             }
-            return sheet_page_rect(content, sidebar, right, self.open_dock_height_px(window));
+            return column_page_rect(content, sidebar, right, self.open_dock_height_px(window));
         }
-        let page = self.browse_centre_content_rect(content, window);
-        if self.browse_page_card() {
-            page_card_rect(page)
-        } else {
-            page
-        }
-    }
-
-    /// Whether the Browse page sits in the inset rounded card: Browse with
-    /// the sidebar open (canvas BrowseWindow; owner note 2026-10-11 — a
-    /// square page's corner poked past the window's rounded corner).
-    pub(crate) fn browse_page_card(&self) -> bool {
-        // v3: the page is always the sheet in Browse, open or closed.
-        self.mode == crate::layout::Mode::Browse && !self.settings_open()
+        self.browse_centre_content_rect(content, window)
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -2584,16 +2550,9 @@ impl Harness {
             return;
         };
         let content = window_content_bounds(window);
-        // The live page sits under the webview's nav row: a press on the
-        // row itself is outside the page and takes the keyboard back too.
-        let pane = browser_page_bounds(content, gpui::px(self.right_resize.width));
-        let page = gpui::Bounds::new(
-            gpui::point(pane.origin.x, pane.origin.y + gpui::px(BROWSER_NAV_PX)),
-            gpui::size(
-                pane.size.width,
-                (pane.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.)),
-            ),
-        );
+        // The live page sits under the pane's one bar: a press on the bar
+        // itself is outside the page and takes the keyboard back too.
+        let page = browser_page_bounds(content, gpui::px(self.right_resize.width));
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
             event.position,
@@ -4552,7 +4511,7 @@ pub(crate) struct BrowserRegistry {
     /// `None` outside Browse and before the first sync.
     pub centre_page_rect: Option<Bounds<Pixels>>,
     /// The loading line's rect while a page loads (v3): cut through the
-    /// page as a hole so the line shows on the sheet's top edge.
+    /// page as a hole so the line shows along the page column's top edge.
     pub progress_hole: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The page the v3 holes were last cut through, so they are taken back
     /// when it stops being the centre.
@@ -4883,16 +4842,18 @@ mod tests {
     use aui_webview::WebBackend as _;
     use std::collections::HashMap;
 
-    /// FF `variant=inset` (owner 2026-10-11): the native page fills the card
-    /// — 8 off the top, right and bottom, flush on the sidebar side — with
-    /// no hairline offset, since the card draws none.
+    /// Flat (docs/83 §3): the Browse page fills its column edge to edge —
+    /// from the sidebar column's edge to the right column's, top to bottom,
+    /// above the dock.
     #[test]
-    fn page_card_rect_is_the_inset_card_with_no_hairline() {
+    fn column_page_rect_is_the_column_edge_to_edge() {
         use gpui::{point, px, size, Bounds};
-        let page = Bounds { origin: point(px(256.0), px(0.0)), size: size(px(1000.0), px(800.0)) };
-        let card = super::page_card_rect(page);
-        assert_eq!(card.origin, point(px(256.0), px(super::PAGE_CARD_INSET)));
-        assert_eq!(card.size, size(px(1000.0 - super::PAGE_CARD_INSET), px(800.0 - 2.0 * super::PAGE_CARD_INSET)));
+        let content = Bounds { origin: point(px(0.0), px(0.0)), size: size(px(1440.0), px(900.0)) };
+        let page = super::column_page_rect(content, px(256.0), px(400.0), px(120.0));
+        assert_eq!(page.origin, point(px(256.0), px(0.0)));
+        assert_eq!(page.size, size(px(1440.0 - 256.0 - 400.0), px(900.0 - 120.0)));
+        let closed = super::column_page_rect(content, px(0.0), px(0.0), px(0.0));
+        assert_eq!(closed, content, "both columns closed: the whole window");
     }
 
     fn all_clear() -> BrowserVisibility {
@@ -5135,15 +5096,16 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_page_is_the_second_sheet_off_the_right_edge() {
+    fn the_pane_page_sits_past_the_divider_under_the_bar() {
         let content = gpui::Bounds {
             origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
             size: gpui::size(gpui::px(1440.0), gpui::px(900.0)),
         };
         let pane = browser_page_bounds(content, gpui::px(400.0));
-        assert_eq!(f32::from(pane.origin.x), 1040.0);
-        assert_eq!(f32::from(pane.origin.y), 6.0 + 44.0, "v3: the second sheet, its header inside it");
-        assert_eq!(f32::from(pane.size.width), 394.0);
+        assert_eq!(f32::from(pane.origin.x), 1041.0, "past the column's 1 px divider");
+        assert_eq!(f32::from(pane.origin.y), 44.0, "under the pane's 44 px bar");
+        assert_eq!(f32::from(pane.size.width), 399.0);
+        assert_eq!(f32::from(pane.size.height), 900.0 - 44.0);
     }
 
     #[test]

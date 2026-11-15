@@ -335,16 +335,17 @@ mod tests {
     /// overshoot, and never leaves the divider's range.
     #[test]
     fn a_sweep_marches_by_the_step_and_snaps_at_the_target() {
-        let mut sweep = ResizeSweep::new(412.0, 4.0);
+        // Inside the divider's range (docs/83 §2.5: 220–360).
+        let mut sweep = ResizeSweep::new(352.0, 4.0);
         assert_eq!(sweep.advance(252.0), 256.0);
-        assert_eq!(sweep.advance(410.0), 412.0);
-        assert_eq!(sweep.advance(412.0), 412.0);
+        assert_eq!(sweep.advance(350.0), 352.0);
+        assert_eq!(sweep.advance(352.0), 352.0);
     }
 
     #[test]
     fn a_sweep_marches_down_as_well_as_up() {
         let mut sweep = ResizeSweep::new(252.0, 4.0);
-        assert_eq!(sweep.advance(412.0), 408.0);
+        assert_eq!(sweep.advance(352.0), 348.0);
         assert_eq!(sweep.advance(254.0), 252.0);
     }
 
@@ -353,8 +354,8 @@ mod tests {
         // Past the maximum the clamp holds every tick, which is what ends
         // the sweep instead of marching forever.
         let mut sweep = ResizeSweep::new(10_000.0, 4.0);
-        assert_eq!(sweep.advance(418.0), aui::shell::SIDEBAR_MAX_WIDTH);
-        assert_eq!(sweep.advance(420.0), aui::shell::SIDEBAR_MAX_WIDTH);
+        assert_eq!(sweep.advance(aui::shell::SIDEBAR_MAX_WIDTH - 2.0), aui::shell::SIDEBAR_MAX_WIDTH);
+        assert_eq!(sweep.advance(aui::shell::SIDEBAR_MAX_WIDTH), aui::shell::SIDEBAR_MAX_WIDTH);
     }
 
     /// A scroll sweep holds a constant delta for the finger phase, then

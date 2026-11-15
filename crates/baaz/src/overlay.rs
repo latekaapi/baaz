@@ -86,7 +86,7 @@ pub(crate) enum OverlayKind {
     /// 2026-10-11 5.23 PM); here the page stays live and dims with the rest.
     Modal,
     /// The corner stack (D4, docs/41 §2.11) in Browse: the newest toast
-    /// over the feedback slot, 12 above the sheet's bottom and 12 from its
+    /// over the feedback slot, 12 above the page's bottom and 12 from its
     /// right, over the live page. Its own window beside the one above —
     /// it coexists with a menu or the Field — and it never takes the
     /// keyboard, so it never closes on a resign: it lives while it has
@@ -559,7 +559,7 @@ impl Harness {
     }
 
     /// Where the corner window should be, in screen space, while Browse
-    /// has a stack to show: 12 above the sheet's bottom, 12 from its right,
+    /// has a stack to show: 12 above the page's bottom, 12 from its right,
     /// the window reaching the shadow margin past the pills. Wide enough
     /// for the widest toast; the pills sit at its bottom-right and the
     /// clear rest passes the pointer through to the page.

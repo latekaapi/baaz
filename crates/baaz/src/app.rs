@@ -282,11 +282,6 @@ const LAUNCH_STDERR_MAX_W: f32 = 640.0;
 /// The right pane's close ✕: its glyph inside the extra-small button.
 const RIGHT_CLOSE_GLYPH: f32 = 10.0;
 
-/// D6 (docs/43 §2.1): the right pane is a sheet this far in from the
-/// window's right edge…
-const RIGHT_SHEET_INSET: f32 = 6.0;
-/// …and this far right of the centre sheet; the divider handle straddles the gap.
-const RIGHT_SHEET_GAP: f32 = 6.0;
 /// What the host hands the shell's chrome row (see `Harness::render_bar_chrome`).
 pub(crate) struct BarChrome {
     pub(crate) lead: AnyElement,
@@ -3528,10 +3523,10 @@ impl Harness {
         Ok(())
     }
 
-    /// The centre column's height: the sheet, the window less its 6 px
-    /// inset top and bottom.
+    /// The centre column's height: the window's — the flat shell's columns
+    /// run top to bottom with no inset (docs/83 §3).
     fn centre_height(&self, window: &Window) -> f32 {
-        f32::from(window.bounds().size.height).max(0.0) - 2.0 * aui::shell::SHEET_INSET
+        f32::from(window.bounds().size.height).max(0.0)
     }
 
     /// The dock's height now: the stored one, clamped into `[120px, 70% of
@@ -3660,7 +3655,6 @@ impl Harness {
                 TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
             });
         let dock = terminal_dock("terminal-dock", header, body)
-            .surface(true)
             .hint(self.terminal_hint_name(hint_provider))
             .maximized(maximised)
             .on_action(dock_action);
@@ -4426,7 +4420,7 @@ impl Harness {
             .into_any_element();
         if self.mode == layout::Mode::Browse {
             // Browse: the page controls and the address live in the sidebar's
-            // own header; the sheet is the page, so the row shows nothing.
+            // own header; the centre is the page, so the row shows nothing.
             BarChrome { lead, switch: Some(switch), title: None, right: None }
         } else {
             BarChrome {
@@ -4452,7 +4446,7 @@ impl Harness {
         }
     }
 
-    /// Hands the v3 shell's chrome over the sheet (the peek card) to the
+    /// Hands the shell's chrome over the centre (the sidebar peek) to the
     /// Browse page as holes, so they show over the native page
     /// and take the clicks there; none outside Browse.
     pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
@@ -4568,7 +4562,7 @@ impl Harness {
     }
 
     /// The session header's actions — terminal, the session menu, the right
-    /// pane — drawn in the sheet's title row while the sidebar is open.
+    /// pane — drawn in the centre column's header.
     fn session_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -4870,11 +4864,10 @@ impl Harness {
                     // the centre with no library nav row of its own.
                     // (Annotate and Screenshot stay reachable through the
                     // header's ⋯ menu.)
-                    // The page sits in the rounded card (canvas BrowseWindow):
-                    // its native corners take the card's radius, square when
-                    // there is no card.
-                    let radius = if self.browse_page_card() { aui::shell::SHEET_RADIUS } else { 0.0 };
-                    state.update(cx, |state, _| state.set_corner_radius(radius));
+                    // The page fills its column edge to edge (docs/83 §3):
+                    // square native corners (a tab that was the Peek's
+                    // rounded page gets them back here).
+                    state.update(cx, |state, _| state.set_corner_radius(0.0));
                     let page = aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
                         .on_intent(move |intent, window, cx| {
@@ -4962,11 +4955,11 @@ impl Harness {
             .children(extensions)
             .children(more)
             .children(peek);
-        // v3: the shell draws the page's sheet (6 px in, radius 8, the 50 %
-        // black ring) and this fills it; the native page's rect and radius
-        // match (`browse_centre_page_rect`, `set_corner_radius`). The loading
-        // line rides the sheet's top edge.
-        // The docked agent column (R3) takes a strip on the sheet's right:
+        // Flat (docs/83 §3): this fills the shell's centre column edge to
+        // edge; the native page's rect and its square corners match
+        // (`browse_centre_page_rect`, `set_corner_radius`). The loading line
+        // rides the column's top edge.
+        // The docked agent column (R3) takes a strip on the column's right:
         // the page narrows beside it (its own window covers the strip), and
         // `browse_centre_page_rect` agrees.
         let column = if self.card_ui == agent_window::CardUi::Column { agent_window::COLUMN_W + 6.0 } else { 0.0 };
@@ -4982,8 +4975,8 @@ impl Harness {
     /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
     /// the foreground filling a border-12 % track in proportion to the
     /// engine's progress, along the card's top edge between its corner radii.
-    /// v3: the line runs along the sheet's top edge between its corner
-    /// radii, inside the page's rect — it is cut through the page as a hole
+    /// Flat (docs/83 §3): the line runs the page column's top edge, end to
+    /// end (the page has no corners), inside the page's rect — it is cut through the page as a hole
     /// while it shows (`set_browse_holes`), since the native page covers
     /// anything gpui draws under it.
     fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -5000,7 +4993,6 @@ impl Harness {
         let hole = self.browser.progress_hole.clone();
         let p = cx.aui().colors;
         let line = px(scale::SP_1);
-        let radius = px(aui::shell::SHEET_RADIUS);
         let fill = progress.clamp(0.0, 1.0);
         Some(
             div()
@@ -5009,10 +5001,9 @@ impl Harness {
                 .aria_label("Loading page")
                 .absolute()
                 .top_0()
-                .left(radius)
-                .right(radius)
+                .left_0()
+                .right_0()
                 .h(line)
-                .rounded(line / 2.0)
                 .overflow_hidden()
                 .bg(p.line)
                 .flex()
@@ -5212,9 +5203,9 @@ impl Harness {
             let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).border_1().border_color(p.line_strong).shadow(p.floating_shadow()).child(rows));
             column = column.child(panel);
         }
-        let radius = if self.browse_page_card() { px(scale::SHAPE_CONTAINER) } else { Pixels::ZERO };
+        // The new tab is the page column, square like a page (docs/83 §3).
         let ground = self.newtab_ground.clone().map(|path| {
-            gpui::img(path).absolute().top_0().left_0().size_full().object_fit(gpui::ObjectFit::Cover).rounded(radius).into_any_element()
+            gpui::img(path).absolute().top_0().left_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element()
         });
         div()
             .size_full()
@@ -5478,22 +5469,22 @@ impl Harness {
                 let jump = view.update(cx, |view, cx| view.render_jump_pill(cx));
                 // The composer floats over the transcript (owner 2026-10-15:
                 // "it's not floating on top of the transcript"): the band is
-                // absolute at the sheet's bottom and the list runs under it.
+                // absolute at the column's bottom and the list runs under it.
                 // Its ground fades from clear at the field's top edge to the
-                // sheet by the controls row, so the transcript stays visible
-                // beside the field; the band's painted height goes to the
-                // session view, whose list ends that far up. The corner
-                // stack rides the band: its bottom 8 above the composer.
-                let sheet = cx.aui().colors.surface_2;
+                // column's ground by the controls row, so the transcript
+                // stays visible beside the field; the band's painted height
+                // goes to the session view, whose list ends that far up. The
+                // corner stack rides the band: its bottom 8 above the composer.
+                let ground = cx.aui().colors.surface_1;
                 let inset_to = view.downgrade();
                 let band = div()
                     .absolute()
                     .left_0()
                     .right_0()
                     .bottom_0()
-                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.55), 0.0), gpui::linear_color_stop(sheet, 0.5)))
+                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(ground.alpha(0.55), 0.0), gpui::linear_color_stop(ground, 0.5)))
                     // The lead-in: 32 px above the field, clear to half the
-                    // sheet, so the text dissolves into the composer instead
+                    // ground, so the text dissolves into the composer instead
                     // of meeting its edge.
                     .child(
                         div()
@@ -5502,7 +5493,7 @@ impl Harness {
                             .right_0()
                             .bottom(gpui::relative(1.0))
                             .h(px(scale::SP_7))
-                            .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet.alpha(0.55), 1.0))),
+                            .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(ground.alpha(0.0), 0.0), gpui::linear_color_stop(ground.alpha(0.55), 1.0))),
                     )
                     // Measured on the composer itself: the band's first child is
                     // the lead-in fade, and reporting *its* 32 px left the list's
@@ -5564,7 +5555,7 @@ impl Harness {
             }
         };
         // A centre with no composer (no session, Skills, a pending switch)
-        // holds the corner stack 12 above the sheet's bottom; Browse's is
+        // holds the corner stack 12 above the column's bottom; Browse's is
         // in the corner window.
         let in_band = !self.skills.open && pending_dest.is_none() && self.mode != layout::Mode::Browse && self.active.is_some();
         let body = match (in_band || self.corner_in_overlay()).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
@@ -6673,12 +6664,12 @@ impl Render for Harness {
                             ),
                     )
                 };
-            // One shell for every page (canvas "Baaz v3", chrome revised
-            // 2026-10-13): the sidebar column full height with the chrome row
-            // at its top; the work area a sheet 6 px in with its own title
-            // row; closed, nothing stays (not even the lights) and the top or
+            // One shell for every page (docs/83 §3, flat): the sidebar column
+            // full height with the chrome row at its top; the centre and the
+            // right pane plain columns, each with its 44 px header and line;
+            // closed, nothing stays (not even the lights) and the top or
             // left edge peeks the sidebar. Settings puts its section list in the column,
-            // its breadcrumb and close button in the sheet's row. Sessions animates (ease-out, the sheet's content laid out
+            // its breadcrumb and close button in the centre header. Sessions animates (ease-out, the centre's content laid out
             // once at the resting width); Browse is instant — the native page
             // cannot follow a per-frame resize without jank — and cuts a hole
             // for the peek so it shows over the page.
@@ -6782,11 +6773,11 @@ impl Render for Harness {
                         .absolute()
                         .top_0()
                         .bottom_0()
-                        // D6: the pane is a sheet 6 in from the window's
-                        // right edge with a 6 gap before it; the handle
-                        // straddles that gap (live 2026-10-19: it sat 9 px
-                        // inside the pane, where nobody aims).
-                        .right(px(self.right_resize.width + RIGHT_SHEET_INSET + RIGHT_SHEET_GAP / 2.0 - RESIZE_HANDLE_W / 2.0))
+                        // Flat (docs/83 §3): the pane is a column flush with
+                        // the window's right edge; the handle straddles its
+                        // left divider (live 2026-10-19: a handle 9 px inside
+                        // the pane was where nobody aims).
+                        .right(px(self.right_resize.width - RESIZE_HANDLE_W / 2.0))
                         .id("right-resize-area")
                         .role(gpui::Role::Splitter)
                         .aria_label("Resize right pane")
@@ -8630,11 +8621,12 @@ mod tests {
         restore_state(state);
     }
 
-    /// v3: the stored centre page is the sheet — 6 px in from the window
-    /// (closed) or from the sidebar column (open), on every side — the one
-    /// rect behind placement and the mouse-down hand-back.
+    /// Flat (docs/83 §3): the stored centre page is the centre column edge to
+    /// edge — from the window's top and left (closed) or the sidebar
+    /// column's edge (open) — the one rect behind placement and the
+    /// mouse-down hand-back.
     #[gpui::test]
-    fn centre_page_rect_is_the_v3_sheet(cx: &mut gpui::TestAppContext) {
+    fn centre_page_rect_is_the_flat_column(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("browse-page-rect");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -8657,16 +8649,16 @@ mod tests {
             let h = baaz.read(cx);
             (h.browser.centre_page_rect.expect("the sync stores the rect"), h.resize.width)
         });
-        assert_eq!(open_page.origin, gpui::point(gpui::px(width + 6.0), gpui::px(6.0)), "open: 6 px past the column");
+        assert_eq!(open_page.origin, gpui::point(gpui::px(width), gpui::px(0.0)), "open: flush with the sidebar column");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         let closed_page =
             vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
-        assert_eq!(closed_page.origin, gpui::point(gpui::px(6.0), gpui::px(6.0)), "closed: 6 px from the window");
+        assert_eq!(closed_page.origin, gpui::point(gpui::px(0.0), gpui::px(0.0)), "closed: the window's corner");
         assert_eq!(
             closed_page.size.width - open_page.size.width,
             gpui::px(width),
-            "the sheet never moves: closing only removes the column"
+            "the page only grows by the column: closing removes the column and nothing else"
         );
         restore_state(state);
     }
@@ -8704,8 +8696,8 @@ mod tests {
     }
 
     /// The Skills page's own header ("Skills · project · Search · Add
-    /// skill") sits below the sheet's title row and its fade, as the
-    /// Settings column does: at 16 px it drew dimmed and half under the
+    /// skill") sits below the centre header's line, inset as the Settings
+    /// column's heading is: once it drew dimmed and half under the
     /// window's top bar (2026-10-30).
     #[gpui::test]
     fn the_skills_header_clears_the_top_bar_and_its_fade(cx: &mut gpui::TestAppContext) {
@@ -8724,14 +8716,18 @@ mod tests {
         });
         draw_shell(&mut *vc, &baaz);
         let header = vc.debug_bounds("skills-header").expect("the Skills header draws");
-        let clear = aui::shell::SHEET_ROW_H + aui::shell::SHEET_FADE_BELOW;
+        let bar = vc.update(|_, cx| {
+            use aui_tokens::ActiveAui as _;
+            f32::from(cx.aui().metrics.bar)
+        });
         assert!(
-            f32::from(header.origin.y) + crate::skills_page::SKILLS_HEADER_TOP >= clear,
-            "the header's content starts below the top bar's row and fade: {header:?}"
+            f32::from(header.origin.y) >= bar - 0.5,
+            "the header starts below the centre header and its line ({bar}): {header:?}"
         );
-        assert!(
-            crate::skills_page::SKILLS_HEADER_TOP >= clear,
-            "the header's inset clears the sheet row and its fade"
+        assert_eq!(
+            crate::skills_page::SKILLS_HEADER_TOP,
+            crate::settings::SETTINGS_COLUMN_TOP,
+            "the header's inset is the Settings column's"
         );
         restore_state(state);
     }
@@ -8895,10 +8891,11 @@ mod tests {
     }
 
     /// The Settings nav's "← Back" row sits below the sidebar column's
-    /// chrome row and the fade the shell lays under it: at an 8 px margin it
-    /// drew half under the top bar's shade (owner screenshot, 2026-10-31).
+    /// chrome row and its line, the list inset down (once it drew half
+    /// under the top bar's shade, owner screenshot 2026-10-31; the flat shell
+    /// has no shade).
     #[gpui::test]
-    fn the_settings_back_row_clears_the_top_bar_and_its_fade(cx: &mut gpui::TestAppContext) {
+    fn the_settings_back_row_clears_the_top_bar(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("settings-back-top");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -8918,11 +8915,11 @@ mod tests {
             use aui_tokens::ActiveAui as _;
             f32::from(cx.aui().metrics.header)
         });
-        let clear = row_h + aui::shell::LIST_FADE;
+        let clear = row_h + crate::settings::SETTINGS_NAV_TOP;
         assert!(
             f32::from(back.origin.y) >= clear - 0.5,
-            "Back starts below the chrome row ({row_h}) and its fade ({}): {back:?}",
-            aui::shell::LIST_FADE
+            "Back starts the list inset ({}) below the chrome row and its line ({row_h}): {back:?}",
+            crate::settings::SETTINGS_NAV_TOP
         );
         restore_state(state);
     }

@@ -587,8 +587,8 @@ mod tests {
     fn a_drag_never_leaves_the_library_range() {
         assert_eq!(drag_width(252.0, 0.0, -10_000.0), aui::shell::SIDEBAR_MIN_WIDTH);
         assert_eq!(drag_width(252.0, 0.0, 10_000.0), aui::shell::SIDEBAR_MAX_WIDTH);
-        assert_eq!(drag_width(180.0, 200.0, 100.0), aui::shell::SIDEBAR_MIN_WIDTH);
-        assert_eq!(drag_width(420.0, 200.0, 300.0), aui::shell::SIDEBAR_MAX_WIDTH);
+        assert_eq!(drag_width(220.0, 200.0, 100.0), aui::shell::SIDEBAR_MIN_WIDTH);
+        assert_eq!(drag_width(360.0, 200.0, 300.0), aui::shell::SIDEBAR_MAX_WIDTH);
     }
 
     #[test]
