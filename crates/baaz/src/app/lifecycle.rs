@@ -6445,6 +6445,7 @@ mod tests {
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, off()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -10290,6 +10291,7 @@ done
                 (Capability::ClientTools, off()),
                 (Capability::ReasoningTraces, off()),
                 (Capability::SubagentTurns, off()),
+                (Capability::ImageInput, native.clone()),
             ])
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -10901,6 +10903,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, native.clone()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -13149,6 +13152,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, native.clone()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
@@ -14063,6 +14067,7 @@ done
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, off()),
                 ])
             }
             fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {

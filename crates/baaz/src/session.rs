@@ -1665,6 +1665,12 @@ impl SessionView {
         crate::providers::gate(self.provider_kind(), provider::Capability::TurnControl)
     }
 
+    /// Whether this session's provider offers `capability` (docs/82 0.7):
+    /// what every control that sends a command asks first.
+    pub(crate) fn offers(&self, capability: provider::Capability) -> bool {
+        crate::providers::offers(self.provider_kind(), capability)
+    }
+
     /// The question-answer control's gate, same contract as [`Self::steer_gate`].
     pub fn questions_gate(&self) -> Option<String> {
         crate::providers::gate(self.provider_kind(), provider::Capability::Questions)

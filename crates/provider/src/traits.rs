@@ -174,14 +174,19 @@ impl Provider {
     /// [`ProviderError::Unsupported`] — never `Ok`.
     ///
     /// The gate: the command's [`Command::required_capability`] is looked up
-    /// in [`capabilities`](Self::capabilities) first, and an `Unavailable`
-    /// state is refused here, before [`dispatch`](ProviderAdapter::dispatch)
-    /// runs. An adapter whose dispatch would have returned `Ok` still
+    /// in [`capabilities`](Self::capabilities) first, and a state that does
+    /// not [`allow an attempt`](CapabilityState::allows_attempt)
+    /// (`Unavailable` or `Unverified`) is refused here, before
+    /// [`dispatch`](ProviderAdapter::dispatch) runs. An adapter whose dispatch would have returned `Ok` still
     /// refuses, because its dispatch is unreachable except through here.
     pub fn send(&self, command: Command) -> Result<Ack, ProviderError> {
         let needed = command.required_capability();
-        if let CapabilityState::Unavailable { reason } = self.inner.capabilities().state(needed) {
-            return Err(ProviderError::unsupported(command.capability(), reason.clone()));
+        let state = self.inner.capabilities().state(needed).clone();
+        if !state.allows_attempt() {
+            let reason = state.reason().map(str::to_owned).unwrap_or_else(|| {
+                format!("{} has not been verified on this provider", needed.name())
+            });
+            return Err(ProviderError::unsupported(command.capability(), reason));
         }
         self.inner.dispatch(command)
     }

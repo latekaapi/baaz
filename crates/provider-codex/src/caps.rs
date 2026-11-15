@@ -1,11 +1,11 @@
 //! The declared set, grounded in `fixtures/codex/`.
 //!
-//! Anything with a fixture proving the round trip is `Native`. Anything read
-//! off a method name but never executed (`thread/fork`, `thread/compact/start`,
-//! `item/tool/requestUserInput`, out-of-turn shell, client-tool registration)
-//! is `Unverified` — honest ignorance, still attempted — never quietly
-//! upgraded without a fixture. Nothing here is `Unavailable`: no negative has
-//! been established on this backend.
+//! Anything with a fixture proving the round trip is `Native`. What the
+//! adapter refuses in `dispatch` (fork, compact, out-of-turn shell, question
+//! answers, images) is `Unavailable` with the adapter's reason, so the app
+//! never offers the control (docs/81 F D1). What has no command and no
+//! evidence (client-tool registration, sub-agent turns) stays `Unverified`,
+//! which the gate also refuses; promote a cell only with a fixture.
 //!
 //! `app-server` is flagged `[experimental]` in `codex --help`, so the floor
 //! below is a version we pin, and the protocol may move under us.
@@ -39,15 +39,33 @@ pub fn capabilities() -> CapabilitySet {
         // thread/resume rejoins it with its turns[] history, executed
         // live 2026-09-26 (`fixtures/codex/resume.jsonl`).
         (Capability::SessionLifecycle, CapabilityState::Native),
-        // `thread/fork` exists; no fixture forks. Do not upgrade blind.
-        (Capability::ForkSession, CapabilityState::Unverified),
-        // `thread/compact/start` exists; never executed. Do not upgrade blind.
-        (Capability::CompactSession, CapabilityState::Unverified),
+        // `thread/fork` exists; no fixture forks, and the adapter refuses it.
+        (
+            Capability::ForkSession,
+            CapabilityState::Unavailable {
+                reason: "thread/fork was never executed against a live server; not forked blind"
+                    .into(),
+            },
+        ),
+        // `thread/compact/start` exists; never executed, and the adapter refuses it.
+        (
+            Capability::CompactSession,
+            CapabilityState::Unavailable {
+                reason: "thread/compact/start was never executed; not compacted blind"
+                    .into(),
+            },
+        ),
         // thread/start and turn/start both carry an explicit model.
         (Capability::SessionConfig, CapabilityState::Native),
         // No out-of-turn shell surface was captured; the shell runs inside
-        // turns. Attempted, never refused by the gate.
-        (Capability::SessionShell, CapabilityState::Unverified),
+        // turns.
+        (
+            Capability::SessionShell,
+            CapabilityState::Unavailable {
+                reason: "no out-of-turn shell surface was captured; the shell runs inside turns"
+                    .into(),
+            },
+        ),
         // turn/start, proven in every fixture.
         (Capability::SubmitTurn, CapabilityState::Native),
         // turn/steer answers `{"turnId":…}`, proven mid-turn.
@@ -65,10 +83,24 @@ pub fn capabilities() -> CapabilitySet {
         // executed live.
         (Capability::Approvals, CapabilityState::Native),
         // item/tool/requestUserInput exists; no probe ever settled one.
-        (Capability::Questions, CapabilityState::Unverified),
-        // Transcript paging rides thread/read, whose shape was never
-        // captured; following the live stream works. Attempted, page refused.
-        (Capability::Transcript, CapabilityState::Unverified),
+        (
+            Capability::Questions,
+            CapabilityState::Unavailable {
+                reason: "question answer shapes were never captured; not answered blind"
+                    .into(),
+            },
+        ),
+        // Following the live stream works ("Retry now" revives the child
+        // through FollowSession); paging rides thread/read, never captured,
+        // and the app never pages a Codex session (`pages_history`).
+        (
+            Capability::Transcript,
+            CapabilityState::Emulated {
+                reason: "follows the live session; the history comes back whole on resume and \
+                         is never paged"
+                    .into(),
+            },
+        ),
         // account/read plus rateLimits, pushed unprompted after every turn.
         (Capability::Account, CapabilityState::Native),
         // `item/tool/call` exists; the registration path is unidentified and
@@ -78,6 +110,15 @@ pub fn capabilities() -> CapabilitySet {
         (Capability::ReasoningTraces, CapabilityState::Native),
         // No sub-agent turn shape was captured.
         (Capability::SubagentTurns, CapabilityState::Unverified),
+        // turn/start takes `localImage` paths (fixture `image.jsonl`) but the
+        // seam carries bytes; the adapter refuses images until it stages them.
+        (
+            Capability::ImageInput,
+            CapabilityState::Unavailable {
+                reason: "turn/start takes a local image path but the seam carries bytes; images are not staged to a file yet"
+                    .into(),
+            },
+        ),
     ])
 }
 
@@ -91,10 +132,10 @@ mod tests {
         use Capability as C;
         use CapabilityState as S;
         assert_eq!(set.state(C::SessionLifecycle), &S::Native);
-        assert_eq!(set.state(C::ForkSession), &S::Unverified);
-        assert_eq!(set.state(C::CompactSession), &S::Unverified);
+        assert!(matches!(set.state(C::ForkSession), S::Unavailable { .. }));
+        assert!(matches!(set.state(C::CompactSession), S::Unavailable { .. }));
         assert_eq!(set.state(C::SessionConfig), &S::Native);
-        assert_eq!(set.state(C::SessionShell), &S::Unverified);
+        assert!(matches!(set.state(C::SessionShell), S::Unavailable { .. }));
         assert_eq!(set.state(C::SubmitTurn), &S::Native);
         assert_eq!(set.state(C::SteerTurn), &S::Native);
         assert_eq!(set.state(C::TurnControl), &S::Native);
@@ -102,8 +143,9 @@ mod tests {
         assert_eq!(set.state(C::Approvals), &S::Native);
         // NOT Native: the shape was read, never executed. Do not upgrade
         // without a fixture.
-        assert_eq!(set.state(C::Questions), &S::Unverified);
-        assert_eq!(set.state(C::Transcript), &S::Unverified);
+        assert!(matches!(set.state(C::Questions), S::Unavailable { .. }));
+        assert!(matches!(set.state(C::Transcript), S::Emulated { .. }));
+        assert!(matches!(set.state(C::ImageInput), S::Unavailable { .. }));
         assert_eq!(set.state(C::Account), &S::Native);
         assert_eq!(set.state(C::ClientTools), &S::Unverified);
         assert_eq!(set.state(C::ReasoningTraces), &S::Native);

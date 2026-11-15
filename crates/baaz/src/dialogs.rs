@@ -59,10 +59,13 @@ fn palette_items(
 /// query lists every command. The drawn rows come from
 /// [`Harness::palette_rows`], which reads the palette's own query field,
 /// so the keyboard and the click walk the same filtered list.
-fn filter_commands(query: &str) -> Vec<Command> {
+/// A command the open session's provider cannot run is left out
+/// ([`Command::offered_on`]); with no session open, every command shows.
+fn filter_commands(query: &str, provider: Option<crate::providers::ProviderId>) -> Vec<Command> {
     let needle = query.trim().to_lowercase();
     Command::ALL
         .into_iter()
+        .filter(|command| provider.is_none_or(|id| command.offered_on(id)))
         .filter(|command| {
             needle.is_empty()
                 || command.slash().to_lowercase().contains(&needle)
@@ -291,9 +294,14 @@ impl Harness {
     /// Keep the Commands selection inside the filtered rows after a
     /// keystroke: the rows are rebuilt at render, so a selection past the
     /// new end wraps to the head.
+    /// The open session's provider, for the menus that offer per provider.
+    pub(crate) fn active_provider(&self, cx: &gpui::App) -> Option<crate::providers::ProviderId> {
+        self.active.as_ref().map(|view| view.read(cx).provider_kind())
+    }
+
     pub(crate) fn clamp_commands_selection(&mut self, cx: &mut Context<Self>) {
         let query = self.commands_query.read(cx).value().trim().to_owned();
-        let count = filter_commands(&query).len();
+        let count = filter_commands(&query, self.active_provider(cx)).len();
         self.overlays.update(cx, |overlays, _| {
             if let Some(palette) = overlays.palette.as_mut() {
                 if palette.kind == PaletteKind::Commands && palette.selected >= count {
@@ -443,7 +451,7 @@ impl Harness {
         match kind {
             PaletteKind::Commands => {
                 let query = self.commands_query.read(cx).value().trim().to_owned();
-                filter_commands(&query)
+                filter_commands(&query, self.active_provider(cx))
                     .into_iter()
                     .map(|c| (c.slash().into(), c.slash().into(), c.description().into()))
                     .collect()
@@ -2160,12 +2168,12 @@ mod tests {
     /// description word only, nonsense is nothing, empty is all 24.
     #[test]
     fn the_command_filter_matches_slash_and_description() {
-        assert_eq!(filter_commands("brow"), vec![Command::RightBrowser]);
-        assert_eq!(filter_commands("BROW"), vec![Command::RightBrowser]);
-        assert_eq!(filter_commands("reasoning"), vec![Command::Effort]);
-        assert!(filter_commands("zzz-no-such-command").is_empty());
-        assert_eq!(filter_commands("").len(), 24, "an empty query lists every command");
-        assert_eq!(filter_commands("   ").len(), 24, "whitespace is an empty query");
+        assert_eq!(filter_commands("brow", None), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("BROW", None), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("reasoning", None), vec![Command::Effort]);
+        assert!(filter_commands("zzz-no-such-command", None).is_empty());
+        assert_eq!(filter_commands("", None).len(), 24, "an empty query lists every command");
+        assert_eq!(filter_commands("   ", None).len(), 24, "whitespace is an empty query");
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the

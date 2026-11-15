@@ -146,6 +146,7 @@ impl ProviderAdapter for ScriptedProvider {
             (Capability::ClientTools, off()),
             (Capability::ReasoningTraces, off()),
             (Capability::SubagentTurns, off()),
+            (Capability::ImageInput, CapabilityState::Native),
         ])
     }
 

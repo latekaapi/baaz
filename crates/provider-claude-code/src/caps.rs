@@ -1,7 +1,7 @@
 //! The declared set, exactly as doc §6 declares it.
 //!
-//! Anything without evidence is `Unverified` — honest ignorance, still
-//! attempted. `Questions` is `AskUserQuestion`: the CLI hands every call to the
+//! Anything without evidence is `Unverified` — honest ignorance, and like
+//! `Unavailable` it is neither attempted nor offered. `Questions` is `AskUserQuestion`: the CLI hands every call to the
 //! host as a `can_use_tool` request, in every permission mode, and the answers
 //! go back as the tool's input.
 //!
@@ -9,7 +9,7 @@
 //! and has since been executed for real (fixture `fork.jsonl`: resuming
 //! `f3815266-…` with `--fork-session` minted `c4b6fee5-…`), so it stays
 //! `Native`. `SubagentTurns` was read off frame fields and never executed,
-//! so it is `Unverified` — honest ignorance, still attempted.
+//! so it is `Unverified` — honest ignorance, not attempted.
 
 use provider::{version_at_least, Capability, CapabilitySet, CapabilityState};
 
@@ -37,19 +37,38 @@ pub fn capabilities() -> CapabilitySet {
         // Native: executed for real (§8 caveat retired by fork.jsonl —
         // resuming f3815266-… with --fork-session minted c4b6fee5-…).
         (Capability::ForkSession, CapabilityState::Native),
+        // The adapter refuses compact-now: `--autocompact` only sets a
+        // window, so offering "/compact" would always fail (docs/81 F D1).
         (
             Capability::CompactSession,
-            CapabilityState::Emulated {
-                reason: "--autocompact <auto|tokens> sets a window; there is no 'compact now' \
-                         command over --print. Compaction happens when the window fills, not \
-                         when asked"
+            CapabilityState::Unavailable {
+                reason: "no compact-now command exists over --print; compaction happens when the \
+                         --autocompact window fills, not when asked"
                     .into(),
             },
         ),
         (Capability::SessionConfig, CapabilityState::Native),
-        (Capability::SessionShell, CapabilityState::Native),
+        // The adapter refuses `RunShell`: the Bash tool runs inside turns.
+        (
+            Capability::SessionShell,
+            CapabilityState::Unavailable {
+                reason: "no out-of-turn shell surface was probed over stream-json stdin; the Bash \
+                         tool runs inside turns"
+                    .into(),
+            },
+        ),
         (Capability::SubmitTurn, CapabilityState::Native),
-        (Capability::SteerTurn, CapabilityState::Unverified),
+        // A mid-turn stdin line is answered with a turn and a `result` of
+        // its own (probed live 2026-10-16): the words arrive, as the next
+        // turn rather than inside the running one.
+        (
+            Capability::SteerTurn,
+            CapabilityState::Emulated {
+                reason: "sent while the turn runs; Claude Code answers it as its own turn after \
+                         the current one"
+                    .into(),
+            },
+        ),
         (Capability::TurnControl, CapabilityState::Unverified),
         // Native: the adapter sends `initialize` after every spawn and
         // answers `ListModels` from the answer's `models[]` (fixture
@@ -70,6 +89,7 @@ pub fn capabilities() -> CapabilitySet {
         // Unverified: parent_tool_use_id on every streamed frame was read
         // off --help and frame fields, never executed — see §8.
         (Capability::SubagentTurns, CapabilityState::Unverified),
+        (Capability::ImageInput, CapabilityState::Native),
     ])
 }
 
@@ -84,12 +104,12 @@ mod tests {
         use CapabilityState as S;
         assert_eq!(set.state(C::SessionLifecycle), &S::Native);
         assert_eq!(set.state(C::ForkSession), &S::Native);
-        assert!(matches!(set.state(C::CompactSession), S::Emulated { .. }));
+        assert!(matches!(set.state(C::CompactSession), S::Unavailable { .. }));
         assert_eq!(set.state(C::SessionConfig), &S::Native);
-        assert_eq!(set.state(C::SessionShell), &S::Native);
+        assert!(matches!(set.state(C::SessionShell), S::Unavailable { .. }));
         assert_eq!(set.state(C::SubmitTurn), &S::Native);
         // NOT Native: nothing probed them. Do not upgrade without a fixture.
-        assert_eq!(set.state(C::SteerTurn), &S::Unverified);
+        assert!(matches!(set.state(C::SteerTurn), S::Emulated { .. }));
         assert_eq!(set.state(C::TurnControl), &S::Unverified);
         assert_eq!(set.state(C::ModelCatalog), &S::Native);
         assert_eq!(set.state(C::Approvals), &S::Native);

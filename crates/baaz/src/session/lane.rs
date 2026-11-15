@@ -873,8 +873,11 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) {
         match error {
+            // The seam refused before the adapter ran: the control should
+            // not have been offered, so say only that it is not available.
             provider::ProviderError::Unsupported { reason, .. } => {
-                self.set_banner(reason, None, cx);
+                crate::baaz_log!("{} does not offer that: {reason}", self.provider_kind().label());
+                self.set_banner(&crate::providers::not_available(self.provider_kind()), None, cx);
             }
             // A typed refusal says how loudly: a dialog for what concerns
             // the connection, a banner titled by the provider otherwise.
@@ -884,6 +887,15 @@ impl SessionView {
                 }
                 provider::Severity::Banner => self.set_banner(&refusal_banner(refusal), None, cx),
             },
+            // A command the provider turned down at run time. Its words are
+            // the adapter's, written for logs: the banner names the provider
+            // in plain words and the log keeps the rest (docs/82 0.7 — the
+            // raw "provider refused the command" never reaches the window).
+            provider::ProviderError::Rejected { reason } => {
+                crate::baaz_log!("{} rejected a command: {reason}", self.provider_kind().label());
+                let text = format!("{} couldn't do that.", self.provider_kind().label());
+                self.set_banner(&text, None, cx);
+            }
             other => {
                 let text = other.to_string();
                 self.set_banner(&text, None, cx);
@@ -2125,6 +2137,7 @@ mod tests {
                 (Capability::ClientTools, off()),
                 (Capability::ReasoningTraces, off()),
                 (Capability::SubagentTurns, off()),
+                (Capability::ImageInput, native.clone()),
             ])
         }
 
@@ -2389,7 +2402,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
-        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 view.images.push(test_image());
@@ -2816,7 +2829,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
-        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
                 session_id: Some("s-1".to_owned()),
@@ -2897,19 +2910,39 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shell_escape_travels_as_run_shell(cx: &mut gpui::TestAppContext) {
+    fn shell_escape_is_not_offered_where_no_clean_run_is_on_record(cx: &mut gpui::TestAppContext) {
+        // docs/82 0.7: no provider's table offers the out-of-turn shell
+        // (Claude Code and Codex refuse it; Muse never ran one cleanly), so
+        // `!` sends nothing and says so in plain words.
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for (provider, label) in [("codex", "Codex"), ("claude-code", "Claude Code")] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, _tx) = open_recording_view(vc, "s-1", provider, adapter);
+            vc.update(|_, cx| view.update(cx, |view, cx| view.run_user_shell("echo hi".to_owned(), cx)));
+            vc.run_until_parked();
+            assert!(handle.commands_of("run-shell").is_empty(), "{provider}: nothing leaves the lane");
+            let banner = vc.update(|_, cx| view.read(cx).banner.clone());
+            assert_eq!(banner, Some(format!("Not available in {label}.")), "{provider}");
+        }
+    }
+
+    /// docs/82 0.7: the raw "provider refused the command" never reaches
+    /// the window — a run-time refusal names the provider in plain words.
+    #[gpui::test]
+    fn a_rejected_command_never_shows_the_raw_refusal(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        let (adapter, handle) = RecordingProvider::new();
-        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.run_user_shell("echo hi".to_owned(), cx)));
-        vc.run_until_parked();
-        let shells = handle.commands_of("run-shell");
-        assert_eq!(shells.len(), 1, "one RunShell leaves the lane, drew {shells:?}");
-        match &shells[0] {
-            provider::Command::RunShell { command, .. } => assert_eq!(command, "echo hi"),
-            other => panic!("a `!` command must travel as RunShell, travelled as {other:?}"),
-        }
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let error = provider::ProviderError::Rejected { reason: "thread/x was never captured".into() };
+                view.report_provider_error(&error, cx);
+            })
+        });
+        let banner = vc.update(|_, cx| view.read(cx).banner.clone()).unwrap_or_default();
+        assert_eq!(banner, "Codex couldn't do that.");
+        assert!(!banner.contains("provider refused the command"));
     }
 
     #[gpui::test]
@@ -2997,8 +3030,8 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
-                "the refusal's reason reaches the banner, drew {:?}",
+                view.read(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                "the refusal names the provider in plain words, drew {:?}",
                 view.read(cx).banner
             );
         });
@@ -3209,8 +3242,8 @@ mod tests {
             let view = view.read(cx);
             assert!(view.pending_model.is_none(), "the unlanded pick is dropped");
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
-                "the refusal's reason reaches the banner, drew {:?}",
+                view.banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                "the refusal names the provider in plain words, drew {:?}",
                 view.banner
             );
         });
@@ -3713,7 +3746,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
-        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let (view, tx) = open_recording_view(vc, "s-1", "muse", adapter);
         // One finished turn for the fork to name.
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
@@ -3746,7 +3779,7 @@ mod tests {
             let seen = seen.clone();
             let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
                 if let super::super::SessionEvent::ForkedOnProvider { session_id, provider } = event {
-                    assert_eq!(*provider, crate::providers::ProviderId::Codex, "the fork stays on its lane");
+                    assert_eq!(*provider, crate::providers::ProviderId::Muse, "the fork stays on its lane");
                     seen.borrow_mut().push(session_id.clone());
                 }
             });
@@ -3994,8 +4027,8 @@ mod tests {
             let view = view.read(cx);
             assert!(!view.plan_mode(), "the refused switch stands the pill back down");
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
-                "the refusal's reason reaches the banner, drew {:?}",
+                view.banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                "the refusal names the provider in plain words, drew {:?}",
                 view.banner
             );
         });

@@ -779,6 +779,7 @@ mod tests {
                 (Capability::ClientTools, off()),
                 (Capability::ReasoningTraces, off()),
                 (Capability::SubagentTurns, off()),
+                (Capability::ImageInput, native.clone()),
             ])
         }
 
@@ -870,6 +871,7 @@ mod tests {
                     (Capability::ClientTools, off()),
                     (Capability::ReasoningTraces, off()),
                     (Capability::SubagentTurns, off()),
+                    (Capability::ImageInput, off()),
                 ])
             }
 

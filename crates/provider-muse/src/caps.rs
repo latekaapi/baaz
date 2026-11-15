@@ -18,8 +18,10 @@
 //! the item in status `failed` — the sandbox was unavailable, so the command
 //! was never started. A grant without a single clean run is not the hard
 //! evidence a `Native` needs, and 1.3.0 and newer were never probed for
-//! `userShell` at all. `Unverified` is attempted, never refused, so nothing
-//! about sending changes — only the declaration stops guessing.
+//! `userShell` at all. `Unverified` is neither attempted nor offered
+//! (docs/82 0.7), so the app hides the `!` escape on Muse until a clean run
+//! is on record; a connected link that granted it reads `Native`
+//! ([`capabilities_for_link`]).
 //!
 //! Nothing here talks to a live server. Every entry is a claim until a
 //! live probe checks it.
@@ -83,7 +85,7 @@ pub fn capabilities_for_link(version: &str, user_shell: Option<bool>) -> Capabil
 /// version: granted on record at 1.0.3–1.2.1 but never cleanly executed
 /// there, and never probed at 1.3.0 or newer. Reasoning traces and sub-agent
 /// turns are `Unverified` on every version: nobody has probed them live.
-/// `Unverified` is attempted, never refused, so the shell still sends.
+/// `Unverified` is neither attempted nor offered.
 pub fn capabilities_for_version(version: &str) -> CapabilitySet {
     let client_tools = if compare_versions(version, MUSE_MCP_VERSION_FLOOR) != Ordering::Less {
         CapabilityState::Native
@@ -112,6 +114,7 @@ pub fn capabilities_for_version(version: &str) -> CapabilitySet {
         (Capability::ClientTools, client_tools),
         (Capability::ReasoningTraces, CapabilityState::Unverified),
         (Capability::SubagentTurns, CapabilityState::Unverified),
+        (Capability::ImageInput, CapabilityState::Native),
     ])
 }
 
