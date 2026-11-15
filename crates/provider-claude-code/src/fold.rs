@@ -745,6 +745,10 @@ fn wall_ms_since(start: Instant) -> u64 {
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeFold {
     started: HashMap<String, ()>,
+    /// Stop asked the child to interrupt (docs/82 0.8): the error `result`
+    /// that ends the turn is the person's stop, settled `Interrupted` —
+    /// never `Failed`. Cleared by that result.
+    stopping: bool,
     open: Vec<String>,
     /// The turn this CLI turn's assistant messages share: `Some` from the
     /// first message's `TurnStarted` until the `result` frame (or the next
@@ -1694,6 +1698,50 @@ impl ClaudeFold {
             Delta::TurnFinished { turn_id, meta }
         }));
         deltas
+    }
+
+    /// Whether a turn is open (a submission answered and not yet settled
+    /// by its `result`): what Stop waits on.
+    pub fn has_live_turn(&self) -> bool {
+        !self.open.is_empty()
+    }
+
+    /// Stop asked the child to interrupt: the result that ends the turn is
+    /// read as interrupted ([`step_line`]).
+    pub fn note_stopping(&mut self) {
+        self.stopping = true;
+    }
+
+    /// Stop's fallback (docs/82 0.8): the child is being ended on purpose,
+    /// so every open turn closes as the person's own stop — open approval
+    /// cards settle "Stopped" (denied only when denied), no error card —
+    /// and the ids of the turns it closed come back for their
+    /// `TurnSettled { Interrupted }`.
+    pub fn interrupt_live_turns(&mut self) -> (Vec<Delta>, Vec<String>) {
+        self.stopping = false;
+        self.forget_submissions();
+        let mut deltas = Vec::new();
+        self.resolve_open_thinking(None, &mut deltas);
+        self.flush_agents(&mut deltas);
+        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
+        for request_id in carded {
+            let state = if self.denied.contains(&request_id) {
+                ApprovalState::Denied
+            } else {
+                ApprovalState::Cancelled { reason: Some("Stopped".to_owned()) }
+            };
+            self.resolve_approval_card(&request_id, state, &mut deltas);
+        }
+        self.pending.clear();
+        self.pending_unknown.clear();
+        self.assistant_turn = None;
+        let open = std::mem::take(&mut self.open);
+        let stopped = open.clone();
+        deltas.extend(open.into_iter().map(|turn_id| {
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            Delta::TurnFinished { turn_id, meta }
+        }));
+        (deltas, stopped)
     }
 
     /// Close every live turn the child left open when its stream ended:
@@ -3340,12 +3388,16 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
     }
+    // The result ending a turn Stop interrupted is the person's stop, not
+    // a failure (docs/82 0.8).
+    let stopped = line.contains("\"result\"") && std::mem::take(&mut fold.stopping);
     if let (Some(message), Some(turn_id), Some(session_id)) = (failed, failed_turn, session_id.clone()) {
-        emit(ProviderEvent::TurnSettled {
-            session_id,
-            turn_id,
-            outcome: provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false },
-        });
+        let outcome = if stopped {
+            provider::facts::TurnOutcome::Interrupted
+        } else {
+            provider::facts::TurnOutcome::Failed { message: Some(message), signed_out: false }
+        };
+        emit(ProviderEvent::TurnSettled { session_id, turn_id, outcome });
     }
     if let Some(tap) = tap {
         emit(tap);

@@ -103,6 +103,10 @@ pub(crate) enum PendingControlKind {
     /// exactly when the mode the child then reports is Read-only — a
     /// refused layer never leaves Read-only quietly unenforced.
     ApplyReadOnly(PermissionMode),
+    /// Stop's `interrupt` request: success needs nothing (the child ends
+    /// the turn with a `result`), and an error or silence is covered by
+    /// Stop's own fallback, which ends the child.
+    Interrupt,
     /// An `mcp_status` query (probed 2026-10-17): success reports the
     /// owner's MCP servers and their tools' annotations, from which the
     /// Read-only layer's MCP denies are refreshed; error or silence is
@@ -742,6 +746,12 @@ impl ControlHub {
     /// newer request owns the state and answers for itself.
     fn refuse(&self, pending: PendingControl, reason: &str) {
         match pending.kind {
+            PendingControlKind::Interrupt => {
+                eprintln!(
+                    "[provider-claude-code] interrupt {} refused ({}); Stop ends the child instead",
+                    pending.request_id, reason
+                );
+            }
             PendingControlKind::Initialize => {
                 eprintln!(
                     "[provider-claude-code] initialize {} refused ({}); keeping the fallback catalog",

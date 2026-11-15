@@ -69,7 +69,20 @@ pub fn capabilities() -> CapabilitySet {
                     .into(),
             },
         ),
-        (Capability::TurnControl, CapabilityState::Unverified),
+        // Emulated (docs/82 0.8): Stop sends the protocol's `interrupt`
+        // control request and, if the turn is still open after
+        // INTERRUPT_GRACE, ends the child and marks the turn interrupted;
+        // the session resumes on the next send. Becomes Native once the
+        // interrupt alone is confirmed live (Needs owner 1).
+        (
+            Capability::TurnControl,
+            CapabilityState::Emulated {
+                reason: "Stop asks Claude Code to interrupt; if the turn does not end within a \
+                         moment, Baaz ends the Claude Code process, marks the turn interrupted, \
+                         and the session resumes on your next message"
+                    .into(),
+            },
+        ),
         // Native: the adapter sends `initialize` after every spawn and
         // answers `ListModels` from the answer's `models[]` (fixture
         // `permission.jsonl`; probed live 2026-09-28). Baaz's supplied
@@ -110,7 +123,7 @@ mod tests {
         assert_eq!(set.state(C::SubmitTurn), &S::Native);
         // NOT Native: nothing probed them. Do not upgrade without a fixture.
         assert!(matches!(set.state(C::SteerTurn), S::Emulated { .. }));
-        assert_eq!(set.state(C::TurnControl), &S::Unverified);
+        assert!(matches!(set.state(C::TurnControl), S::Emulated { .. }));
         assert_eq!(set.state(C::ModelCatalog), &S::Native);
         assert_eq!(set.state(C::Approvals), &S::Native);
         // NOT Native until a fixture records the CLI taking the answers.

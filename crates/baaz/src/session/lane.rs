@@ -2493,6 +2493,35 @@ mod tests {
         });
     }
 
+    /// docs/82 0.8: Stop on a Claude Code lane travels as InterruptTurn
+    /// (the adapter's interrupt-or-end, tested in its own crate), the turn
+    /// settles, and the composer takes the next message.
+    #[gpui::test]
+    fn stop_on_claude_code_ends_the_turn_and_the_composer_is_usable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.run_until_parked();
+        drain_recording(&view, &tx, vc);
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "setup: the turn runs");
+            view.update(cx, |view, cx| view.interrupt(cx));
+        });
+        vc.run_until_parked();
+        assert_eq!(handle.commands_of("interrupt-turn").len(), 1, "Stop leaves the lane as InterruptTurn");
+        drain_recording(&view, &tx, vc);
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.busy(), "the turn ended");
+            assert!(view.banner.is_none(), "no refusal banner: {:?}", view.banner);
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("next".to_owned(), cx)));
+        vc.run_until_parked();
+        assert_eq!(handle.commands_of("submit-input").len(), 2, "the composer sends the next message");
+    }
+
     /// One settled turn ends on the lane channel: the start the bridge
     /// forwarded when the turn opened, then its finish. The start matters:
     /// a finish for a turn the fold never saw folds to nothing, so the

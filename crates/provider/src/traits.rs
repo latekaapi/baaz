@@ -22,7 +22,7 @@
 use crossbeam_channel::Receiver;
 
 use crate::{
-    Ack, CapabilitySet, CapabilityState, Command, ProviderError, ProviderEvent, ProviderId,
+    Ack, CapabilitySet, Command, ProviderError, ProviderEvent, ProviderId,
 };
 
 /// Who this client is, for the provider's handshake.
@@ -86,13 +86,13 @@ pub trait ProviderAdapter: Send {
 
     /// What this provider can do, before the app asks. The UI reads the
     /// set to decide which buttons to offer; [`Provider::send`] reads it to
-    /// refuse what is [`CapabilityState::Unavailable`] before any adapter
+    /// refuse what is [`crate::CapabilityState::Unavailable`] before any adapter
     /// code runs.
     fn capabilities(&self) -> CapabilitySet;
 
     /// The adapter's real dispatch. Raw and ungated: it runs only when
     /// [`Provider::send`] has already refused what is
-    /// [`CapabilityState::Unavailable`], and no caller reaches it any other
+    /// [`crate::CapabilityState::Unavailable`], and no caller reaches it any other
     /// way — [`Provider`] exposes no path to the bare adapter. May still
     /// refuse anything further with [`ProviderError::Unsupported`]: the gate
     /// is a floor, so partial support inside one capability (following a
@@ -175,7 +175,7 @@ impl Provider {
     ///
     /// The gate: the command's [`Command::required_capability`] is looked up
     /// in [`capabilities`](Self::capabilities) first, and a state that does
-    /// not [`allow an attempt`](CapabilityState::allows_attempt)
+    /// not [`allow an attempt`](crate::CapabilityState::allows_attempt)
     /// (`Unavailable` or `Unverified`) is refused here, before
     /// [`dispatch`](ProviderAdapter::dispatch) runs. An adapter whose dispatch would have returned `Ok` still
     /// refuses, because its dispatch is unreachable except through here.
