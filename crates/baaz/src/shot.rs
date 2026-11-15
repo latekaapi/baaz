@@ -349,6 +349,19 @@ pub fn capture_and_quit(
             });
         });
         cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+        // gpui-pre 0.3.12 stops a window's frame source while it is not
+        // visibly on screen (covered, on another Space, display asleep), so
+        // the last painted frame can be the first one. Draw a few frames
+        // here — through `update_window`, which leases no view — with a
+        // pause between for the work each frame schedules: lists that scroll
+        // to their tail, menus placed after a first paint and blocks sized
+        // from the previous frame need a second or third frame to settle.
+        for _ in 0..4 {
+            cx.update(|cx| {
+                let _ = gpui::AppContext::update_window(cx, handle.into(), |_, window, cx| window.draw(cx).clear(cx));
+            });
+            cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
+        }
         let rendered = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();
