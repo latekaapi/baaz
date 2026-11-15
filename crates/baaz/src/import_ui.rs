@@ -23,12 +23,13 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
-use aui::data::{button, icon_button, ButtonSize};
-use aui::skills::{checkbox, CheckboxIntent, CheckboxState};
+use aui::data::{button, checkbox, ButtonSize, CheckboxIntent, CheckboxState, CARD_PAD_X, CARD_PAD_Y};
+use aui::interact::{interactive, Shape, LIST_ROW_H, ROW_GAP};
+use aui::screens::{dialog_sheet, SHEET_PAD_X};
+use aui::util::{h_flex, v_flex};
 use aui_icons::{icon, provider_mark, IconName};
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{div, prelude::*, px, AnyElement, Context, SharedString};
-use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::import::{self, Choice, Found, Plan, CLAUDE, CODEX};
@@ -45,8 +46,8 @@ const STALE_SECS: u64 = 600;
 const LISTED_FOLDERS: usize = 7;
 /// The sheet's width on the board.
 const SHEET_W: f32 = 540.0;
-/// Side padding every sheet block shares (the setup sheet's).
-const PAD_X: f32 = 16.0;
+/// The progress bar's thickness.
+const PROGRESS_H: f32 = 6.0;
 
 /// The plan the surfaces read, with when it was computed.
 #[derive(Clone, Debug)]
@@ -720,12 +721,12 @@ impl Harness {
             .id(SharedString::from(format!("import-card-line-{provider}")))
             .w_full()
             .items_center()
-            .gap(px(10.0))
-            .px(px(14.0))
-            .py(px(12.0))
+            .gap(px(scale::SP_3))
+            .px(px(CARD_PAD_X))
+            .py(px(CARD_PAD_Y))
             .text_color(p.ink_2)
-            .child(icon(IconName::Clock).size(px(14.0)).color(p.ink_2))
-            .child(div().flex_1().min_w(px(0.0)).text_px(scale::FS_12).line_height(px(18.0)).child(line.text.clone()));
+            .child(icon(IconName::Clock).size(px(scale::ICON_COMPACT)).color(p.ink_2))
+            .child(div().flex_1().min_w_0().role_in(TextRole::Caption, cx).child(line.text.clone()));
         if let Some(label) = line.button {
             let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_import_sheet(cx));
             let mut btn = button(SharedString::from(format!("import-card-open-{provider}")), label)
@@ -775,7 +776,6 @@ impl Harness {
     /// The sheet over the scrim, or `None` while it is shut.
     pub(crate) fn render_import_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.import.sheet.as_ref()?;
-        let p = cx.aui().colors;
         let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
                 this.close_import_sheet(cx);
@@ -783,55 +783,19 @@ impl Harness {
             }
         });
         let title = if sheet.stage == SheetStage::Done { "Import finished" } else { "Import sessions" };
-        let close_x = {
-            let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_import_sheet(cx));
-            icon_button("import-sheet-close", IconName::X)
-                .ghost()
-                .accessibility_label(format!("Close {title}"))
-                .on_click(move |event, window, cx| close(event, window, cx))
-        };
-        let head = h_flex()
-            .w_full()
-            .h(px(44.0))
-            .flex_none()
-            .items_center()
-            .gap(px(10.0))
-            .pl(px(PAD_X))
-            .pr(px(8.0))
-            .border_b_1()
-            .border_color(p.line)
-            .child(div().flex_1().min_w(px(0.0)).truncate().text_px(scale::FS_13).semibold().text_color(p.ink).child(title))
-            .child(close_x);
         let (body, actions) = match sheet.stage {
             SheetStage::Choose => self.import_choose_body(sheet, cx),
             SheetStage::Progress => self.import_progress_body(cx),
             SheetStage::Done => self.import_done_body(sheet, cx),
         };
-        let card = v_flex()
-            .id("import-sheet")
-            .w(px(SHEET_W))
-            .max_w_full()
-            .rounded(px(12.0))
-            .bg(p.surface_2)
-            .shadow(p.floating_shadow())
-            .overflow_hidden()
-            .text_color(p.ink)
-            .role(gpui::Role::Dialog)
-            .aria_label(title)
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(head)
-            .children(body)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(PAD_X))
-                    .pt(px(14.0))
-                    .pb(px(16.0))
-                    .child(div().flex_1())
-                    .children(actions),
-            );
+        let weak = cx.weak_entity();
+        let mut card = dialog_sheet("import-sheet", title).width(SHEET_W).on_close(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_import_sheet(cx));
+        });
+        for block in body {
+            card = card.child(block);
+        }
+        let card = card.actions(actions);
         Some(
             div()
                 .absolute()
@@ -856,10 +820,9 @@ impl Harness {
         };
         let (Some(plan), Some(choice)) = (self.import.plan(), sheet.choice.as_ref()) else {
             let waiting = div()
-                .px(px(PAD_X))
-                .pt(px(12.0))
-                .text_px(scale::FS_12)
-                .line_height(px(19.0))
+                .px(px(SHEET_PAD_X))
+                .pt(px(scale::SP_4))
+                .role_in(TextRole::Caption, cx)
                 .text_color(p.ink_2)
                 .child("Looking for earlier sessions on this Mac…")
                 .into_any_element();
@@ -874,10 +837,9 @@ impl Harness {
         let mut body = Vec::new();
         body.push(
             div()
-                .px(px(PAD_X))
-                .pt(px(12.0))
-                .text_px(scale::FS_12)
-                .line_height(px(19.0))
+                .px(px(SHEET_PAD_X))
+                .pt(px(scale::SP_4))
+                .role_in(TextRole::Caption, cx)
                 .text_color(p.ink_2)
                 .child(
                     "Earlier Claude Code and Codex sessions, by the folder they ran in. Folders that are Baaz \
@@ -886,25 +848,26 @@ impl Harness {
                 .into_any_element(),
         );
         let (listed, rest) = visible_folders(plan, choice);
-        let mut list = v_flex()
+        // The folder list is an object on the sheet: one fill step up, no
+        // edge (docs/83 §1 rule 3); its rows split by 1 px `line`.
+        let mut list = Shape::Container
+            .rounded(v_flex())
             .id("import-folders")
-            .mx(px(PAD_X))
-            .mt(px(10.0))
-            .rounded(px(8.0))
+            .mx(px(SHEET_PAD_X))
+            .mt(px(scale::SP_3))
             .bg(p.surface_3)
-            .shadow(p.edge())
             .overflow_hidden()
             .role(gpui::Role::List)
             .aria_label("Folders")
             .child(
                 h_flex()
-                    .h(px(30.0))
-                    .px(px(12.0))
-                    .gap(px(10.0))
+                    .h(px(scale::H_MD))
+                    .px(px(scale::SP_4))
+                    .gap(px(scale::SP_3))
                     .items_center()
                     .border_b_1()
                     .border_color(p.line)
-                    .text_px(scale::FS_11)
+                    .role_in(TextRole::Micro, cx)
                     .text_color(p.ink_4)
                     .child(div().flex_1().child("Folder"))
                     .child("Sessions"),
@@ -912,11 +875,11 @@ impl Harness {
         if listed.is_empty() {
             list = list.child(
                 div()
-                    .h(px(36.0))
-                    .px(px(12.0))
+                    .h(px(LIST_ROW_H))
+                    .px(px(scale::SP_4))
                     .flex()
                     .items_center()
-                    .text_px(scale::FS_12)
+                    .role_in(TextRole::Caption, cx)
                     .text_color(p.ink_2)
                     .child(if plan.sessions.is_empty() {
                         "No earlier sessions on this Mac that are not in Baaz already."
@@ -985,10 +948,10 @@ impl Harness {
             h_flex()
                 .id("import-skip-scripted-row")
                 .items_center()
-                .gap(px(8.0))
-                .px(px(PAD_X))
-                .pt(px(10.0))
-                .text_px(scale::FS_12)
+                .gap(px(scale::SP_3))
+                .px(px(SHEET_PAD_X))
+                .pt(px(scale::SP_3))
+                .role_in(TextRole::Caption, cx)
                 .child(
                     checkbox("import-skip-scripted", if skip { CheckboxState::On } else { CheckboxState::Off }, false)
                         .accessibility_label(format!("Skip scripted runs, {} of them", thousands(scripted)))
@@ -1004,10 +967,9 @@ impl Harness {
         );
         body.push(
             div()
-                .px(px(PAD_X))
-                .pt(px(10.0))
-                .text_px(scale::FS_12)
-                .line_height(px(18.0))
+                .px(px(SHEET_PAD_X))
+                .pt(px(scale::SP_3))
+                .role_in(TextRole::Caption, cx)
                 .text_color(p.ink_4)
                 .child(
                     "They stay where they are: nothing is copied or moved, and Claude Code and Codex keep using \
@@ -1045,32 +1007,29 @@ impl Harness {
         let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
         let line = h_flex()
             .id("import-progress-line")
-            .px(px(PAD_X))
-            .pt(px(16.0))
-            .gap(px(4.0))
-            .text_px(scale::FS_13)
-            .line_height(px(21.0))
+            .px(px(SHEET_PAD_X))
+            .pt(px(scale::SP_5))
+            .gap(px(scale::SP_2))
+            .role_in(TextRole::Body, cx)
             .role(gpui::Role::Status)
             .aria_label(format!("Importing {} of {}, {folder}", thousands(done), thousands(total)))
             .child(div().text_color(p.ink).child(format!("Importing {} of {}…", thousands(done), thousands(total))))
             .child(div().text_color(p.ink_2).child(folder));
         let bar = div()
             .id("import-progress-bar")
-            .mx(px(PAD_X))
-            .mt(px(16.0))
-            .h(px(6.0))
-            .rounded(px(3.0))
+            .mx(px(SHEET_PAD_X))
+            .mt(px(scale::SP_5))
+            .h(px(PROGRESS_H))
+            .rounded_full()
             .bg(p.surface_3)
-            .shadow(p.edge())
             .overflow_hidden()
             .role(gpui::Role::ProgressIndicator)
             .aria_label(format!("{} of {} imported", thousands(done), thousands(total)))
-            .child(div().h_full().w(gpui::relative(fraction)).rounded(px(3.0)).bg(p.ink).opacity(0.75));
+            .child(div().h_full().w(gpui::relative(fraction)).rounded_full().bg(p.ink).opacity(0.75));
         let note = div()
-            .px(px(PAD_X))
-            .pt(px(10.0))
-            .text_px(scale::FS_12)
-            .line_height(px(18.0))
+            .px(px(SHEET_PAD_X))
+            .pt(px(scale::SP_3))
+            .role_in(TextRole::Caption, cx)
             .text_color(p.ink_4)
             .child(
                 "Reading each session\u{2019}s first prompt and words for search. You can close this; it keeps \
@@ -1093,11 +1052,10 @@ impl Harness {
         let mut big = h_flex()
             .id("import-result")
             .flex_wrap()
-            .px(px(PAD_X))
-            .pt(px(16.0))
-            .gap(px(4.0))
-            .text_px(scale::FS_13)
-            .line_height(px(21.0))
+            .px(px(SHEET_PAD_X))
+            .pt(px(scale::SP_5))
+            .gap(px(scale::SP_2))
+            .role_in(TextRole::Body, cx)
             .child(div().text_color(p.ink).child(result_line(run)));
         if unreadable > 0 {
             big = big.child(div().text_color(p.ink_2).child(format!(
@@ -1107,11 +1065,10 @@ impl Harness {
             )));
         }
         let mut note = h_flex()
-            .px(px(PAD_X))
-            .pt(px(10.0))
-            .gap(px(4.0))
-            .text_px(scale::FS_12)
-            .line_height(px(18.0))
+            .px(px(SHEET_PAD_X))
+            .pt(px(scale::SP_3))
+            .gap(px(scale::SP_2))
+            .role_in(TextRole::Caption, cx)
             .text_color(p.ink_4);
         if unreadable > 0 {
             let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
@@ -1127,16 +1084,9 @@ impl Harness {
             };
             note = note
                 .child(
-                    div()
-                        .id("import-show-unreadable")
-                        .cursor_pointer()
-                        .underline()
-                        .text_color(p.ink_2)
-                        .hover(|s| s.text_color(p.ink))
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("{label}, the files that could not be read"))
-                        .on_click(move |event, window, cx| toggle(event, window, cx))
-                        .child(label),
+                    interactive("import-show-unreadable", div().underline().text_color(p.ink_2).child(label.clone()))
+                        .label(format!("{label}, the files that could not be read"))
+                        .on_click(move |event, window, cx| toggle(event, window, cx)),
                 )
                 .child("·");
         }
@@ -1145,13 +1095,12 @@ impl Harness {
         if sheet.show_unreadable && unreadable > 0 {
             let mut list = v_flex()
                 .id("import-unreadable")
-                .mx(px(PAD_X))
-                .mt(px(8.0))
-                .p(px(10.0))
-                .gap(px(2.0))
-                .rounded(px(8.0))
+                .mx(px(SHEET_PAD_X))
+                .mt(px(scale::SP_3))
+                .p(px(scale::SP_4))
+                .gap(px(ROW_GAP))
+                .rounded(px(Shape::Container.radius()))
                 .bg(p.surface_3)
-                .shadow(p.edge())
                 .role(gpui::Role::List)
                 .aria_label("Files that could not be read");
             for path in run.unreadable.iter().take(12) {
@@ -1159,7 +1108,7 @@ impl Harness {
                     div()
                         .truncate()
                         .font_family(scale::FONT_MONO)
-                        .text_px(11.0)
+                        .text_px(scale::FS_11)
                         .text_color(p.ink_2)
                         .child(crate::layout::tilde_path(path)),
                 );
@@ -1219,11 +1168,11 @@ fn folder_row(
     let label = if parent.is_empty() { name.to_owned() } else { format!("{name}, in {parent}") };
     let mut row = h_flex()
         .id(id.clone())
-        .h(px(36.0))
-        .px(px(12.0))
-        .gap(px(10.0))
+        .h(px(LIST_ROW_H))
+        .px(px(scale::SP_4))
+        .gap(px(scale::SP_3))
         .items_center()
-        .text_px(scale::FS_12)
+        .role_in(TextRole::Caption, cx)
         .role(gpui::Role::ListItem)
         .aria_label(SharedString::from(label.clone()));
     if hairline {
@@ -1238,23 +1187,23 @@ fn folder_row(
         .child(
             h_flex()
                 .flex_1()
-                .min_w(px(0.0))
-                .gap(px(6.0))
+                .min_w_0()
+                .gap(px(scale::SP_2))
                 .items_baseline()
                 .overflow_hidden()
                 .child(div().flex_none().text_color(p.ink).child(name.to_owned()))
                 .child(
                     div()
-                        .min_w(px(0.0))
+                        .min_w_0()
                         .truncate()
                         .font_family(scale::FONT_MONO)
-                        .text_px(11.0)
+                        .text_px(scale::FS_11)
                         .text_color(p.ink_4)
                         .child(parent.to_owned()),
                 ),
         );
     if let Some(tag) = tag {
-        row = row.child(div().flex_none().text_px(10.5).text_color(p.ink_4).child(tag));
+        row = row.child(div().flex_none().role_in(TextRole::Micro, cx).text_color(p.ink_4).child(tag));
     }
     for (provider, n) in [(ProviderId::ClaudeCode, counts.0), (ProviderId::Codex, counts.1)] {
         if n == 0 {
@@ -1263,10 +1212,10 @@ fn folder_row(
         row = row.child(
             h_flex()
                 .flex_none()
-                .gap(px(5.0))
+                .gap(px(scale::SP_2))
                 .items_center()
                 .text_color(p.ink_2)
-                .child(provider_mark(provider.icon()).size(px(14.0)))
+                .child(provider_mark(provider.icon()).size(px(scale::ICON_COMPACT)))
                 .child(thousands(n)),
         );
     }

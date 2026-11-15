@@ -154,8 +154,8 @@ impl ErrorMascot {
     }
 }
 
-/// The critical-dialog mascot: 56 pt on the dialog's leading side, drawn
-/// beside the title by its caller.
+/// The critical-dialog mascot: 56 pt on the dialog's leading side, in the
+/// library dialog's leading slot beside the title.
 ///
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
 /// the PNG lands. Static — no enter, no hover, no glow, halo or coloured

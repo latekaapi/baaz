@@ -198,11 +198,12 @@ fn suggestions_pickup_and_row_presses() {
     let app = source("app.rs");
     assert!(app.contains("reopen_browse_closed_tab"), "closed rows reopen on press");
     assert!(app.contains("\"browse-pickup-closed\""), "closed rows name their own chain");
+    let omni = fn_body(&app, "omnibox_list");
     assert!(
-        app.contains("on_mouse_down(gpui::MouseButton::Left, press)"),
-        "omnibox rows press on mouse-down"
+        omni.contains(".on_press(move |index, w, cx| press(&index, w, cx))"),
+        "omnibox rows press on mouse-down (the row list's on_press)"
     );
-    assert!(app.contains(".on_click(activate)"), "omnibox rows also answer clicks");
+    assert!(omni.contains(".on_activate(move |index, w, cx| activate(&index, w, cx))"), "omnibox rows also answer clicks");
     let leave = fn_body(&browser, "leave_browse_address");
     assert!(leave.contains("browse_address_page_focus"), "leaving prefers the page when it had focus");
     assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");

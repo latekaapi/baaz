@@ -7,27 +7,29 @@
 //! `.on_click(` occurrences under `crates/baaz/src` whose builder chain (the
 //! ~12 preceding lines) carries neither `accessibility_label` nor
 //! `aria_label` nor a `button(`/`chip(`/`nav_item(`/`sidebar_footer(` call
-//! with a visible text label, and pins the count.
+//! with a visible text label (nor an aui `list_row(`/`dismiss_layer(`, which
+//! take their name as an argument, nor an `interactive(` with its
+//! `.label(`), and pins the count.
 //!
 //! **When this test fails because the number went down, lower `CEILING`.**
 //! When it fails because the number went up, name the new control instead:
 //! `.accessibility_label(...)` on an aui `Button`/`Chip`, or
 //! `.role(gpui::Role::Button).aria_label(...)` on a raw clickable div.
 //!
-//! The remaining hits at the time of writing are all outside this ratchet's
-//! reach: `connect.rs`, `dialogs.rs`, `project_menu.rs` and
-//! `settings_providers.rs` are not covered by the labelling pass, and the
-//! `account-scrim` catcher in `sidebar_view.rs` sits inside
-//! `render_account_menu`, which must not be touched. Shrinking that list is
-//! welcome — lowering `CEILING` along with it is mandatory.
+//! The remaining hits at the time of writing: the Projects palette's folder
+//! drop card (`dialogs.rs`, the library card names itself by its visible
+//! title), `project_menu.rs`, `right_files.rs` and `app/peek_split.rs`.
+//! Shrinking that list is welcome — lowering `CEILING` along with it is
+//! mandatory.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The most `.on_click(` sites under `crates/baaz/src` that may lack an
-/// accessible name. Measured after the Z9b labelling pass. It may only ever
-/// be reduced.
-const CEILING: usize = 8;
+/// accessible name. Measured after docs/82 task 2.2 moved Settings, the
+/// sheets and the Browse chrome onto aui primitives. It may only ever be
+/// reduced.
+const CEILING: usize = 4;
 
 /// How many lines above an `.on_click(` still count as its builder chain.
 const CHAIN_LINES: usize = 12;
@@ -68,9 +70,15 @@ fn has_text_label(window: &str) -> bool {
         "draft_checkbox(",
         "base_picker(",
         "image_view(",
+        // aui's flat list row and dismiss layer take their accessible name
+        // as a required argument (agentic-ui interact/row.rs, surface.rs).
+        "list_row(",
+        "dismiss_layer(",
     ]
     .iter()
     .any(|needle| window.contains(needle))
+        // aui's `interactive(…)` control names itself from `.label(…)`.
+        || (window.contains("interactive(") && window.contains(".label("))
 }
 
 fn unlabeled_clickables() -> Vec<String> {

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aui::interact::row_list;
+use aui::interact::{dropdown, row_list, DropdownItem, LIST_INSET, LIST_ROW_H};
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
     ahead_behind, base_and_head, base_picker, branch_label, change_row, changes_caption, diff_fold, commit_foot, commit_frame,
@@ -18,15 +18,29 @@ use aui::workbench::{
     state_block, text_action, unchanged_between, well_input,
 };
 use aui_icons::IconName;
-use aui_tokens::{ActiveAui, AuiStyled};
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, ScrollHandle, SharedString, Window};
+use aui::util::{h_flex, v_flex, ElementExt as _};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, Pixels, ScrollHandle, SharedString, Window};
 use gpui_kit::base::input::{InputState, TextareaState};
-use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::Textarea;
-use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::git_ops::{self, CommitOutcome, GitTree, PullRequest};
+
+/// The clean state's lift above centre, clear of the commit foot.
+const CLEAN_LIFT: f32 = 72.0;
+/// Room under the list so the last row scrolls clear of the commit foot.
+const FOOT_CLEARANCE: f32 = 180.0;
+/// The same for the Create PR form's shorter foot.
+const FORM_FOOT_CLEARANCE: f32 = 64.0;
+/// The loading skeleton: a kind letter, a path of these widths, a stat.
+const SKELETON_KIND_W: f32 = 10.0;
+const SKELETON_WIDTHS: [f32; 5] = [90.0, 120.0, 70.0, 110.0, 84.0];
+const SKELETON_STAT_W: f32 = 44.0;
+/// The commit and description editors' line height.
+const EDITOR_LH: f32 = 22.0;
+/// The base-branch menu's narrowest width.
+const BASE_MENU_MIN_W: f32 = 160.0;
 
 /// What the commit box is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,7 +614,7 @@ impl Harness {
         }
         let ui = self.changes_ui(&root);
         ui.flash = Some((Instant::now(), matched.clone()));
-        ui.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        ui.scroll.set_offset(gpui::Point::default());
         cx.notify();
     }
 }
@@ -732,7 +746,7 @@ pub(crate) fn changes_screen(
     let diffs = cache.file_diffs.clone();
     let gaps = cache.gap_lines.clone();
 
-    let mut list = row_list("right-changes-list").gap(px(0.0)).label("Changes");
+    let mut list = row_list("right-changes-list").gap(Pixels::ZERO).label("Changes");
     let mut ix = 0usize;
     let mut sections: Vec<(&str, Vec<FileChange>)> = Vec::new();
     if !session.is_empty() || !session_edits.is_empty() {
@@ -798,15 +812,15 @@ pub(crate) fn changes_screen(
                     }
                     // Live 2026-10-19: a binary file opened onto an empty box.
                     None if unreadable => div()
-                        .h(px(28.0))
-                        .px(px(22.0))
+                        .h(px(scale::H_MD))
+                        .px(px(scale::SP_6))
                         .flex()
                         .items_center()
-                        .text_px(13.2)
+                        .text_role_in(TextRole::Body, aui_tokens::Density::Standard)
                         .text_color(muted)
                         .child("Binary file — no text diff.")
                         .into_any_element(),
-                    None => div().h(px(24.0)).into_any_element(),
+                    None => div().h(px(scale::H_SM)).into_any_element(),
                 }
             };
             // The row and its diff are two list entries: the diff is a
@@ -843,7 +857,7 @@ pub(crate) fn changes_screen(
     let foot_el = foot_element(ui, &root_buf, &tree, session_edits, foot, agent, window, cx);
     let clean = tree.files.is_empty();
     let body = if clean {
-        div().size_full().pb(px(72.0)).child(state_block("right-changes-clean", IconName::Check, "No changes").line("The working tree is clean.")).into_any_element()
+        div().size_full().pb(px(CLEAN_LIFT)).child(state_block("right-changes-clean", IconName::Check, "No changes").line("The working tree is clean.")).into_any_element()
     } else {
         div()
             .id("right-changes-scroll")
@@ -854,9 +868,9 @@ pub(crate) fn changes_screen(
             // The sticky row is decided in render: a scroll re-renders, after
             // the wheel has moved the offset (live 2026-10-19: it never stuck).
             .on_scroll(cx.listener(|_: &mut Harness, _: &gpui::ScrollEvent, _, cx| cx.notify()))
-            .pt(px(4.0))
-            .px(px(6.0))
-            .pb(px(180.0))
+            .pt(px(scale::SP_2))
+            .px(px(LIST_INSET))
+            .pb(px(FOOT_CLEARANCE))
             .child(list)
             .into_any_element()
     };
@@ -878,23 +892,23 @@ pub(crate) fn changes_screen(
         .flatten();
     let mut screen = div().relative().size_full().bg(p.surface_2).child(body);
     if let Some(row) = sticky {
-        screen = screen.child(div().absolute().top(px(0.0)).left(px(6.0)).right(px(6.0)).bg(p.surface_2).child(row));
+        screen = screen.child(div().absolute().top_0().left(px(LIST_INSET)).right(px(LIST_INSET)).bg(p.surface_2).child(row));
     }
     (None, screen.child(commit_foot(foot_el, cx)).into_any_element())
 }
 
 fn loading_body(cx: &Context<Harness>) -> gpui::Div {
-    v_flex().pt(px(4.0)).px(px(6.0)).child(changes_caption("right-changes-loading-cap", "This session", None, true, cx)).children([90.0, 120.0, 70.0, 110.0, 84.0].iter().map(|w| {
+    v_flex().pt(px(scale::SP_2)).px(px(LIST_INSET)).child(changes_caption("right-changes-loading-cap", "This session", None, true, cx)).children(SKELETON_WIDTHS.iter().map(|w| {
         h_flex()
-            .h(px(32.0))
-            .gap(px(10.0))
-            .pl(px(24.0))
-            .pr(px(8.0))
+            .h(px(LIST_ROW_H))
+            .gap(px(scale::SP_3))
+            .pl(px(scale::SP_6))
+            .pr(px(scale::SP_3))
             .items_center()
-            .child(skeleton_bar(px(10.0), cx))
+            .child(skeleton_bar(px(SKELETON_KIND_W), cx))
             .child(skeleton_bar(px(*w), cx))
             .child(div().flex_1())
-            .child(skeleton_bar(px(44.0), cx))
+            .child(skeleton_bar(px(SKELETON_STAT_W), cx))
     }))
 }
 
@@ -927,12 +941,12 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                     let r2 = root_buf.clone();
                     div()
                         .id("right-commit-editor")
-                        .min_h(px(44.0))
-                        .px(px(4.0))
+                        .min_h(px(scale::BAR_DEFAULT))
+                        .px(px(scale::SP_2))
                         .on_action(cx.listener(move |this, _: &crate::app::CommitMessage, _, cx| this.commit_changes(&r1, cx)))
                         .on_mouse_down_out(cx.listener(move |this, _, _, cx| this.settle_commit_message(&r2, cx)))
                         .key_context("CommitMessage")
-                        .child(Textarea::new(&editor).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(22.0)))
+                        .child(Textarea::new(&editor).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(EDITOR_LH)))
                         .into_any_element()
                 }
                 None => {
@@ -947,7 +961,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                 .when(!disabled && busy.is_none(), |b| b.on_click(cx.listener(move |this, _, _, cx| this.commit_changes(&r, cx))));
             let box_el = commit_frame(focused, cx)
                 .child(message_el)
-                .child(h_flex().h(px(28.0)).gap(px(6.0)).items_center().child(branch_label(&tree.branch, ahead_behind(tree.ahead, tree.behind), cx)).child(div().flex_1()).child(commit));
+                .child(h_flex().h(px(scale::H_MD)).gap(px(scale::SP_2)).items_center().child(branch_label(&tree.branch, ahead_behind(tree.ahead, tree.behind), cx)).child(div().flex_1()).child(commit));
             match hook {
                 Some(lines) => {
                     let who = agent;
@@ -973,7 +987,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
             commit_frame(false, cx)
                 .child(
                     h_flex()
-                        .h(px(28.0))
+                        .h(px(scale::H_MD))
                         .items_center()
                         .child(branch_label(&tree.branch, Some(suffix.into()), cx))
                         .child(div().flex_1())
@@ -986,7 +1000,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
             commit_frame(false, cx)
                 .child(
                     h_flex()
-                        .h(px(28.0))
+                        .h(px(scale::H_MD))
                         .items_center()
                         .child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx))
                         .child(div().flex_1())
@@ -995,7 +1009,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                 .into_any_element()
         }
         Foot::Level => commit_frame(false, cx)
-            .child(h_flex().h(px(28.0)).items_center().child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx)))
+            .child(h_flex().h(px(scale::H_MD)).items_center().child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx)))
             .into_any_element(),
         Foot::Pr(pr) => {
             let url = pr.url.clone();
@@ -1032,34 +1046,23 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window:
         cx.notify();
     })));
     if menu && !bases.is_empty() {
-        let mut items = v_flex().p(px(4.0)).min_w(px(160.0)).rounded(px(10.0)).bg(p.overlay).shadow(p.floating_shadow());
+        // The base branches: the library's menu, under the picker.
+        let mut items = dropdown("right-pr-base-menu", "Base branch").min_width(px(BASE_MENU_MIN_W));
         for b in bases {
             let pick_root = root.to_path_buf();
             let value = b.clone();
-            items = items.child(
-                div()
-                    .id(SharedString::from(format!("right-pr-base-{b}")))
-                    .role(gpui::Role::MenuItem)
-                    .aria_label(b.clone())
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .font_family(aui_tokens::scale::FONT_MONO)
-                    .hover(move |s| s.bg(p.hover_overlay()))
-                    .child(b)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(f) = this.changes_ui(&pick_root).form.as_mut() {
-                            f.base = value.clone();
-                            f.base_menu = false;
-                        }
-                        cx.notify();
-                    })),
-            );
+            let weak = cx.weak_entity();
+            items = items.entry(DropdownItem::new(b.clone()).current(b == base).on_select(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if let Some(f) = this.changes_ui(&pick_root).form.as_mut() {
+                        f.base = value.clone();
+                        f.base_menu = false;
+                    }
+                    cx.notify();
+                });
+            }));
         }
-        picker = picker.child(div().absolute().top(px(36.0)).left(px(0.0)).child(items));
+        picker = picker.child(div().absolute().top_full().left_0().mt(px(scale::SP_2)).child(items));
     }
     let draft_root = root.to_path_buf();
     let body_el = v_flex()
@@ -1067,17 +1070,17 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window:
         .size_full()
         .overflow_y_scroll()
         .scroll_axis_locked()
-        .p(px(12.0))
-        .pb(px(64.0))
-        .gap(px(12.0))
+        .p(px(scale::SP_4))
+        .pb(px(FORM_FOOT_CLEARANCE))
+        .gap(px(scale::SP_4))
         .child(form_field("Into", base_and_head(picker, &tree.branch, cx), cx))
         .child(form_field("Title", well_input(gpui_kit::base::input::Input::new(&title), 32.0, title_focused, cx), cx))
         .child(form_field(
             "Description",
             well_input(
                 v_flex()
-                    .child(Textarea::new(&body).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(22.0)))
-                    .child(div().mt(px(8.0)).text_color(p.fg_muted).child(if drafting { "Drafting from this session…" } else { "Drafted from this session · edit freely" })),
+                    .child(Textarea::new(&body).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(EDITOR_LH)))
+                    .child(div().mt(px(scale::SP_3)).text_color(p.fg_muted).child(if drafting { "Drafting from this session…" } else { "Drafted from this session · edit freely" })),
                 150.0,
                 body_focused,
                 cx,
@@ -1094,8 +1097,8 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window:
     let create_root = root.to_path_buf();
     let foot = h_flex()
         .justify_end()
-        .gap(px(6.0))
-        .px(px(4.0))
+        .gap(px(scale::SP_2))
+        .px(px(scale::SP_2))
         .child(text_action("right-pr-cancel", "Cancel", None, 28.0, cx).on_click(cx.listener(move |this, _, _, cx| {
             this.changes_ui(&cancel_root).form = None;
             cx.notify();

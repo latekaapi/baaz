@@ -14,7 +14,6 @@
 //! draws the dialog and the toast stack settled rather than rising in: an
 //! enter presence never lands on the same frame twice.
 
-use aui::data::{button, ButtonSize};
 use aui::feedback::ToastKind;
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
@@ -24,12 +23,12 @@ use aui::overlay::{
 };
 use aui::transcript::handoff_confirm;
 use aui_icons::IconName;
-use aui_motion::{presence, EnterExit, PresenceStyle};
-use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
+use aui_tokens::scale;
 use gpui::{
-    black, div, prelude::*, px, relative, AnyElement, App, Context, Focusable, SharedString, Window,
+    div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
 };
-use gpui_kit::base::h_flex;
+use aui::interact::dismiss_layer;
+use aui::util::{h_flex, v_flex};
 use gpui_kit::component::input::Textarea;
 
 use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP};
@@ -771,12 +770,7 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
         });
-        let catcher = div()
-            .id("overflow-scrim")
-            .occlude()
-            .absolute()
-            .inset_0()
-            .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        let catcher = dismiss_layer("overflow-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
         Some(
             div().absolute().inset_0().child(catcher).child(anchored_menu(
                 trigger,
@@ -834,12 +828,7 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
         });
-        let catcher = div()
-            .id("back-history-scrim")
-            .occlude()
-            .absolute()
-            .inset_0()
-            .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        let catcher = dismiss_layer("back-history-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
         Some(
             div().absolute().inset_0().child(catcher).child(anchored_menu(
                 trigger,
@@ -1052,9 +1041,26 @@ impl Harness {
         // The Projects palette's drop card rides inside the card as the Add
         // section's lead now, not as a floating box above it.
         let centred: AnyElement = card.into_any_element();
+        // A click on the dimmed ground closes it, which is the gesture every
+        // overlay in this window already answers to. The layer dismisses on
+        // the *release*, not the press: gpui fires a row's `on_click` on
+        // mouse-up against the frame the release sees, so dismissing on
+        // mouse-down closed the palette under the press and the release
+        // found no row — every palette row's click silently did nothing but
+        // dismiss. The row's own click runs first on the way up and this
+        // runs after it, idempotently.
+        let close = self.main_listener(cx, |this, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.palette = None);
+            cx.notify();
+        });
         Some(
             popover_layer(
-                div()
+                // The open palette owns the wheel: the layer occludes, so the
+                // transcript's `wheel_capture` yields everywhere outside the
+                // card (the library card already occludes its own rect and
+                // stops the wheel after its list scrolls), and a wheel over
+                // the dimmed ground never reaches the transcript behind it.
+                dismiss_layer("palette-scrim", "Close the palette", move |w, cx| close(&(), w, cx))
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_palette)
                     .on_action(self.main_listener(cx, move |this, _: &SelectNext, _, cx| {
@@ -1070,34 +1076,9 @@ impl Harness {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
-                    .id("palette-scrim")
-                    .absolute()
-                    .inset_0()
-                    // The open palette owns the wheel: occluding the scrim
-                    // makes the transcript's `wheel_capture` yield everywhere
-                    // outside the card (the library card already occludes its
-                    // own rect and stops the wheel after its list scrolls),
-                    // so a wheel over the dimmed ground never reaches the
-                    // transcript behind this modal. Clicks already dismiss
-                    // through this same scrim, so blocking click-through
-                    // changes nothing.
-                    .occlude()
                     .bg(gpui::black().opacity(PALETTE_SCRIM))
-                    // A click on the dimmed ground closes it, which is the
-                    // gesture every overlay in this window already answers to.
-                    // On the *release*, not the press: gpui fires a row's
-                    // `on_click` on mouse-up against the frame the release
-                    // sees, so dismissing on mouse-down closed the palette
-                    // under the press and the release found no row — every
-                    // palette row's click silently did nothing but dismiss.
-                    // The row's own click runs first on
-                    // the way up and this runs after it, idempotently.
-                    .on_click(self.main_listener(cx, |this, _: &gpui::ClickEvent, _, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.palette = None);
-                        cx.notify();
-                    }))
                     .child(
-                        gpui_kit::base::h_flex()
+                        h_flex()
                             .w_full()
                             .justify_center()
                             .pt(px(PALETTE_TOP))
@@ -1286,106 +1267,25 @@ impl Harness {
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
         let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        // Critical errors (`DialogKind::Error`) draw a Baaz-owned card that
-        // mirrors the library dialog's shell — same 420 pt width, 16 pt
-        // padding, 12 pt gap, scrim, motion and action row — with the error
-        // mascot leading the header in place of the 26 px kind tile: 56 pt,
-        // centred on the title row, the title to its right. Only critical
-        // dialogs take this path; confirmations keep the library card below
-        // untouched, and the toast stack stays text-only.
-        let card: AnyElement = if kind == DialogKind::Error {
-            let sprite = crate::mascot::ErrorMascot::classify(&title, &detail);
-            let p = cx.aui().colors;
-            // The shared modal motion (6 px drop at 98.5 % scale), settled
-            // for a scripted capture — the same stillness the palette uses.
-            let style = if self.still() {
-                PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
-            } else {
-                PresenceStyle::fade_rise_scale(
-                    presence("baaz-error-dialog", true, EnterExit::DEFAULT, window, cx),
-                    6.0,
-                    0.985,
-                )
-            };
-            let head = h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(scale::SP_3))
-                .child(crate::mascot::error_mascot(sprite))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_role(TextRole::Title)
-                        .text_color(p.ink)
-                        .child(SharedString::from(title)),
-                );
-            let mut shell = div()
-                .relative()
-                .top(-style.offset_y)
-                .flex_none()
-                .w(px(420.0 * style.scale))
-                .rounded(px(scale::R_LG))
-                // FF dialog: surface 5 with its paired shadow-5 (the recipe
-                // carries the hairline, so no separate border).
-                .bg(p.surface(5))
-                .shadow(p.shadow(5))
-                .text_color(p.ink)
-                .gap(px(scale::SP_4))
-                .p(px(scale::SP_5))
-                .child(head)
-                .child(
-                    div()
-                        .w_full()
-                        .ui(scale::FS_12)
-                        .line_height(relative(scale::LH_UI))
-                        .text_color(p.ink_2)
-                        .child(SharedString::from(detail)),
-                );
-            // The one action row, as the library draws it: spacer, secondary,
-            // primary at the far right.
-            let mut actions =
-                h_flex().w_full().items_center().gap(px(scale::SP_3)).child(div().flex_1().min_w(px(0.0)));
-            if let Some(label) = secondary {
-                actions = actions.child(
-                    button("dialog-secondary", label)
-                        .size(ButtonSize::Md)
-                        .on_click(move |_, w, cx| close(&(), w, cx)),
-                );
-            }
-            let mut prime = button("dialog-primary", primary_label).size(ButtonSize::Md);
-            prime = if danger { prime.danger() } else { prime.primary() };
-            shell = shell.child(actions.child(prime.on_click(move |_, w, cx| primary(&(), w, cx))));
-            let mut scrim = div()
-                .id("dialog")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(black().opacity(0.25 * style.opacity));
-            scrim = scrim.on_click(move |_, w, cx| dismiss(&(), w, cx));
-            scrim
-                .child(div().id("dialog-card").flex_none().opacity(style.opacity).occlude().child(shell))
-                .into_any_element()
-        } else {
-            // A deterministic capture draws the dialog settled rather than rising
-            // in: the enter presence never lands on the same frame twice.
-            let mut card = dialog("dialog", title)
-                .kind(kind)
-                .body(detail)
-                .danger(danger)
-                .primary(primary_label);
-            if let Some(secondary) = secondary {
-                card = card.secondary(secondary);
-            }
-            let card = card
-                .on_primary(move |w, cx| primary(&(), w, cx))
-                .on_secondary(move |w, cx| close(&(), w, cx))
-                .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-            let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-            card.into_any_element()
-        };
+        // Critical errors (`DialogKind::Error`) lead the library dialog with
+        // the error mascot (56 pt, centred on the title row) in place of the
+        // kind tile; confirmations keep the tile, and the toast stack stays
+        // text-only.
+        let mascot = (kind == DialogKind::Error).then(|| crate::mascot::error_mascot(crate::mascot::ErrorMascot::classify(&title, &detail)));
+        let mut card = dialog("dialog", title).kind(kind).body(detail).danger(danger).primary(primary_label);
+        if let Some(mascot) = mascot {
+            card = card.leading(mascot);
+        }
+        if let Some(secondary) = secondary {
+            card = card.secondary(secondary);
+        }
+        let card = card
+            .on_primary(move |w, cx| primary(&(), w, cx))
+            .on_secondary(move |w, cx| close(&(), w, cx))
+            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
+        // A scripted capture draws the dialog settled rather than rising in:
+        // the enter presence never lands on the same frame twice.
+        let card = if self.still() || crate::clock::deterministic() { card.at_rest() } else { card };
         Some(
             popover_layer(
                 div()
@@ -1480,19 +1380,22 @@ impl Harness {
         if toast.is_none() && slot.is_none() {
             return None;
         }
-        Some(gpui_kit::base::v_flex().flex_none().items_end().gap(px(8.0)).children(toast).children(slot).into_any_element())
+        Some(v_flex().flex_none().items_end().gap(px(scale::SP_3)).children(toast).children(slot).into_any_element())
     }
+
+    /// The corner stack's inset from the sheet's right (and bottom) edge.
+    const CORNER_INSET: f32 = 12.0;
 
     /// The stack over the composer band: its bottom 8 above the band's top
     /// (the composer's top edge), 12 from the sheet's right.
     pub(crate) fn corner_above_band(stack: AnyElement) -> AnyElement {
-        div().absolute().right(px(12.0)).bottom(gpui::relative(1.0)).pb(px(8.0)).child(stack).into_any_element()
+        div().absolute().right(px(Self::CORNER_INSET)).bottom(gpui::relative(1.0)).pb(px(scale::SP_3)).child(stack).into_any_element()
     }
 
     /// The stack where the sheet has no composer: 12 above its bottom, 12
     /// from its right.
     pub(crate) fn corner_at_sheet_bottom(stack: AnyElement) -> AnyElement {
-        div().absolute().right(px(12.0)).bottom(px(12.0)).child(stack).into_any_element()
+        div().absolute().right(px(Self::CORNER_INSET)).bottom(px(Self::CORNER_INSET)).child(stack).into_any_element()
     }
 
     /// Whether the stack lives in the corner window: Browse, where the

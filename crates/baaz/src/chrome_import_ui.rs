@@ -6,18 +6,18 @@
 
 use std::path::PathBuf;
 
-use aui::data::{button, icon_button};
-use aui::skills::{checkbox, CheckboxIntent, CheckboxState};
+use aui::data::{button, checkbox, settings_row, CheckboxIntent, CheckboxState};
+use aui::interact::{list_row, LIST_INSET, ROW_GAP};
+use aui::screens::{dialog_sheet, SHEET_PAD_X};
+use aui::util::{h_flex, v_flex};
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{div, prelude::*, px, AnyElement, Context, SharedString};
-use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::browser::chrome_import::{self, ChromeProfile, Counts, Imported};
 
 const SHEET_W: f32 = 500.0;
-const PAD_X: f32 = 16.0;
 
 /// Where the sheet stands.
 pub(crate) enum Stage {
@@ -103,7 +103,8 @@ impl Harness {
         self.close_chrome_import(cx);
     }
 
-    /// The sheet, over everything (like the sessions import sheet).
+    /// The sheet, over everything (like the sessions import sheet): the
+    /// library's dialog sheet, its body blocks padded like its title.
     pub(crate) fn render_chrome_import(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.chrome_import.as_ref()?;
         let p = cx.aui().colors;
@@ -114,23 +115,17 @@ impl Harness {
             }
         });
         let title = "Import from Chrome";
-        let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
-        let head = h_flex()
-            .w_full()
-            .h(px(44.0))
-            .flex_none()
-            .items_center()
-            .gap(px(10.0))
-            .pl(px(PAD_X))
-            .pr(px(8.0))
-            .border_b_1()
-            .border_color(p.line)
-            .child(div().flex_1().text_px(scale::FS_13).semibold().text_color(p.ink).child(title))
-            .child(icon_button("chrome-import-close", IconName::X).ghost().accessibility_label("Close Import from Chrome").on_click(move |e, w, cx| close(e, w, cx)));
+        let weak = cx.weak_entity();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
         let line = |text: String, faint: bool| {
-            div().px(px(PAD_X)).pt(px(12.0)).text_px(scale::FS_12).line_height(px(18.0)).text_color(if faint { p.ink_3 } else { p.ink_2 }).child(text).into_any_element()
+            div()
+                .px(px(SHEET_PAD_X))
+                .pt(px(scale::SP_4))
+                .role_in(TextRole::Caption, cx)
+                .text_color(if faint { p.ink_3 } else { p.ink_2 })
+                .child(text)
+                .into_any_element()
         };
         match &sheet.stage {
             Stage::Choose if sheet.profiles.is_empty() => {
@@ -142,7 +137,7 @@ impl Harness {
                 body.push(line("Baaz reads a copy of Chrome’s files; Chrome is never changed.".into(), false));
                 // The profile: a row per profile when there are several.
                 if sheet.profiles.len() > 1 {
-                    let mut list = v_flex().mx(px(PAD_X)).mt(px(10.0)).rounded(px(8.0)).border_1().border_color(p.line).overflow_hidden();
+                    let mut list = v_flex().mx(px(SHEET_PAD_X - LIST_INSET)).mt(px(scale::SP_3)).gap(px(ROW_GAP));
                     for (i, profile) in sheet.profiles.iter().enumerate() {
                         let pick = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                             if let Some(sheet) = this.chrome_import.as_mut() {
@@ -153,19 +148,10 @@ impl Harness {
                         });
                         let on = i == sheet.selected;
                         list = list.child(
-                            h_flex()
-                                .id(SharedString::from(format!("chrome-profile-{i}")))
-                                .h(px(32.0))
-                                .px(px(12.0))
-                                .gap(px(8.0))
-                                .items_center()
-                                .cursor_pointer()
-                                .when(on, |d| d.bg(p.surface_3))
-                                .role(gpui::Role::RadioButton)
-                                .aria_label(SharedString::from(format!("Chrome profile {}", profile.name)))
-                                .on_click(pick)
-                                .child(div().flex_1().text_px(scale::FS_13).text_color(p.ink).child(profile.name.clone()))
-                                .when(on, |d| d.child(aui_icons::icon(IconName::Check).size(px(12.0)).color(p.ink))),
+                            list_row(SharedString::from(format!("chrome-profile-{i}")), profile.name.clone())
+                                .selected(on)
+                                .when(on, |r| r.trailing(aui_icons::icon(IconName::Check).size(px(scale::ICON_COMPACT)).color(p.ink)))
+                                .on_click(pick),
                         );
                     }
                     body.push(list.into_any_element());
@@ -186,37 +172,26 @@ impl Harness {
                         }
                         cx.notify();
                     });
-                    h_flex()
-                        .id(id)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .gap(px(10.0))
-                        .items_start()
-                        .child(
-                            div().pt(px(2.0)).child(
-                                checkbox(SharedString::from(format!("{id}-box")), if on { CheckboxState::On } else { CheckboxState::Off }, false)
-                                    .accessibility_label(SharedString::from(format!("{label}, {}", word(n))))
-                                    .on_intent(move |intent, w, cx| flip(&intent, w, cx)),
-                            ),
+                    // A settings row whose control is the count and the box.
+                    settings_row(label)
+                        .description(detail)
+                        .control(
+                            h_flex()
+                                .gap(px(scale::SP_4))
+                                .child(div().role_in(TextRole::Body, cx).text_color(p.ink_2).child(word(n)))
+                                .child(
+                                    checkbox(SharedString::from(format!("{id}-box")), if on { CheckboxState::On } else { CheckboxState::Off }, false)
+                                        .accessibility_label(SharedString::from(format!("{label}, {}", word(n))))
+                                        .on_intent(move |intent, w, cx| flip(&intent, w, cx)),
+                                ),
                         )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(div().text_px(scale::FS_13).text_color(p.ink).child(label))
-                                .child(div().text_px(scale::FS_12).line_height(px(17.0)).text_color(p.ink_3).child(detail)),
-                        )
-                        .child(div().flex_none().text_px(scale::FS_13).text_color(p.ink_2).child(word(n)))
                         .into_any_element()
                 };
+                // Two rows split by a line, no frame (docs/83 §1 rule 2).
                 let rows = v_flex()
-                    .mx(px(PAD_X))
-                    .mt(px(10.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(p.line)
+                    .px(px(SHEET_PAD_X))
                     .child(tick("chrome-import-bookmarks", "Bookmarks", "Into a folder “Imported from Chrome”, folders kept.", sheet.bookmarks, counts.as_ref().map(|c| c.bookmarks), 0))
-                    .child(div().h(px(1.0)).bg(p.line))
+                    .child(div().h_px().bg(p.line))
                     .child(tick(
                         "chrome-import-history",
                         "History",
@@ -236,10 +211,9 @@ impl Harness {
             Stage::Done(done) => {
                 body.push(
                     div()
-                        .px(px(PAD_X))
-                        .pt(px(16.0))
-                        .text_px(scale::FS_13)
-                        .line_height(px(20.0))
+                        .px(px(SHEET_PAD_X))
+                        .pt(px(scale::SP_5))
+                        .role_in(TextRole::Body, cx)
                         .text_color(p.ink)
                         .child(format!(
                             "Imported {} bookmarks and {} pages of history.",
@@ -262,21 +236,13 @@ impl Harness {
                 actions.push(button("chrome-import-done", "Done").primary().on_click(move |e, w, cx| ok(e, w, cx)).into_any_element());
             }
         }
-        let card = v_flex()
-            .id("chrome-import-sheet")
-            .w(px(SHEET_W))
-            .max_w_full()
-            .rounded(px(12.0))
-            .bg(p.surface_2)
-            .shadow(p.floating_shadow())
-            .overflow_hidden()
-            .text_color(p.ink)
-            .role(gpui::Role::Dialog)
-            .aria_label(title)
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(head)
-            .children(body)
-            .child(h_flex().w_full().items_center().gap(px(8.0)).px(px(PAD_X)).pt(px(14.0)).pb(px(16.0)).child(div().flex_1()).children(actions));
+        let mut card = dialog_sheet("chrome-import-sheet", title).width(SHEET_W).on_close(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_chrome_import(cx));
+        });
+        for block in body {
+            card = card.child(block);
+        }
+        let card = card.actions(actions);
         Some(
             div()
                 .absolute()

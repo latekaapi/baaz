@@ -100,7 +100,7 @@ fn skills_page_fills_the_remainder_and_stretches_its_list() {
     let root = src.find("let mut root = div()").expect("the page builds its root off `div()`");
     let root_tail = &src[root..];
     assert!(
-        root_tail.starts_with("let mut root = div().flex_1().min_h(px(0.0))"),
+        root_tail.starts_with("let mut root = div().flex_1().min_h_0()"),
         "the page root must take the centre's remainder, never `size_full`"
     );
     assert!(

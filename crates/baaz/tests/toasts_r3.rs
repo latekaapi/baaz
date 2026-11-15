@@ -132,7 +132,7 @@ fn the_corner_stack_holds_the_toast_above_the_slot() {
     let slot = stack.find("render_feedback_header_slot").expect("the stack draws the feedback slot");
     assert!(toast < slot, "the toast sits above the slot");
     assert!(stack.contains("items_end()"), "right-aligned");
-    assert!(stack.contains("gap(px(8.0))"), "8 apart");
+    assert!(stack.contains("gap(px(scale::SP_3))"), "8 apart");
     assert!(!dialogs.contains("fn render_toasts("), "the top-right stack is gone");
     assert!(!dialogs.contains("fn render_toast_chip("), "the header chip is gone");
     let app = source("app.rs");
@@ -147,9 +147,10 @@ fn the_corner_stack_holds_the_toast_above_the_slot() {
 fn the_stack_sits_above_the_composer_and_over_the_page() {
     let dialogs = source("dialogs.rs");
     let band = fn_body(&dialogs, "corner_above_band");
-    assert!(band.contains("right(px(12.0))") && band.contains("pb(px(8.0))"), "8 above the composer, 12 in");
+    assert!(dialogs.contains("const CORNER_INSET: f32 = 12.0;"), "the corner inset is 12");
+    assert!(band.contains("right(px(Self::CORNER_INSET))") && band.contains("pb(px(scale::SP_3))"), "8 above the composer, 12 in");
     let sheet = fn_body(&dialogs, "corner_at_sheet_bottom");
-    assert!(sheet.contains("bottom(px(12.0))"), "12 above the sheet's bottom without a composer");
+    assert!(sheet.contains("bottom(px(Self::CORNER_INSET))"), "12 above the sheet's bottom without a composer");
     let overlay = source("overlay.rs");
     let wanted = fn_body(&overlay, "wanted_corner");
     assert!(wanted.contains("corner_in_overlay"), "Browse hosts it in the corner window");

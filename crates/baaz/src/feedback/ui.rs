@@ -20,13 +20,14 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use aui::data::button;
+use aui::data::{button, icon_button, ButtonSize};
+use aui::interact::menu_panel;
 use aui::overlay::popover_layer;
-use aui_icons::{icon, IconName};
+use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
 use gpui_kit::base::input::TextareaState;
-use gpui_kit::base::{h_flex, v_flex};
+use aui::util::{h_flex, v_flex};
 use gpui_kit::component::input::Textarea;
 use image::RgbaImage;
 
@@ -85,6 +86,12 @@ pub(crate) const FEEDBACK_SAVED_FLASH: Duration = Duration::from_secs(4);
 
 /// How long a first Discard click stays armed waiting for its confirm.
 const DISCARD_ARM: Duration = Duration::from_secs(4);
+/// The hover chip's padding (the target's name over the outline).
+const CHIP_PAD_X: f32 = 7.0;
+const CHIP_PAD_Y: f32 = 3.0;
+/// A pin: its outline's width and its numbered badge's diameter.
+const PIN_LINE: f32 = 1.5;
+const PIN_BADGE: f32 = 22.0;
 
 /// What the feedback shell shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2160,7 +2167,7 @@ impl crate::app::Harness {
         };
         // Roughly 6.9 px per mono glyph at 11.5 px plus the 7 px side
         // padding each side; the position clamps into the window.
-        let est_w = chip.chars().count() as f32 * 6.9 + 14.0;
+        let est_w = chip.chars().count() as f32 * 6.9 + CHIP_PAD_X * 2.0;
         let (chip_x, chip_y) = FeedbackUi::feedback_chip_pos(hit.rect, est_w, 24.0, win_w, win_h);
         Some(
             div()
@@ -2171,7 +2178,7 @@ impl crate::app::Harness {
                         .top(px(hit.rect.y - 3.0))
                         .w(px(hit.rect.w + 6.0))
                         .h(px(hit.rect.h + 6.0))
-                        .rounded(px(6.0))
+                        .rounded(px(scale::R_MD))
                         .border_2()
                         .border_color(accent)
                         .bg(fill),
@@ -2181,10 +2188,10 @@ impl crate::app::Harness {
                         .absolute()
                         .left(px(chip_x))
                         .top(px(chip_y))
-                        .rounded(px(6.0))
+                        .rounded(px(scale::R_MD))
                         .bg(accent)
-                        .px(px(7.0))
-                        .py(px(3.0))
+                        .px(px(CHIP_PAD_X))
+                        .py(px(CHIP_PAD_Y))
                         .mono(11.5)
                         .text_color(on_accent)
                         .whitespace_nowrap()
@@ -2247,8 +2254,9 @@ impl crate::app::Harness {
             .visible_pin_rects(&current)
             .into_iter()
             .map(|(rect, index)| {
-                let badge_x = (rect.x + rect.w - 11.0).clamp(0.0, (win_w - 22.0).max(0.0));
-                let badge_y = (rect.y - 11.0).clamp(0.0, (win_h - 22.0).max(0.0));
+                let half = PIN_BADGE / 2.0;
+                let badge_x = (rect.x + rect.w - half).clamp(0.0, (win_w - PIN_BADGE).max(0.0));
+                let badge_y = (rect.y - half).clamp(0.0, (win_h - PIN_BADGE).max(0.0));
                 div()
                     .child(
                         div()
@@ -2257,8 +2265,8 @@ impl crate::app::Harness {
                             .top(px(rect.y))
                             .w(px(rect.w.max(1.0)))
                             .h(px(rect.h.max(1.0)))
-                            .rounded(px(6.0))
-                            .border(px(1.5))
+                            .rounded(px(scale::R_MD))
+                            .border(px(PIN_LINE))
                             .border_color(line),
                     )
                     .child(
@@ -2266,7 +2274,7 @@ impl crate::app::Harness {
                             .absolute()
                             .left(px(badge_x))
                             .top(px(badge_y))
-                            .size(px(22.0))
+                            .size(px(PIN_BADGE))
                             .rounded_full()
                             .bg(accent)
                             .flex()
@@ -2399,18 +2407,18 @@ impl crate::app::Harness {
         // the corner stack's floating pill (D4, docs/41 §2.11): padding
         // 0 / 4, the toggle, then the count, Done and Discard while active.
         let mut row = aui::feedback::floating_pill(if decorative { "feedback-header-ghost" } else { "feedback-header" }, cx)
-            .px(px(4.0))
-            .gap(px(6.0))
+            .px(px(scale::SP_2))
+            .gap(px(scale::SP_2))
             .when(!decorative, |row| row.occlude());
         row = row.child(self.render_feedback_toggle(cx, active, decorative));
         if flashing {
-            row = row.child(self.render_feedback_flash(cx, decorative)).pr(px(10.0));
+            row = row.child(self.render_feedback_flash(cx, decorative)).pr(px(scale::SP_4));
         } else if active || !self.feedback.draft.is_empty() {
             let count = self.feedback.notes_label();
             let count_row = div()
                 .id(if decorative { "feedback-count-ghost" } else { "feedback-count" })
                 .flex_none()
-                .pl(px(2.0))
+                .pl(px(scale::SP_1))
                 .mono(scale::FS_11)
                 .text_color(cx.aui().colors.ink_4)
                 .whitespace_nowrap()
@@ -2420,72 +2428,50 @@ impl crate::app::Harness {
                 .child(count_row)
                 .child(self.render_feedback_done(cx, decorative))
                 .child(self.render_feedback_discard(cx, decorative))
-                .pr(px(6.0));
+                .pr(px(scale::SP_2));
         }
         Some(row.into_any_element())
     }
 
-    /// One 24 px text control in the slot's pill — Done (the primary: the
-    /// foreground fill) or Discard (text; danger ink while armed). Both
-    /// copies build it here, so the decorative one is the same size: it
-    /// only drops the id, role, label and handler.
-    fn slot_text(id: Option<&'static str>, label: &'static str, primary: bool, danger: bool, enabled: bool, cx: &App) -> gpui::Stateful<gpui::Div> {
-        let p = cx.aui().colors;
-        let control = h_flex()
-            .id(id.unwrap_or(label))
-            .flex_none()
-            .h(px(24.0))
-            .px(px(8.0))
-            .rounded(px(6.0))
-            .ui(scale::FS_12)
-            .whitespace_nowrap()
-            .child(label);
-        let control = if primary {
-            control.bg(p.ink).text_color(p.bg).semibold().when(!enabled, |c| c.opacity(0.4))
+    /// One small text control in the slot's pill — Done (the primary) or
+    /// Discard (ghost; the danger kind while armed). Both copies build it
+    /// here, so the decorative one is the same box: it only drops the
+    /// focus, role, label and handler.
+    fn slot_text(id: &'static str, label: &'static str, primary: bool, danger: bool, enabled: bool, decorative: bool) -> aui::data::Button {
+        let control = button(id, label).size(ButtonSize::Sm).disabled(!enabled).decorative(decorative).no_tooltip();
+        if primary {
+            control.primary()
         } else if danger {
-            control.text_color(p.danger).bg(gpui::Hsla { a: 0.12, ..p.danger })
+            control.danger()
         } else {
-            control.text_color(p.ink_2).when(!enabled, |c| c.opacity(0.4))
-        };
-        match id {
-            Some(_) if enabled => control.cursor_pointer().hover(move |d| if primary { d.opacity(0.9) } else { d.text_color(p.ink).bg(p.hover_overlay()) }),
-            _ => control,
+            control.ghost()
         }
     }
 
-    /// The pill's toggle: 28, the message-plus glyph; lit (9 % and the
-    /// foreground) while Active. Toggles exactly like ⌃⌥⌘F (Off or Paused
-    /// → Active, Active → Paused), and the toggled state names it for the
-    /// accessibility tree. Decorative: the same box with none of that — no
-    /// id, role, label, handler or recorder.
+    /// The pill's toggle: the message-plus icon button, lit while Active.
+    /// Toggles exactly like ⌃⌥⌘F (Off or Paused → Active, Active →
+    /// Paused), and the toggled state names it for the accessibility tree.
+    /// Decorative: the same button with none of that — no focus, role,
+    /// label, handler or recorder.
     fn render_feedback_toggle(
         &self,
         cx: &mut Context<Self>,
         active: bool,
         decorative: bool,
     ) -> AnyElement {
-        let p = cx.aui().colors;
-        let side = cx.aui().metrics.control_md;
-        let glyph = icon(IconName::MessagePlus).size(px(14.0)).lit(active);
-        let shell = div()
-            .flex_none()
-            .size(side)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .text_color(if active { p.ink } else { p.ink_2 })
-            .when(active, |d| d.bg(p.selected_overlay()));
+        let toggle = icon_button(if decorative { "feedback-toggle-ghost" } else { "feedback-toggle" }, IconName::MessagePlus)
+            .ghost()
+            .toggled(active)
+            .decorative(decorative)
+            .no_tooltip();
         if decorative {
-            return shell.child(glyph).into_any_element();
+            return toggle.into_any_element();
         }
-        let toggle = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+        let flip = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             if !this.feedback.saving {
                 this.toggle_feedback(window, cx);
             }
         });
-        let toggled = if active { gpui::Toggled::True } else { gpui::Toggled::False };
-        aui::data::record_ax_label("Feedback mode");
         let report = cx.entity().downgrade();
         div()
             .on_children_prepainted(move |bounds, _, cx| {
@@ -2496,19 +2482,10 @@ impl crate::app::Harness {
                     });
                 }
             })
+            .id("feedback-toggle-tip")
+            .tooltip(|_, cx| cx.new(|_| FeedbackTip::toggle()).into())
             .flex_none()
-            .child(
-                shell
-                    .id("feedback-toggle")
-                    .cursor_pointer()
-                    .when(!active, |d| d.hover(|d| d.bg(p.hover_overlay()).text_color(p.ink)))
-                    .role(gpui::Role::Button)
-                    .aria_label("Feedback mode")
-                    .aria_toggled(toggled)
-                    .tooltip(|_, cx| cx.new(|_| FeedbackTip::toggle()).into())
-                    .on_click(toggle)
-                    .child(glyph),
-            )
+            .child(toggle.accessibility_label("Feedback mode").on_click(flip))
             .into_any_element()
     }
 
@@ -2517,14 +2494,13 @@ impl crate::app::Harness {
     fn render_feedback_done(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
         let enabled = self.feedback.done_enabled(cx);
         if decorative {
-            return Self::slot_text(None, "Done", true, false, enabled, cx).into_any_element();
+            return Self::slot_text("feedback-done-ghost", "Done", true, false, enabled, true).into_any_element();
         }
         let done = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             if this.feedback.done_enabled(cx) {
                 this.finish_feedback(window, cx);
             }
         });
-        aui::data::record_ax_label("Done — save feedback report");
         let report = cx.entity().downgrade();
         div()
             .on_children_prepainted(move |bounds, _, cx| {
@@ -2535,25 +2511,25 @@ impl crate::app::Harness {
                     });
                 }
             })
+            .id("feedback-done-tip")
+            .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
             .flex_none()
             .child(
-                Self::slot_text(Some("feedback-done"), "Done", true, false, enabled, cx)
-                    .role(gpui::Role::Button)
-                    .aria_label("Done — save feedback report")
-                    .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
+                Self::slot_text("feedback-done", "Done", true, false, enabled, false)
+                    .accessibility_label("Done — save feedback report")
                     .on_click(done),
             )
             .into_any_element()
     }
 
-    /// Discard: text; the first click arms it (danger ink, the label names
-    /// the confirm), a second within the arm window discards. Decorative:
-    /// the same box.
+    /// Discard: ghost; the first click arms it (the danger kind, the label
+    /// names the confirm), a second within the arm window discards.
+    /// Decorative: the same box.
     fn render_feedback_discard(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
         let armed = self.feedback.discard_armed_live();
         let enabled = self.feedback.discard_enabled();
         if decorative {
-            return Self::slot_text(None, "Discard", false, armed, enabled, cx).into_any_element();
+            return Self::slot_text("feedback-discard-ghost", "Discard", false, armed, enabled, true).into_any_element();
         }
         let label = if armed {
             format!("Confirm: discard {}", self.feedback.notes_label())
@@ -2570,7 +2546,6 @@ impl crate::app::Harness {
                 this.discard_feedback(window, cx);
             }
         });
-        aui::data::record_ax_label(&label);
         let report = cx.entity().downgrade();
         div()
             .on_children_prepainted(move |bounds, _, cx| {
@@ -2581,12 +2556,12 @@ impl crate::app::Harness {
                     });
                 }
             })
+            .id("feedback-discard-tip")
+            .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
             .flex_none()
             .child(
-                Self::slot_text(Some("feedback-discard"), "Discard", false, armed, enabled, cx)
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
+                Self::slot_text("feedback-discard", "Discard", false, armed, enabled, false)
+                    .accessibility_label(label)
                     .on_click(discard),
             )
             .into_any_element()
@@ -2604,10 +2579,10 @@ impl crate::app::Harness {
             .id(if decorative { "feedback-saved-ghost" } else { "feedback-saved" })
             .flex_none()
             .items_center()
-            .gap(px(8.0))
-            .pl(px(2.0))
+            .gap(px(scale::SP_3))
+            .pl(px(scale::SP_1))
             .when(!decorative, |row| row.role(gpui::Role::Group).aria_label(label))
-            .child(div().flex_none().size(px(8.0)).rounded_full().bg(p.success))
+            .child(div().flex_none().size(px(scale::SP_3)).rounded_full().bg(p.success))
             .child(
                 div()
                     .flex_none()
@@ -2637,9 +2612,6 @@ impl crate::app::Harness {
         let note = self.feedback.popover.as_ref()?;
         let (target, field) = (note.target.clone(), note.field.clone());
         let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
-        let on_accent = feedback_on_accent(cx);
-        let hover = gpui::Hsla { l: (accent.l - 0.06).max(0.0), ..accent };
         let win = window.viewport_size();
         let (win_w, win_h) = (f32::from(win.width), f32::from(win.height));
         let rect = FeedbackUi::target_rect(&target);
@@ -2655,8 +2627,6 @@ impl crate::app::Harness {
         // Empty text saves nothing (the save keeps focus as a no-op), so
         // the button reads disabled until there is something to file.
         let save_enabled = !note.field.read(cx).value().trim().is_empty();
-        let save_border = gpui::Hsla { a: 0.45, ..accent };
-        let save_faint = gpui::Hsla { a: 0.55, ..accent };
         let save = cx.listener(|this: &mut Self, _: &(), window, cx| {
             this.save_feedback_note(window, cx);
         });
@@ -2673,25 +2643,12 @@ impl crate::app::Harness {
                 this.cancel_feedback_note(window, cx);
             },
         );
-        let popover = v_flex()
-            .id("feedback-note")
-            .w(px(300.0))
-            .role(gpui::Role::Group)
-            .aria_label("Feedback note")
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
-            .rounded(px(12.0))
-            .shadow(p.shadow(2))
-            .p(px(12.0))
-            .gap(px(9.0))
-            .occlude()
-            .key_context(FEEDBACK_NOTE_CONTEXT)
-            .on_action(move |event, window, cx| on_save_action(event, window, cx))
-            .on_action(move |event, window, cx| on_cancel_action(event, window, cx))
+        let body = v_flex()
+            .p(px(scale::SP_3))
+            .gap(px(scale::SP_3))
             .child(
                 v_flex()
-                    .gap(px(2.0))
+                    .gap(px(scale::SP_1))
                     .child(div().ui(scale::FS_13).semibold().text_color(p.ink).child(title))
                     .child(
                         div()
@@ -2710,7 +2667,7 @@ impl crate::app::Harness {
             )
             .child(
                 h_flex()
-                    .gap(px(8.0))
+                    .gap(px(scale::SP_3))
                     .justify_end()
                     .child(
                         button("feedback-note-cancel", "Cancel")
@@ -2719,32 +2676,11 @@ impl crate::app::Harness {
                             .on_click(move |_, window, cx| cancel(&(), window, cx)),
                     )
                     .child(
-                        div()
-                            .id("feedback-note-save")
-                            .h(px(28.0))
-                            .px(px(11.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(scale::R_SM))
-                            .border_1()
-                            .border_color(if save_enabled {
-                                gpui::transparent_black()
-                            } else {
-                                save_border
-                            })
-                            .bg(if save_enabled { accent } else { gpui::transparent_black() })
-                            .when(save_enabled, |this| {
-                                this.hover(|this| this.bg(hover)).cursor_pointer()
-                            })
-                            .ui(scale::FS_13)
-                            .medium()
-                            .text_color(if save_enabled { on_accent } else { save_faint })
-                            .whitespace_nowrap()
-                            .role(gpui::Role::Button)
-                            .aria_label("Save note")
-                            .on_click(move |_, window, cx| save(&(), window, cx))
-                            .child("Save note"),
+                        button("feedback-note-save", "Save note")
+                            .primary()
+                            .disabled(!save_enabled)
+                            .accessibility_label("Save note")
+                            .on_click(move |_, window, cx| save(&(), window, cx)),
                     ),
             )
             .child(
@@ -2753,6 +2689,16 @@ impl crate::app::Harness {
                     .text_color(p.ink_3)
                     .child("↵ save · ⇧↵ new line · Esc cancel"),
             );
+        // A popover: the one floating panel (docs/83 §7).
+        let popover = menu_panel(body, cx)
+            .id("feedback-note")
+            .w(px(FEEDBACK_POPOVER_W))
+            .role(gpui::Role::Group)
+            .aria_label("Feedback note")
+            .occlude()
+            .key_context(FEEDBACK_NOTE_CONTEXT)
+            .on_action(move |event, window, cx| on_save_action(event, window, cx))
+            .on_action(move |event, window, cx| on_cancel_action(event, window, cx));
         Some(
             popover_layer(
                 div()

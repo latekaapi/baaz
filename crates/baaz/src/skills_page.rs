@@ -26,10 +26,12 @@ use aui::skills::{
     SkillDetailIntent, SkillMode, SkillRowModel, SkillState, SwitchIntent, ChipTone, DetailAction,
 };
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use aui::transcript::{prose, ProseStyle};
 use gpui::{div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window};
-use gpui_kit::base::{h_flex, v_flex};
+use aui::interact::{dismiss_layer, dropdown_separator, menu_panel};
+use aui::overlay::modal_panel;
+use aui::util::{h_flex, v_flex};
 use gpui_kit::component::input::Textarea;
 
 use crate::app::{
@@ -53,6 +55,14 @@ pub(crate) const SKILLS_HEADER_TOP: f32 = aui::shell::SHEET_ROW_H + aui::shell::
 const SKILLS_ROW_INSET: f32 = 12.0;
 /// The detail pane beside the list.
 const SKILLS_DETAIL_W: f32 = 460.0;
+/// The header's search field width.
+const SKILLS_SEARCH_W: f32 = 220.0;
+/// The Add skill menu's width.
+const ADD_MENU_W: f32 = 380.0;
+/// The custom dialogs' width (New skill, Install preview, Import, Remove).
+const SKILLS_DIALOG_W: f32 = 520.0;
+/// The empty list's breathing room above and below its two lines.
+const EMPTY_PAD_Y: f32 = 48.0;
 
 /// The Skills page's centred column: the Settings column's measure (plus
 /// the detail pane while one is open), its padding less the rows' own
@@ -1533,29 +1543,23 @@ impl Harness {
             .w_full()
             .items_center()
             .gap(px(scale::SP_3))
-            .px(px(12.0))
+            .px(px(SKILLS_ROW_INSET))
             .pt(px(SKILLS_HEADER_TOP))
-            .child(div().flex_none().ui(19.8).semibold().text_color(p.ink).child("Skills"))
-            .child(div().flex_none().ui(14.3).text_color(p.ink_4).child("·"))
+            .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Skills"))
+            .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink_4).child("·"))
             .child(
-                h_flex()
-                    .id("skills-crumb")
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Skills project, {project_name}. Switch project."))
-                    .on_click(open_menu)
-                    .child(div().ui(scale::FS_13).medium().text_color(p.ink).child(project_name))
-                    .child(div().flex_none().text_color(p.ink_3).child("▾")),
+                button("skills-crumb", project_name.clone())
+                    .ghost()
+                    .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)))
+                    .accessibility_label(format!("Skills project, {project_name}. Switch project."))
+                    .on_click(open_menu),
             )
             .child(div().flex_1())
             .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Search"))
             .child(
                 aui::data::field_frame("skills-search-field", &self.skills_query, window, cx)
                     .flex_none()
-                    .w(px(220.0))
+                    .w(px(SKILLS_SEARCH_W))
                     .child(
                         Textarea::new(&self.skills_query)
                             .appearance(false)
@@ -1584,9 +1588,9 @@ impl Harness {
                 div()
                     .flex_none()
                     .w_full()
-                    .px(px(12.0))
-                    .pt(px(6.0))
-                    .ui(scale::FS_12)
+                    .px(px(SKILLS_ROW_INSET))
+                    .pt(px(scale::SP_2))
+                    .role_in(TextRole::Caption, cx)
                     .text_color(p.ink_3)
                     .child(line.to_owned()),
             );
@@ -1599,7 +1603,7 @@ impl Harness {
                 this.relist_skills(cx);
             });
             column = column.child(
-                div().flex_none().w_full().px(px(12.0)).pt(px(8.0)).child(
+                div().flex_none().w_full().px(px(SKILLS_ROW_INSET)).pt(px(scale::SP_3)).child(
                     banner("skills-error", BannerKind::Error, vec![BannerRun::Text(error.into())])
                         .action("Try again", BannerActionStyle::Secondary)
                         .on_action(move |window, cx| retry(&(), window, cx)),
@@ -1620,7 +1624,7 @@ impl Harness {
                 CostSegment::new(format!("{} {}", section.label(), format_tokens(*tokens as u32)), *tokens as f32, level)
             })
             .collect();
-        column = column.child(div().flex_none().w_full().pt(px(8.0)).child(cost_meter(total, caption, segments)));
+        column = column.child(div().flex_none().w_full().pt(px(scale::SP_3)).child(cost_meter(total, caption, segments)));
 
         // The filter row: segments with counts, the Hide off switch.
         let labels: Vec<SharedString> =
@@ -1641,8 +1645,8 @@ impl Harness {
             .w_full()
             .items_center()
             .gap(px(scale::SP_3))
-            .px(px(12.0))
-            .pb(px(8.0))
+            .px(px(SKILLS_ROW_INSET))
+            .pb(px(scale::SP_3))
             .child(
                 segmented("skills-filter", labels, active)
                     .accessibility_label("Filter skills by scope")
@@ -1658,7 +1662,7 @@ impl Harness {
         column = column.child(filter_row);
 
         // The body: the list beside the 460 px detail pane.
-        let mut list = v_flex().w_full().pb(px(24.0));
+        let mut list = v_flex().w_full().pb(px(scale::SP_6));
         if rows.is_empty() {
             list = list.child(self.render_skills_empty(window, cx));
         } else {
@@ -1707,7 +1711,7 @@ impl Harness {
                             cx.notify();
                         });
                         list = list.child(
-                            div().w_full().px(px(12.0)).py(px(4.0)).child(
+                            div().w_full().px(px(SKILLS_ROW_INSET)).py(px(scale::SP_2)).child(
                                 button("skills-builtin-less", "Show less")
                                     .accessibility_label("Show fewer built-in skills")
                                     .on_click(less),
@@ -1719,7 +1723,7 @@ impl Harness {
                             cx.notify();
                         });
                         list = list.child(
-                            div().w_full().px(px(12.0)).py(px(4.0)).child(
+                            div().w_full().px(px(SKILLS_ROW_INSET)).py(px(scale::SP_2)).child(
                                 button("skills-builtin-more", format!("Show {more} more"))
                                     .accessibility_label(format!("Show {more} more built-in skills"))
                                     .on_click(show),
@@ -1740,15 +1744,15 @@ impl Harness {
         // the body's full height; the 460 px detail pane is unaffected.
         let mut body = h_flex()
             .flex_1()
-            .min_h(px(0.0))
+            .min_h_0()
             .w_full()
             .items_stretch()
             .child(
                 div()
                     .id("skills-list-scroll")
                     .flex_1()
-                    .min_h(px(0.0))
-                    .min_w(px(0.0))
+                    .min_h_0()
+                    .min_w_0()
                     .overflow_y_scroll()
                     .child(list),
             );
@@ -1778,7 +1782,7 @@ impl Harness {
             column
                 .debug_selector(|| "skills-column".into())
                 .flex_1()
-                .min_w(px(0.0))
+                .min_w_0()
                 .max_w(px(column_max))
                 .px(px(column_pad)),
         );
@@ -1795,7 +1799,7 @@ impl Harness {
         // seated at this relative root — clipped to the page.
         // `min_w(0)` too: a row's unwrapped text otherwise sets the page's
         // min-content width, and the page ran ~480 px past the centre cell.
-        let mut root = div().flex_1().min_h(px(0.0)).min_w(px(0.0)).w_full().overflow_hidden().relative().child(column);
+        let mut root = div().flex_1().min_h_0().min_w_0().w_full().overflow_hidden().relative().child(column);
         // The test hook the feedback-mode layout test measures.
         root = root.debug_selector(|| "skills-page".into());
         if self.skills.add_menu_open {
@@ -1833,22 +1837,15 @@ impl Harness {
             this.open_import(skills::ImportSource::Codex, cx);
         });
         let ask = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.ask_muse_to_write(window, cx));
-        let p = cx.aui().colors;
         // A click outside the card closes the menu. The catcher is
         // transparent, so the page behind it captures unchanged.
-        let dismiss = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.skills.add_menu_open = false;
             cx.notify();
         });
         let card = v_flex()
                     .id("skills-add-menu")
-                    .flex_none()
-                    .w(px(380.0))
-                    .py(px(6.0))
-                    .rounded(px(scale::R_SM))
-                    .border_1()
-                    .border_color(p.line)
-                    .bg(p.surface_1)
+                    .w_full()
                     .role(gpui::Role::Menu)
                     .aria_label("Add skill")
                     .child(
@@ -1871,7 +1868,7 @@ impl Harness {
                         .key("install")
                         .on_activate(move |key, window, cx| install(key, window, cx)),
                     )
-                    .child(div().flex_none().w_full().h(px(1.0)).my(px(6.0)).bg(p.line))
+                    .child(dropdown_separator(cx))
                     .child(
                         menu_row_two_line(
                             "skills-add-import-claude",
@@ -1896,7 +1893,7 @@ impl Harness {
                         .trailing(self.add_menu_trail(skills::ImportSource::Codex))
                         .on_activate(move |key, window, cx| import_codex(key, window, cx)),
                     )
-                    .child(div().flex_none().w_full().h(px(1.0)).my(px(6.0)).bg(p.line))
+                    .child(dropdown_separator(cx))
                     .child(
                         menu_row_two_line(
                             "skills-add-ask",
@@ -1908,27 +1905,20 @@ impl Harness {
                         .trailing("uses a turn")
                         .on_activate(move |key, window, cx| ask(key, window, cx)),
                     );
+        // The one floating panel (docs/83 §7).
+        let card = menu_panel(card, cx).flex_none().w(px(ADD_MENU_W));
         // The popover layer, never the column: the menu floats right-
         // aligned under the header and the page's layout does not move.
         popover_layer(
             div()
                 .absolute()
                 .inset_0()
-                .child(
-                    div()
-                        .id("skills-add-scrim")
-                        .occlude()
-                        .absolute()
-                        .inset_0()
-                        .role(gpui::Role::Button)
-                        .aria_label("Dismiss menu")
-                        .on_click(dismiss),
-                )
+                .child(dismiss_layer("skills-add-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx)))
                 // Seated in the page's centred column, under its Add
                 // button (the column's right edge less the rows' inset).
                 .child(
                     h_flex().absolute().inset_0().justify_center().child(
-                        div().relative().flex_1().min_w(px(0.0)).max_w(px(column_max)).h_full().child(
+                        div().relative().flex_1().min_w_0().max_w(px(column_max)).h_full().child(
                             div()
                                 .absolute()
                                 .top(px(SKILLS_HEADER_TOP + SKILLS_HEADER_ROW_H))
@@ -1957,39 +1947,18 @@ impl Harness {
         }
     }
 
-    /// The scrim-and-card shell every custom dialog draws through: a full
-    /// overlay with a dim scrim and a centred 520 px card wearing the
-    /// dialog role and its name.
+    /// The scrim-and-card shell every custom dialog draws through: the
+    /// library's sheet scrim with a centred dialog panel wearing the dialog
+    /// role and its name.
     fn dialog_shell(&self, name: &str, card: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        div()
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .size_full()
-            .child(div().absolute().top(px(0.0)).left(px(0.0)).size_full().bg(gpui::rgba(0x0000_0066)))
-            .child(
-                v_flex()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        v_flex()
-                            .id("skills-dialog-card")
-                            .flex_none()
-                            .w(px(520.0))
-                            .p(px(16.0))
-                            .gap(px(scale::SP_3))
-                            .rounded(px(scale::R_SM))
-                            .border_1()
-                            .border_color(p.line)
-                            .bg(p.surface_1)
-                            .role(gpui::Role::Dialog)
-                            .aria_label(name.to_owned())
-                            .child(card),
-                    ),
-            )
-            .into_any_element()
+        let panel = modal_panel(SKILLS_DIALOG_W, cx)
+            .id("skills-dialog-card")
+            .p(px(scale::SP_5))
+            .gap(px(scale::SP_3))
+            .role(gpui::Role::Dialog)
+            .aria_label(name.to_owned())
+            .child(card);
+        aui::screens::sheet_scrim("skills-dialog-scrim", panel, None)
     }
 
     /// New skill… (A2): name and description fields with inline errors, the
@@ -2015,17 +1984,16 @@ impl Harness {
         let mut card = v_flex()
             .w_full()
             .gap(px(scale::SP_3))
-            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("New skill"))
+            .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("New skill"))
             .child(
                 v_flex()
                     .w_full()
-                    .gap(px(4.0))
+                    .gap(px(scale::SP_2))
                     .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Name"))
                     .child(
                         aui::data::field_frame("skills-new-name-field", &self.skills_new_name, window, cx)
                             .flex_none()
                             .w_full()
-                            .bg(p.surface_2)
                             .child(
                                 Textarea::new(&self.skills_new_name)
                                     .appearance(false)
@@ -2048,13 +2016,12 @@ impl Harness {
             .child(
                 v_flex()
                     .w_full()
-                    .gap(px(4.0))
+                    .gap(px(scale::SP_2))
                     .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Description"))
                     .child(
                         aui::data::field_frame("skills-new-desc-field", &self.skills_new_desc, window, cx)
                             .flex_none()
                             .w_full()
-                            .bg(p.surface_2)
                             .child(
                                 Textarea::new(&self.skills_new_desc)
                                     .appearance(false)
@@ -2139,7 +2106,7 @@ impl Harness {
         let card = v_flex()
             .w_full()
             .gap(px(scale::SP_3))
-            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("Install skill"))
+            .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Install skill"))
             .child(div().flex_none().w_full().ui(scale::FS_13).medium().text_color(p.ink).child(name))
             .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink_3).child(description))
             .child(
@@ -2274,7 +2241,7 @@ impl Harness {
         let card = v_flex()
             .w_full()
             .gap(px(scale::SP_3))
-            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("Remove skill"))
+            .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Remove skill"))
             .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(headline))
             .child(div().flex_none().w_full().mono(scale::FS_12).text_color(p.ink_3).child(detail))
             .child(
@@ -2453,7 +2420,7 @@ impl Harness {
 
         // Diagnostics: the only coloured text (D60).
         if !skill.diagnostics.is_empty() {
-            let mut diagnostics = v_flex().w_full().gap(px(4.0));
+            let mut diagnostics = v_flex().w_full().gap(px(scale::SP_2));
             for diagnostic in &skill.diagnostics {
                 let line = diagnostic.message.clone().unwrap_or_else(|| diagnostic.code.clone());
                 diagnostics = diagnostics.child(
@@ -2466,7 +2433,7 @@ impl Harness {
         // The ⋯ menu: Validate and Copy path, with the personal line on
         // personal rows (D60, §7).
         if self.skills.overflow_open {
-            let mut menu = v_flex().w_full().gap(px(4.0));
+            let mut menu = v_flex().w_full().gap(px(scale::SP_2));
             if skill.section() == ScopeSection::Personal {
                 menu = menu.child(
                     div().w_full().ui(scale::FS_12).text_color(p.ink_3).child("Personal skills apply to every project."),
@@ -2596,9 +2563,9 @@ impl Harness {
             .items_center()
             .justify_center()
             .gap(px(scale::SP_3))
-            .py(px(48.0))
-            .child(div().ui(14.3).medium().text_color(p.ink_2).child("Nothing here"))
-            .child(div().ui(scale::FS_13).text_color(p.ink_3).child(copy))
+            .py(px(EMPTY_PAD_Y))
+            .child(div().role_in(TextRole::Subtitle, cx).text_color(p.ink_2).child("Nothing here"))
+            .child(div().role_in(TextRole::Body, cx).text_color(p.ink_3).child(copy))
             .into_any_element()
     }
 }

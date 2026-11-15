@@ -44,13 +44,13 @@
 //! (`shortcuts_cache`) and rebuilt per frame, and its edits go through
 //! [`Harness::handle_shortcut`](crate::app::Harness::handle_shortcut).
 
-use aui::data::{button, icon_button, ButtonSize};
+use aui::data::{button, icon_button, section, segmented, settings_row, switch, ButtonSize, SwitchIntent, SETTINGS_ROW_PAD_Y};
+use aui::interact::{interactive, list_row, LIST_INSET, ROW_GAP};
 use aui::overlay::{SettingsRow, SettingsSection, ShortcutEdit};
+use aui::util::{h_flex, v_flex};
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{div, prelude::*, px, AnyElement, Context, Focusable, SharedString, Window};
-use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::switch::Switch;
 
 use crate::app::Harness;
 use crate::browser::toolbar::SearchEngine;
@@ -88,6 +88,8 @@ pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
 /// Skills page takes the same column (owner 2026-10-31: full width "looks
 /// too wide").
 pub(crate) const SETTINGS_COLUMN_MAX: f32 = 680.0;
+/// The Shortcuts page's search field width.
+const SHORTCUT_SEARCH_W: f32 = 280.0;
 /// The Settings column's side padding.
 pub(crate) const SETTINGS_COLUMN_PAD_X: f32 = scale::SP_5;
 
@@ -812,10 +814,9 @@ impl Harness {
         self.settings_page.open
     }
 
-    /// The left column while the page is open: a "← Back" row at the top,
-    /// then the section list (same width as the sidebar cell that hosts
-    /// it). Provider sub-pages nest under Providers, indented, only while
-    /// Providers is selected. Every row carries a role and a name.
+    /// The Settings nav in the sidebar column: Back, a rule, then one flat
+    /// list row per page (provider sub-pages nested under Providers while
+    /// it is selected), a rule before Archived.
     pub(crate) fn render_settings_nav(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let selected = settings_parent(&self.settings_page.section);
@@ -836,42 +837,36 @@ impl Harness {
             }
             cx.stop_propagation();
         });
-        let mut list = v_flex()
+        let rule = || div().h_px().w_full().flex_none().bg(p.line);
+        let list = v_flex()
             .id("settings-nav")
             .size_full()
             .bg(p.surface_1)
             .child(
-                h_flex()
-                    .id("settings-back")
+                div()
                     .debug_selector(|| "settings-back".into())
                     .flex_none()
-                    .items_center()
-                    .gap(px(scale::SP_2))
-                    .mx(px(scale::SP_2))
+                    .mx(px(LIST_INSET))
                     // Below the column's top fade: the shell starts this
                     // column under its chrome row and lays LIST_FADE of
                     // fade over its top, so an 8 px margin left Back half
                     // dimmed under the bar (owner, 2026-10-31).
                     .mt(px(SETTINGS_NAV_TOP))
                     .mb(px(scale::SP_2))
-                    .px(px(scale::SP_2))
-                    .py(px(scale::SP_2))
-                    .rounded(px(scale::R_SM))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(p.surface_2))
-                    .role(gpui::Role::Button)
-                    .aria_label("Back")
-                    .on_mouse_down(gpui::MouseButton::Left, back_down)
-                    .on_click(back)
-                    // The label reads at the section rows' weight: muted, it
-                    // sat in the bar's shade and looked disabled (owner,
-                    // 2026-10-29).
-                    .child(div().text_color(p.ink_2).ui(scale::FS_13).child("← Back")),
+                    .child(
+                        list_row("settings-back", "Back")
+                            .leading(aui_icons::icon(IconName::ArrowLeft).size(px(scale::ICON_DEFAULT)))
+                            .on_press(back_down)
+                            .on_click(back),
+                    ),
             )
-            .child(div().h(px(1.0)).w_full().flex_none().bg(p.line));
+            .child(rule());
         let mut section_list = v_flex()
             .id("settings-sections")
             .w_full()
+            .px(px(LIST_INSET))
+            .pt(px(scale::SP_2))
+            .gap(px(ROW_GAP))
             .role(gpui::Role::TabList)
             .aria_label("Settings sections");
         for (id, label) in SETTINGS_SECTIONS {
@@ -879,73 +874,31 @@ impl Harness {
             let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.open_settings_page(&target, cx);
             });
-            let active = selected == *id;
-            let mut row = h_flex()
-                .id(SharedString::from(format!("settings-nav-{id}")))
-                .w_full()
-                .items_center()
-                .px(px(scale::SP_4))
-                .py(px(scale::SP_2))
-                .cursor_pointer()
-                .role(gpui::Role::Tab)
-                .aria_label(format!("Settings section, {label}"))
-                .on_click(open)
-                .child(
-                    div()
-                        .flex_1()
-                        .ui(scale::FS_13)
-                        .text_color(if active { p.ink } else { p.ink_3 })
-                        .child(label.to_string()),
-                );
-            if active {
-                row = row.bg(p.surface_2);
-            }
-            section_list = section_list.child(row);
+            section_list = section_list
+                .child(list_row(SharedString::from(format!("settings-nav-{id}")), label.to_string()).selected(selected == *id).on_click(open));
             // Provider sub-pages nest under Providers, indented, only
             // while Providers is selected.
             if *id == "providers" && selected == "providers" {
                 for provider in ProviderId::all() {
                     let sub = format!("providers/{}", provider.as_str());
-                    let open_sub = cx.listener({
-                        let sub = sub.clone();
-                        move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.open_settings_page(&sub, cx);
-                        }
-                    });
                     let sub_active = self.settings_page.section == sub;
-                    let mut sub_row = h_flex()
-                        .id(SharedString::from(format!("settings-nav-{}", provider.as_str())))
-                        .w_full()
-                        .items_center()
-                        .pl(px(scale::SP_4 + 16.0))
-                        .pr(px(scale::SP_4))
-                        .py(px(scale::SP_2))
-                        .cursor_pointer()
-                        .role(gpui::Role::Tab)
-                        .aria_label(format!("Settings section, {} provider", provider.label()))
-                        .on_click(open_sub)
-                        .child(
-                            div()
-                                .flex_1()
-                                .ui(scale::FS_13)
-                                .text_color(if sub_active { p.ink } else { p.ink_3 })
-                                .child(provider.label().to_string()),
-                        );
-                    if sub_active {
-                        sub_row = sub_row.bg(p.surface_2);
-                    }
-                    section_list = section_list.child(sub_row);
+                    let open_sub = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.open_settings_page(&sub, cx);
+                    });
+                    section_list = section_list.child(
+                        list_row(SharedString::from(format!("settings-nav-{}", provider.as_str())), provider.label().to_string())
+                            .depth(1)
+                            .selected(sub_active)
+                            .on_click(open_sub),
+                    );
                 }
             }
-            // A muted divider before Archived.
+            // A rule before Archived.
             if *id == "shortcuts" {
-                section_list = section_list.child(
-                    div().h(px(1.0)).w_full().flex_none().my(px(scale::SP_2)).bg(p.line),
-                );
+                section_list = section_list.child(rule().my(px(scale::SP_2)));
             }
         }
-        list = list.child(section_list);
-        list.into_any_element()
+        list.child(section_list).into_any_element()
     }
 
     /// The bar while Settings is open: the breadcrumb (`Settings / Providers /
@@ -964,12 +917,7 @@ impl Harness {
                 trail = trail.child(div().flex_none().ui(scale::FS_13).text_color(p.ink_4).child("/"));
             }
             let last = index + 1 == crumbs.len();
-            let crumb_el = div()
-                .id(SharedString::from(format!("settings-crumb-{index}")))
-                .flex_none()
-                .ui(scale::FS_13)
-                .text_color(if last { p.ink } else { p.ink_3 })
-                .child(crumb.clone());
+            let crumb_el = div().flex_none().ui(scale::FS_13).text_color(if last { p.ink } else { p.ink_3 }).child(crumb.clone());
             // Every crumb but the page itself is a link to its page (owner,
             // 2026-10-29: the crumbs looked clickable and were not).
             let crumb_el = match settings_crumb_target(&self.settings_page.section, index) {
@@ -977,11 +925,9 @@ impl Harness {
                     let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                         this.open_settings_page(target, cx);
                     });
-                    crumb_el
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(p.ink))
-                        .role(gpui::Role::Link)
-                        .aria_label(format!("Open {crumb}"))
+                    interactive(SharedString::from(format!("settings-crumb-{index}")), crumb_el.px(px(scale::SP_1)))
+                        .role("link")
+                        .label(format!("Open {crumb}"))
                         .on_click(open)
                         .into_any_element()
                 }
@@ -1007,7 +953,8 @@ impl Harness {
     /// The settings surface: centre+right merged into one column, max 680
     /// px, centred, scrolling on its own, 32 px top padding. The surface is
     /// always the full column, so moving between sections never resizes
-    /// anything. Each page: H1 + one muted line + grouped hairline boxes.
+    /// anything. Each page: H1 + one muted line + sections (a title over
+    /// line-split rows, no box around them).
     pub(crate) fn render_settings_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Keep the filter source in one place: the search entity owns the
         // text while the page stands open.
@@ -1063,7 +1010,7 @@ impl Harness {
                 v_flex()
                     .id("settings-column")
                     .flex_1()
-                    .min_w(px(0.0))
+                    .min_w_0()
                     .max_w(px(SETTINGS_COLUMN_MAX))
                     .h_full()
                     .overflow_y_scroll()
@@ -1078,8 +1025,7 @@ impl Harness {
                         div()
                             .id("settings-h1")
                             .flex_none()
-                            .ui(19.8)
-                            .semibold()
+                            .role_in(TextRole::Title, cx)
                             .text_color(p.ink)
                             .role(gpui::Role::Heading)
                             .aria_label(format!("Settings page, {title}"))
@@ -1097,7 +1043,8 @@ impl Harness {
             .into_any_element()
     }
 
-    /// One switch row: label + one detail line left, the control right.
+    /// One switch row: the library's settings row, its switch named by the
+    /// row's title.
     fn settings_switch_row(
         &self,
         row_id: &str,
@@ -1106,59 +1053,25 @@ impl Harness {
         on: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let p = cx.aui().colors;
         let id = row_id.to_owned();
-        let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
-            this.flip_setting(&id, *next, cx);
+        // The switch asks to flip; the row knows what it showed.
+        let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
+            this.flip_setting(&id, !on, cx);
         });
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child(label.to_string()))
-                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(detail.to_string())),
-            )
-            .child(
-                Switch::new(format!("settings-switch-{row_id}"))
-                    .checked(on)
-                    .color(p.accent_ring)
-                    .accessibility_label(SharedString::from(label.to_string()))
-                    .on_click(move |next, window, cx| flip(next, window, cx)),
+        settings_row(label.to_string())
+            .description(detail.to_string())
+            .control(
+                switch(SharedString::from(format!("settings-switch-{row_id}")), on, false)
+                    .accessibility_label(label.to_string())
+                    .on_intent(move |intent, window, cx| flip(&intent, window, cx)),
             )
             .into_any_element()
     }
 
-    /// One plain hairline box with hairline dividers between rows.
-    fn settings_group(&self, label: &str, rows: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let mut boxed = v_flex()
-            .id(SharedString::from(format!("settings-group-{label}")))
-            .w_full()
-            .rounded(px(scale::R_SM))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.surface_2)
-            .px(px(scale::SP_4))
-            .role(gpui::Role::Group)
-            .aria_label(format!("Settings group, {label}"));
-        for (index, row) in rows.into_iter().enumerate() {
-            if index > 0 {
-                boxed = boxed.child(div().h(px(1.0)).w_full().flex_none().bg(p.line));
-            }
-            boxed = boxed.child(row);
-        }
-        v_flex()
-            .w_full()
-            .flex_none()
-            .gap(px(scale::SP_2))
-            .child(div().ui(scale::FS_12).text_color(p.ink_3).child(label.to_string()))
-            .child(boxed)
-            .into_any_element()
+    /// One page section: its title, then rows split by 1 px `line` — no
+    /// card around it (docs/83 §7).
+    fn settings_group(&self, label: &str, rows: Vec<AnyElement>, _cx: &mut Context<Self>) -> AnyElement {
+        section(label.to_string()).rows(rows).into_any_element()
     }
 
     /// General: the three model-spending switches under "Model
@@ -1211,52 +1124,26 @@ impl Harness {
     }
 
 
-    /// One Default-search-engine row: the radio dot (accent while
-    /// checked) and the engine's name. Every row carries a role and a
-    /// name.
-    fn settings_search_engine_row(&self, engine: SearchEngine, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let checked = self.layout.search_engine == engine;
-        let dot = div()
-            .flex_none()
-            .size(px(14.0))
-            .rounded_full()
-            .border_1()
-            .border_color(if checked { p.accent } else { p.line_strong })
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(if checked {
-                div().size(px(6.0)).rounded_full().bg(p.accent).into_any_element()
-            } else {
-                div().into_any_element()
-            });
-        let set = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.set_search_engine(engine, cx);
-        });
-        h_flex()
-            .id(SharedString::from(format!("settings-search-engine-{}", engine.slug())))
-            .debug_selector(move || format!("settings-search-engine-{}", engine.slug()))
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .cursor_pointer()
-            .role(gpui::Role::RadioButton)
-            .aria_selected(checked)
-            .aria_label(format!("Default search engine, {}", engine.name()))
-            .on_click(set)
-            .child(dot)
-            .child(div().text_color(p.ink).ui(scale::FS_13).child(engine.name().to_string()))
-            .into_any_element()
-    }
 
-    /// The Search group: the four engines as radio rows. The address
-    /// field commits to the checked one from the next Enter on.
+    /// The Search group: the four engines as one segmented choice. The
+    /// address field commits to the chosen one from the next Enter on.
     fn settings_browser_search_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows =
-            SearchEngine::ALL.iter().map(|engine| self.settings_search_engine_row(*engine, cx)).collect();
-        self.settings_group("Search", rows, cx)
+        let active = SearchEngine::ALL.iter().position(|e| *e == self.layout.search_engine).unwrap_or(0);
+        let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+            if let Some(engine) = SearchEngine::ALL.get(*index) {
+                this.set_search_engine(*engine, cx);
+            }
+        });
+        let control = div().debug_selector(|| "settings-search-engine".into()).child(
+            segmented("settings-search-engine", SearchEngine::ALL.iter().map(|e| SharedString::from(e.name())).collect(), active)
+                .accessibility_label("Default search engine")
+                .on_select(move |index, w, cx| set(&index, w, cx)),
+        );
+        self.settings_group(
+            "Search",
+            vec![settings_row("Default search engine").description("What the address field searches with.").control(control).into_any_element()],
+            cx,
+        )
     }
 
     /// The Downloads group: the current folder and its Change row,
@@ -1273,32 +1160,18 @@ impl Harness {
         let current = self.assistant_choice();
         let mut anchor = div().relative().flex_none();
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
-        let mut chip = h_flex()
-            .id("settings-assistant-model")
-            .debug_selector(|| "settings-assistant-model".into())
-            .flex_none()
-            .h(px(28.0))
-            .pl(px(6.0))
-            .pr(px(8.0))
-            .gap(px(7.0))
-            .items_center()
-            .rounded(px(scale::R_SM))
-            .bg(p.surface_4)
-            .shadow(p.edge())
-            .cursor_pointer()
-            .text_color(p.ink)
-            .ui(scale::FS_13)
-            .role(gpui::Role::Button)
-            .aria_label(format!("Assistant model, {chip_label}. Change"))
-            .hover(|s| s.bg(p.surface_5))
+        let mut chip = button("settings-assistant-model", chip_label)
+            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)).color(p.ink_2))
+            .menu_open(self.assistant_menu_open)
+            .accessibility_label(format!("Assistant model, {chip_label}. Change"))
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.assistant_menu_open = !this.assistant_menu_open;
                 cx.notify();
             }));
         if let Some(choice) = current.as_ref() {
-            chip = chip.child(aui_icons::provider_mark(choice.provider.icon()).size(px(16.0)));
+            chip = chip.leading(aui_icons::provider_mark(choice.provider.icon()).size(px(scale::ICON_DEFAULT)));
         }
-        chip = chip.child(chip_label).child(aui_icons::icon(aui_icons::IconName::ChevronDown).size(px(12.0)).color(p.ink_2));
+        let chip = div().debug_selector(|| "settings-assistant-model".into()).child(chip);
         anchor = anchor.child(chip);
         if self.assistant_menu_open {
             let choices: Vec<crate::browser::assistant::ModelChoice> = ProviderId::all()
@@ -1342,25 +1215,9 @@ impl Harness {
                     }),
             );
         }
-        let row = h_flex()
-            .id("settings-browser-assistant")
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Provider and model".to_string()))
-                    .child(
-                        div()
-                            .text_color(p.ink_3)
-                            .ui(scale::FS_12)
-                            .child("Used by ⌘J, the card and Ask in the Field. New chats start with it; an open chat keeps its model.".to_string()),
-                    ),
-            )
-            .child(anchor);
+        let row = settings_row("Provider and model")
+            .description("Used by ⌘J, the card and Ask in the Field. New chats start with it; an open chat keeps its model.")
+            .control(anchor);
         self.settings_group("Assistant", vec![row.into_any_element()], cx)
     }
 
@@ -1370,30 +1227,15 @@ impl Harness {
     /// its remove button. "Always on this site" on an approval adds one.
     fn settings_browser_agents_group(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::browser::agents::{ActMode, SiteRule, YourTabs};
-        let p = cx.aui().colors;
-        let row = |id: &'static str, label: &'static str, detail: &'static str, control: AnyElement| -> AnyElement {
-            h_flex()
-                .id(id)
-                .w_full()
-                .items_center()
-                .gap(px(scale::SP_3))
-                .py(px(scale::SP_2))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(div().text_color(p.ink).ui(scale::FS_13).child(label.to_string()))
-                        .child(div().text_color(p.ink_3).ui(scale::FS_12).child(detail.to_string())),
-                )
-                .child(div().flex_none().child(control))
-                .into_any_element()
+        let row = |_id: &'static str, label: &'static str, detail: &'static str, control: AnyElement| -> AnyElement {
+            settings_row(label).description(detail).control(control).into_any_element()
         };
         let agents = self.layout.agents.clone();
         let act_index = match agents.act {
             ActMode::Ask => 0,
             ActMode::Auto => 1,
         };
-        let act = aui::workbench::segmented("settings-agents-act", vec!["Ask".into(), "Auto".into()], act_index)
+        let act = segmented("settings-agents-act", vec!["Ask".into(), "Auto".into()], act_index)
             .accessibility_label("Before acting on a page")
             .on_select({
                 let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
@@ -1408,7 +1250,7 @@ impl Harness {
             YourTabs::AskFirst => 1,
             YourTabs::ReadOnly => 2,
         };
-        let tabs = aui::workbench::segmented("settings-agents-tabs", vec!["Yes".into(), "Ask first".into(), "Read only".into()], tabs_index)
+        let tabs = segmented("settings-agents-tabs", vec!["Yes".into(), "Ask first".into(), "Read only".into()], tabs_index)
             .accessibility_label("Your own tabs")
             .on_select({
                 let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
@@ -1436,25 +1278,13 @@ impl Harness {
                 tabs.into_any_element(),
             ),
         ];
-        let sites = h_flex()
-            .id("settings-agents-sites")
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Sites".to_string()))
-                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(if agents.sites.is_empty() {
-                        agents.sites_summary()
-                    } else {
-                        // The rows below name every rule; the line says what
-                        // removing one does.
-                        "Remove a rule to be asked again on that site.".to_owned()
-                    })),
-            );
+        let sites = settings_row("Sites").description(if agents.sites.is_empty() {
+            agents.sites_summary()
+        } else {
+            // The rows below name every rule; the line says what removing
+            // one does.
+            "Remove a rule to be asked again on that site.".to_owned()
+        });
         rows.push(sites.into_any_element());
         for (index, (host, rule)) in agents.sites.iter().enumerate() {
             let word = match rule {
@@ -1468,20 +1298,14 @@ impl Harness {
                 cx.notify();
             });
             rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("settings-agents-site-{index}")))
-                    .w_full()
-                    .items_center()
-                    .gap(px(scale::SP_3))
-                    .py(px(scale::SP_1))
-                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).ui(scale::FS_13).mono(scale::FS_12).child(host.clone()))
-                    .child(div().flex_none().text_color(p.ink_2).ui(scale::FS_12).child(word))
-                    .child(
-                        button(SharedString::from(format!("settings-agents-site-remove-{index}")), "Remove")
-                            .accessibility_label(SharedString::from(format!("Remove the rule for {host}")))
-                            .on_click(move |e, w, cx| remove(e, w, cx)),
-                    )
-                    .into_any_element(),
+                site_row(
+                    host,
+                    Some(word),
+                    button(SharedString::from(format!("settings-agents-site-remove-{index}")), "Remove")
+                        .accessibility_label(SharedString::from(format!("Remove the rule for {host}")))
+                        .on_click(move |e, w, cx| remove(e, w, cx)),
+                    cx,
+                ),
             );
         }
         self.settings_group("Agents", rows, cx)
@@ -1491,7 +1315,6 @@ impl Harness {
     /// the sites history never records, each with Remove. (Import from
     /// Chrome joins this group.)
     fn settings_browser_data_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let db = self.browser.db();
         let pages = db.len();
         let summary = format!(
@@ -1501,55 +1324,32 @@ impl Harness {
         );
         let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.ask_clear_history(cx));
         let import = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_chrome_import(cx));
-        let mut rows = vec![h_flex()
-            .id("settings-browser-import")
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Import from Chrome".to_string()))
-                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child("Bookmarks and history. Chrome is only read; nothing in it changes.".to_string())),
-            )
-            .child(
-                button("settings-browser-import-open", "Import…")
-                    .accessibility_label("Import bookmarks and history from Chrome")
-                    .on_click(move |e, w, cx| import(e, w, cx)),
-            )
-            .into_any_element(), h_flex()
-            .id("settings-browser-history")
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("History".to_string()))
-                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(summary)),
-            )
-            .child(
-                button("settings-history-clear", "Clear…")
-                    .accessibility_label("Clear browsing history")
-                    .on_click(move |e, w, cx| clear(e, w, cx)),
-            )
-            .into_any_element()];
+        let mut rows = vec![
+            settings_row("Import from Chrome")
+                .description("Bookmarks and history. Chrome is only read; nothing in it changes.")
+                .control(
+                    button("settings-browser-import-open", "Import…")
+                        .accessibility_label("Import bookmarks and history from Chrome")
+                        .on_click(move |e, w, cx| import(e, w, cx)),
+                )
+                .into_any_element(),
+            settings_row("History")
+                .description(summary)
+                .control(
+                    button("settings-history-clear", "Clear…")
+                        .accessibility_label("Clear browsing history")
+                        .on_click(move |e, w, cx| clear(e, w, cx)),
+                )
+                .into_any_element(),
+        ];
         let sites = db.excluded();
         rows.push(
-            v_flex()
-                .id("settings-browser-forgotten")
-                .w_full()
-                .py(px(scale::SP_2))
-                .child(div().text_color(p.ink).ui(scale::FS_13).child("Never remembered".to_string()))
-                .child(div().text_color(p.ink_3).ui(scale::FS_12).child(if sites.is_empty() {
+            settings_row("Never remembered")
+                .description(if sites.is_empty() {
                     "None. “Never remember this site” in the Field (⌘L) adds the page you’re on.".to_owned()
                 } else {
                     "History never records these sites. Remove one to record it again.".to_owned()
-                }))
+                })
                 .into_any_element(),
         );
         for (index, site) in sites.into_iter().enumerate() {
@@ -1558,28 +1358,20 @@ impl Harness {
                 this.browser.db().include(&owned);
                 cx.notify();
             });
-            rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("settings-forgotten-{index}")))
-                    .w_full()
-                    .items_center()
-                    .gap(px(scale::SP_3))
-                    .py(px(scale::SP_1))
-                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).mono(scale::FS_12).child(site.clone()))
-                    .child(
-                        button(SharedString::from(format!("settings-forgotten-remove-{index}")), "Remove")
-                            .accessibility_label(SharedString::from(format!("Record {site} again")))
-                            .on_click(move |e, w, cx| remove(e, w, cx)),
-                    )
-                    .into_any_element(),
-            );
+            rows.push(site_row(
+                &site,
+                None,
+                button(SharedString::from(format!("settings-forgotten-remove-{index}")), "Remove")
+                    .accessibility_label(SharedString::from(format!("Record {site} again")))
+                    .on_click(move |e, w, cx| remove(e, w, cx)),
+                cx,
+            ));
         }
         self.settings_group("Your data", rows, cx)
     }
 
     /// R4 Ad blocking: the switch and the sites ads are allowed on.
     fn settings_browser_adblock_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let prefs = self.layout.adblock.clone();
         let mut rows = vec![self.settings_switch_row(
             "adblock_enabled",
@@ -1589,13 +1381,8 @@ impl Harness {
             cx,
         )];
         rows.push(
-            div()
-                .id("settings-adblock-allowed")
-                .w_full()
-                .py(px(scale::SP_2))
-                .text_color(p.ink_3)
-                .ui(scale::FS_12)
-                .child(if prefs.allowed.is_empty() {
+            settings_row("Allowed sites")
+                .description(if prefs.allowed.is_empty() {
                     "Ads are blocked on every site. “Allow ads on this site” in the Field (⌘L) makes an exception.".to_owned()
                 } else {
                     "Ads are allowed on these sites:".to_owned()
@@ -1610,65 +1397,31 @@ impl Harness {
                 crate::layout::write(&this.layout);
                 cx.notify();
             });
-            rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("settings-adblock-site-{index}")))
-                    .w_full()
-                    .items_center()
-                    .gap(px(scale::SP_3))
-                    .py(px(scale::SP_1))
-                    .child(div().flex_1().min_w(px(0.0)).truncate().text_color(p.ink).mono(scale::FS_12).child(site.clone()))
-                    .child(
-                        button(SharedString::from(format!("settings-adblock-remove-{index}")), "Remove")
-                            .accessibility_label(SharedString::from(format!("Block ads on {site} again")))
-                            .on_click(move |e, w, cx| remove(e, w, cx)),
-                    )
-                    .into_any_element(),
-            );
+            rows.push(site_row(
+                site,
+                None,
+                button(SharedString::from(format!("settings-adblock-remove-{index}")), "Remove")
+                    .accessibility_label(SharedString::from(format!("Block ads on {site} again")))
+                    .on_click(move |e, w, cx| remove(e, w, cx)),
+                cx,
+            ));
         }
         self.settings_group("Ad blocking", rows, cx)
     }
 
     fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let dir = browser_download_dir(&self.layout);
-        let row = h_flex()
-            .id("settings-browser-downloads")
-            .debug_selector(|| "settings-browser-downloads".into())
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Downloads folder".to_string()))
-                    .child(
-                        div()
-                            .id("settings-downloads-path")
-                            .debug_selector(|| "settings-downloads-path".into())
-                            .text_color(p.ink_3)
-                            .ui(scale::FS_12)
-                            .truncate()
-                            .child(tilde_path(&dir)),
-                    ),
-            )
-            .child(
-                div()
-                    .id("settings-downloads-change-wrap")
-                    .debug_selector(|| "settings-downloads-change".into())
-                    .flex_none()
-                    .child(
-                        button("settings-downloads-change", "Change…")
-                            .accessibility_label("Change downloads folder")
-                            .on_click(cx.listener(
-                                |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                                    this.choose_downloads_folder(cx);
-                                },
-                            )),
-                    ),
-            );
+        let row = div().debug_selector(|| "settings-browser-downloads".into()).child(
+            settings_row("Downloads folder").description(tilde_path(&dir)).control(
+                div().debug_selector(|| "settings-downloads-change".into()).child(
+                    button("settings-downloads-change", "Change…")
+                        .accessibility_label("Change downloads folder")
+                        .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                            this.choose_downloads_folder(cx);
+                        })),
+                ),
+            ),
+        );
         self.settings_group("Downloads", vec![row.into_any_element()], cx)
     }
 
@@ -1676,34 +1429,19 @@ impl Harness {
     /// site settings — lives at `chrome://settings`, opened in a Browse
     /// tab.
     fn settings_browser_chromium_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.open_chromium_settings(window, cx);
         });
-        let row = h_flex()
-            .id("settings-browser-chromium")
-            .debug_selector(|| "settings-browser-chromium".into())
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Open Chromium settings")
-            .on_click(open)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Open chrome://settings".to_string()))
-                    .child(
-                        div()
-                            .text_color(p.ink_3)
-                            .ui(scale::FS_12)
-                            .child("Passwords, cookies, site settings and everything else Chromium owns."),
-                    ),
-            )
-            .child(div().flex_none().text_color(p.ink_3).ui(scale::FS_13).child("↗"));
+        let row = div().debug_selector(|| "settings-browser-chromium".into()).child(
+            settings_row("Chromium settings")
+                .description("Passwords, cookies, site settings and everything else Chromium owns.")
+                .control(
+                    button("settings-browser-chromium", "Open chrome://settings")
+                        .trailing(aui_icons::icon(IconName::External).size(px(scale::ICON_COMPACT)))
+                        .accessibility_label("Open Chromium settings")
+                        .on_click(open),
+                ),
+        );
         self.settings_group("Chromium", vec![row.into_any_element()], cx)
     }
 
@@ -1725,18 +1463,7 @@ impl Harness {
             self.default_browser_confirm_pending,
         );
         // B2a-H7
-        let mut row = h_flex()
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .py(px(scale::SP_2))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(div().text_color(p.ink).ui(scale::FS_13).child("Default browser".to_string()))
-                    .child(div().text_color(p.ink_3).ui(scale::FS_12).child(status)),
-            );
+        let mut row = settings_row("Default browser").description(status);
         if crate::default_browser::offers_make_default(handler.as_deref()) {
             let make = cx.listener(|this: &mut Self, _: &(), _, cx| {
                 if !crate::default_browser::make_baaz_default() {
@@ -1750,7 +1477,7 @@ impl Harness {
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
                 cx.notify();
             });
-            row = row.child(
+            row = row.control(
                 button("settings-browser-make-default", "Make default")
                     .accessibility_label("Make Baaz your default browser")
                     .on_click(move |_, window, cx| make(&(), window, cx)),
@@ -1849,62 +1576,26 @@ impl Harness {
                 }
             });
             let provider = status.provider;
-            let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
-                this.flip_provider_enabled(provider, *next, cx);
+            let enabled = status.enabled;
+            let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
+                this.flip_provider_enabled(provider, !enabled, cx);
             });
-            rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("settings-provider-{wire}")))
-                    .w_full()
-                    .items_center()
-                    .gap(px(scale::SP_3))
-                    .py(px(scale::SP_2))
-                    .child(
-                        v_flex()
-                            .id(SharedString::from(format!("settings-provider-open-{wire}")))
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .cursor_pointer()
-                            .role(gpui::Role::Button)
-                            .aria_label(format!(
-                                "{} settings, {}. Open the {} page.",
-                                status.provider.label(),
-                                status.headline_text(),
-                                status.provider.label()
-                            ))
-                            .on_click(open)
-                            .child(
-                                div()
-                                    .text_color(p.ink)
-                                    .ui(scale::FS_13)
-                                    .child(status.provider.label().to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_color(p.ink_3)
-                                    .ui(scale::FS_12)
-                                    .child(status.headline_text().to_string()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ui(scale::FS_13)
-                            .text_color(p.ink_4)
-                            .child("›".to_string()),
-                    )
-                    .child(
-                        Switch::new(format!("settings-enable-{wire}"))
-                            .checked(status.enabled)
-                            .color(p.accent_ring)
-                            .accessibility_label(SharedString::from(format!(
-                                "Enable {}",
-                                status.provider.label()
-                            )))
-                            .on_click(move |next, window, cx| flip(next, window, cx)),
-                    )
-                    .into_any_element(),
-            );
+            let name = status.provider.label();
+            // The switch, then the drill-in into the provider's page.
+            let control = h_flex()
+                .gap(px(scale::SP_3))
+                .child(
+                    switch(SharedString::from(format!("settings-enable-{wire}")), enabled, false)
+                        .accessibility_label(SharedString::from(format!("Enable {name}")))
+                        .on_intent(move |intent, window, cx| flip(&intent, window, cx)),
+                )
+                .child(
+                    icon_button(SharedString::from(format!("settings-provider-open-{wire}")), IconName::Chevron)
+                        .ghost()
+                        .accessibility_label(format!("{name} settings, {}. Open the {name} page.", status.headline_text()))
+                        .on_click(open),
+                );
+            rows.push(settings_row(name).description(status.headline_text().to_string()).control(control).into_any_element());
         }
         let setup = cx.listener(|this: &mut Self, _: &(), _, cx| this.open_connect_screen(cx));
         let _ = window;
@@ -1925,7 +1616,7 @@ impl Harness {
                     .child(
                         div()
                             .flex_1()
-                            .ui(scale::FS_12)
+                            .role_in(TextRole::Caption, cx)
                             .text_color(p.ink_3)
                             .child("Signing a CLI out signs it out on this Mac.".to_string()),
                     )
@@ -1949,7 +1640,6 @@ impl Harness {
         statuses: &[crate::provider_status::ProviderStatus],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let p = cx.aui().colors;
         let current = ProviderId::parse(&self.new_provider);
         let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.connect_menu_open) {
             Some(picker) => {
@@ -1968,19 +1658,14 @@ impl Harness {
                 h_flex()
                     .id("settings-default-provider-row")
                     .w_full()
-                    .items_center()
-                    .py(px(scale::SP_2))
+                    .py(px(SETTINGS_ROW_PAD_Y))
                     .role(gpui::Role::Group)
                     .aria_label("Default provider for new sessions")
                     .child(control)
                     .into_any_element()
             }
-            None => div()
-                .w_full()
-                .py(px(scale::SP_2))
-                .ui(scale::FS_13)
-                .text_color(p.ink_3)
-                .child("No provider is connected yet. New sessions start in the first one you connect.")
+            None => settings_row("No provider is connected yet")
+                .description("New sessions start in the first one you connect.")
                 .into_any_element(),
         };
         self.settings_group("New sessions", vec![row], cx)
@@ -2014,21 +1699,10 @@ impl Harness {
             .on_assist(move |key, window, cx| assist(&key, window, cx))
             .into_any_element();
         // The P7 offer sits under Details, inside the card's frame (the
-        // board). The library card has no footer slot, so the two share one
-        // frame here: the card's own edge draws the hairline between them.
+        // board). The provider card has no footer slot, so the two share
+        // one flat card here, a 1 px line between them.
         let card = match self.import_card_line(id, cx) {
-            Some(line) => {
-                let p = cx.aui().colors;
-                v_flex()
-                    .w_full()
-                    .rounded(px(10.0))
-                    .bg(p.surface_2)
-                    .shadow(p.edge())
-                    .overflow_hidden()
-                    .child(card)
-                    .child(line)
-                    .into_any_element()
-            }
+            Some(line) => aui::data::card().flush().label(format!("{} account", id.label())).section(card).section(line).into_any_element(),
             None => card,
         };
         let mut page = v_flex().w_full().gap(px(scale::SP_4)).child(card);
@@ -2057,7 +1731,7 @@ impl Harness {
         header_row = header_row.child(
             aui::data::field_frame("settings-shortcut-search", &self.settings_search, window, cx)
                 .flex_none()
-                .w(px(280.0))
+                .w(px(SHORTCUT_SEARCH_W))
                 .role(gpui::Role::SearchInput)
                 .aria_label("Search shortcuts")
                 .child(
@@ -2102,46 +1776,22 @@ impl Harness {
             });
             let editable = binding.editable;
             let keycap = keystroke_glyphs(&binding.keystroke);
-            let row = h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(scale::SP_3))
-                .py(px(scale::SP_2))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(div().text_color(p.ink).ui(scale::FS_13).child(binding.label.clone()))
-                        .children(detail.map(|text| {
-                            div().text_color(p.ink_3).ui(scale::FS_12).child(text)
-                        })),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("settings-key-{id}")))
-                        .flex_none()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(scale::R_SM))
-                        .border_1()
-                        .border_color(p.line)
-                        .bg(p.surface_1)
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label(format!(
-                            "{}, currently {}. Activate to rebind.",
-                            binding.label,
-                            if recording { "recording, press a key" } else { keycap.as_str() }
-                        ))
-                        .on_click(arm)
-                        .child(
-                            div()
-                                .ui(scale::FS_12)
-                                .text_color(p.ink)
-                                .child(if recording { "press a key…".to_owned() } else { keycap }),
-                        ),
-                )
-                .into_any_element();
+            let keycap_button = button(SharedString::from(format!("settings-key-{id}")), if recording { "press a key…".to_owned() } else { keycap.clone() })
+                .size(ButtonSize::Sm)
+                .toggled(recording)
+                .accessibility_label(format!(
+                    "{}, currently {}. Activate to rebind.",
+                    binding.label,
+                    if recording { "recording, press a key" } else { keycap.as_str() }
+                ))
+                .on_click(arm);
+            let row = settings_row(binding.label.clone());
+            let row = match detail {
+                Some(text) => row.description(text),
+                None => row,
+            }
+            .control(keycap_button)
+            .into_any_element();
             let _ = editable;
             let group = shortcut_group_label(&binding.category);
             match groups.iter_mut().find(|(name, _)| *name == group) {
@@ -2156,36 +1806,12 @@ impl Harness {
         let taken = terminal_taken_keys();
         if !taken.is_empty() {
             let shown: Vec<String> = taken.iter().map(|key| keystroke_glyphs(key)).collect();
-            let reserved_row = h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(scale::SP_3))
-                .py(px(scale::SP_2))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(
-                            div()
-                                .id("settings-reserved-label")
-                                .text_color(p.ink)
-                                .ui(scale::FS_13)
-                                .role(gpui::Role::Label)
-                                .aria_label("Reserved keys, terminal takes the key")
-                                .child("Terminal takes the key"),
-                        )
-                        .child(
-                            div()
-                                .text_color(p.ink_3)
-                                .ui(scale::FS_12)
-                                .child("These keys reach the running program while the terminal is focused."),
-                        ),
-                )
-                .child(
+            let reserved_row = settings_row("Terminal takes the key")
+                .description("These keys reach the running program while the terminal is focused.")
+                .control(
                     div()
                         .id("settings-reserved-keys")
-                        .flex_none()
-                        .ui(scale::FS_12)
+                        .role_in(TextRole::Caption, cx)
                         .text_color(p.ink)
                         .role(gpui::Role::Label)
                         .aria_label(format!("Reserved terminal keys, {}", shown.join(", ")))
@@ -2240,23 +1866,9 @@ impl Harness {
                     this.unarchive_session(id.clone(), cx);
                 });
                 els.push(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap(px(scale::SP_3))
-                        .py(px(scale::SP_2))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(div().text_color(p.ink).ui(scale::FS_13).child(entry.label.clone()))
-                                .child(
-                                    div().text_color(p.ink_3).ui(scale::FS_12).child(
-                                        entry.updated.format("%Y-%m-%d").to_string(),
-                                    ),
-                                ),
-                        )
-                        .child(
+                    settings_row(entry.label.clone())
+                        .description(entry.updated.format("%Y-%m-%d").to_string())
+                        .control(
                             button(SharedString::from(format!("settings-unarchive-{}", entry.id)), "Unarchive")
                                 .accessibility_label(format!("Unarchive {}", entry.label))
                                 .on_click(move |_, window, cx| unarchive(&(), window, cx)),
@@ -2268,6 +1880,17 @@ impl Harness {
         }
         column.into_any_element()
     }
+}
+
+/// One per-site rule or exception under its group's row: the host as the
+/// row's title, the rule's word under it, its action at the right.
+fn site_row(host: &str, word: Option<&'static str>, action: impl IntoElement, _cx: &Context<Harness>) -> AnyElement {
+    let row = settings_row(host.to_owned()).control(action);
+    match word {
+        Some(word) => row.description(word),
+        None => row,
+    }
+    .into_any_element()
 }
 
 /// Whether the live bindings differ from the shipped defaults (a user

@@ -18,13 +18,12 @@
 //! scripted [`AuthCommander`] below, and every binary run sets
 //! `BAAZ_STATE_DIR=$(mktemp -d)`.
 
-use aui::data::button;
+use aui::data::{button, card, settings_row, switch, SwitchIntent, SETTINGS_ROW_GAP};
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{prelude::*, px, AnyElement, Context, SharedString, Window};
-use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::switch::Switch;
+use aui::util::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::overlays::{Dialog, DialogAction};
@@ -508,52 +507,20 @@ impl Harness {
     }
 
     /// The "Use my own MCP servers" row under the Claude Code / Codex
-    /// card: label + detail left, the switch right, flipping through
+    /// card: the library's settings row, its switch flipping through
     /// [`Self::flip_use_own_mcp`]. Shared with the Settings provider
     /// sub-pages (B11).
     pub(crate) fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let on = use_own_mcp_state(&self.layout, id);
-        let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
-            this.flip_use_own_mcp(id, *next, cx);
+        let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
+            this.flip_use_own_mcp(id, !on, cx);
         });
-        // Its own Tools box now (D5 put the card on the page): with the
-        // group's own padding, the card's 18 px inset, so the text lines up
-        // with the card's mark above. The old inset under the provider's name left
-        // an empty column (owner, 2026-10-29: uneven spacing).
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .px(px(18.0 - scale::SP_4))
-            .py(px(scale::SP_3))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(
-                        gpui::div()
-                            .text_color(p.ink)
-                            .ui(scale::FS_13)
-                            .child(use_own_mcp_label()),
-                    )
-                    .child(
-                        gpui::div()
-                            .text_color(p.ink_3)
-                            .ui(scale::FS_12)
-                            .child(use_own_mcp_detail(id)),
-                    ),
-            )
-            .child(
-                Switch::new(format!("providers-use-own-mcp-{}", id.as_str()))
-                    .checked(on)
-                    .color(p.accent_ring)
-                    .accessibility_label(SharedString::from(format!(
-                        "{} · {}",
-                        use_own_mcp_label(),
-                        id.label()
-                    )))
-                    .on_click(move |next, window, cx| flip(next, window, cx)),
+        settings_row(use_own_mcp_label())
+            .description(use_own_mcp_detail(id))
+            .control(
+                switch(SharedString::from(format!("providers-use-own-mcp-{}", id.as_str())), on, false)
+                    .accessibility_label(SharedString::from(format!("{} · {}", use_own_mcp_label(), id.label())))
+                    .on_intent(move |intent, window, cx| flip(&intent, window, cx)),
             )
             .into_any_element()
     }
@@ -578,7 +545,7 @@ impl Harness {
         let paths_toggle_label = format!("{paths_label} ({} files)", plan.len());
         let go = cx.listener(|this: &mut Self, _: &(), _, cx| this.confirm_session_migration(cx));
         let toggle = cx.listener(|this: &mut Self, _: &(), _, cx| this.toggle_migration_paths(cx));
-        let mut text = v_flex().flex_1().min_w(px(0.0)).child(
+        let mut text = v_flex().flex_1().min_w_0().child(
             gpui::div().text_color(p.ink).ui(scale::FS_13).semibold().child(SharedString::from(title)),
         ).child(
             gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
@@ -600,30 +567,32 @@ impl Harness {
             }
             text = text.child(list);
         }
+        // A notice on the page: a flat card, no edge (docs/83 §1 rule 3).
         Some(
-            h_flex()
-                .w_full()
-                .items_start()
-                .gap(px(scale::SP_3))
-                .p(px(scale::SP_3))
-                .rounded(px(scale::R_SM))
-                .border_1()
-                .border_color(p.line_strong)
-                .child(text)
-                .child(
-                    v_flex()
-                        .gap(px(scale::SP_2))
+            card()
+                .label("Move sessions into Baaz")
+                .section(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap(px(SETTINGS_ROW_GAP))
+                        .child(text)
                         .child(
-                            button("migration-move", "Move")
-                                .primary()
-                                .accessibility_label("Move sessions into Baaz")
-                                .on_click(move |_, window, cx| go(&(), window, cx)),
-                        )
-                        .child(
-                            button("migration-paths", paths_toggle_label.clone())
-                                .ghost()
-                                .accessibility_label(paths_toggle_label)
-                                .on_click(move |_, window, cx| toggle(&(), window, cx)),
+                            v_flex()
+                                .flex_none()
+                                .gap(px(scale::SP_2))
+                                .child(
+                                    button("migration-move", "Move")
+                                        .primary()
+                                        .accessibility_label("Move sessions into Baaz")
+                                        .on_click(move |_, window, cx| go(&(), window, cx)),
+                                )
+                                .child(
+                                    button("migration-paths", paths_toggle_label.clone())
+                                        .ghost()
+                                        .accessibility_label(paths_toggle_label)
+                                        .on_click(move |_, window, cx| toggle(&(), window, cx)),
+                                ),
                         ),
                 )
                 .into_any_element(),

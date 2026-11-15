@@ -74,7 +74,8 @@ use gpui::{
     FocusHandle, Focusable, ListState, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::base::{h_flex, v_flex};
+use aui::interact::{dismiss_layer, interactive, menu_panel, MENU_ROW_H, ROW_GAP};
+use aui::util::{h_flex, v_flex};
 use gpui_kit::component::Root;
 use provider::ProviderEvent;
 
@@ -274,6 +275,12 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 
 /// The new-tab page's Field width (canvas NewTab board): 560.
 const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
+/// The Browse chrome popovers' width (Downloads, Extensions, ⋯).
+const BROWSE_POPOVER_W: f32 = 320.0;
+/// The launch-failure screen's stderr block: its widest measure.
+const LAUNCH_STDERR_MAX_W: f32 = 640.0;
+/// The right pane's close ✕: its glyph inside the extra-small button.
+const RIGHT_CLOSE_GLYPH: f32 = 10.0;
 
 /// D6 (docs/43 §2.1): the right pane is a sheet this far in from the
 /// window's right edge…
@@ -3577,7 +3584,7 @@ impl Harness {
     fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.layout.terminal_open;
         let resting = self.dock_height(window);
-        let target = if open { px(resting) } else { px(0.0) };
+        let target = if open { px(resting) } else { Pixels::ZERO };
         // Mid-drag the height feeds straight through: `spring_px` would chase
         // a moving target and the divider would lag the pointer. On release
         // the spring re-arms from the current height, so there is no jump.
@@ -3585,9 +3592,10 @@ impl Harness {
         let shown = if self.terminal_drag.is_some() {
             target
         } else {
-            spring_px(("terminal-dock", "dock-height"), target, SpringKind::Layout, window, cx).max(px(0.0))
+            spring_px(("terminal-dock", "dock-height"), target, SpringKind::Layout, window, cx).max(Pixels::ZERO)
         };
-        if !open && shown <= px(1.0) {
+        // Under a pixel left: the dock has closed.
+        if !open && shown < px(scale::SP_1 / 2.0) {
             return None;
         }
         let root = self.current_project().map(|project| project.root.clone())?;
@@ -3707,7 +3715,7 @@ impl Harness {
     fn pane_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.layout.right_open && !self.settings_page.open;
         let shown = layout::right_kind(&self.layout);
-        let mut row = h_flex().flex_none().items_center().gap(px(2.0));
+        let mut row = h_flex().flex_none().items_center().gap(px(ROW_GAP));
         for (kind, glyph, label, id) in [
             (layout::RightKind::Changes, IconName::Git, "Changes", "hd-centre-pane-changes"),
             (layout::RightKind::Files, IconName::Folder, "Files", "hd-centre-pane-files"),
@@ -3772,50 +3780,33 @@ impl Harness {
         div()
             .id("hd-browse-address-keys")
             .flex_1()
-            .min_w(px(0.0))
+            .min_w_0()
             .on_key_down(keys)
             .child(
                 a11y_text_input("browse-address-field", "Address and search", &input, cx)
                     .flex_1()
-                    .min_w(px(0.0)),
+                    .min_w_0(),
             )
             .into_any_element()
     }
 
-    /// A small chrome button (B2a-H5): text on no surface, named for
-    /// assistive tech, with its click. Find-strip, permission-strip and
-    /// popover rows share it — the label and the click stay in one chain,
-    /// so the a11y ratchet sees the name beside the press.
+    /// A small chrome button (B2a-H5): the library's small ghost button,
+    /// named for assistive tech, with its click. Find-strip,
+    /// permission-strip and popover rows share it.
     fn browse_chrome_button(
         &self,
         id: impl Into<gpui::ElementId>,
         label: &str,
         aria: &str,
         click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let p = cx.aui().colors;
-        div()
-            .id(id)
-            .flex_none()
-            .h(px(24.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .rounded(px(scale::R_SM))
-            .ui(scale::FS_12)
-            .text_color(p.ink_2)
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label(aria.to_owned())
-            .child(label.to_owned())
-            .on_click(click)
+        _cx: &mut Context<Self>,
+    ) -> aui::data::Button {
+        button(id, label.to_owned()).ghost().sm().accessibility_label(aria.to_owned()).on_click(click)
     }
 
     /// One ⋯/popover menu row (B2a-H5): label plus an optional shortcut
-    /// hint, a MenuItem named for assistive tech, with its click. Mirrors
-    /// the tab menu's rows; the label and the click stay in one chain, so
-    /// the a11y ratchet sees the name beside the press.
+    /// hint on the menu row's height, a MenuItem named for assistive tech,
+    /// painting its hover with the one model.
     fn browse_menu_row(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -3823,48 +3814,36 @@ impl Harness {
         hint: Option<&str>,
         click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let mut row = h_flex()
-            .id(id)
+    ) -> aui::interact::Interactive {
+        let p = cx.aui().colors;
+        let metrics = cx.aui().metrics;
+        let content = h_flex()
             .w_full()
-            .h(px(28.0))
-            .flex_none()
-            .items_center()
-            .px(px(8.0))
-            .gap(px(8.0))
-            .rounded(px(scale::R_XS))
-            .cursor_pointer()
-            .role(gpui::Role::MenuItem)
-            .aria_label(label.to_owned())
-            .child(div().flex_1().min_w(px(0.0)).truncate().ui(scale::FS_12).child(label.to_owned()));
-        if let Some(hint) = hint {
-            let p = cx.aui().colors;
-            row = row.child(div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(hint.to_owned()));
-        }
-        row.on_click(click)
+            .h(px(MENU_ROW_H))
+            .px(metrics.item_px)
+            .gap(metrics.gap)
+            .child(div().flex_1().min_w_0().truncate().ui(scale::FS_12).child(label.to_owned()))
+            .children(hint.map(|hint| div().flex_none().ui(scale::FS_11).text_color(p.ink_3).child(hint.to_owned())));
+        interactive(id, content).role("menuitem").label(label.to_owned()).on_click(click)
     }
 
-    /// A popover shell (B2a-H5): absolute under the toolbar, over the page
-    /// (which the covering rule obscures while it stands). Downloads,
-    /// extensions and ⋯ share it.
-    /// A Browse chrome popover: the menu at Floating (D4) — radius 10, the
-    /// edge and the float drop, 6 px of panel around its rows.
+    /// A Browse chrome popover (B2a-H5): the one floating panel, its rows
+    /// in a column. Absolute under the toolbar, over the page (which the
+    /// covering rule obscures while it stands). Downloads, extensions and ⋯
+    /// share it.
     fn browse_popover(&self, id: impl Into<gpui::ElementId>, aria: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let p = cx.aui().colors;
         // In the overlay window (the footer's popovers, R4) it sits in flow,
         // so the window can put it right above its button; in the main
         // window it hangs from the top-right of the page.
         let hosted = self.hosting_overlay;
-        v_flex()
+        menu_panel(gpui::Empty, cx)
             .id(id)
-            .when(!hosted, |d| d.absolute().top(px(4.0)).right(px(8.0)))
-            .w(px(320.0))
+            .when(!hosted, |d| d.absolute().top(px(scale::SP_2)).right(px(scale::SP_3)))
+            .w(px(BROWSE_POPOVER_W))
             .flex_none()
-            .gap(px(2.0))
-            .p(px(aui::interact::PANEL_PAD))
-            .rounded(px(10.0))
-            .bg(p.overlay)
-            .shadow(p.floating_shadow())
+            .flex()
+            .flex_col()
+            .gap(px(ROW_GAP))
             .role(gpui::Role::Menu)
             .aria_label(aria.to_owned())
     }
@@ -3877,7 +3856,7 @@ impl Harness {
     /// render mutates nothing. Esc closes (the wrapper owns it, like the
     /// address field); Enter steps through the input's own PressEnter and
     /// Shift+Enter steps back.
-    fn render_browse_find(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_browse_find(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::find_count_text;
         let shown = self.browse_centre_shown();
         let (query, match_case) = match self.browser.find_strips.visible(shown) {
@@ -3912,9 +3891,9 @@ impl Harness {
             .w_full()
             .flex_none()
             .items_center()
-            .h(px(32.0))
-            .px(px(8.0))
-            .gap(px(6.0))
+            .h(px(scale::H_XL))
+            .px(px(scale::SP_3))
+            .gap(px(scale::SP_2))
             .bg(p.surface_1)
             .border_b_1()
             .border_color(p.line)
@@ -3923,22 +3902,13 @@ impl Harness {
             .capture_key_down(back)
             .on_key_down(keys)
             .child(
-                div()
+                aui::data::field_frame("browse-find-frame", &input, window, cx)
                     .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .bg(p.surface_2)
-                    .rounded(px(scale::R_SM))
-                    .border_1()
-                    .border_color(p.line)
-                    .child(icon(IconName::Search).size(px(13.0)).color(p.ink_3))
+                    .min_w_0()
+                    .gap(px(scale::SP_2))
+                    .child(icon(IconName::Search).size(px(scale::ICON_COMPACT)).color(p.ink_3))
                     .child(
-                        a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w(px(0.0)),
+                        a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w_0(),
                     ),
             );
         match count {
@@ -4016,15 +3986,15 @@ impl Harness {
             .w_full()
             .flex_none()
             .items_center()
-            .h(px(32.0))
-            .px(px(8.0))
-            .gap(px(6.0))
+            .h(px(scale::H_XL))
+            .px(px(scale::SP_3))
+            .gap(px(scale::SP_2))
             .bg(p.surface_1)
             .border_b_1()
             .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Permission request")
-            .child(icon(IconName::Globe).size(px(14.0)).color(p.ink_2))
+            .child(icon(IconName::Globe).size(px(scale::ICON_COMPACT)).color(p.ink_2))
             .child(
                 div()
                     .id("browse-permission-host")
@@ -4043,7 +4013,7 @@ impl Harness {
                 div()
                     .id("browse-permission-text")
                     .flex_1()
-                    .min_w(px(0.0))
+                    .min_w_0()
                     .truncate()
                     .ui(scale::FS_13)
                     .text_color(p.ink)
@@ -4092,7 +4062,7 @@ impl Harness {
             .id("browse-crashed")
             .items_center()
             .justify_center()
-            .gap(px(8.0))
+            .gap(px(scale::SP_3))
             .role(gpui::Role::Group)
             .aria_label("This page stopped")
             .child(div().ui(scale::FS_14).text_color(p.ink).child("This page stopped"))
@@ -4118,7 +4088,7 @@ impl Harness {
         if downloads.is_empty() {
             // R4: the button is always in the footer; an empty list says so.
             menu = menu.child(
-                div().w_full().px(px(8.0)).py(px(4.0)).ui(scale::FS_13).text_color(p.ink_3).child("No downloads yet."),
+                div().w_full().px(cx.aui().metrics.item_px).py(px(scale::SP_2)).ui(scale::FS_13).text_color(p.ink_3).child("No downloads yet."),
             );
             let folder = self.browse_menu_row(
                 "browse-downloads-folder",
@@ -4151,9 +4121,9 @@ impl Harness {
             let mut item = v_flex()
                 .w_full()
                 .flex_none()
-                .gap(px(2.0))
-                .px(px(8.0))
-                .py(px(4.0))
+                .gap(px(scale::SP_1))
+                .px(cx.aui().metrics.item_px)
+                .py(px(scale::SP_2))
                 .child(
                     div()
                         .w_full()
@@ -4232,11 +4202,11 @@ impl Harness {
         // D4: opened from the sidebar's button, the popover hangs under it
         // (window coordinates), its left edge on the button's.
         if self.hosting_overlay {
-            return Some(menu.relative().top(px(0.0)).right(px(0.0)).into_any_element());
+            return Some(menu.relative().top_0().right_0().into_any_element());
         }
         if let Some(anchor) = self.browser.downloads_anchor {
-            let at = gpui::point(anchor.left(), anchor.bottom() + px(6.0));
-            return Some(gpui::deferred(gpui::anchored().position(at).child(menu.relative().top(px(0.0)).right(px(0.0)))).with_priority(2).into_any_element());
+            let at = gpui::point(anchor.left(), anchor.bottom() + px(scale::SP_2));
+            return Some(gpui::deferred(gpui::anchored().position(at).child(menu.relative().top_0().right_0())).with_priority(2).into_any_element());
         }
         Some(menu.into_any_element())
     }
@@ -4256,10 +4226,9 @@ impl Harness {
         menu = menu.child(
             div()
                 .w_full()
-                .px(px(8.0))
-                .py(px(4.0))
-                .ui(scale::FS_13)
-                .line_height(px(19.0))
+                .px(cx.aui().metrics.item_px)
+                .py(px(scale::SP_2))
+                .role_in(TextRole::Body, cx)
                 .text_color(p.ink_2)
                 .child("Chrome extensions don’t run in Baaz yet. Ads and trackers are blocked without one."),
         );
@@ -4351,11 +4320,11 @@ impl Harness {
             h_flex()
                 .id("browse-more-zoom")
                 .w_full()
-                .h(px(28.0))
+                .h(px(MENU_ROW_H))
                 .flex_none()
                 .items_center()
-                .px(px(8.0))
-                .gap(px(4.0))
+                .px(cx.aui().metrics.item_px)
+                .gap(px(scale::SP_2))
                 .role(gpui::Role::Group)
                 .aria_label("Zoom")
                 .child(zoom_out)
@@ -4497,7 +4466,7 @@ impl Harness {
         let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
             rects
                 .iter()
-                .chain(self.browser.progress_hole.get().map(|b| (b, px(0.0))).iter())
+                .chain(self.browser.progress_hole.get().map(|b| (b, Pixels::ZERO)).iter())
                 .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
                 .collect()
         } else {
@@ -4535,10 +4504,10 @@ impl Harness {
         // on narrow windows.
         let mut title = h_flex()
             .flex_1()
-            .min_w(px(0.0))
+            .min_w_0()
             .overflow_hidden()
             .items_center()
-            .gap(px(7.0))
+            .gap(px(scale::SP_3))
             .text_color(p.ink)
             .ui(scale::FS_13)
             .semibold();
@@ -4549,7 +4518,7 @@ impl Harness {
             self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
         if renaming_project_here {
             title = title.child(
-                div().flex_1().min_w(px(0.0)).overflow_hidden().child(self.rename_field(window, cx)),
+                div().flex_1().min_w_0().overflow_hidden().child(self.rename_field(window, cx)),
             );
         } else if let Some(label) = label {
             // Renaming the open session swaps the session label for the same
@@ -4565,10 +4534,10 @@ impl Harness {
                 // the overflow button keeps its slot instead of being pushed
                 // out.
                 title = title.child(
-                    div().flex_1().min_w(px(0.0)).overflow_hidden().child(self.rename_field(window, cx)),
+                    div().flex_1().min_w_0().overflow_hidden().child(self.rename_field(window, cx)),
                 );
             } else {
-                title = title.child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+                title = title.child(div().flex_1().min_w_0().truncate().child(label));
             }
         }
         title.into_any_element()
@@ -4625,10 +4594,10 @@ impl Harness {
         h_flex()
             .flex_none()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(ROW_GAP))
             .child(toggles)
             .child(term_button)
-            .child(div().flex_none().mx(px(4.0)).w(px(1.0)).h(px(16.0)).bg(cx.aui().colors.line))
+            .child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line))
             .child(
                 div()
                     .flex_none()
@@ -4836,7 +4805,7 @@ impl Harness {
         let p = cx.aui().colors;
         v_flex()
             .size_full()
-            .child(div().w_full().flex_1().min_h(px(0.0)))
+            .child(div().w_full().flex_1().min_h_0())
             .child(
                 div()
                     .w_full()
@@ -4933,7 +4902,7 @@ impl Harness {
         let find = (!blank_page).then(|| self.render_browse_find(window, cx)).flatten();
         let permission = (!blank_page).then(|| self.render_browse_permission(cx)).flatten();
         let body = if find.is_some() || permission.is_some() {
-            div().flex_1().min_h(px(0.0)).w_full().child(body).into_any_element()
+            div().flex_1().min_h_0().w_full().child(body).into_any_element()
         } else {
             body
         };
@@ -4957,18 +4926,10 @@ impl Harness {
         // column, so popover clicks still land on the popovers.
         let scrim: Option<AnyElement> =
             (downloads.is_some() || extensions.is_some() || more.is_some()).then(|| {
-                let dismiss = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
                     this.dismiss_browse_popovers(cx);
                 });
-                div()
-                    .id("browse-popover-scrim")
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .role(gpui::Role::Button)
-                    .aria_label("Dismiss menu")
-                    .on_click(dismiss)
-                    .into_any_element()
+                dismiss_layer("browse-popover-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx)).into_any_element()
             });
         let peek = self.render_peek(cx);
         let peeking = peek.is_some();
@@ -5035,10 +4996,10 @@ impl Harness {
         if !loading {
             return None;
         }
-        use gpui_kit::base::ElementExt as _;
+        use aui::util::ElementExt as _;
         let hole = self.browser.progress_hole.clone();
         let p = cx.aui().colors;
-        let line = px(2.0);
+        let line = px(scale::SP_1);
         let radius = px(aui::shell::SHEET_RADIUS);
         let fill = progress.clamp(0.0, 1.0);
         Some(
@@ -5047,7 +5008,7 @@ impl Harness {
                 .role(gpui::Role::ProgressIndicator)
                 .aria_label("Loading page")
                 .absolute()
-                .top(px(0.0))
+                .top_0()
                 .left(radius)
                 .right(radius)
                 .h(line)
@@ -5124,18 +5085,15 @@ impl Harness {
         };
         let asks = div().flex_none().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("⌘↵ asks");
         let field: AnyElement = if editing {
-            shell(true).child(lit(true)).child(div().flex_1().min_w(px(0.0)).child(self.browse_address_input(window, cx))).child(asks).into_any_element()
+            shell(true).child(lit(true)).child(div().flex_1().min_w_0().child(self.browse_address_input(window, cx))).child(asks).into_any_element()
         } else {
             let focus = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.focus_browse_address_with("", window, cx);
             });
-            div()
-                .id("browse-newtab-field")
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label("New tab. Search, open a page, or ask")
+            interactive("browse-newtab-field", shell(false).text_color(p.fg_muted).child(lit(false)).child(div().flex_1().child("Search, open a page, or ask")).child(asks))
+                .shape(aui::interact::Shape::Container)
+                .label("New tab. Search, open a page, or ask")
                 .on_click(focus)
-                .child(shell(false).text_color(p.fg_muted).child(lit(false)).child(div().flex_1().child("Search, open a page, or ask")).child(asks))
                 .into_any_element()
         };
         let mut column = v_flex().w(field_w).mt(px(scale::SP_7 * 6.25)).gap(px(scale::SP_6)).child(field);
@@ -5166,9 +5124,16 @@ impl Harness {
                 );
             let hover = self.browse_pickup_hover;
             let report = cx.entity().downgrade();
+            // Pick-up rows press on mouse-down (pointer timing: the press
+            // must land before the address input's blur drops the field)
+            // and also answer clicks for accessibility presses; the second
+            // call of the pair is a no-op (selecting the same tab, reopening
+            // an already-reopened tab, or opening the now-active session
+            // again changes nothing).
+            let mut targets: Vec<crate::browser::PickupTarget> = Vec::new();
             let mut list = aui::interact::row_list("browse-pickup-rows")
                 .label("Pick up where you left off")
-                .gap(px(0.0))
+                .gap(Pixels::ZERO)
                 .on_highlight(move |index, _, cx| {
                     let _ = report.update(cx, |this, cx| {
                         if this.browse_pickup_hover != index {
@@ -5216,63 +5181,39 @@ impl Harness {
                         .items_center()
                         .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(div().flex_none().size(metrics.icon).flex().items_center().justify_center().child(lead))
-                        .child(div().flex_shrink(1.0).min_w(px(0.0)).truncate().text_role_in(TextRole::Body, Density::Standard).child(row.title.clone()))
+                        .child(div().flex_shrink(1.0).min_w_0().truncate().text_role_in(TextRole::Body, Density::Standard).child(row.title.clone()))
                         .child(div().flex_1())
                         .child(div().flex_none().pl(px(scale::SP_4)).role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(row.detail.clone())),
                 );
-                // Pick-up rows press on mouse-down (pointer timing: the
-                // press must land before the address input's blur drops
-                // the field) and also answer clicks for accessibility
-                // presses; the second call of the pair is a no-op
-                // (selecting the same tab, reopening an already-reopened
-                // tab, or opening the now-active session again changes
-                // nothing).
-                let row_el = match target {
-                    crate::browser::PickupTarget::Tab(id) => {
-                        let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
-                            this.select_browse_sidebar_tab(id, window, cx);
-                        });
-                        let select = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                            this.select_browse_sidebar_tab(id, window, cx);
-                        });
-                        div().id(("browse-pickup", index)).aria_label(format!("Open {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(select)
-                    }
-                    crate::browser::PickupTarget::Session(session) => {
-                        let press_session = session.clone();
-                        let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
-                            if this.active_id(cx).as_deref() != Some(press_session.as_str()) {
-                                this.set_mode(layout::Mode::Sessions, window, cx);
-                                this.resume(press_session.clone(), window, cx);
-                            }
-                        });
-                        let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                            if this.active_id(cx).as_deref() != Some(session.as_str()) {
-                                this.set_mode(layout::Mode::Sessions, window, cx);
-                                this.resume(session.clone(), window, cx);
-                            }
-                        });
-                        div().id(("browse-pickup-session", index)).aria_label(format!("Open {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(open)
-                    }
-                    crate::browser::PickupTarget::Closed(id) => {
-                        let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
-                            this.reopen_browse_closed_tab(id, window, cx);
-                        });
-                        let reopen = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                            this.reopen_browse_closed_tab(id, window, cx);
-                        });
-                        div().id(("browse-pickup-closed", index)).aria_label(format!("Reopen {}", row.title)).on_mouse_down(gpui::MouseButton::Left, press).on_click(reopen)
-                    }
+                let (verb, key) = match &target {
+                    crate::browser::PickupTarget::Tab(_) => ("Open", "browse-pickup"),
+                    crate::browser::PickupTarget::Session(_) => ("Open", "browse-pickup-session"),
+                    crate::browser::PickupTarget::Closed(_) => ("Reopen", "browse-pickup-closed"),
                 };
-                list = list.item(index, row_el.role(gpui::Role::Button).cursor_pointer().child(content));
+                targets.push(target);
+                list = list.item(index, content.id((key, index)).role(gpui::Role::Button).aria_label(format!("{verb} {}", row.title)));
             }
+            let targets = std::rc::Rc::new(targets);
+            let (on_press, on_click) = (targets.clone(), targets);
+            let press = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+                if let Some(target) = on_press.get(*index) {
+                    this.open_pickup_target(target, window, cx);
+                }
+            });
+            let open = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+                if let Some(target) = on_click.get(*index) {
+                    this.open_pickup_target(target, window, cx);
+                }
+            });
+            let list = list.on_press(move |index, w, cx| press(&index, w, cx)).on_activate(move |index, w, cx| open(&index, w, cx));
             rows = rows.child(list);
             // The frosted panel: surface-1 at 62 % with FF's shadow-3 ring.
             let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).shadow(p.floating_shadow()).child(rows));
             column = column.child(panel);
         }
-        let radius = if self.browse_page_card() { px(scale::SHAPE_CONTAINER) } else { px(0.0) };
+        let radius = if self.browse_page_card() { px(scale::SHAPE_CONTAINER) } else { Pixels::ZERO };
         let ground = self.newtab_ground.clone().map(|path| {
-            gpui::img(path).absolute().top(px(0.0)).left(px(0.0)).size_full().object_fit(gpui::ObjectFit::Cover).rounded(radius).into_any_element()
+            gpui::img(path).absolute().top_0().left_0().size_full().object_fit(gpui::ObjectFit::Cover).rounded(radius).into_any_element()
         });
         div()
             .size_full()
@@ -5283,6 +5224,21 @@ impl Harness {
             .children(ground)
             .child(div().size_full().flex().flex_col().items_center().child(column))
             .into_any_element()
+    }
+
+    /// What a pick-up row does: select the tab, open the session (unless
+    /// it is already the active one), or reopen exactly the closed tab.
+    fn open_pickup_target(&mut self, target: &crate::browser::PickupTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            crate::browser::PickupTarget::Tab(id) => self.select_browse_sidebar_tab(*id, window, cx),
+            crate::browser::PickupTarget::Session(session) => {
+                if self.active_id(cx).as_deref() != Some(session.as_str()) {
+                    self.set_mode(layout::Mode::Sessions, window, cx);
+                    self.resume(session.clone(), window, cx);
+                }
+            }
+            crate::browser::PickupTarget::Closed(id) => self.reopen_browse_closed_tab(*id, window, cx),
+        }
     }
 
     /// The omnibox suggestion list (B2a-H4): the palette look — Ask the
@@ -5311,8 +5267,8 @@ impl Harness {
             crate::browser::OmniAnchor::Toolbar => list
                 .absolute()
                 .top(px(crate::browser::OMNIBOX_DROPDOWN_TOP))
-                .left(px(12.0))
-                .right(px(12.0))
+                .left(px(scale::SP_4))
+                .right(px(scale::SP_4))
                 .into_any_element(),
             crate::browser::OmniAnchor::Newtab => list.w(px(NEWTAB_FIELD_W)).into_any_element(),
         })
@@ -5337,13 +5293,11 @@ impl Harness {
         // FF's dropdown chrome (`dropdown.tsx`): the popup surface, a 4 px
         // inset, 36 px rows on the item radius lit by the hover overlay,
         // Caption group labels — the same rows the Field overlay draws.
-        let list = v_flex()
+        let list = menu_panel(gpui::Empty, cx)
             .id("browse-omni-list")
             .debug_selector(|| "browse-omni-list".into())
-            .p(metrics.item_px / 2.0)
-            .rounded(px(scale::SHAPE_CONTAINER))
-            .bg(p.surface(3))
-            .shadow(p.floating_shadow())
+            .flex()
+            .flex_col()
             .role(gpui::Role::ListBox)
             .aria_label("Address suggestions");
         // One highlight that the pointer and the arrows both drive — a hover
@@ -5351,11 +5305,24 @@ impl Harness {
         // only the selection (`pointer(false)`), so the two never light two
         // rows at once.
         let report = cx.entity().downgrade();
+        // Rows press on mouse-down (pointer timing: before the address
+        // input's blur drops the field) and also answer clicks, so an
+        // accessibility press reaches them. The second call of the pair is
+        // a no-op: every arm drops the field first, so the click re-ranks to
+        // no rows — and the session arms guard anyway.
+        let press = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+            this.activate_omnibox_row(*index, window, cx);
+        });
+        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+            this.activate_omnibox_row(*index, window, cx);
+        });
         let mut rows_list = aui::interact::row_list("browse-omni-rows")
             .pointer(false)
             .label("Address suggestions")
-            .gap(px(0.0))
+            .gap(Pixels::ZERO)
             .highlighted(Some(selected))
+            .on_press(move |index, w, cx| press(&index, w, cx))
+            .on_activate(move |index, w, cx| activate(&index, w, cx))
             .on_highlight(move |index, _, cx| {
                 if let Some(index) = index {
                     let _ = report.update(cx, |this, cx| {
@@ -5404,17 +5371,6 @@ impl Harness {
                 );
             }
             last_kind = Some(row.suggestion.kind);
-            // Rows press on mouse-down (pointer timing: before the address
-            // input's blur drops the field) and also answer clicks, so an
-            // accessibility press reaches them. The second call of the pair
-            // is a no-op: every arm drops the field first, so the click
-            // re-ranks to no rows — and the session arms guard anyway.
-            let press = cx.listener(move |this: &mut Self, _: &gpui::MouseDownEvent, window, cx| {
-                this.activate_omnibox_row(index, window, cx);
-            });
-            let activate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.activate_omnibox_row(index, window, cx);
-            });
             let lit = index == selected;
             let mut item = h_flex()
                 .w_full()
@@ -5426,7 +5382,7 @@ impl Harness {
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(0.0))
+                        .min_w_0()
                         .truncate()
                         .text_role_in(TextRole::Body, Density::Standard)
                         .text_color(if lit { p.fg } else { p.fg_muted })
@@ -5435,7 +5391,7 @@ impl Harness {
             // A history row's address, or the line its words matched (R4).
             if let Some(detail) = row.suggestion.detail.clone() {
                 item = item.child(
-                    div().flex_shrink(1.0).min_w(px(0.0)).max_w(gpui::relative(0.5)).truncate().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(detail),
+                    div().flex_shrink(1.0).min_w_0().max_w(gpui::relative(0.5)).truncate().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child(detail),
                 );
             }
             if !row.suggestion.hint.is_empty() {
@@ -5443,14 +5399,7 @@ impl Harness {
             }
             rows_list = rows_list.item(
                 index,
-                div()
-                    .id(("browse-omni", index))
-                    .role(gpui::Role::ListBoxOption)
-                    .aria_label(row.suggestion.title.clone())
-                    .cursor_pointer()
-                    .on_mouse_down(gpui::MouseButton::Left, press)
-                    .on_click(activate)
-                    .child(item),
+                item.id(("browse-omni", index)).role(gpui::Role::ListBoxOption).aria_label(row.suggestion.title.clone()),
             );
         }
         let _ = window;
@@ -5551,7 +5500,7 @@ impl Harness {
                             .left_0()
                             .right_0()
                             .bottom(gpui::relative(1.0))
-                            .h(px(32.0))
+                            .h(px(scale::SP_7))
                             .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(sheet.alpha(0.0), 0.0), gpui::linear_color_stop(sheet.alpha(0.55), 1.0))),
                     )
                     // Measured on the composer itself: the band's first child is
@@ -5569,7 +5518,7 @@ impl Harness {
                             // B5), inside the measured child so the list
                             // ends above both.
                             .child(
-                                gpui_kit::base::v_flex()
+                                v_flex()
                                     .w_full()
                                     .relative()
                                     .children(provider_banner.take())
@@ -5985,7 +5934,7 @@ impl Harness {
                     .role(gpui::Role::Log)
                     .aria_label(format!("{label}'s last output"))
                     .w_full()
-                    .max_w(px(640.0))
+                    .max_w(px(LAUNCH_STDERR_MAX_W))
                     .mt(px(scale::SP_2))
                     .px(px(scale::SP_3))
                     .py(px(scale::SP_2))
@@ -6690,7 +6639,7 @@ impl Render for Harness {
                             .w_full()
                             .h_full()
                             .items_center()
-                            .gap(px(2.0))
+                            .gap(px(ROW_GAP))
                             .child(
                                 tab_strip(
                                     "hd-right-tabs",
@@ -6716,7 +6665,7 @@ impl Render for Harness {
                                             .ghost()
                                             .muted()
                                             .size(ButtonSize::Xs)
-                                            .icon_size(px(10.0))
+                                            .icon_size(px(RIGHT_CLOSE_GLYPH))
                                             .accessibility_label("Close right pane")
                                             .on_click(close),
                                     ),
@@ -6801,8 +6750,8 @@ impl Render for Harness {
                 stack = stack.child(
                     div()
                         .absolute()
-                        .top(px(0.0))
-                        .bottom(px(0.0))
+                        .top_0()
+                        .bottom_0()
                         .left(px(self.resize.width - RESIZE_HANDLE_W / 2.0))
                         .child(
                             resize_handle("sidebar-resize")
@@ -6830,8 +6779,8 @@ impl Render for Harness {
                 stack = stack.child(
                     div()
                         .absolute()
-                        .top(px(0.0))
-                        .bottom(px(0.0))
+                        .top_0()
+                        .bottom_0()
                         // D6: the pane is a sheet 6 in from the window's
                         // right edge with a 6 gap before it; the handle
                         // straddles that gap (live 2026-10-19: it sat 9 px
@@ -9000,7 +8949,7 @@ mod tests {
             "settings:browser normalises onto the Browser page"
         );
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.debug_bounds("settings-search-engine-google").is_some(), "the engine rows draw");
+        assert!(vc.debug_bounds("settings-search-engine").is_some(), "the engine choice draws");
         assert!(vc.debug_bounds("settings-downloads-change").is_some(), "the Change row draws");
         // The Chromium row shows only where the engine loads `chrome://`
         // pages (the `cef` backend) — anywhere else it hides.

@@ -34,18 +34,8 @@ impl SearchEngine {
     pub(crate) const ALL: [SearchEngine; 4] =
         [SearchEngine::Google, SearchEngine::DuckDuckGo, SearchEngine::Bing, SearchEngine::Kagi];
 
-    /// The machine name: what `layout.json` stores.
-    pub(crate) fn slug(self) -> &'static str {
-        match self {
-            SearchEngine::Google => "google",
-            SearchEngine::DuckDuckGo => "duckduckgo",
-            SearchEngine::Bing => "bing",
-            SearchEngine::Kagi => "kagi",
-        }
-    }
-
-    /// The inverse of [`SearchEngine::slug`]: `None` for an unknown
-    /// string, so a hand-edited file reads as Google, never an error.
+    /// The engine for its machine name (what `layout.json` stores, serde's
+    /// lowercase): `None` for an unknown string, so a hand-edited file reads as Google, never an error.
     pub(crate) fn parse(s: &str) -> Option<SearchEngine> {
         match s.trim().to_ascii_lowercase().as_str() {
             "google" => Some(SearchEngine::Google),
@@ -1100,14 +1090,14 @@ mod tests {
     }
 
 
-    /// B2a-H6: every engine builds its own search URL — names, slugs
-    /// and parse round-trip, and queries encode the same everywhere.
+    /// B2a-H6: every engine builds its own search URL — names, stored
+    /// names and parse round-trip, and queries encode the same everywhere.
     #[test]
     fn search_engines_build_their_own_urls() {
         assert_eq!(SearchEngine::default(), SearchEngine::Google);
         assert_eq!(
-            SearchEngine::ALL.map(|engine| engine.slug()),
-            ["google", "duckduckgo", "bing", "kagi"]
+            SearchEngine::ALL.map(|engine| serde_json::to_string(&engine).unwrap()),
+            ["\"google\"", "\"duckduckgo\"", "\"bing\"", "\"kagi\""]
         );
         assert_eq!(
             SearchEngine::ALL.map(|engine| engine.name()),
