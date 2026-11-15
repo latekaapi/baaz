@@ -62,6 +62,7 @@ mod import_ui;
 mod chrome_import_ui;
 mod images;
 mod index;
+mod instance;
 mod keymap;
 mod layout;
 mod list_cache;
@@ -832,6 +833,35 @@ fn main() {
     // Finder launch has no stderr anyone reads (the 2026-10-31 hang left
     // nothing behind).
     crate::log::init_file_log(&crate::store::support_dir());
+    // One Baaz per state directory (docs/81 B D-4): a second launch on the
+    // same directory brings the first forward and leaves, before it reads or
+    // writes any store. `--print-tier` and `--bench` write no store and are
+    // meant to run beside a live window, so they skip the lock.
+    let _instance = {
+        let argv: Vec<String> = std::env::args().collect();
+        let side_tool = argv.iter().any(|arg| arg == "--print-tier" || arg == "--bench");
+        if side_tool {
+            None
+        } else {
+            match crate::instance::acquire(&crate::store::support_dir()) {
+                Ok(crate::instance::Acquire::Owned(lock)) => Some(lock),
+                Ok(crate::instance::Acquire::HeldBy(pid)) => {
+                    let shown = pid.is_some_and(crate::instance::bring_forward);
+                    crate::baaz_log!(
+                        "another Baaz (pid {}) already uses {}; {}",
+                        pid.map(|pid| pid.to_string()).unwrap_or_else(|| "unknown".into()),
+                        crate::store::support_dir().display(),
+                        if shown { "brought it forward" } else { "could not bring it forward" }
+                    );
+                    return;
+                }
+                Err(error) => {
+                    crate::baaz_log!("instance lock failed ({error}); running without it");
+                    None
+                }
+            }
+        }
+    };
     // The Chromium page engine, when the bundle carries it (docs/25 §2):
     // mapped before anything else allocates in earnest, initialised lazily on
     // the first page. Without it the browser pane stays on WKWebView.
