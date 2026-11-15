@@ -1793,14 +1793,23 @@ impl TerminalService {
                 return;
             }
         };
+        let mut persons_tab = false;
         if let Some(tab) = tab {
             let key = self.resolve_session(session);
             let owned = self.shared.tab_pages.lock().expect("tab pages").get(&tab).is_some_and(|(owner, _)| *owner == key);
-            if !owned && self.granted(&key, tab).is_some_and(|(_, read_only)| read_only) && !read_only_tool(tool) {
+            let grant = (!owned).then(|| self.granted(&key, tab)).flatten();
+            if grant.as_ref().is_some_and(|(_, read_only)| *read_only) && !read_only_tool(tool) {
                 send(&reply, job_id, false, json!({"error": format!("tab {tab} is the person's and read-only for you: read it, or open your own tab with browser_tabs")}));
                 return;
             }
+            persons_tab = grant.is_some();
         }
+        // The page tools' gate asks before a first use of the person's tab
+        // at each host (Your own tabs › Ask first, docs/82 0.12).
+        let start: JobStart = Box::new(move |handle: TabHandle| {
+            handle.borrow_mut().persons_tab = persons_tab;
+            start(handle)
+        });
         if tool != "browser_navigate" {
             match self.page_for(session, tab) {
                 Ok(Some(_)) => {}

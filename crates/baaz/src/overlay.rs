@@ -812,6 +812,9 @@ impl Harness {
                 // Ask mode (Settings › Browser › Agents): any action asks, so
                 // the title says which, from the line's own words.
                 ("Act", _) => format!("{name} asks before {}", activity.label),
+                // Your own tabs › Ask first: the first use of this tab here.
+                ("Use your tab", _) => format!("{name} wants to use this tab"),
+                ("Open", target) => format!("{name} wants to open {}", crate::browser::automation::policy::host_of(target)),
                 (_, "") => format!("{name} wants to go ahead"),
                 ("Run a script", _) => format!("{name} wants to run a script on this page"),
                 ("Upload", files) => format!("{name} wants to upload {files}"),
@@ -822,9 +825,13 @@ impl Harness {
                 host: page_host.to_owned().into(),
                 line: page_host.to_owned().into(),
                 kind_pill: ask.kind.clone().into(),
-                hint: if ask.kind == "Act" { "Ask is on in Settings › Browser › Agents".into() } else { format!("{} always asks", ask.kind).into() },
+                hint: match ask.kind.as_str() {
+                    "Act" | "Open" => "Ask is on in Settings › Browser › Agents".into(),
+                    "Use your tab" => "Ask first is on for your tabs in Settings › Browser › Agents".into(),
+                    kind => format!("{kind} always asks").into(),
+                },
                 deny: "Don't allow".into(),
-                allow: if ask.kind == "Act" { "Allow".into() } else { ask.kind.clone().into() },
+                allow: if matches!(ask.kind.as_str(), "Act" | "Use your tab" | "Open") { "Allow".into() } else { ask.kind.clone().into() },
                 // A known host can be trusted for good (Settings › Browser ›
                 // Agents › Sites, R3); `a` takes it.
                 allow_always: (!page_host.is_empty()).then(|| "Always on this site".to_owned()),

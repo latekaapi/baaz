@@ -16,6 +16,11 @@ pub enum Reason {
     Script,
     /// Any action on a page, under Settings › Browser › Agents › Ask (R3).
     Act,
+    /// The first action in one of the person's own tabs at a host the
+    /// agent has not been allowed on there (Your own tabs › Ask first).
+    YourTab,
+    /// Opening or fetching a page on another host, when a rule above asks.
+    Open,
 }
 
 impl Reason {
@@ -29,6 +34,8 @@ impl Reason {
             Reason::SignIn => "Sign in",
             Reason::Script => "Run a script",
             Reason::Act => "Act",
+            Reason::YourTab => "Use your tab",
+            Reason::Open => "Open",
         }
     }
 }
@@ -136,6 +143,67 @@ pub fn host_of(url: &str) -> String {
     url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").to_lowercase()
 }
 
+/// What the agent is about to do, for [`decide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// A click, a key or a value on the page; `Some` when [`classify`] says
+    /// it is one of the always-ask kinds.
+    Page(Option<Reason>),
+    /// Opening a URL in the tab, or a cookie-bearing fetch from it.
+    Open,
+}
+
+/// What [`decide`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Go on.
+    Go,
+    /// A site rule refuses agents here.
+    Refuse,
+    /// Ask the person first, for this reason.
+    Ask(Reason),
+}
+
+/// The one gate every agent action passes (docs/82 0.12), with no model in
+/// the loop:
+///
+/// 1. A site's Never refuses and its Always goes on.
+/// 2. In one of the person's own tabs under **Ask first**, the first action
+///    at a host the agent was not allowed on in that tab asks ("Use your
+///    tab"); **Yes** treats the tab as the agent's own. (**Read only** is
+///    refused before any job starts.)
+/// 3. The always-ask kinds (Send, Pay, Delete, Upload, Sign in) ask.
+/// 4. Under **Ask** every page action asks, and opening another page asks.
+///
+/// Opening this machine's own pages (`localhost`, `file:`) skips 2–4.
+pub fn decide(
+    prefs: &crate::browser::agents::AgentsPrefs,
+    host: &str,
+    local: bool,
+    persons_tab: bool,
+    allowed_in_tab: bool,
+    action: Action,
+) -> Decision {
+    use crate::browser::agents::{ActMode, SiteRule, YourTabs};
+    match prefs.site(host) {
+        Some(SiteRule::Never) => return Decision::Refuse,
+        Some(SiteRule::Always) => return Decision::Go,
+        None => {}
+    }
+    if action == Action::Open && local {
+        return Decision::Go;
+    }
+    if persons_tab && prefs.your_tabs == YourTabs::AskFirst && !allowed_in_tab {
+        return Decision::Ask(Reason::YourTab);
+    }
+    match action {
+        Action::Page(Some(reason)) => Decision::Ask(reason),
+        Action::Page(None) if prefs.act == ActMode::Ask => Decision::Ask(Reason::Act),
+        Action::Open if prefs.act == ActMode::Ask => Decision::Ask(Reason::Open),
+        _ => Decision::Go,
+    }
+}
+
 /// The tool's answer when a site rule refuses agents (Never here).
 pub fn refused_answer(host: &str) -> Value {
     json!({
@@ -152,6 +220,8 @@ pub fn stopped_answer(reason: Reason, target: &Target) -> Value {
         "target": target.name,
         "message": match reason {
             Reason::Act => "The person asked to approve actions on this page and declined this one. Nothing was done.".to_owned(),
+            Reason::YourTab => "This is one of the person's own tabs and they did not allow you to use it here. Nothing was done; open your own tab with browser_tabs.".to_owned(),
+            Reason::Open => "The person did not allow opening this page. Nothing was done.".to_owned(),
             _ => format!("{} always asks the person. Nothing was done.", reason.word()),
         },
     })
@@ -210,6 +280,48 @@ mod tests {
         assert_eq!(classify(&target(|t| t.form_has_card = true)), Some(Reason::Pay));
         assert_eq!(classify(&target(|t| t.input_type = "file".into())), Some(Reason::Upload));
         assert_eq!(classify(&target(|t| t.cross_origin_post = true)), Some(Reason::Send));
+    }
+
+    /// docs/82 0.12: the three "Your own tabs" values each change what the
+    /// gate does in one of the person's tabs; the agent's own tabs never
+    /// ask for being used.
+    #[test]
+    fn your_own_tabs_values_each_change_the_gate() {
+        use crate::browser::agents::{AgentsPrefs, YourTabs};
+        let with = |tabs| AgentsPrefs { your_tabs: tabs, ..AgentsPrefs::default() };
+        let click = Action::Page(None);
+        // Ask first (the default): the first action at a new host asks…
+        assert_eq!(decide(&with(YourTabs::AskFirst), "shop.example", false, true, false, click), Decision::Ask(Reason::YourTab));
+        // …and once allowed in that tab, the next goes on.
+        assert_eq!(decide(&with(YourTabs::AskFirst), "shop.example", false, true, true, click), Decision::Go);
+        // Navigating the person's tab to a new host asks too.
+        assert_eq!(decide(&with(YourTabs::AskFirst), "other.example", false, true, false, Action::Open), Decision::Ask(Reason::YourTab));
+        // Yes: the person's tab is used like the agent's own.
+        assert_eq!(decide(&with(YourTabs::Yes), "shop.example", false, true, false, click), Decision::Go);
+        // The agent's own tab never asks for being used.
+        assert_eq!(decide(&with(YourTabs::AskFirst), "shop.example", false, false, false, click), Decision::Go);
+        // Read only is refused before the gate (`read_only_tool`); here the
+        // gate itself adds no prompt for it.
+        assert_eq!(decide(&with(YourTabs::ReadOnly), "shop.example", false, true, false, click), Decision::Go);
+    }
+
+    #[test]
+    fn site_rules_and_ask_mode_cover_opening_pages_too() {
+        use crate::browser::agents::{ActMode, AgentsPrefs, SiteRule};
+        let mut prefs = AgentsPrefs::default();
+        prefs.set_site("bank.example", Some(SiteRule::Never));
+        prefs.set_site("docs.example", Some(SiteRule::Always));
+        assert_eq!(decide(&prefs, "bank.example", false, false, true, Action::Open), Decision::Refuse);
+        assert_eq!(decide(&prefs, "docs.example", false, true, false, Action::Page(Some(Reason::Pay))), Decision::Go);
+        // Auto: opening a page in the agent's own tab goes on; Ask asks.
+        assert_eq!(decide(&prefs, "news.example", false, false, true, Action::Open), Decision::Go);
+        prefs.act = ActMode::Ask;
+        assert_eq!(decide(&prefs, "news.example", false, false, true, Action::Open), Decision::Ask(Reason::Open));
+        // This machine's own pages are the person's dev work: never asked.
+        assert_eq!(decide(&prefs, "localhost:5173", true, true, false, Action::Open), Decision::Go);
+        // The always-ask kinds still ask once the tab is allowed.
+        prefs.act = ActMode::Auto;
+        assert_eq!(decide(&prefs, "shop.example", false, true, true, Action::Page(Some(Reason::Pay))), Decision::Ask(Reason::Pay));
     }
 
     #[test]

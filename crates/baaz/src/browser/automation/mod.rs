@@ -43,6 +43,12 @@ pub struct TabAgent {
     pub last_shot: Option<u64>,
     /// Which document [`Self::refs`] belongs to ([`PageLog::documents`]).
     pub refs_document: u64,
+    /// Whether this tab is one of the person's own, used by the agent
+    /// under a grant (set by the service before each job).
+    pub persons_tab: bool,
+    /// Hosts the person allowed the agent on in this tab (Your own tabs ›
+    /// Ask first, "Allow"): the next action there does not ask again.
+    pub allowed_hosts: std::collections::HashSet<String>,
 }
 
 /// A shared handle to one tab's [`TabAgent`].
