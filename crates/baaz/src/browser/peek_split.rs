@@ -253,19 +253,30 @@ impl Harness {
     }
 
     /// `peek:<url>` / `split:<url>`: the ⇧/⌥-click on the shown tab's link,
-    /// without a page to click (captures). Free.
-    pub(crate) fn step_link_gesture(&mut self, rest: &str, gesture: LinkGesture, window: &mut Window, cx: &mut Context<Self>) {
+    /// without a page to click (captures). A URL that is not a web page,
+    /// or no tab shown in the Browse centre, is an `Err`. Free.
+    pub(crate) fn step_link_gesture(&mut self, rest: &str, gesture: LinkGesture, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.ensure_tabs_loaded(cx);
         let url = rest.trim();
-        let Some(opener) = self.browse_centre_shown().filter(|_| super::history::recordable(url)) else {
-            crate::steps::record_step_failure(&format!("{gesture:?}:{rest}"));
-            return;
-        };
+        if !super::history::recordable(url) {
+            return Err(format!("`{url}` is not a web page to open"));
+        }
+        let opener = self.browse_centre_shown().ok_or("no tab is shown in Browse")?;
         match gesture {
             LinkGesture::Peek => self.open_peek(opener, url, window, cx),
-            LinkGesture::Split => self.open_split(opener, url, cx),
+            LinkGesture::Split => {
+                // `open_split` gives up without a word when the tab model
+                // refuses the new half; a fresh half is a new split pair.
+                let before = self.browser.split.map(|pair| (pair.left, pair.right));
+                self.open_split(opener, url, cx);
+                let after = self.browser.split.map(|pair| (pair.left, pair.right));
+                if after.is_none() || after == before {
+                    return Err("the Split's second half could not be placed".into());
+                }
+            }
         }
+        Ok(())
     }
 
     /// Whether the open Split is still valid; a closed half ends it.

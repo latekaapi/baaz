@@ -311,19 +311,29 @@ impl Harness {
 
     /// `setup:<provider>:<install|signin|update>` (`--steps`): open the sheet
     /// as its button would. Deterministic runs show a scripted terminal.
-    pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `Err` for a provider id no registry entry owns (never the Muse
+    /// fallback), an unknown or missing stage, extra payload, or a stage
+    /// that provider has no command for.
+    pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let mut parts = rest.split(':');
-        let id = parts.next().map(ProviderId::parse);
-        let kind = match parts.next() {
-            Some("install") => Some(SetupKind::Install),
-            Some("signin") => Some(SetupKind::SignIn),
-            Some("update") => Some(SetupKind::Update),
-            _ => None,
+        let raw_id = parts.next().unwrap_or("").trim();
+        let Some(id) = ProviderId::parse_known(raw_id) else {
+            return Err(format!("unknown provider {raw_id:?}"));
         };
-        match (id, kind) {
-            (Some(id), Some(kind)) if kind.command(id).is_some() => self.open_setup_sheet(id, kind, window, cx),
-            _ => crate::steps::record_step_failure(&format!("setup:{rest}")),
+        let kind = match parts.next().map(str::trim) {
+            Some("install") => SetupKind::Install,
+            Some("signin") => SetupKind::SignIn,
+            Some("update") => SetupKind::Update,
+            other => return Err(format!("unknown setup stage {other:?} (expected install, signin or update)")),
+        };
+        if let Some(extra) = parts.next() {
+            return Err(format!("unexpected extra payload {extra:?}"));
         }
+        if kind.command(id).is_none() {
+            return Err(format!("{} has no command for that setup stage", id.as_str()));
+        }
+        self.open_setup_sheet(id, kind, window, cx);
+        Ok(())
     }
 
     /// Close the sheet (Close, Done, ✕, Escape). The terminal and the watch

@@ -9,12 +9,12 @@
 //! batch id, so Undo removes exactly what one import wrote.
 
 // The import (R4 step 7) and its Undo use the rest of this API.
-#![allow(dead_code)]
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// The built-in folders' ids.
 pub(crate) const BAR: i64 = 1;
+#[cfg(test)]
 pub(crate) const OTHER: i64 = 2;
 
 /// A bookmark.
@@ -136,6 +136,7 @@ pub(crate) fn folders(conn: &Connection) -> Vec<Folder> {
 }
 
 /// The folders directly inside `parent` (`None`: the top level).
+#[cfg(test)]
 pub(crate) fn subfolders(conn: &Connection, parent: Option<i64>) -> Vec<Folder> {
     folders(conn).into_iter().filter(|folder| folder.parent == parent).collect()
 }
@@ -208,6 +209,7 @@ pub(crate) fn search(conn: &Connection, query: &str, limit: usize) -> Vec<Bookma
 }
 
 /// How many bookmarks there are.
+#[cfg(test)]
 pub(crate) fn count(conn: &Connection) -> u64 {
     conn.query_row("SELECT count(*) FROM bookmarks", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
 }

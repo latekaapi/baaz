@@ -1155,18 +1155,14 @@ struct LastProvider {
     provider: String,
 }
 
-/// Where the last-chosen provider lives: one small JSON file in Baaz's own
-/// store, beside the projects file rather than inside it. Every read is
-/// best-effort like every other store read; every write is atomic.
-fn last_provider_path() -> std::path::PathBuf {
-    crate::store::support_dir().join("provider.json")
-}
+/// The last pick's one writer ([`crate::store::JsonStore`]).
+static LAST_PROVIDER: crate::store::JsonStore<LastProvider> = crate::store::JsonStore::new("provider.json");
 
 /// The backend new sessions start on, as last chosen. `None` when nothing
 /// was ever chosen or the file names no backend — the caller falls back to
 /// the command line.
 pub fn read_last_provider() -> Option<ProviderId> {
-    let stored: LastProvider = crate::store::read_json(&last_provider_path());
+    let stored: LastProvider = LAST_PROVIDER.read();
     match stored.provider.as_str() {
         "muse" => Some(ProviderId::Muse),
         "claude-code" => Some(ProviderId::ClaudeCode),
@@ -1179,20 +1175,13 @@ pub fn read_last_provider() -> Option<ProviderId> {
 /// cannot be written leaves the in-memory pick, which still names every
 /// session this run starts.
 pub fn write_last_provider(id: ProviderId) {
-    let text = serde_json::to_string(&LastProvider { provider: id.as_str().to_owned() });
-    if let Ok(text) = text {
-        let _ = crate::store::write_atomic(&last_provider_path(), text.as_bytes());
-    }
+    let _ = LAST_PROVIDER.write_now(&LastProvider { provider: id.as_str().to_owned() });
 }
 
 // ------------------------------------------------- external approvals
 
-/// Where an approval waiting on the person came from. Claude Code sends
-/// one control request (`can_use_tool`); Codex sends five.
-///
-/// Constructed by the provider lane decoders when they land (today only
-/// by tests and fixtures); the surface already renders every variant.
-#[allow(dead_code)]
+/// Where an approval waiting on the person came from. The provider lane
+/// constructs it from the decoded request (`session::lane`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalApprovalKind {
     /// Claude Code `can_use_tool` on the control channel: `tool_name`,
@@ -1200,12 +1189,6 @@ pub enum ExternalApprovalKind {
     ClaudeCanUseTool,
     /// Codex `item/commandExecution/requestApproval`.
     CodexCommand,
-    /// Codex `item/fileChange/requestApproval`.
-    CodexFileChange,
-    /// Codex `item/permissions/requestApproval`.
-    CodexPermissions,
-    /// Codex `item/tool/requestUserInput`.
-    CodexUserInput,
     /// Codex `mcpServer/elicitation/request`.
     CodexMcpElicitation,
     /// Muse `approval/request`: the inline card carries its choices.
@@ -1218,9 +1201,6 @@ impl ExternalApprovalKind {
         match self {
             ExternalApprovalKind::ClaudeCanUseTool => "Claude Code tool request",
             ExternalApprovalKind::CodexCommand => "Codex command approval",
-            ExternalApprovalKind::CodexFileChange => "Codex file-change approval",
-            ExternalApprovalKind::CodexPermissions => "Codex permissions approval",
-            ExternalApprovalKind::CodexUserInput => "Codex question",
             ExternalApprovalKind::CodexMcpElicitation => "Codex tool question",
             ExternalApprovalKind::MuseApproval => "Muse approval",
         }
@@ -1644,8 +1624,13 @@ mod tests {
         assert_eq!(read_last_provider(), Some(ProviderId::Codex));
         write_last_provider(ProviderId::Muse);
         assert_eq!(read_last_provider(), Some(ProviderId::Muse));
-        // A file this build cannot parse is ordinary, not a pick.
+        // A file this build cannot parse is set aside and the last good
+        // copy read instead (the store rule, docs/81 A F8): the pick before.
         std::fs::write(dir.join("provider.json"), b"not json").expect("seed bad json");
+        assert_eq!(read_last_provider(), Some(ProviderId::Codex));
+        // With no good copy either, it is no pick at all.
+        std::fs::write(dir.join("provider.json"), b"not json").expect("seed bad json");
+        let _ = std::fs::remove_file(dir.join("provider.json.bak"));
         assert_eq!(read_last_provider(), None);
         match old {
             Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
@@ -1863,14 +1848,11 @@ mod tests {
     }
 
     #[test]
-    fn all_six_request_shapes_reach_the_store() {
+    fn every_request_shape_reaches_the_store() {
         let mut store = ExternalApprovalStore::empty();
         let kinds = [
             ExternalApprovalKind::ClaudeCanUseTool,
             ExternalApprovalKind::CodexCommand,
-            ExternalApprovalKind::CodexFileChange,
-            ExternalApprovalKind::CodexPermissions,
-            ExternalApprovalKind::CodexUserInput,
             ExternalApprovalKind::CodexMcpElicitation,
         ];
         for (i, kind) in kinds.into_iter().enumerate() {
@@ -1878,6 +1860,6 @@ mod tests {
             approval.id = format!("appr-{i}");
             store.inject(approval);
         }
-        assert_eq!(store.pending().len(), 6);
+        assert_eq!(store.pending().len(), 3);
     }
 }

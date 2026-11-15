@@ -42,7 +42,6 @@ pub struct TerminalTab {
     pub owner: TabOwner,
     /// The session the tab was opened from, if any. Written here, read by
     /// the agent route (H1b), which is the only consumer of tab provenance.
-    #[allow(dead_code)]
     pub origin_session: Option<SessionId>,
     /// The emulator behind the tab.
     pub session: Entity<TerminalSession>,

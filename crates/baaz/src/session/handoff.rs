@@ -309,26 +309,24 @@ impl SessionView {
     /// `handoff:<provider>`: the step verb for live runs. The same
     /// [`SessionView::pick_provider`] path the menu uses, forced onto the
     /// handoff row, and headless — the command line already asked, so no
-    /// confirm dialog. Unknown ids record a step failure and change
-    /// nothing, like `setprovider:`.
-    pub(crate) fn step_handoff(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// confirm dialog. Fails and changes nothing on an unknown id, on this
+    /// session's own provider (a model change, not a handoff), or on a
+    /// session with no turns to carry, like `setprovider:`.
+    pub(crate) fn step_handoff(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
-        let Some(picked) = ProviderId::all().iter().find(|p| p.as_str() == id).copied() else {
-            crate::steps::record_step_failure(&format!("handoff:{rest}"));
-            crate::baaz_log!("unknown provider `{rest}`; known providers are muse, claude-code, codex");
-            return;
-        };
+        let picked = ProviderId::all()
+            .iter()
+            .find(|p| p.as_str() == id)
+            .copied()
+            .ok_or_else(|| format!("unknown provider `{rest}`; known providers are muse, claude-code, codex"))?;
         if picked == self.provider_kind() {
-            crate::steps::record_step_failure(&format!("handoff:{rest}"));
-            crate::baaz_log!("`handoff:{id}` names this session's own provider: a model change, not a handoff");
-            return;
+            return Err(format!("`handoff:{id}` names this session's own provider: a model change, not a handoff"));
         }
         if !self.has_turns() {
-            crate::steps::record_step_failure(&format!("handoff:{rest}"));
-            crate::baaz_log!("`handoff:{id}` needs turns to carry: this session has none");
-            return;
+            return Err(format!("`handoff:{id}` needs turns to carry: this session has none"));
         }
         cx.emit(SessionEvent::HandoffRequested { provider: picked, headless: true });
+        Ok(())
     }
 }
 

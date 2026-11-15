@@ -368,7 +368,7 @@ impl RightCache {
     pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
         match kind {
             RightKind::Browser => None,
-            RightKind::Changes | RightKind::Git | RightKind::Diff => self
+            RightKind::Changes => self
                 .git
                 .as_ref()
                 .filter(|slot| slot.root == root)
@@ -571,7 +571,7 @@ pub(crate) fn render(
             ),
             BrowserPlaceholder::Closed => closed_browser_state(),
         },
-        RightKind::Changes | RightKind::Diff | RightKind::Git => match project {
+        RightKind::Changes => match project {
             Some((root, _)) => crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx).1,
             None => empty_state("right-changes-empty", "Changes", "No project is open", "Open or adopt a project and its uncommitted changes will be listed here."),
         },
@@ -604,7 +604,7 @@ pub(crate) fn render(
 /// The screen's place on the strip (D6): Changes 0, Files 1, Page 2.
 pub(crate) fn screen_index(kind: RightKind) -> usize {
     match kind {
-        RightKind::Changes | RightKind::Diff | RightKind::Git => 0,
+        RightKind::Changes => 0,
         RightKind::Files => 1,
         RightKind::Browser => 2,
     }
@@ -613,7 +613,7 @@ pub(crate) fn screen_index(kind: RightKind) -> usize {
 /// The glyph a screen wears in its row and toggle (docs/43 §2.2).
 pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
     match kind {
-        RightKind::Changes | RightKind::Diff | RightKind::Git => IconName::Git,
+        RightKind::Changes => IconName::Git,
         RightKind::Files => IconName::Folder,
         RightKind::Browser => IconName::Globe,
     }
@@ -648,7 +648,7 @@ pub(crate) fn render_screen(
     // here, from what this screen showed last frame.
     let pushed_now = cache.pushed.contains_key(&screen)
         || (matches!(kind, RightKind::Files) && project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some()))
-        || (matches!(kind, RightKind::Changes | RightKind::Diff | RightKind::Git)
+        || (matches!(kind, RightKind::Changes)
             && cache.changes.form.is_some());
     let back_since = {
         let mut popped = cache.popped.borrow_mut();
@@ -668,7 +668,7 @@ pub(crate) fn render_screen(
         (row, body, true)
     } else {
         match (kind, project) {
-            (RightKind::Changes | RightKind::Diff | RightKind::Git, Some((root, _))) => {
+            (RightKind::Changes, Some((root, _))) => {
                 let (row, body) = crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx);
                 let pushed = row.is_some();
                 (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
@@ -713,7 +713,7 @@ pub(crate) fn render_screen(
                 let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
                 (row, body, pushed)
             }
-            (RightKind::Changes | RightKind::Diff | RightKind::Git, None) => (
+            (RightKind::Changes, None) => (
                 pane_row().on_close(close).into_any_element(),
                 aui::workbench::state_block("right-changes-noproject", IconName::Git, "No project").line("Open or add a project to see its changes.").into_any_element(),
                 false,

@@ -206,9 +206,9 @@ impl Harness {
     /// The names of the sessions with a turn running — open, parked or the
     /// browser chat — as their rows read them.
     pub(crate) fn working_session_names(&self, cx: &gpui::App) -> Vec<String> {
-        self.live_views()
+        self.registry
+            .iter_running(self.active.as_ref(), cx)
             .iter()
-            .filter(|view| view.read(cx).is_sending())
             .map(|view| {
                 let id = view.read(cx).session_id.clone();
                 if self.is_browser_chat(&id) {
@@ -1405,8 +1405,9 @@ impl Harness {
     /// real failure takes, so the screenshot shows the production render —
     /// never a hardcoded render branch. Scripting only, like the other
     /// capture aids (`title-land:`, `row-detail:`); free, it reaches the
-    /// wire nowhere. The payload picks the sprite family (default `sorry`).
-    pub(crate) fn step_error_dialog(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// wire nowhere. The payload picks the sprite family (empty means
+    /// `sorry`); any other payload is an `Err` and raises nothing.
+    pub(crate) fn step_error_dialog(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         use crate::overlays::{Dialog, DialogAction};
         let dialog = match rest.trim().to_lowercase().as_str() {
             "offline" => Dialog {
@@ -1429,7 +1430,7 @@ impl Harness {
                 action: DialogAction::Dismiss,
                 archive_target: None,
             },
-            _ => Dialog {
+            "" | "sorry" => Dialog {
                 title: "Muse hit an internal error".into(),
                 detail: "The turn failed inside `muse serve` before producing anything. \
                     Nothing was billed for the attempt; retry the turn or start a new session."
@@ -1439,8 +1440,10 @@ impl Harness {
                 action: DialogAction::Dismiss,
                 archive_target: None,
             },
+            other => return Err(format!("unknown error-dialog family {other:?} (expected offline, blocked or sorry)")),
         };
         self.set_dialog(cx, dialog);
+        Ok(())
     }
 
     /// Baaz → About Baaz.
@@ -1543,18 +1546,17 @@ impl Harness {
     /// production note takes, so the screenshot shows the production
     /// render — never a hardcoded branch. Scripting only, like the other
     /// capture aids (`title-land:`, `row-detail:`); free, it reaches the
-    /// wire nowhere. An empty title records a step failure.
-    pub(crate) fn step_toast(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// wire nowhere. An empty title is an `Err` and raises nothing.
+    pub(crate) fn step_toast(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (title, body) = rest.split_once('|').unwrap_or((rest, ""));
         let (title, body) = (title.trim(), body.trim());
         if title.is_empty() {
-            crate::steps::record_step_failure(rest);
-            crate::baaz_log!("toast needs a title (`toast:<title>|<body>`)");
-            return;
+            return Err("toast needs a title (`toast:<title>|<body>`)".to_owned());
         }
         self.overlays.update(cx, |overlays, _| {
             overlays.toast(title, body);
         });
+        Ok(())
     }
 }
 
@@ -2334,7 +2336,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus opens");
         assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
@@ -2352,7 +2354,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus opens");
         assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_project_menu(None, true, cx)));
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
@@ -2370,7 +2372,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus opens");
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
         assert!(plus && !menu, "exactly the `+` menu stays open (plus={plus}, menu={menu})");
         restore_state(state);

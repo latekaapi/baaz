@@ -168,20 +168,6 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Open (creating) the usage database, ensuring the schema.
-///
-/// Modelled on `search::open_at`: the parent directory is created, and the
-/// caller decides what an error means — the fire-and-forget recorders below
-/// log it and carry on.
-/// Unused until something reads the ledger: the writes go through
-/// [`record_at`], which opens by path, and the tests use [`open_at`].
-/// Kept because a reader is the next thing to be built and this is the
-/// one place that should decide where the real database lives.
-#[allow(dead_code)]
-pub fn open() -> Result<Connection, rusqlite::Error> {
-    open_at(&db_path())
-}
-
 /// [`open`] against an explicit path, which is what the tests use
 /// (`:memory:` included).
 pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {

@@ -908,18 +908,17 @@ impl Harness {
     }
 
     /// `codex-login:<waiting|device|failed>` (`--steps`): Codex's sign-in in
-    /// that state with sample values, for captures. Starts nothing.
-    pub(crate) fn step_codex_login(&mut self, rest: &str, cx: &mut Context<Self>) {
-        self.codex_login = match rest {
+    /// that state with sample values, for captures. Starts nothing. Any
+    /// other state is an `Err` and leaves the sign-in as it was.
+    pub(crate) fn step_codex_login(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        self.codex_login = match rest.trim() {
             "waiting" => CodexLogin::Waiting { auth_url: "https://example.invalid/oauth/authorize".into() },
             "device" => CodexLogin::Device { url: "https://auth.openai.com/codex/device".into(), code: "K7QX-9P2M".into() },
             "failed" => CodexLogin::Failed { reason: "The sign-in timed out.".into() },
-            _ => {
-                crate::steps::record_step_failure(&format!("codex-login:{rest}"));
-                return;
-            }
+            other => return Err(format!("unknown codex-login state {other:?} (expected waiting, device or failed)")),
         };
         cx.notify();
+        Ok(())
     }
 
     /// A link in the assist line (the connect screen's, or the Codex card's

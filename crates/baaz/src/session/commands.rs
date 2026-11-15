@@ -2055,8 +2055,9 @@ mod tests {
         vc.update(|window, cx| {
             view.update(cx, |view, cx| {
                 crate::steps::session_step(view, "setprovider:claude-code", window, cx)
-            });
-        });
+            })
+        })
+        .expect("a fresh session swaps lanes through the application");
         vc.update(|_, cx| {
             assert_eq!(*swaps.borrow(), [ProviderId::ClaudeCode]);
             assert!(new_on.borrow().is_empty(), "no new-session detour on a fresh session");
@@ -2065,16 +2066,17 @@ mod tests {
         // Picking the session's own lane is a no-op success, like its
         // menu row — a setter, not a toggle — and an unknown id fails
         // loudly instead of falling back to Muse for a typo.
-        vc.update(|window, cx| {
+        let (same, unknown) = vc.update(|window, cx| {
             view.update(cx, |view, cx| {
-                crate::steps::session_step(view, "setprovider:muse", window, cx);
-                crate::steps::session_step(view, "setprovider:not-a-lane", window, cx)
-            });
+                (
+                    crate::steps::session_step(view, "setprovider:muse", window, cx),
+                    crate::steps::session_step(view, "setprovider:not-a-lane", window, cx),
+                )
+            })
         });
-        assert!(
-            crate::steps::step_failure_names().iter().any(|name| name == "setprovider:not-a-lane"),
-            "an unknown provider id is a named failure, not a silent no-op"
-        );
+        same.expect("picking the session's own lane is a no-op success");
+        let reason = unknown.expect_err("an unknown provider id is a failure, not a silent no-op");
+        assert!(reason.contains("not-a-lane"), "the failure names the id: {reason}");
         vc.update(|_, cx| {
             assert_eq!(swaps.borrow().len(), 1, "the unknown id emitted nothing");
             assert!(new_on.borrow().is_empty());
@@ -2091,33 +2093,32 @@ mod tests {
             });
             assert!(view.read(cx).has_turns(), "the session has turns in it");
         });
-        vc.update(|window, cx| {
+        let detour = vc.update(|window, cx| {
             view.update(cx, |view, cx| {
                 crate::steps::session_step(view, "setprovider:codex", window, cx)
-            });
+            })
         });
         assert_eq!(*new_on.borrow(), [ProviderId::Codex], "the menu's new-session path, verbatim");
-        assert!(
-            crate::steps::step_failure_names().iter().any(|name| name == "setprovider:codex"),
-            "the detour is a named failure, never a silent non-swap"
-        );
+        let reason = detour.expect_err("the detour is a failure, never a silent non-swap");
+        assert!(reason.contains("new session"), "the failure says a new session started: {reason}");
         vc.update(|_, cx| {
             assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse, "the live session never changes lanes");
         });
         // `seteffort:` rides the same shape: a known level applies
         // through the menu's own pick, an unknown spelling fails loudly.
-        vc.update(|window, cx| {
+        let (known, unknown) = vc.update(|window, cx| {
             view.update(cx, |view, cx| {
-                crate::steps::session_step(view, "seteffort:high", window, cx);
-                crate::steps::session_step(view, "seteffort:sideways", window, cx);
-            });
+                (
+                    crate::steps::session_step(view, "seteffort:high", window, cx),
+                    crate::steps::session_step(view, "seteffort:sideways", window, cx),
+                )
+            })
         });
+        known.expect("a known effort level applies");
+        let reason = unknown.expect_err("an unknown effort level is a failure");
+        assert!(reason.contains("sideways"), "the failure names the spelling: {reason}");
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).effort, Some(aui_protocol::ReasoningEffort::High));
-            assert!(
-                crate::steps::step_failure_names().iter().any(|name| name == "seteffort:sideways"),
-                "an unknown effort level is a named failure"
-            );
+            assert_eq!(view.read(cx).effort, Some(aui_protocol::ReasoningEffort::High), "the unknown spelling changed nothing");
         });
         drop(sub);
     }

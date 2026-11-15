@@ -570,67 +570,26 @@ impl Harness {
         self.terminal_service.register_tab_page(key, id.0, state.clone());
         self.browser.agent_tabs.insert(key.to_owned(), id);
     }
-
-    /// Arm the debounced `tabs.json` write: the first change in a dirty
-    /// spell arms one 750 ms window, and the window serialises the CURRENT
-    /// tabs when it fires — a switch inside the window lands on disk
-    /// instead of being overwritten by stale state. Changes inside the
-    /// window only mark dirty (no re-arm), which is the max-delay cap: a
-    /// constantly-changing title lands on disk at most 750 ms after the
-    /// spell starts instead of postponing the write forever. The write
-    /// itself runs off the UI thread, like the sessions write. Each armed
-    /// snapshot carries a monotonic generation, and the writer skips a
-    /// snapshot older than the last written — two saves finishing out of
-    /// order can never let the older state win.
-    pub(crate) fn schedule_tabs_write(&mut self, cx: &mut Context<Self>) {
-        if self.browser.tabs_save_pending {
-            return;
-        }
-        self.browser.tabs_save_pending = true;
-        self.browser.tabs_save_epoch += 1;
-        let epoch = self.browser.tabs_save_epoch;
-        let generation = tabs::next_tabs_generation();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(750))
-                .await;
-            let snapshot = this
-                .update(cx, |this, _| {
-                    if this.browser.tabs_save_epoch != epoch {
-                        return None;
-                    }
-                    this.browser.tabs_save_pending = false;
-                    Some(this.browser.tabs.clone())
-                })
-                .unwrap_or(None);
-            let Some(snapshot) = snapshot else {
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    tabs::write_tabs_snapshot_generation(generation, &snapshot);
-                })
-                .await;
-        })
-        .detach();
+    /// Queue `tabs.json` behind a tab change: the tabs store's delayed
+    /// save (750 ms), so a spell of changes — a title that keeps changing,
+    /// a burst of opens — coalesces into one write off the UI thread, the
+    /// newest snapshot wins, and a constant stream still lands within the
+    /// delay of its first change ([`crate::store::JsonStore`]).
+    pub(crate) fn schedule_tabs_write(&mut self, _cx: &mut Context<Self>) {
+        tabs::save_soon(&self.browser.tabs);
     }
 
     /// Land the tabs durably, synchronously: the quit and window-close
-    /// durability point, next to the layout/sessions flushes. Writes the
-    /// CURRENT model under a generation newer than any armed snapshot —
-    /// a save still in flight can never land after this and win — then
-    /// cancels the armed debounce, whose snapshot is stale by definition.
-    /// A no-op when the tabs never loaded, so a quit that never touched
-    /// the browser still writes nothing; otherwise the in-memory-only
-    /// `last_shown` stamps land here at the latest.
+    /// durability point, next to the session stores' flush. Writes the
+    /// CURRENT model, superseding anything queued. A no-op when the tabs
+    /// never loaded, so a quit that never touched the browser writes
+    /// nothing; otherwise the in-memory-only `last_shown` stamps land here
+    /// at the latest.
     pub(crate) fn flush_tabs_save(&mut self) {
-        self.browser.tabs_save_epoch += 1;
-        self.browser.tabs_save_pending = false;
         if !self.browser.tabs_loaded {
             return;
         }
-        let generation = tabs::next_tabs_generation();
-        tabs::write_tabs_snapshot_generation(generation, &self.browser.tabs);
+        tabs::write(&self.browser.tabs);
     }
 
     /// The webview for `key`, creating it on first use. `key` names an
@@ -1361,12 +1320,12 @@ impl Harness {
     }
 
     /// `browse:<url>`: navigate the active (or home) browser, idempotently —
-    /// navigating to the shown URL is a no-op. Free: no turn, no wire.
-    pub(crate) fn step_browse(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// navigating to the shown URL is a no-op that succeeds (the page is
+    /// already there). An empty URL is an `Err`. Free: no turn, no wire.
+    pub(crate) fn step_browse(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let url = rest.trim();
         if url.is_empty() {
-            crate::steps::record_step_failure("browse:");
-            return;
+            return Err("no URL given".into());
         }
         let key = self.browser_key(cx);
         let owner = self.tab_owner_for_key(&key);
@@ -1382,18 +1341,18 @@ impl Harness {
             }
         }
         cx.notify();
+        Ok(())
     }
 
     /// `tab-new:<url>`: open a tab on `url` — a person tab in Browse
     /// mode, otherwise a tab for the shown owner (a session tab in the
     /// active session, a person tab with no session open) — and select
-    /// it. Empty records a step failure. A blank URL focuses the
+    /// it. An empty payload is an `Err`. A blank URL focuses the
     /// address field, like a by-hand open. Free: no turn, no wire.
-    pub(crate) fn step_tab_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_tab_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let url = rest.trim();
         if url.is_empty() {
-            crate::steps::record_step_failure("tab-new:");
-            return;
+            return Err("no URL given".into());
         }
         // A real page opening ends any open address edit (the blank tab
         // entering Browse opens one), exactly as selecting a tab does.
@@ -1421,7 +1380,7 @@ impl Harness {
                         self.schedule_tabs_write(cx);
                     }
                     cx.notify();
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -1441,6 +1400,7 @@ impl Harness {
             state.update(cx, |state, cx| state.begin_editing(window, cx));
         }
         cx.notify();
+        Ok(())
     }
 
     /// Build (or reuse) the live page for `id` and register it under `key`.
@@ -1515,86 +1475,89 @@ impl Harness {
     }
 
     /// `tab-select:<n>`: select the n-th tab of the shown strip (1-based).
-    /// Unknown or out-of-range records a step failure. Free.
+    /// An unparseable or out-of-range `n` is an `Err`. Free.
     pub(crate) fn step_tab_select(
         &mut self,
         rest: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        match self.strip_tab_at(rest, cx) {
-            Some((key, id)) => self.select_tab(&key, id, window, cx),
-            None => crate::steps::record_step_failure(&format!("tab-select:{rest}")),
-        }
+    ) -> crate::steps::StepResult {
+        let (key, id) = self.strip_tab_at(rest, cx).ok_or_else(|| format!("no tab `{rest}` in the shown strip"))?;
+        self.select_tab(&key, id, window, cx);
+        Ok(())
     }
 
     /// `tab-close:<n>`: close the n-th tab of the shown strip (1-based),
-    /// activating its neighbour. Unknown or out-of-range records a step
-    /// failure. Free.
+    /// activating its neighbour. An unparseable or out-of-range `n` is an
+    /// `Err`. Free.
     pub(crate) fn step_tab_close(
         &mut self,
         rest: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some((key, id)) = self.strip_tab_at(rest, cx) else {
-            crate::steps::record_step_failure(&format!("tab-close:{rest}"));
-            return;
-        };
+    ) -> crate::steps::StepResult {
+        let (key, id) = self.strip_tab_at(rest, cx).ok_or_else(|| format!("no tab `{rest}` in the shown strip"))?;
         self.close_tab(&key, id, window, cx);
+        Ok(())
     }
 
     /// `tab-pin:<n>`: pin (or unpin, when already pinned) the n-th
     /// person tab of the current project (1-based, on-screen order).
-    /// Unknown or out-of-range records a step failure. Free.
-    pub(crate) fn step_tab_pin(&mut self, rest: &str, cx: &mut Context<Self>) {
-        match self.browse_tab_at(rest, cx) {
-            Some(id) => {
-                self.toggle_pin_browse_tab(id, cx);
-            }
-            None => crate::steps::record_step_failure(&format!("tab-pin:{rest}")),
-        }
+    /// An unparseable or out-of-range `n` is an `Err`. Free.
+    pub(crate) fn step_tab_pin(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?;
+        self.toggle_pin_browse_tab(id, cx);
+        Ok(())
     }
 
     /// `tab-menu:<n>`: open the n-th person tab's right-click menu
-    /// (1-based, on-screen order). Unknown or out-of-range records a step
-    /// failure. Free.
-    pub(crate) fn step_tab_menu(&mut self, rest: &str, cx: &mut Context<Self>) {
-        match self.browse_tab_at(rest, cx) {
-            Some(id) => {
-                let (pinned, in_folder) = self.browser.tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
-                // A right-click lands mid-sidebar at a fixed height: the menu
-                // seats at the pointer, so the capture shows it over the page.
-                let menu = aui::screens::sidebar::BrowseMenu {
-                    target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned, in_folder },
-                    at: gpui::point(gpui::px(150.0), gpui::px(300.0)),
-                };
-                self.open_browse_menu(menu, cx);
-            }
-            None => crate::steps::record_step_failure(&format!("tab-menu:{rest}")),
-        }
+    /// (1-based, on-screen order). An unparseable or out-of-range `n` is
+    /// an `Err`. Free.
+    pub(crate) fn step_tab_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let id = self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?;
+        let (pinned, in_folder) = self.browser.tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
+        // A right-click lands mid-sidebar at a fixed height: the menu
+        // seats at the pointer, so the capture shows it over the page.
+        let menu = aui::screens::sidebar::BrowseMenu {
+            target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned, in_folder },
+            at: gpui::point(gpui::px(150.0), gpui::px(300.0)),
+        };
+        self.open_browse_menu(menu, cx);
+        Ok(())
     }
 
     /// `folder-new:<name>`: a new folder in the current space holding the
     /// active person tab, named `<name>` (the new-folder flow, committed).
-    pub(crate) fn step_folder_new(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// A blank name, or no active person tab to put in it, is an `Err` and
+    /// makes no folder.
+    pub(crate) fn step_folder_new(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let name = rest.trim();
+        if name.is_empty() {
+            return Err("no folder name given".into());
+        }
         self.ensure_tabs_loaded(cx);
         let space = self.browse_space().unwrap_or_default();
-        let active = self.browser.tabs.active_of(&Owner::Person, Some(&space));
-        let id = self.browser.tabs.add_folder(&space, rest.trim());
-        if let Some(tab) = active {
-            self.browser.tabs.set_folder(tab, Some(&id));
-        }
+        let tab = self
+            .browser
+            .tabs
+            .active_of(&Owner::Person, Some(&space))
+            .ok_or("no active person tab to put in the folder")?;
+        let id = self.browser.tabs.add_folder(&space, name);
+        let moved = self.browser.tabs.set_folder(tab, Some(&id));
         self.schedule_tabs_write(cx);
         cx.notify();
+        if moved { Ok(()) } else { Err("the active tab did not move into the new folder".into()) }
     }
 
     /// `space-new:<name>`: add a space named `<name>` (it becomes current).
-    pub(crate) fn step_space_new(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// A blank name is the by-hand default, "Space N" — still a new space,
+    /// so it succeeds.
+    pub(crate) fn step_space_new(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.ensure_tabs_loaded(cx);
         self.browser.tabs.add_space(rest.trim());
         self.schedule_tabs_write(cx);
         cx.notify();
+        Ok(())
     }
 
     /// Resolve `rest` to the current project's n-th person tab (1-based,
@@ -1748,8 +1711,9 @@ impl Harness {
 
     /// `tab-discard-now`: drop every hidden tab's live page at once,
     /// ignoring the idle timer (audible and agent-active pages are still
-    /// spared). The live-check hook. Free.
-    pub(crate) fn step_tab_discard_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// spared). The live-check hook. Nothing hidden to drop is still
+    /// done (every hidden page is gone), so it always succeeds. Free.
+    pub(crate) fn step_tab_discard_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
         let space = self.owner_space(&owner);
@@ -1757,6 +1721,7 @@ impl Harness {
         let centre = self.browse_centre_shown();
         self.discard_hidden_tabs(true, shown, centre, cx);
         cx.notify();
+        Ok(())
     }
 
     /// Attach `bytes` (a page screenshot) to the active session's composer
@@ -4070,28 +4035,36 @@ impl Harness {
         }
     }
 
-    /// `omnibox:<text>`: focus the Browse address field and type `text` —
-    /// the `browse-omnibox` capture aid. The dropdown stays open on the
-    /// typed text. Free: no turn, no wire.
-    pub(crate) fn step_history(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// `history:<url>|<title>|<days ago>|<page words>`: record a visit to
+    /// `url` `days ago` days back (blank = now), with optional page text for
+    /// the omnibox's full-text match. An unrecordable URL or an unparseable
+    /// day count is an `Err`. Free: no turn, no wire.
+    pub(crate) fn step_history(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let mut parts = rest.splitn(4, '|');
         let url = parts.next().unwrap_or("").trim().to_owned();
         let title = parts.next().unwrap_or("").trim().to_owned();
-        let days: u64 = parts.next().and_then(|d| d.trim().parse().ok()).unwrap_or(0);
+        let days: u64 = match parts.next().map(str::trim) {
+            None | Some("") => 0,
+            Some(days) => days.parse().map_err(|_| format!("`{days}` is not a day count"))?,
+        };
         let words = parts.next().unwrap_or("").trim().to_owned();
         let when = tabs::now_ms().saturating_sub(days * 86_400_000);
         if !self.browser.db().record_visit(&url, &title, when) {
-            crate::steps::record_step_failure(&format!("history:{rest}"));
-            return;
+            return Err(format!("`{url}` could not be recorded as a visit"));
         }
         if !words.is_empty() {
             self.browser.db().set_text(&url, &title, &words);
         }
         self.browser.history_changed();
         cx.notify();
+        Ok(())
     }
 
-    pub(crate) fn step_bookmark(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// `bookmark:<url>|<title>|<folder>`: bookmark `url` on the bar, or in
+    /// the folder named `<folder>` (made when missing). An unrecordable
+    /// URL, a folder that cannot be found or made, or a refused add is an
+    /// `Err`. Free: no turn, no wire.
+    pub(crate) fn step_bookmark(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let mut parts = rest.splitn(3, '|');
         let url = parts.next().unwrap_or("").trim().to_owned();
         let title = parts.next().unwrap_or("").trim().to_owned();
@@ -4105,95 +4078,99 @@ impl Harness {
                 .find(|f| f.name == folder_name)
                 .map(|f| f.id)
                 .or_else(|| bookmarks::add_folder(conn, &folder_name, None, "baaz"))
-                .unwrap_or(bookmarks::BAR)
+                .ok_or_else(|| format!("no bookmark folder `{folder_name}` and none could be made"))?
         };
-        if !history::recordable(&url) || bookmarks::add(conn, &url, &title, folder, tabs::now_ms()).is_none() {
-            crate::steps::record_step_failure(&format!("bookmark:{rest}"));
-            return;
+        if !history::recordable(&url) {
+            return Err(format!("`{url}` cannot be bookmarked"));
+        }
+        if bookmarks::add(conn, &url, &title, folder, tabs::now_ms()).is_none() {
+            return Err(format!("bookmarking `{url}` was refused"));
         }
         self.browser.bookmarks_changed();
         cx.notify();
+        Ok(())
     }
 
-    pub(crate) fn step_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `bookmarks`: enter Browse and open the address field scoped to
+    /// bookmarks. No page in the centre to anchor the field is an `Err`.
+    /// Free.
+    pub(crate) fn step_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.ensure_tabs_loaded(cx);
         if self.browse_centre_page(window, cx).is_none() {
-            crate::steps::record_step_failure("bookmarks");
-            return;
+            return Err("no page is open in Browse".into());
         }
         self.focus_browse_address_with("", window, cx);
         self.browser.field_scope = Some(None);
         cx.notify();
+        Ok(())
     }
 
-    /// `omnibox:<text>`: focus the address field and type `text`.
-    pub(crate) fn step_omnibox(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `omnibox:<text>`: enter Browse, focus the address field and type
+    /// `text` — the `browse-omnibox` capture aid; the dropdown stays open
+    /// on the typed text. No page in the centre is an `Err`. Free.
+    pub(crate) fn step_omnibox(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.ensure_tabs_loaded(cx);
         if self.browse_centre_page(window, cx).is_none() {
-            crate::steps::record_step_failure(&format!("omnibox:{rest}"));
-            return;
+            return Err("no page is open in Browse".into());
         }
         self.focus_browse_address_with(rest, window, cx);
+        Ok(())
     }
 
     /// `find:<query>`: open the find strip on the shown tab with `query`
     /// typed (a scripted "3 of 12" result lands through the poll path, so
-    /// the `browse-find` capture shows the count). Empty records a step
-    /// failure. Free: no turn, no wire.
-    pub(crate) fn step_find(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// the `browse-find` capture shows the count). An empty query, no
+    /// shown tab, or a find strip that did not open is an `Err`. Free: no
+    /// turn, no wire.
+    pub(crate) fn step_find(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let query = rest.trim();
         if query.is_empty() {
-            crate::steps::record_step_failure(&format!("find:{rest}"));
-            return;
+            return Err("no query given".into());
         }
         self.browser.fake_scripts.push(chrome::FakePageScript::Find { query: query.to_owned(), active: 3, total: 12 });
         if !self.rebuild_shown_browse_page(window, cx) {
-            crate::steps::record_step_failure(&format!("find:{rest}"));
-            return;
+            return Err("no tab is shown in Browse".into());
         }
         self.open_browse_find(window, cx);
-        if let Some(input) = self.browse_find.clone() {
-            let query = query.to_owned();
-            input.update(cx, |input, cx| input.set_value(query, window, cx));
-        }
+        let input = self.browse_find.clone().ok_or("the find strip did not open")?;
+        let query = query.to_owned();
+        input.update(cx, |input, cx| input.set_value(query, window, cx));
         self.find_input_changed(cx);
+        Ok(())
     }
 
     /// `permission:<kinds>`: script a permission ask (`camera,microphone`)
     /// on the shown tab, so the `browse-permission` capture shows the
-    /// strip. Unknown kinds record a step failure. Free.
-    pub(crate) fn step_permission(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// strip. Unknown kinds, or no shown tab, is an `Err`. Free.
+    pub(crate) fn step_permission(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        let Some(kinds) = chrome::parse_permission_kinds(rest) else {
-            crate::steps::record_step_failure(&format!("permission:{rest}"));
-            return;
-        };
+        let kinds = chrome::parse_permission_kinds(rest).ok_or_else(|| format!("`{rest}` names an unknown permission"))?;
         self.browser.fake_scripts.push(chrome::FakePageScript::Permission {
             id: 7,
             origin: "https://example.com".to_owned(),
             kinds,
         });
         if !self.rebuild_shown_browse_page(window, cx) {
-            crate::steps::record_step_failure(&format!("permission:{rest}"));
+            return Err("no tab is shown in Browse".into());
         }
+        Ok(())
     }
 
     /// `download:<name>`: script an active download (`done:<name>` lands
     /// it) on the shown tab and open the popover, so the
-    /// `browse-downloads` capture shows the list. Empty records a step
-    /// failure. Free.
-    pub(crate) fn step_download(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `browse-downloads` capture shows the list. An empty name, or no
+    /// shown tab, is an `Err`. Free.
+    pub(crate) fn step_download(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let (done, name) = match rest.trim().strip_prefix("done:") {
             Some(done) => (true, done.trim()),
             None => (false, rest.trim()),
         };
         if name.is_empty() {
-            crate::steps::record_step_failure(&format!("download:{rest}"));
-            return;
+            return Err("no file name given".into());
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
         self.browser.fake_scripts.push(chrome::FakePageScript::Download(aui_webview::DownloadState {
@@ -4206,61 +4183,64 @@ impl Harness {
             state: if done { aui_webview::DownloadStatus::Complete } else { aui_webview::DownloadStatus::Downloading },
         }));
         if !self.rebuild_shown_browse_page(window, cx) {
-            crate::steps::record_step_failure(&format!("download:{rest}"));
-            return;
+            return Err("no tab is shown in Browse".into());
         }
         self.browser.downloads_open = true;
         self.browser.downloads_rendered = false;
         self.browser.extensions_open = false;
         self.browser.more_open = false;
         cx.notify();
+        Ok(())
     }
 
     /// `crashed:<reason>`: script a renderer crash on the shown tab, so
-    /// the `browse-crashed` capture shows the Baaz error page. Free.
-    pub(crate) fn step_crashed(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// the `browse-crashed` capture shows the Baaz error page. A blank
+    /// reason uses a default one; no shown tab is an `Err`. Free.
+    pub(crate) fn step_crashed(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let reason = rest.trim();
         let reason = if reason.is_empty() { "the page crashed (-1)" } else { reason };
         self.browser.fake_scripts.push(chrome::FakePageScript::Crashed(reason.to_owned()));
         if !self.rebuild_shown_browse_page(window, cx) {
-            crate::steps::record_step_failure(&format!("crashed:{rest}"));
+            return Err("no tab is shown in Browse".into());
         }
+        Ok(())
     }
 
     /// `more-menu`: open the ⋯ page-actions menu on the shown tab, so the
-    /// `browse-more-menu` capture shows it. A no-op with no shown tab
-    /// (records a step failure). Free.
-    pub(crate) fn step_more_menu(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `browse-more-menu` capture shows it. No shown tab is an `Err`.
+    /// Free.
+    pub(crate) fn step_more_menu(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         if self.browse_centre_page(window, cx).is_none() {
-            crate::steps::record_step_failure(&format!("more-menu:{rest}"));
-            return;
+            return Err("no page is open in Browse".into());
         }
         self.browser.more_open = true;
         self.browser.downloads_open = false;
         self.browser.extensions_open = false;
         cx.notify();
+        Ok(())
     }
 
-    /// `extensions`: open the extensions popover on the shown tab. A no-op
-    /// with no shown tab (records a step failure). Free.
-    pub(crate) fn step_extensions(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `extensions`: open the extensions popover on the shown tab. No
+    /// shown tab is an `Err`. Free.
+    pub(crate) fn step_extensions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         if self.browse_centre_page(window, cx).is_none() {
-            crate::steps::record_step_failure(&format!("extensions:{rest}"));
-            return;
+            return Err("no page is open in Browse".into());
         }
         self.browser.extensions_open = true;
         self.browser.downloads_open = false;
         self.browser.more_open = false;
         cx.notify();
+        Ok(())
     }
 
     /// `fixture-session:<name>`: park a local session row plus one session
     /// tab carrying `https://example.com`, and carry it into Browse — the
-    /// offline `browse-from-session` capture aid. Free: no turn, no wire.
-    pub(crate) fn step_fixture_session(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// offline `browse-from-session` capture aid. A blank name uses
+    /// "Fix ledger chart". Always succeeds. Free: no turn, no wire.
+    pub(crate) fn step_fixture_session(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let name = rest.trim();
         let name = if name.is_empty() { "Fix ledger chart" } else { name };
         let id = format!("fixture-{}", name.to_lowercase().replace(' ', "-"));
@@ -4283,20 +4263,23 @@ impl Harness {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.browse_session_tab = Some(tab_id);
         cx.notify();
+        Ok(())
     }
 
     /// `page-focus`: give the active browser page the keyboard, focusing the
     /// pane's own focus handle — the same hand-over an explicit person open
-    /// performs. Free: no turn, no wire.
-    pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// performs. In Browse with no centre page it is an `Err`. Whether the
+    /// native page then takes the keyboard is the backend's, and settles
+    /// later: it is logged, not judged, so the hand-over itself succeeds.
+    /// Free: no turn, no wire.
+    pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         // In Browse the active page is the centre's, not the pane's.
         if self.mode == crate::layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
-            if let Some(state) = self.browse_centre_page(window, cx) {
-                let focus = state.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-            }
-            return;
+            let state = self.browse_centre_page(window, cx).ok_or("no page is open in Browse")?;
+            let focus = state.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+            return Ok(());
         }
         let key = self.browser_key(cx);
         let state = self.browser_for(&key, false, window, cx);
@@ -4307,6 +4290,7 @@ impl Harness {
         } else {
             crate::baaz_log!("browser: page-focus: page did not take the keyboard");
         }
+        Ok(())
     }
 
     /// Deliver one keystroke routed out of a focused Chromium page: first
@@ -4555,10 +4539,6 @@ pub(crate) struct BrowserRegistry {
     /// registry is built before `sessions.json` is read, so the first
     /// browser use loads.
     pub tabs_loaded: bool,
-    /// The debounced `tabs.json` write's generation; only the latest fires.
-    pub tabs_save_epoch: u64,
-    /// Whether a `tabs.json` write is armed.
-    pub tabs_save_pending: bool,
     /// The tab the agent tools act on per session key, so discard never
     /// drops the agent's active tab and switches re-register it.
     pub agent_tabs: HashMap<String, TabId>,
@@ -4706,8 +4686,6 @@ impl BrowserRegistry {
             shot_pending: HashSet::new(),
             tabs: Tabs::default(),
             tabs_loaded: false,
-            tabs_save_epoch: 0,
-            tabs_save_pending: false,
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
             progress_hole: Default::default(),
@@ -5558,8 +5536,8 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.set_mode(crate::layout::Mode::Browse, window, cx);
-                harness.step_tab_new("https://www.wikipedia.org/", window, cx);
-                harness.step_tab_new("https://docs.rs/", window, cx);
+                harness.step_tab_new("https://www.wikipedia.org/", window, cx).expect("tab-new opens wikipedia");
+                harness.step_tab_new("https://docs.rs/", window, cx).expect("tab-new opens docs.rs");
             });
         });
         vc.run_until_parked();
@@ -5606,7 +5584,7 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.set_mode(crate::layout::Mode::Browse, window, cx);
-                harness.step_tab_new("https://www.wikipedia.org/", window, cx);
+                harness.step_tab_new("https://www.wikipedia.org/", window, cx).expect("tab-new opens wikipedia");
             });
         });
         vc.run_until_parked();
@@ -5828,7 +5806,7 @@ mod tests {
                 // page at once but spares the agent's active tab — the
                 // live probe drives this verb.
                 harness.select_tab("tab-probe", first, window, cx);
-                harness.step_tab_discard_now(window, cx);
+                harness.step_tab_discard_now(window, cx).expect("tab-discard-now runs");
                 assert_eq!(
                     harness.browser.states.len(),
                     1,

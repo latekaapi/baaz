@@ -1051,7 +1051,7 @@ pub fn restore_defaults() -> bool {
 /// Unbind an action in a context: write `null` at its current effective
 /// keystroke. Refuses when that keystroke is [`RESERVED`] — ⌘Q stays bound —
 /// and is a no-op when the action has no binding there.
-#[allow(dead_code)] // exercised by tests; no dialog affordance maps to it (Clear restores via clear_binding)
+#[cfg(test)]
 pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapError> {
     if !known_action(action) || action == "NoAction" {
         return Err(KeymapError::UnknownAction(action.to_string()));

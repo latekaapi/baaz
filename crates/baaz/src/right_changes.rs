@@ -573,7 +573,9 @@ impl Harness {
             return;
         }
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.step_tab_new(&url, window, cx);
+        if let Err(reason) = self.step_tab_new(&url, window, cx) {
+            crate::baaz_log!("view_pull_request: no tab opened: {reason}");
+        }
     }
 
     /// The transcript's `+N −M` chip: Changes, that turn's files opened, the
@@ -605,21 +607,22 @@ impl Harness {
 
 impl Harness {
     /// `changes-open:<path>`: open that row's diff (idempotent), refreshing
-    /// first so the tree is there. Unknown paths record a step failure.
-    pub(crate) fn step_changes_open(&mut self, rest: &str, cx: &mut Context<Self>) {
+    /// first so the tree is there. No project for the pane, or a path that
+    /// is not a changed row, is an `Err`; a row already open succeeds.
+    pub(crate) fn step_changes_open(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let path = rest.trim();
-        let Some((root, _)) = self.right_project() else {
-            crate::steps::record_step_failure("changes-open:");
-            return;
-        };
+        let (root, _) = self.right_project().ok_or("no project for the right pane")?;
         self.select_right(crate::layout::RightKind::Changes, cx);
-        let Some(change) = self.right_cache.git_for(&root).flatten().and_then(|t| t.change(path).cloned()) else {
-            crate::steps::record_step_failure(&format!("changes-open:{path}"));
-            return;
-        };
+        let change = self
+            .right_cache
+            .git_for(&root)
+            .flatten()
+            .and_then(|t| t.change(path).cloned())
+            .ok_or_else(|| format!("no changed row `{path}`"))?;
         if !self.right_cache.changes_expanded_for(&root).contains(path) {
             self.toggle_change_row(&root, &change, cx);
         }
+        Ok(())
     }
 }
 

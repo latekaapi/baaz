@@ -2765,7 +2765,6 @@ mod tests {
     #[gpui::test]
     fn malformed_requests_error_and_unknown_tools_name_themselves(cx: &mut gpui::TestAppContext) {
         let fx = fixture(cx, "s1");
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
         stream.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
         stream.write_all(br#"{"id": 501}"#).expect("malformed writes");
@@ -2781,7 +2780,6 @@ mod tests {
         drop(stream);
         // The server outlives a bad line: the next connection works.
         assert_eq!(result(&call(cx, &fx, "terminal_list", json!({}))), json!({"tabs": []}));
-        let _ = id;
         let unknown = call(cx, &fx, "frobnicate", json!({}));
         let message = err_text(&unknown);
         assert!(message.contains("unknown tool") && message.contains("terminal_run"), "names: {message}");

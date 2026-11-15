@@ -118,7 +118,7 @@ mod wire;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use aui_tokens::{scale, AuiTheme, ThemeKind};
+use aui_tokens::ThemeKind;
 use gpui::{px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions};
 use gpui_kit::component::{Root, TitleBar};
 
@@ -589,7 +589,6 @@ fn run_bench(args: Args) {
         if crate::clock::deterministic() {
             cx.set_reduce_motion(true);
         }
-        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
         app::bind_keys(cx);
         app::set_menus(cx);
 
@@ -761,7 +760,7 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
                                         .clone()
                                         .downcast::<crate::app::Harness>()
                                         .map(|harness| {
-                                            harness.update(cx, |this, _| this.flush_right_save())
+                                            harness.update(cx, |this, _| this.flush_stores())
                                         })
                                         .unwrap_or(())
                                 })
@@ -888,8 +887,13 @@ fn main() {
     let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
     // A `shell:` step raises a real approval over a live wire, which does not
     // land inside a fixed delay (finding F9).
-    let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
-    let await_steps = !args.steps.is_empty() || !args.login_steps.is_empty();
+    let waits = shot::CaptureWaits {
+        steps: !args.steps.is_empty() || !args.login_steps.is_empty(),
+        approval: args.steps.iter().any(|step| step.starts_with("shell:")),
+        // A replay runs no agent process: no child for the quit to orphan,
+        // and no frame that will ever end its turn.
+        turns: args.replay.is_none(),
+    };
     // 1. The asset source first: the harness's mascot PNGs, then `aui-icons`
     // over gpui-kit's set (see `crate::mascot`).
     let app = gpui_kit::application().with_assets(crate::mascot::BaazAssets);
@@ -925,8 +929,6 @@ fn main() {
         if crate::clock::deterministic() {
             cx.set_reduce_motion(true);
         }
-        // 3. The product text scale.
-        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
         // 4. The app's own keys, then the native menu bar: macOS reads each
         // menu item's shortcut from the keymap, so the menus come second.
         app::bind_keys(cx);
@@ -1002,7 +1004,7 @@ fn main() {
                                             // runs (a quit with a Peek open
                                             // SIGSEGV'd in shutdown, 11 Nov).
                                             this.close_peek(cx);
-                                            this.flush_right_save();
+                                            this.flush_stores();
                                             this.flush_tabs_save();
                                             this.persist_layout();
                                         })
@@ -1023,7 +1025,7 @@ fn main() {
         })
         .detach();
         match screenshot {
-            Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, capture, cx),
+            Some(path) => shot::capture_and_quit(handle, path, delay, waits, capture, cx),
             None => cx.activate(true),
         }
     });

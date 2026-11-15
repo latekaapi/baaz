@@ -1072,11 +1072,12 @@ impl crate::app::Harness {
     /// flag (never `layout.feedback_mode`) and enters Active; `pause` /
     /// `resume` move between Active and Paused; `off` clears the run's
     /// flag and parks Off keeping the draft; `discard` clears the draft
-    /// at once; `done` saves like the Done button. Idempotent where it
-    /// can be (`on` while Active stays Active). A no-op while saving. An
-    /// unknown sub records a step failure — there is no forwarding: the
-    /// session verb `feedback:<text>` (the open approval/clarify field)
-    /// is a different verb again and dispatches on its own.
+    /// at once; `done` saves like the Done button. Idempotent where the
+    /// shell already stands in the asked state: `on` while Active, `pause`
+    /// while Paused, `resume` while Active, `off` while Off, `discard` with
+    /// an empty draft. There is no forwarding: the session verb
+    /// `feedback:<text>` (the open approval/clarify field) is a different
+    /// verb again and dispatches on its own.
     ///
     /// The F3 note-taking subs run through the same handlers as the
     /// mouse: `hover:x,y` hovers, `click:x,y` presses and releases at one
@@ -1087,51 +1088,73 @@ impl crate::app::Harness {
     /// issued while a capture is pending queues behind it instead of
     /// cancelling it, and a `pause`/`resume`/`done`/`discard` issued while
     /// anything is still pending queues behind it too, running in order
-    /// when the queue reaches it. A note sub with no popover and nothing
-    /// pending, an empty text, an unparseable coordinate, or a pointing
-    /// sub while not Active records a step failure.
-    pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// when the queue reaches it. A queued sub returns `Ok` at once; if it
+    /// never resolves, the pump ([`Self::step_pump_tick`]) or a pause fails
+    /// it later under its own step name.
+    ///
+    /// `Err` (nothing done) for: any sub while a report is saving; an
+    /// unknown sub; an unparseable coordinate; a pointing or note sub while
+    /// not Active; a `hover:` with a popover, capture or press in the way;
+    /// a `note:` with empty text, or with no popover and nothing pending;
+    /// a `cancel` with no popover, capture or queued step; `on` while
+    /// Paused (it stays Paused); `pause`/`resume` while Off; and a `done`
+    /// with nothing to save.
+    pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         if self.feedback.saving {
-            return;
+            return Err("a feedback report is still saving".to_owned());
         }
         let rest = rest.trim();
+        let not_active = |phase: FeedbackPhase| format!("feedback mode is {phase:?}, not Active");
         if let Some(payload) = rest.strip_prefix("hover:") {
-            match parse_feedback_point(payload) {
-                Some(point) if self.feedback.phase == FeedbackPhase::Active => {
-                    self.feedback_hover_at(point, window, cx);
-                }
-                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            let Some(point) = parse_feedback_point(payload) else {
+                return Err(format!("unparseable point {payload:?} (expected x,y)"));
+            };
+            if self.feedback.phase != FeedbackPhase::Active {
+                return Err(not_active(self.feedback.phase));
             }
+            if !self.feedback.slot_contains(point)
+                && (self.feedback.popover.is_some()
+                    || self.feedback.capture_pending.is_some()
+                    || self.feedback.press.is_some())
+            {
+                return Err("nothing hovers: a popover, capture or press is in the way".to_owned());
+            }
+            self.feedback_hover_at(point, window, cx);
             cx.notify();
-            return;
+            return Ok(());
         }
         if let Some(payload) = rest.strip_prefix("click:") {
-            match parse_feedback_point(payload) {
-                Some(point) if self.feedback.phase == FeedbackPhase::Active => {
-                    let step = QueuedStep::Click { step: format!("feedback-mode:{rest}"), point };
-                    self.run_or_queue_step(step, window, cx);
-                }
-                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            let Some(point) = parse_feedback_point(payload) else {
+                return Err(format!("unparseable point {payload:?} (expected x,y)"));
+            };
+            if self.feedback.phase != FeedbackPhase::Active {
+                return Err(not_active(self.feedback.phase));
             }
+            let step = QueuedStep::Click { step: format!("feedback-mode:{rest}"), point };
+            self.run_or_queue_step(step, window, cx);
             cx.notify();
-            return;
+            return Ok(());
         }
         if let Some(payload) = rest.strip_prefix("drag:") {
-            match parse_feedback_drag(payload) {
-                Some((start, end)) if self.feedback.phase == FeedbackPhase::Active => {
-                    let step =
-                        QueuedStep::Drag { step: format!("feedback-mode:{rest}"), start, end };
-                    self.run_or_queue_step(step, window, cx);
-                }
-                _ => crate::steps::record_step_failure(&format!("feedback-mode:{rest}")),
+            let Some((start, end)) = parse_feedback_drag(payload) else {
+                return Err(format!("unparseable drag {payload:?} (expected x1,y1,x2,y2)"));
+            };
+            if self.feedback.phase != FeedbackPhase::Active {
+                return Err(not_active(self.feedback.phase));
             }
+            let step = QueuedStep::Drag { step: format!("feedback-mode:{rest}"), start, end };
+            self.run_or_queue_step(step, window, cx);
             cx.notify();
-            return;
+            return Ok(());
         }
         if let Some(text) = rest.strip_prefix("note:") {
-            if self.feedback.phase != FeedbackPhase::Active || text.trim().is_empty() {
-                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
-            } else if self.feedback.popover.is_some() && self.feedback.step_queue.is_empty() {
+            if self.feedback.phase != FeedbackPhase::Active {
+                return Err(not_active(self.feedback.phase));
+            }
+            if text.trim().is_empty() {
+                return Err("a note needs text (`note:<text>`)".to_owned());
+            }
+            if self.feedback.popover.is_some() && self.feedback.step_queue.is_empty() {
                 self.fill_feedback_note(text, window, cx);
                 self.save_feedback_note(window, cx);
             } else if self.feedback.popover.is_some()
@@ -1146,28 +1169,40 @@ impl crate::app::Harness {
                 let step = QueuedStep::Note { step: format!("feedback-mode:{rest}"), text: text.to_owned() };
                 self.queue_step(step, cx);
             } else {
-                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
+                return Err("no note popover is open and nothing is pending to open one".to_owned());
             }
             cx.notify();
-            return;
+            return Ok(());
         }
         if rest == "cancel" {
+            if self.feedback.popover.is_none()
+                && self.feedback.capture_pending.is_none()
+                && self.feedback.step_queue.is_empty()
+            {
+                return Err("nothing to cancel: no popover, capture or queued step".to_owned());
+            }
             // A cancel supersedes queued steps: their popovers will never
             // open, so drop them rather than failing each on expiry.
             self.feedback.step_queue.clear();
             self.cancel_feedback_note(window, cx);
             cx.notify();
-            return;
+            return Ok(());
         }
         match rest {
             "on" => {
                 self.feedback.forced_on = true;
-                if self.feedback.phase == FeedbackPhase::Off {
-                    self.feedback.toggle(true);
-                    self.enter_feedback_active(window, cx);
-                } else {
-                    cx.notify();
+                match self.feedback.phase {
+                    FeedbackPhase::Off => {
+                        self.feedback.toggle(true);
+                        self.enter_feedback_active(window, cx);
+                    }
+                    FeedbackPhase::Active => cx.notify(),
+                    FeedbackPhase::Paused => {
+                        cx.notify();
+                        return Err("feedback mode is Paused; `on` does not resume it (use `resume`)".to_owned());
+                    }
                 }
+                Ok(())
             }
             "pause" => {
                 // Behind pending steps the pause waits its turn instead of
@@ -1178,10 +1213,13 @@ impl crate::app::Harness {
                         QueuedStep::Pause { step: format!("feedback-mode:{rest}") },
                         cx,
                     );
+                } else if self.feedback.phase == FeedbackPhase::Off {
+                    return Err(not_active(self.feedback.phase));
                 } else {
                     self.feedback.pause();
                 }
                 cx.notify();
+                Ok(())
             }
             "resume" => {
                 if self.has_pending_steps() {
@@ -1189,16 +1227,26 @@ impl crate::app::Harness {
                         QueuedStep::Resume { step: format!("feedback-mode:{rest}") },
                         cx,
                     );
-                } else if self.feedback.phase == FeedbackPhase::Paused {
-                    self.feedback.resume();
-                    self.enter_feedback_active(window, cx);
+                } else {
+                    match self.feedback.phase {
+                        FeedbackPhase::Paused => {
+                            self.feedback.resume();
+                            self.enter_feedback_active(window, cx);
+                        }
+                        FeedbackPhase::Active => {}
+                        FeedbackPhase::Off => {
+                            return Err("feedback mode is Off; nothing to resume".to_owned());
+                        }
+                    }
                 }
                 cx.notify();
+                Ok(())
             }
             "off" => {
                 self.feedback.forced_on = false;
                 self.feedback.setting_off();
                 cx.notify();
+                Ok(())
             }
             "discard" => {
                 if self.has_pending_steps() {
@@ -1210,6 +1258,7 @@ impl crate::app::Harness {
                     self.feedback.discard_all();
                 }
                 cx.notify();
+                Ok(())
             }
             "done" => {
                 if self.has_pending_steps() {
@@ -1218,13 +1267,18 @@ impl crate::app::Harness {
                         cx,
                     );
                     cx.notify();
+                    return Ok(());
+                }
+                self.finish_feedback(window, cx);
+                if self.feedback.saving {
+                    Ok(())
                 } else {
-                    self.finish_feedback(window, cx);
+                    Err("nothing to save: no notes and no filled popover (or feedback mode is Off)".to_owned())
                 }
             }
-            _ => {
-                crate::steps::record_step_failure(&format!("feedback-mode:{rest}"));
+            other => {
                 cx.notify();
+                Err(format!("unknown feedback-mode sub {other:?}"))
             }
         }
     }
@@ -3424,9 +3478,9 @@ mod tests {
         // the capture, the note files it once the popover lands.
         let failures_before = crate::steps::step_failures();
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_feedback("note:drawn note", window, cx))
+            baaz.update(cx, |h, cx| h.step_feedback("note:drawn note", window, cx).expect("the step runs"))
         });
         pump_frames(vc, 8);
         vc.update(|_, cx| {
@@ -3511,7 +3565,7 @@ mod tests {
             bounds_center(baaz.read(cx).feedback.slot_bounds.expect("the Active slot draws bounds"))
         });
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(
@@ -3618,7 +3672,7 @@ mod tests {
         inject_hits(&baaz, vc, vec![f3_hit(800.0, 530.0, 100.0, 40.0, "New session")]);
         let failures_before = crate::steps::step_failures();
         for sub in ["on", "click:846,551", "note:x", "pause"] {
-            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback(sub, window, cx)));
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback(sub, window, cx).expect("the step runs")));
         }
         pump_frames(vc, 8);
         vc.update(|_, cx| {
@@ -4105,21 +4159,19 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         assert!(!vc.update(|_, cx| baaz.read(cx).layout.feedback_mode));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
             assert!(harness.feedback.forced_on, "the run-only flag parks");
             assert!(!harness.layout.feedback_mode, "the persisted setting never moves");
         });
-        let failures_before = crate::steps::step_failures();
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("bogus", window, cx)));
-        assert_eq!(crate::steps::step_failures(), failures_before + 1);
+        let bogus = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("bogus", window, cx)));
         assert!(
-            crate::steps::step_failure_names().iter().any(|name| name == "feedback-mode:bogus"),
-            "the unknown sub fails under its own verb"
+            bogus.as_ref().is_err_and(|reason| reason.contains("bogus")),
+            "the unknown sub fails, naming itself: {bogus:?}"
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("off", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("off", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
@@ -4372,7 +4424,7 @@ mod tests {
         enter_active(&baaz, vc);
         let calls =
             inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
             "no popover yet: the capture has not landed"
@@ -4402,7 +4454,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, Vec::new());
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx).expect("the step runs")));
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
             "no popover yet: the click waits for the tree to warm"
@@ -4712,15 +4764,15 @@ mod tests {
                 f3_hit(700.0, 330.0, 100.0, 80.0, "Canvas"),
             ],
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_feedback("note:Make this quieter", window, cx))
+            baaz.update(cx, |h, cx| h.step_feedback("note:Make this quieter", window, cx).expect("the step runs"))
         });
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_feedback("drag:560,300,900,420", window, cx))
+            baaz.update(cx, |h, cx| h.step_feedback("drag:560,300,900,420", window, cx).expect("the step runs"))
         });
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_feedback("note:Too much space here", window, cx))
+            baaz.update(cx, |h, cx| h.step_feedback("note:Too much space here", window, cx).expect("the step runs"))
         });
         pump_frames(vc, 8);
         vc.update(|_, cx| {
@@ -4739,13 +4791,13 @@ mod tests {
             assert!(harness.feedback.step_queue.is_empty(), "the pump drained the queue");
         });
         // `cancel` really runs: a fresh popover opens, then closes unsaved.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()),
             "the fresh click opens a popover"
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("cancel", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("cancel", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(harness.feedback.popover.is_none(), "cancel closes the popover");
@@ -4892,7 +4944,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
         assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
         vc.update(|window, cx| {
@@ -4932,7 +4984,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.fill_feedback_note("file me on Done", window, cx))
@@ -5014,16 +5066,10 @@ mod tests {
         let state = hermetic_state("f3-bad-steps");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
-        let failures_before = crate::steps::step_failures();
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("hover:nowhere", window, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("drag:1,2,3", window, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("note:", window, cx)));
-        assert_eq!(
-            crate::steps::step_failures(),
-            failures_before + 4,
-            "off-phase, unparseable and empty pointing subs all fail"
-        );
+        for sub in ["click:20,21", "hover:nowhere", "drag:1,2,3", "note:"] {
+            let result = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback(sub, window, cx)));
+            assert!(result.is_err(), "off-phase, unparseable and empty pointing subs all fail: {sub} gave {result:?}");
+        }
         restore_state(state);
     }
 
@@ -5036,9 +5082,9 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.step_feedback("note:queued behind the capture", window, cx))
+            baaz.update(cx, |h, cx| h.step_feedback("note:queued behind the capture", window, cx).expect("the step runs"))
         });
         assert!(
             vc.update(|_, cx| !baaz.read(cx).feedback.step_queue.is_empty()),
@@ -5216,7 +5262,7 @@ mod tests {
         let mut page = f3_hit(0.0, 0.0, 2000.0, 2000.0, "Browse");
         page.role = "AXGroup".to_owned();
         inject_hits(&baaz, vc, vec![page]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx).expect("the step runs")));
         drive_frames(vc);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Area { rect, region }) => {

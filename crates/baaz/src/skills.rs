@@ -70,20 +70,10 @@ impl Activation {
 /// What a skill costs in context, as Muse reports it (D59).
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 pub struct ContextCost {
-    /// Frontmatter bytes loaded at startup. Parsed for completeness; the
-    /// meter sums tokens, never bytes.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub startup_bytes: u64,
     /// Estimated startup tokens. Muse reports the same figure whatever the
     /// state, so the page sums over rows with `activation == on`.
     #[serde(default)]
     pub startup_estimated_tokens: u64,
-    /// Bytes loaded on invocation, if Muse reports any. Parsed for
-    /// completeness; the detail shows tokens, never bytes.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub invoke_bytes: Option<u64>,
     /// Estimated invocation tokens, if Muse reports any.
     #[serde(default)]
     pub invoke_estimated_tokens: Option<u64>,
@@ -125,20 +115,10 @@ pub struct Skill {
     /// One-line description.
     #[serde(default)]
     pub description: Option<String>,
-    /// Short description, when Muse sends one. Parsed for the H2
-    /// install/import previews; K2 keeps it without reading it.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub short_description: Option<String>,
     /// `bundled` / `user` / `project` / `plugin`. Falls back to the `id`
     /// prefix when Muse omits it (see [`Skill::scope`]).
     #[serde(default)]
     pub scope: Option<String>,
-    /// Where the row came from (`{"type":"local"}`, …). Kept as JSON for
-    /// the H2 install/import previews; K2 never branches on it.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub source: Option<serde_json::Value>,
     /// `bundled://…`, `plugin://…`, relative for project, absolute for user.
     #[serde(default)]
     pub path: Option<String>,
@@ -148,11 +128,6 @@ pub struct Skill {
     /// Row-level diagnostics (issue counts ride here).
     #[serde(default)]
     pub diagnostics: Vec<SkillDiagnostic>,
-    /// Provenance, when Muse sends any. Kept as JSON for the H2
-    /// install/import previews; K2 never reads it.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub provenance: Option<serde_json::Value>,
     /// Context cost, as Muse reports it.
     #[serde(default)]
     pub context_cost: ContextCost,
@@ -1032,13 +1007,10 @@ mod tests {
             name: id.split_once(':').map(|(_, n)| n).unwrap_or(id).to_owned(),
             display_name: None,
             description: description.map(str::to_owned),
-            short_description: None,
             scope: None,
-            source: None,
             path: None,
             activation: Activation::On,
             diagnostics: Vec::new(),
-            provenance: None,
             context_cost: ContextCost::default(),
         }
     }

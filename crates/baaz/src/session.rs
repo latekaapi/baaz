@@ -1,35 +1,27 @@
-//! One open session: the fold, the composer, and the centre pane.
+//! One open session: its transcript, the composer, and the centre pane.
 //!
-//! This is the entity the spec calls `SessionView` (§2.3). It owns a
-//! [`MuseFold`] — the fold is per-connection in principle, but one session is
-//! open at a time in this phase and keeping it here is what makes "close the
-//! session, drop its transcript" free — plus the composer draft, the scroll
-//! position, and which cards the person folded shut.
+//! This is the entity the spec calls `SessionView` (§2.3). It owns one
+//! provider lane ([`lane`]) that folds the provider's neutral
+//! `ProviderEvent`s into the session's `Session` model, plus the composer
+//! draft, the scroll position, and which cards the person folded shut.
+//! Closing the session drops its transcript with it.
 //!
-//! Everything it renders is a pure function of the fold's `Session` and
-//! `SideState`, recomputed every frame. Nothing is optimistic except the word
-//! "Working…", which the first `turn/started` immediately replaces with the
-//! real turn.
+//! Everything it renders is a pure function of that model, recomputed every
+//! frame. Nothing is optimistic except the word "Working…", which the
+//! provider's first turn event immediately replaces with the real turn.
 //!
-//! # The composer controls (spec §5 phase 3)
+//! # The composer controls
 //!
-//! Every one of them is a round trip, and the chip is drawn from what came
-//! back, never from what was sent:
+//! Every one is a neutral `provider::Command` sent through the seam, and the
+//! chip is drawn from what came back, never from what was sent: model
+//! (`SelectModel`), approval mode (`SelectApprovalMode`), compaction
+//! (`CompactSession`), the queue strip (`SubmitInput` while busy, taken back
+//! with `ReclaimQueued`) and steer (`SteerInput`). A control whose capability
+//! the session's provider does not offer is not shown (docs/82 0.7).
 //!
-//! | control | command | what changes the chip |
-//! |---|---|---|
-//! | model | `session/setModel` | `session/modelChanged` |
-//! | approval mode | `session/setApprovalMode` | `session/approvalModeChanged` |
-//! | context meter | — | `session/contextUsage` |
-//! | compaction | `session/compact` | the `compaction` item's marker |
-//! | queue strip | `turn/start` (`ifBusy: queue`) | `SideState::queued` |
-//! | steer | `turn/steer` | the running turn's own items |
-//!
-//! **Reasoning effort is the exception**: MSP carries `reasoningEffort` on
-//! `turn/start` and `turn/steer` and nowhere else — there is no echo on the
-//! `userMessage` item and none on `turn/started` — so the effort chip shows the
-//! client's own value. It is the one control with no server reflection, and
-//! `docs/CHANGELOG.md` says so.
+//! **Reasoning effort is the exception**: it rides on the submit and steer
+//! commands and no provider echoes it back, so the effort chip shows the
+//! client's own value.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -2273,7 +2265,8 @@ impl SessionView {
         if let Some((_, choices)) = self.newest_pending_approval() {
             let wanted = |d: &D| if allow { matches!(d, D::Once | D::ApprovedForSession) } else { matches!(d, D::Deny) };
             let Some(index) = choices.iter().position(|c| wanted(&c.decision)) else { return false };
-            self.step_choose(&(index + 1).to_string(), window, cx);
+            // A press on a choice that exists: the step cannot fail here.
+            let _ = self.step_choose(&(index + 1).to_string(), window, cx);
             return true;
         }
         if self.external_approvals.pending().is_empty() {
@@ -2281,15 +2274,16 @@ impl SessionView {
         }
         let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
         let Some(index) = crate::providers::ApprovalChoice::all().iter().position(|c| *c == wanted) else { return false };
-        self.step_choose(&(index + 1).to_string(), window, cx);
+        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
         true
     }
 
     /// Pick the n-th choice of the newest pending approval (`1`–`9`).
     pub fn choose_nth(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         // The same handler the `choose:<n>` step reaches, with the same
-        // 1-based numbering the digits on the card carry.
-        self.step_choose(&(index + 1).to_string(), window, cx);
+        // 1-based numbering the digits on the card carry. A digit past the
+        // card's choices, or with nothing pending, presses nothing.
+        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
     }
 
     /// Whether plan mode is on, for the app's Shift+Tab.

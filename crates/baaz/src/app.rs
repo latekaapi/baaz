@@ -506,7 +506,7 @@ pub fn set_menus(cx: &mut App) {
                                 .downcast::<Harness>()
                                 .map(|harness| {
                                     harness.update(cx, |this, _| {
-                                        this.flush_right_save();
+                                        this.flush_stores();
                                         this.flush_tabs_save();
                                         this.persist_layout();
                                     })
@@ -567,6 +567,7 @@ pub fn set_menus(cx: &mut App) {
 
 pub(crate) mod agent_window;
 mod browser_chat;
+mod registry;
 mod browser_handoff;
 mod find;
 pub(crate) mod lifecycle;
@@ -814,15 +815,12 @@ pub struct Harness {
     /// The [`SidebarKey`] the pane last rendered for. `None` until the first
     /// frame, so the pane renders at least once.
     pub(crate) sidebar_key: Option<SidebarKey>,
-    /// Parked session views, most-recently-opened first: an MRU of eight.
-    /// Switching away parks the view (its event subscription dropped, its
-    /// fold, scroll position and draft kept); reopening shows it at once and
-    /// tops it up from its last cursor.
-    session_cache: Vec<(String, Entity<SessionView>)>,
-    /// The browser chat the line and the card show (docs/27 §6, R3): a
-    /// hidden `browser` session's view, never the centre's. `find_view`
-    /// searches it, so its open lands here like a parked draft's.
-    pub(crate) browser_chat: Option<Entity<SessionView>>,
+    /// Every live view besides `active`: the parked MRU (switching away
+    /// parks a view with its fold, scroll position and draft; reopening
+    /// shows it at once), the browser chat the line and the card show
+    /// (docs/27 §6, R3), and one event subscription per live view. Every
+    /// enumeration of views goes through it (docs/82 1.6).
+    pub(crate) registry: registry::SessionRegistry,
     /// The ⌘J line's own state (R3), when no agent drives the tab on screen.
     pub(crate) line_ui: agent_window::LineUi,
     /// Where the agent card stands: closed, floating, or docked.
@@ -929,22 +927,6 @@ pub struct Harness {
     /// Whether the window's traffic lights are hidden now (closed sidebar,
     /// no peek), so the native call runs only on a change.
     pub(crate) lights_hidden: bool,
-    /// Generation of the debounced right-pane `sessions.json` write (B7):
-    /// every cheap right-state persist bumps it and arms a delayed
-    /// off-thread write; only the latest generation writes, so quick
-    /// toggles coalesce into one. Never persists.
-    pub(crate) right_save_epoch: u64,
-    /// Whether a cheap right-pane persist still owes its debounced disk
-    /// write (B7fix): set when the write is armed, cleared when it lands
-    /// or when [`Self::flush_right_save`] lands it early on session switch.
-    pub(crate) right_save_pending: bool,
-    /// Override writes snapshotted by `settle_overrides` and not yet on
-    /// disk; while any is, the quit flush writes synchronously.
-    pub(crate) overrides_writes_in_flight: usize,
-    /// `provider-sessions.json` writes still on the background executor
-    /// ([`Self::persist_provider_sessions`]): the quit flush writes the
-    /// store synchronously while any is out.
-    pub(crate) provider_sessions_writes_in_flight: usize,
     /// The last right-pane snapshot landed, hashed: an identical refresh
     /// skips the redraw.
     pub(crate) right_snapshot_print: Option<u64>,
@@ -960,7 +942,6 @@ pub struct Harness {
     /// spelling, so the per-session round-trip restores exactly what the
     /// pane showed; a verbatim handoff carry never marks, so it persists
     /// verbatim. Never persists.
-    pub(crate) right_kind_migrate: std::collections::HashSet<String>,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1414,7 +1395,7 @@ pub struct Harness {
     /// Z4: a provider open that failed after the click already moved. The
     /// window sits on the failed session with an inline failure instead of
     /// another session's transcript: `active` is None while this stands —
-    /// the previous view parks in `session_cache` like any switch away —
+    /// the previous view parks in the registry like any switch away —
     /// and the next successful activation clears it. `session_id` is the
     /// clicked session for a reopen, `None` for a fresh open that never
     /// earned an id.
@@ -1568,9 +1549,6 @@ pub struct Harness {
     /// The boot-time text-field subscriptions (rename, search, Projects and
     /// Commands queries, API key). Made once in `new`, never cleared.
     field_subscriptions: Vec<Subscription>,
-    /// One `SessionEvent` subscription per live view, rebuilt from the live
-    /// views by `activate` and the failed-open paths.
-    view_subscriptions: Vec<Subscription>,
 }
 
 impl WireCall for Harness {
@@ -1693,8 +1671,7 @@ impl Harness {
             reveal_unknown: None,
             sidebar_pane,
             sidebar_key: None,
-            session_cache: Vec::new(),
-            browser_chat: None,
+            registry: registry::SessionRegistry::default(),
             line_ui: agent_window::LineUi::Closed,
             card_ui: agent_window::CardUi::Closed,
             line_wants_keys: false,
@@ -1759,14 +1736,9 @@ impl Harness {
             pending_pr_body: None,
             peek_pinned: false,
             lights_hidden: false,
-            right_save_epoch: 0,
-            right_save_pending: false,
-            overrides_writes_in_flight: 0,
-            provider_sessions_writes_in_flight: 0,
             right_snapshot_print: None,
             right_watch: None,
             right_refresh_again: false,
-            right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -1889,7 +1861,6 @@ impl Harness {
             hover_trace_last_shown: None,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
-            view_subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_fade_since: None,
             browse_drop_target: None,
@@ -2884,7 +2855,7 @@ impl Harness {
     /// view they load into.
     pub(crate) fn right_tab_index(kind: layout::RightKind) -> usize {
         match kind {
-            layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git => 0,
+            layout::RightKind::Changes => 0,
             layout::RightKind::Files => 1,
             layout::RightKind::Browser => 2,
         }
@@ -2904,30 +2875,6 @@ impl Harness {
         .into_iter()
         .map(|(kind, icon)| TabItem::new(kind.slug(), kind.label(), icon).closable(false))
         .collect()
-    }
-
-    /// Copy the overrides with the marked sessions' legacy right-pane kinds
-    /// migrated onto the merged view (B8fix): a marked pre-merge `diff`/`git`
-    /// lands on disk as `changes`, so a user-gesture save migrates
-    /// `sessions.json` onto the three live kinds and a restart restores the
-    /// merged view. Memory is untouched — the in-memory round-trip keeps the
-    /// stored spelling by design — and unmarked sessions (a verbatim handoff
-    /// carry) persist exactly as stored.
-    fn overrides_for_disk(&self) -> crate::sessions::Overrides {
-        let mut disk = self.overrides.clone();
-        for id in &self.right_kind_migrate {
-            if let Some(meta) = disk.get_mut(id) {
-                if let Some(right) = meta.right.as_mut() {
-                    right.kind = match right.kind {
-                        layout::RightKind::Diff | layout::RightKind::Git => {
-                            layout::RightKind::Changes
-                        }
-                        kind => kind,
-                    };
-                }
-            }
-        }
-        disk
     }
 
     /// Persist one session's right-pane state without the session-list
@@ -2974,66 +2921,25 @@ impl Harness {
         self.schedule_overrides_write(cx);
     }
 
-    /// Arm the debounced off-thread `sessions.json` write behind the cheap
-    /// right-pane persists. Only the latest generation writes, so a burst
-    /// of toggles, expansions and navigations coalesces into one write —
-    /// and a toggle never blocks its own animation frame on the store.
-    /// Newest wins (B7fix2): the write serialises the CURRENT overrides at
-    /// fire time, never an armed snapshot — a rename, pin or archive that
-    /// lands inside the window is on disk, not overwritten by stale state.
-    /// Arming clones nothing: Files expand/select/navigation only bump the
-    /// generation, and the single surviving write clones once.
-    pub(crate) fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
-        self.right_save_epoch += 1;
-        self.right_save_pending = true;
-        let epoch = self.right_save_epoch;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(750)).await;
-            let snapshot = this
-                .update(cx, |this, _| {
-                    if this.right_save_epoch != epoch {
-                        return None;
-                    }
-                    this.right_save_pending = false;
-                    Some(this.overrides_for_disk())
-                })
-                .unwrap_or(None);
-            let Some(snapshot) = snapshot else {
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    crate::sessions::write(&snapshot);
-                })
-                .await;
-        })
-        .detach();
+    /// The cheap right-pane persists' write: a snapshot queued on the
+    /// sessions store after its delay, so a burst of toggles, expansions and
+    /// navigations coalesces into one write and a toggle never blocks its
+    /// own animation frame on the disk. Newest wins: a rename, pin or
+    /// archive saved inside the window replaces this snapshot
+    /// ([`crate::store::JsonStore`]).
+    pub(crate) fn schedule_overrides_write(&mut self, _cx: &mut Context<Self>) {
+        crate::sessions::save_soon(&self.overrides);
     }
 
-    /// Land a pending cheap right-pane write synchronously (B7fix): the
-    /// outgoing session's debounced state reaches `sessions.json` before the
-    /// incoming session's state loads in [`Self::restore_right_for_session`].
-    /// A bare `sessions::write` — no `rejoin`, no search rebuild, no notify —
-    /// and a no-op when nothing is pending, so plain opens write nothing.
-    /// The in-flight debounce is cancelled: the disk already leads it.
-    /// Also the quit and window-close durability point (B7fix2): `QuitApp`,
-    /// the red-dot close and the app-quit hook all land here, so up to
-    /// 750 ms of pane state never dies with the process.
-    pub(crate) fn flush_right_save(&mut self) {
-        // The provider records' background write rides the same
-        // durability point: a quit with one in flight lands it now.
-        if self.provider_sessions_writes_in_flight > 0 {
-            crate::provider_sessions::write(&self.provider_sessions);
-        }
-        if !self.right_save_pending && self.overrides_writes_in_flight == 0 {
-            return;
-        }
-        self.right_save_epoch += 1;
-        // Drop migration marks for sessions that no longer exist; a marked
-        // session with no override entry has nothing to migrate.
-        self.right_kind_migrate.retain(|id| self.overrides.contains_key(id));
-        crate::sessions::write(&self.overrides_for_disk());
-        self.right_save_pending = false;
+    /// Land every queued session-store write now (B7fix, B7fix2): on a
+    /// session switch, so the outgoing session's pane state is on disk
+    /// before the incoming one's is restored, and at quit and window
+    /// close (`QuitApp`, the red-dot close and the app-quit hook), so no
+    /// queued pane state or provider record dies with the process. Blocks
+    /// only while a write is queued; with nothing queued it returns at once.
+    pub(crate) fn flush_stores(&mut self) {
+        crate::provider_sessions::flush();
+        crate::sessions::flush();
     }
 
     /// Build the Browser webview outside `render` after an open action
@@ -3129,13 +3035,6 @@ impl Harness {
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
-        // B8fix: the in-memory state keeps the stored spelling — a legacy
-        // `diff`/`git` kind stays as-is and reads back as the merged
-        // Changes view through `layout::right_kind`, so the per-session
-        // round-trip restores exactly what the pane showed. A legacy kind
-        // saved by a user gesture still migrates on disk: mark the session
-        // so the disk writes land it as `changes` (`overrides_for_disk`).
-        // A verbatim handoff carry never marks, so it persists as stored.
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
             kind: self.layout.right_kind.unwrap_or(layout::RightKind::Files),
@@ -3144,12 +3043,6 @@ impl Harness {
             files_expanded,
             browser_url,
         };
-        if matches!(
-            state.kind,
-            layout::RightKind::Diff | layout::RightKind::Git
-        ) {
-            self.right_kind_migrate.insert(session_id.clone());
-        }
         self.store_right_state_cheap(&session_id, state, cx);
     }
 
@@ -3166,7 +3059,7 @@ impl Harness {
         // B7fix: the outgoing session's debounced pane state lands on disk
         // before the incoming session's loads — a switch is the durability
         // point the toggle gesture itself must not pay for.
-        self.flush_right_save();
+        self.flush_stores();
         let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
         if self.layout.right_open != open {
@@ -3604,8 +3497,9 @@ impl Harness {
 
     /// The `--steps` verb's route: open the dock over a FakePty-backed tab
     /// and drain its script at once, so the capture replays the same bytes
-    /// on every run. The payload names the tab; empty is "terminal".
-    pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// on every run. The payload names the tab; empty is "terminal". Fails
+    /// the step while the Settings page stands open.
+    pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let title = rest.trim();
         let title = if title.is_empty() { "terminal".to_owned() } else { title.to_owned() };
         let root = self
@@ -3615,7 +3509,7 @@ impl Harness {
         // The scripted dock stays shut while the Settings page stands open
         // (B11b): a capture aid must not flip hidden state either.
         if self.settings_page.open {
-            return;
+            return Err("the Settings page is open".into());
         }
         self.layout.terminal_open = true;
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
@@ -3628,6 +3522,7 @@ impl Harness {
         self.persist_layout();
         window.focus(&self.terminal_focus, cx);
         cx.notify();
+        Ok(())
     }
 
     /// The centre column's height: the sheet, the window less its 6 px
@@ -4825,8 +4720,7 @@ impl Harness {
         });
         crate::log::trace_mark("replay-folded");
         crate::log::trace_arm_first_frame();
-        self.view_subscriptions.clear();
-        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.registry.resubscribe(Some(&view), cx);
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
@@ -6007,9 +5901,7 @@ impl Harness {
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
         self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
-        for view in self.live_views() {
-            view.update(cx, |view, _| view.shutdown_lane());
-        }
+        self.registry.shutdown_all(self.active.as_ref(), cx);
     }
 
     /// The inline state for a provider that could not start (Z4, typed in
@@ -6668,7 +6560,7 @@ impl Render for Harness {
                 && !pending_neutral
                 && matches!(
                     body_kind,
-                    layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git
+                    layout::RightKind::Changes
                 );
             let session_edits: Vec<String> = if shows_changes {
                 self.active
@@ -8031,22 +7923,22 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
         assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
-        let (right_open, terminal_open, overrides, pending) = vc.update(|_, cx| {
+        let (right_open, terminal_open, overrides) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone(), h.right_save_pending)
+            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone())
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Git, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_terminal(window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_terminal_tab(None, window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
+        assert!(refused.is_err(), "the right step fails while Settings stands open");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.layout.right_open, right_open, "toggle_right changed hidden state");
             assert_eq!(h.layout.terminal_open, terminal_open, "a dock command changed hidden state");
             assert!(h.overrides == overrides, "a per-session pane record was written");
-            assert_eq!(h.right_save_pending, pending, "a pane write was armed");
             assert!(h.settings_page.open, "a guarded command closed Settings");
         });
         // The matching palette action is ignored the same way: it neither
@@ -8211,8 +8103,8 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         Harness::reset_search_rebuild_count();
         assert!(
-            !crate::sessions::path().exists(),
-            "the hermetic store starts with no sessions.json"
+            !crate::sessions::stored(),
+            "the hermetic store starts with no session files"
         );
         // Open on Browser: the webview is prepared on the toggle, before
         // any frame — never as a render side effect.
@@ -8227,7 +8119,7 @@ mod tests {
             "opening the pane must not rebuild the search index"
         );
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "opening the pane must not synchronously write sessions.json"
         );
         // The in-memory state still lands at once: the cheap path defers
@@ -8250,7 +8142,7 @@ mod tests {
             "closing the pane must not rebuild the search index"
         );
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "closing the pane must not synchronously write sessions.json"
         );
         restore_state(state);
@@ -8269,15 +8161,16 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "the toggle itself still writes nothing synchronously"
         );
-        // Past the 750 ms debounce: the test clock jumps it (the harness
-        // clock is virtual — wall-clock sleeping never fires the timer),
-        // then the executors settle and the off-thread write lands.
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(850));
+        // Past the store's 750 ms delay (real time: the store's writer is
+        // a thread, not the test executor), then whatever is still queued
+        // lands.
+        std::thread::sleep(std::time::Duration::from_millis(850));
+        crate::sessions::flush();
         let mut disk = crate::sessions::read();
         for _ in 0..10 {
             if disk.get("s-1").and_then(|meta| meta.right.clone()).is_some() {
@@ -8691,7 +8584,8 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)))
+            .expect("the fixture session opens");
         let carried = vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.mode, Mode::Browse, "the fixture lands in Browse");
@@ -8711,7 +8605,8 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(baaz.read(cx).browse_centre_shown(), Some(carried), "the shown tab survives the trip");
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
+            .expect("the tab opens");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.browse_session_tab, None);
@@ -8732,19 +8627,22 @@ mod tests {
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)))
+            .expect("the verb lands on Kagi");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "the verb lands on Kagi"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=altavista", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=altavista", cx)));
+        assert!(refused.is_err(), "an unknown value fails the step");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "an unknown value changes nothing"
         );
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("engine=google", cx)));
+        let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("engine=google", cx)));
+        assert!(refused.is_err(), "an unknown key fails the step");
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
@@ -8776,7 +8674,7 @@ mod tests {
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         for url in ["https://www.wikipedia.org/", "https://docs.rs/"] {
-            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new(url, window, cx)));
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new(url, window, cx))).expect("the tab opens");
         }
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-strip").is_none(), "vertical keeps the tabs down the sidebar");
@@ -8805,7 +8703,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
+        })
+        .expect("the tab opens");
         draw_shell(&mut *vc, &baaz);
         let (open_page, width) = vc.update(|_, cx| {
             let h = baaz.read(cx);
@@ -8846,7 +8745,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
-        });
+        })
+        .expect("the tab opens");
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
         });
@@ -8872,7 +8772,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
         draw_shell(&mut *vc, &baaz);
@@ -8906,7 +8806,7 @@ mod tests {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
                 h.layout.feedback_mode = true;
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
         draw_shell(&mut *vc, &baaz);
@@ -8937,7 +8837,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.step_skills("page", window, cx);
+                h.step_skills("page", window, cx).expect("the Skills page opens");
                 // No skill picked: the list alone, in Settings' 680.
                 h.skills.selected = None;
             })
@@ -9287,15 +9187,17 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         // Arm the debounced pane save, then rename inside its window: the
         // rename writes synchronously and supersedes the armed write.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.set_override("s-1", |meta| meta.name = Some("Renamed".to_owned()), cx)
             })
         });
-        // Past the 750 ms debounce: settle the executors the way the
-        // persist test does, so the (cancelled) debounce runs its course.
-        vc.cx.executor().advance_clock(std::time::Duration::from_millis(850));
+        // Past the store's 750 ms delay (real time: the store's writer is
+        // a thread, not the test executor), then whatever is still queued
+        // lands.
+        std::thread::sleep(std::time::Duration::from_millis(850));
+        crate::sessions::flush();
         for _ in 0..10 {
             vc.run_until_parked();
         }
@@ -9314,7 +9216,7 @@ mod tests {
 
     /// B7fix2: quitting flushes the pending pane save. The toggle arms the
     /// debounced write and stores nothing synchronously; the quit and
-    /// window-close paths land it through `flush_right_save`, so the pane
+    /// window-close paths land it through `flush_stores`, so the pane
     /// survives a Cmd-Q inside the 750 ms window.
     #[gpui::test]
     fn quit_flushes_the_pending_pane_save(cx: &mut gpui::TestAppContext) {
@@ -9325,17 +9227,13 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
         assert!(
-            !crate::sessions::path().exists(),
+            !crate::sessions::stored(),
             "the toggle itself still writes nothing synchronously"
         );
         // What `QuitApp`, the red-dot close and the app-quit hook call.
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.flush_right_save()));
-        assert!(
-            !vc.update(|_, cx| baaz.read(cx).right_save_pending),
-            "the flush clears the pending write"
-        );
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.flush_stores()));
         assert_eq!(
             crate::sessions::read().get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
@@ -9536,23 +9434,12 @@ mod tests {
             assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "select_right never opens a session");
         }
-        // Legacy kinds open the merged view, still without closing: the
-        // stored value is kept as-is and reads back as Changes.
-        for legacy in [crate::layout::RightKind::Diff, crate::layout::RightKind::Git] {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(legacy, cx)));
-            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
-            assert_eq!(
-                vc.update(|_, cx| crate::layout::right_kind(&baaz.read(cx).layout)),
-                crate::layout::RightKind::Changes,
-                "{legacy:?} loads as Changes"
-            );
-        }
         restore_state(state);
     }
 
     /// B8: the header carries exactly the three tabs Changes · Files ·
     /// Browser, each id parsing back to its kind, with the active index
-    /// following the kind (legacy kinds sit on Changes).
+    /// following the kind.
     #[test]
     fn the_three_header_tabs_map_to_the_three_kinds() {
         let tabs = Harness::right_tab_items();
@@ -9571,8 +9458,6 @@ mod tests {
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
         assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Browser), 2);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Diff), 0);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Git), 0);
     }
 
     /// Z2: the right pane belongs to each session and a switch restores it
@@ -9631,12 +9516,12 @@ mod tests {
         }
         // Session A shows Diff; a user change never arms the snap.
         open_session!("sess-a");
-        show!(crate::layout::RightKind::Diff);
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        show!(crate::layout::RightKind::Changes);
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // Switching to B (no stored state) closes the pane, snapped — and
         // one frame consumes the snap.
         open_session!("sess-b");
-        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // Browser in B; a user change still does not snap.
@@ -9645,7 +9530,7 @@ mod tests {
         // Back to A: Diff again — open throughout, so no snap. Back to B:
         // Browser again, no snap either.
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         open_session!("sess-b");
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
         draw!();
@@ -9653,14 +9538,14 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), false));
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // A user toggle after the snap is consumed never re-arms it.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // A restore arms the snap; a user toggle BEFORE any frame consumes it
         // must still animate (review finding): the toggle disarms it.
         open_session!("sess-b");
