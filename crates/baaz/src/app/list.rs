@@ -227,7 +227,7 @@ impl Harness {
     pub(super) fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
         // Hidden sessions are never cached: a parked view of one is dropped,
         // and reopening (after Undo, or under "Show hidden") pages it afresh.
-        self.session_cache.retain(|(id, _)| !ids.contains(id));
+        self.registry.forget_where(|id| ids.iter().any(|hidden| hidden == id));
         self.set_overrides(&ids, |meta| meta.hidden = true, cx);
         self.push_undo(
             UndoBatch::Hidden(ids),
@@ -318,7 +318,7 @@ impl Harness {
         let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
-        self.session_cache.retain(|(id, _)| !members.contains(id));
+        self.registry.forget_where(|id| members.iter().any(|member| member == id));
         self.set_overrides(&members, |meta| meta.archived = true, cx);
         if was_active {
             self.active = None;
@@ -397,33 +397,6 @@ impl Harness {
         }, cx);
     }
 
-    /// The live view for a session: the open one, or a parked provider lane
-    /// the MRU still holds. A parked provider lane keeps its child and drain
-    /// task, so its fold stays current — the row re-reads it the same way it
-    /// re-reads the open view (B3b). A parked muse view dropped its event
-    /// subscription when it parked, so its fold is frozen at park time: a
-    /// busy bit from then would re-arm the row as Working (and re-pin stale
-    /// approvals) over the wire's idle status — the row defers to the wire
-    /// instead. Never renders the parked transcript: only the row's live
-    /// facts come back. Takes the fields, not `self`, so the caller keeps
-    /// its mutable row borrow (disjoint fields).
-    pub(super) fn live_view_for(
-        active: &Option<Entity<SessionView>>,
-        cache: &[(String, Entity<SessionView>)],
-        session_id: &str,
-        cx: &gpui::App,
-    ) -> Option<Entity<SessionView>> {
-        if let Some(view) = active.clone() {
-            if view.read(cx).session_id == session_id {
-                return Some(view);
-            }
-        }
-        cache
-            .iter()
-            .find(|(id, _)| id == session_id)
-            .map(|(_, view)| view.clone())
-    }
-
     /// Keep one row's live facts current without waiting for `session/list`.
     ///
     /// A started turn reads running with its start (and stands down any
@@ -475,7 +448,7 @@ impl Harness {
         // The live view applies its lane's events before the row syncs: a
         // parked provider lane's fold is as current as the
         // open view's, so its row re-reads it the same way (B3b).
-        if let Some(view) = Self::live_view_for(&self.active, &self.session_cache, session_id, cx) {
+        if let Some(view) = self.registry.find(self.active.as_ref(), session_id, cx) {
             let (approval, question) = view.read(cx).row_pending();
             if entry.approval_command != approval {
                 entry.approval_command = approval;
@@ -514,7 +487,7 @@ impl Harness {
     pub(crate) fn sync_all_live_rows(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<String> = self.sessions.iter().map(|entry| entry.id.clone()).collect();
         for id in ids {
-            if Self::live_view_for(&self.active, &self.session_cache, &id, cx).is_some() {
+            if self.find_view(&id, cx).is_some() {
                 self.sync_row_live(&id, false, cx);
             }
         }

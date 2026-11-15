@@ -135,7 +135,7 @@ impl Harness {
     /// The chat's title for the card: its name or generated title, else its
     /// first ask, short.
     fn browser_chat_title(&self, cx: &App) -> String {
-        let Some(view) = self.browser_chat.as_ref() else { return "New chat".into() };
+        let Some(view) = self.registry.browser_chat() else { return "New chat".into() };
         let view = view.read(cx);
         if let Some(meta) = self.overrides.get(&view.session_id) {
             if let Some(title) = meta.name.clone().or_else(|| meta.generated_title.clone()) {
@@ -163,7 +163,7 @@ impl Harness {
     pub(crate) fn render_agent_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let input = self.agent_card_input.clone()?;
         let title = self.browser_chat_title(cx);
-        let (transcript, model) = match self.browser_chat.as_ref() {
+        let (transcript, model) = match self.registry.browser_chat() {
             Some(view) => {
                 let view = view.read(cx);
                 let busy = view.busy() || view.is_starting();
@@ -183,7 +183,7 @@ impl Harness {
         let mut transcript = transcript;
         // The provider's own approval (a tool, a file write) waits in the
         // input's place, as the card's questions do (docs/27 §4.5).
-        let asking = self.browser_chat.as_ref().and_then(|view| {
+        let asking = self.registry.browser_chat().and_then(|view| {
             let view = view.read(cx);
             // Its own browser tools are accepted for it (`auto_accept_browser_tools`).
             match view.pending_external_approvals().last() {

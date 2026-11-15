@@ -204,7 +204,7 @@ impl Harness {
     /// view's own model (what Codex is known to run for this account —
     /// see [`crate::utility`]), or none when no live view names one.
     pub(crate) fn utility_model(&self, session_id: &str, cx: &Context<Self>) -> Option<String> {
-        Self::live_view_for(&self.active, &self.session_cache, session_id, cx)
+        self.find_view(session_id, cx)
             .map(|view| view.read(cx).model_id())
             .filter(|model| !model.is_empty())
     }

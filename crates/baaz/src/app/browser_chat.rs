@@ -27,7 +27,7 @@ impl Harness {
 
     /// The browser chat's session id, if one is open.
     pub(crate) fn browser_chat_id(&self, cx: &gpui::App) -> Option<String> {
-        self.browser_chat.as_ref().map(|view| view.read(cx).session_id.clone())
+        self.registry.browser_chat().map(|view| view.read(cx).session_id.clone())
     }
 
     /// Start a browser chat and send `ask` as its first turn: the view is
@@ -89,16 +89,14 @@ impl Harness {
     /// the parked MRU, so its child is not killed mid-turn (F7). An idle
     /// replaced chat parks too and is capped like any idle view.
     pub(crate) fn set_browser_chat(&mut self, view: gpui::Entity<SessionView>, cx: &mut Context<Self>) {
-        if let Some(old) = self.browser_chat.take().filter(|old| *old != view) {
+        // Shown again from its folder: it leaves the MRU for the line.
+        self.registry.forget_view(&view);
+        if let Some(old) = self.registry.replace_browser_chat(view.clone()).filter(|old| *old != view) {
             if old.read(cx).must_stay_alive() && self.active.as_ref() != Some(&old) {
                 let id = old.read(cx).session_id.clone();
-                self.session_cache.retain(|(parked, _)| *parked != id);
-                self.session_cache.insert(0, (id, old));
+                self.registry.park(id, old);
             }
         }
-        // Shown again from its folder: it leaves the MRU for the line.
-        self.session_cache.retain(|(_, parked)| *parked != view);
-        self.browser_chat = Some(view);
         self.resubscribe_live_views(cx);
     }
 

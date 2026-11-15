@@ -567,6 +567,7 @@ pub fn set_menus(cx: &mut App) {
 
 pub(crate) mod agent_window;
 mod browser_chat;
+mod registry;
 mod browser_handoff;
 mod find;
 pub(crate) mod lifecycle;
@@ -814,15 +815,12 @@ pub struct Harness {
     /// The [`SidebarKey`] the pane last rendered for. `None` until the first
     /// frame, so the pane renders at least once.
     pub(crate) sidebar_key: Option<SidebarKey>,
-    /// Parked session views, most-recently-opened first: an MRU of eight.
-    /// Switching away parks the view (its event subscription dropped, its
-    /// fold, scroll position and draft kept); reopening shows it at once and
-    /// tops it up from its last cursor.
-    session_cache: Vec<(String, Entity<SessionView>)>,
-    /// The browser chat the line and the card show (docs/27 §6, R3): a
-    /// hidden `browser` session's view, never the centre's. `find_view`
-    /// searches it, so its open lands here like a parked draft's.
-    pub(crate) browser_chat: Option<Entity<SessionView>>,
+    /// Every live view besides `active`: the parked MRU (switching away
+    /// parks a view with its fold, scroll position and draft; reopening
+    /// shows it at once), the browser chat the line and the card show
+    /// (docs/27 §6, R3), and one event subscription per live view. Every
+    /// enumeration of views goes through it (docs/82 1.6).
+    pub(crate) registry: registry::SessionRegistry,
     /// The ⌘J line's own state (R3), when no agent drives the tab on screen.
     pub(crate) line_ui: agent_window::LineUi,
     /// Where the agent card stands: closed, floating, or docked.
@@ -1413,7 +1411,7 @@ pub struct Harness {
     /// Z4: a provider open that failed after the click already moved. The
     /// window sits on the failed session with an inline failure instead of
     /// another session's transcript: `active` is None while this stands —
-    /// the previous view parks in `session_cache` like any switch away —
+    /// the previous view parks in the registry like any switch away —
     /// and the next successful activation clears it. `session_id` is the
     /// clicked session for a reopen, `None` for a fresh open that never
     /// earned an id.
@@ -1567,9 +1565,6 @@ pub struct Harness {
     /// The boot-time text-field subscriptions (rename, search, Projects and
     /// Commands queries, API key). Made once in `new`, never cleared.
     field_subscriptions: Vec<Subscription>,
-    /// One `SessionEvent` subscription per live view, rebuilt from the live
-    /// views by `activate` and the failed-open paths.
-    view_subscriptions: Vec<Subscription>,
 }
 
 impl WireCall for Harness {
@@ -1692,8 +1687,7 @@ impl Harness {
             reveal_unknown: None,
             sidebar_pane,
             sidebar_key: None,
-            session_cache: Vec::new(),
-            browser_chat: None,
+            registry: registry::SessionRegistry::default(),
             line_ui: agent_window::LineUi::Closed,
             card_ui: agent_window::CardUi::Closed,
             line_wants_keys: false,
@@ -1887,7 +1881,6 @@ impl Harness {
             hover_trace_last_shown: None,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
-            view_subscriptions: Vec::new(),
             mode: layout::read().mode,
             mode_fade_since: None,
             browse_drop_target: None,
@@ -4785,8 +4778,7 @@ impl Harness {
         });
         crate::log::trace_mark("replay-folded");
         crate::log::trace_arm_first_frame();
-        self.view_subscriptions.clear();
-        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.registry.resubscribe(Some(&view), cx);
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
@@ -5967,9 +5959,7 @@ impl Harness {
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
         self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
-        for view in self.live_views() {
-            view.update(cx, |view, _| view.shutdown_lane());
-        }
+        self.registry.shutdown_all(self.active.as_ref(), cx);
     }
 
     /// The inline state for a provider that could not start (Z4, typed in

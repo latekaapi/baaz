@@ -342,8 +342,9 @@ impl Harness {
         // asks after Claude Haiku was picked).
         let provider = self.assistant_choice().map(|choice| choice.provider);
         let reuse = self
-            .browser_chat
-            .clone()
+            .registry
+            .browser_chat()
+            .cloned()
             .filter(|view| !view.read(cx).busy() && !view.read(cx).is_starting())
             .filter(|view| Some(view.read(cx).provider_kind()) == provider);
         let session = match reuse {
@@ -388,7 +389,7 @@ impl Harness {
     /// is accepted here, once per prompt; every other tool (files, shell)
     /// still asks in the card.
     pub(crate) fn auto_accept_browser_tools(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.browser_chat.clone() else { return };
+        let Some(view) = self.registry.browser_chat().cloned() else { return };
         let due: Vec<String> = view
             .read(cx)
             .pending_external_approvals()
@@ -407,7 +408,7 @@ impl Harness {
     /// lands as Drafted.
     pub(crate) fn settle_agent_line(&mut self, cx: &mut Context<Self>) {
         self.auto_accept_browser_tools(cx);
-        let Some(view) = self.browser_chat.clone() else { return };
+        let Some(view) = self.registry.browser_chat().cloned() else { return };
         let (busy, id, steps, asks) = {
             let view = view.read(cx);
             (
@@ -515,7 +516,7 @@ impl Harness {
                 cx.notify();
             }
             LineIntent::Stop => {
-                if let Some(view) = self.browser_chat.clone() {
+                if let Some(view) = self.registry.browser_chat().cloned() {
                     view.update(cx, |view, cx| view.interrupt(cx));
                 }
                 self.line_ui = LineUi::Ask;
@@ -538,7 +539,7 @@ impl Harness {
             // it start one (seen live: a steer through the line's reuse rule
             // started a second chat).
             CardIntent::Send(text) | CardIntent::Queue(text) => {
-                match self.browser_chat.clone() {
+                match self.registry.browser_chat().cloned() {
                     Some(view) => view.update(cx, |view, cx| {
                         if queue {
                             view.send_or_queue(text, cx);
@@ -571,7 +572,7 @@ impl Harness {
             // The card's question block: a pending approval's Allow (0) or
             // Don't allow (1).
             CardIntent::Choose(index) => {
-                if let Some(view) = self.browser_chat.clone() {
+                if let Some(view) = self.registry.browser_chat().cloned() {
                     view.update(cx, |view, cx| {
                         // The question names the newest provider approval:
                         // answer that one, by id.

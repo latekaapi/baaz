@@ -206,9 +206,9 @@ impl Harness {
     /// The names of the sessions with a turn running — open, parked or the
     /// browser chat — as their rows read them.
     pub(crate) fn working_session_names(&self, cx: &gpui::App) -> Vec<String> {
-        self.live_views()
+        self.registry
+            .iter_running(self.active.as_ref(), cx)
             .iter()
-            .filter(|view| view.read(cx).is_sending())
             .map(|view| {
                 let id = view.read(cx).session_id.clone();
                 if self.is_browser_chat(&id) {

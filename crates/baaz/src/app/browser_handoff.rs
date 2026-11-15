@@ -195,7 +195,7 @@ impl Harness {
     /// an unsent draft, and the chat records the handoff (board 3b).
     pub(crate) fn hand_off_browser_chat(&mut self, target: HandoffTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.handoff_picker_open = false;
-        let Some(chat) = self.browser_chat.clone() else { return };
+        let Some(chat) = self.registry.browser_chat().cloned() else { return };
         let (chat_id, answer) = {
             let view = chat.read(cx);
             let busy = view.busy() || view.is_starting();

@@ -1665,14 +1665,11 @@ impl Harness {
     /// what a muse start checks its stored default against. Empty means
     /// nothing is known yet — never a reason to drop.
     fn muse_catalog_ids(&self, cx: &gpui::App) -> Vec<String> {
-        let mut catalog: Vec<String> = Vec::new();
-        if let Some(active) = self.active.clone() {
-            catalog.extend(active.read(cx).cached_muse_catalog_ids());
-        }
-        for (_, cached) in &self.session_cache {
-            catalog.extend(cached.read(cx).cached_muse_catalog_ids());
-        }
-        catalog
+        self.registry
+            .live(self.active.as_ref())
+            .iter()
+            .flat_map(|view| view.read(cx).cached_muse_catalog_ids())
+            .collect()
     }
 
     pub(crate) fn new_session_in(
@@ -1905,14 +1902,7 @@ impl Harness {
         {
             return false;
         }
-        let in_centre =
-            self.active.clone().filter(|view| view.read(cx).session_id == session_id);
-        let parked = self
-            .session_cache
-            .iter()
-            .find(|(id, _)| id == session_id)
-            .map(|(_, view)| view.clone());
-        let Some(view) = in_centre.or(parked) else { return false };
+        let Some(view) = self.find_view(session_id, cx) else { return false };
         view.read(cx).session().is_none_or(|session| session.turns.is_empty())
     }
 
@@ -1922,10 +1912,7 @@ impl Harness {
     /// below drops the name and opens fresh on the pick rather than
     /// reopening the wrong lane.
     fn draft_serves(&self, draft_id: &str, wanted: ProviderId, cx: &gpui::App) -> bool {
-        let in_centre = self.active.clone().filter(|view| view.read(cx).session_id == draft_id);
-        let parked =
-            self.session_cache.iter().find(|(id, _)| id == draft_id).map(|(_, view)| view.clone());
-        let Some(view) = in_centre.or(parked) else { return false };
+        let Some(view) = self.find_view(draft_id, cx) else { return false };
         // A local Muse draft stood in while Muse was not running; once it
         // runs, the draft cannot send, so a new session starts a real one.
         if is_local_draft(draft_id) && self.muse_slot.is_ready() {
@@ -2084,7 +2071,7 @@ impl Harness {
         self.sessions.iter().any(|entry| entry.id == session_id)
             || self.provider_sessions.contains_key(session_id)
             || self.index.contains_key(session_id)
-            || self.session_cache.iter().any(|(cached, _)| cached == session_id)
+            || self.registry.is_parked(session_id)
             || self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
     }
 
@@ -2487,11 +2474,7 @@ impl Harness {
             && self.muse_slot.is_ready()
             && crate::tier::muse_menu_refresh_due(self.tier.as_ref());
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
-        let mut views: Vec<Entity<SessionView>> =
-            self.session_cache.iter().map(|(_, view)| view.clone()).collect();
-        if let Some(view) = &self.active {
-            views.push(view.clone());
-        }
+        let views = self.registry.live(self.active.as_ref());
         for view in &views {
             let seen = view.read(cx);
             let id = seen.provider_kind();
@@ -3276,11 +3259,7 @@ impl Harness {
     /// renames itself in `attach_provider`. The draft has no row, no
     /// record and no turn until it lands.
     fn rekey_session(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
-        for (id, _) in &mut self.session_cache {
-            if id == old {
-                *id = new.to_owned();
-            }
-        }
+        self.registry.rekey(old, new);
         for id in self.drafts.values_mut() {
             if id == old {
                 *id = new.to_owned();
@@ -3952,7 +3931,7 @@ impl Harness {
         {
             self.provider_open_error = None;
         }
-        self.session_cache.retain(|(id, _)| id != session_id);
+        self.registry.forget_where(|id| id == session_id);
         self.sessions.retain(|entry| entry.id != session_id);
         self.overrides.remove(session_id);
         if crate::provider_sessions::remove(&mut self.provider_sessions, session_id) {
@@ -4370,7 +4349,7 @@ impl Harness {
                 .get(old_id)
                 .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
             if unsent {
-                self.session_cache.retain(|(id, _)| id != old_id);
+                self.registry.forget_where(|id| id == old_id);
                 self.sessions.retain(|entry| entry.id != old_id);
                 self.overrides.remove(old_id);
                 if crate::provider_sessions::remove(&mut self.provider_sessions, old_id) {
@@ -4474,13 +4453,7 @@ impl Harness {
         // leaves with it and a re-activated view is never subscribed
         // twice. Parked transcripts never re-render through these: the
         // row-affecting arms read the parked fold without touching its UI.
-        self.view_subscriptions.clear();
-        self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        for other in self.live_views() {
-            if other != view {
-                self.view_subscriptions.push(cx.subscribe(&other, |this, view, event, cx| this.on_session_event(view, event, cx)));
-            }
-        }
+        self.registry.resubscribe(Some(&view), cx);
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
         if view.read(cx).provider_kind().has_billing_tier() {
@@ -4545,33 +4518,15 @@ impl Harness {
     /// Park the outgoing view in the MRU: its event subscription drops with
     /// `view_subscriptions`, while its fold, scroll position and draft ride along
     /// in the entity. Hidden, archived and replayed views are never cached.
-    /// Every live view this window holds, once each: the open one, every
-    /// parked one, the browser chat. The one enumeration subscriptions and
-    /// quit go through, so a browser chat is never left out (docs/81 A F5,
-    /// F6) — until stage 1's registry owns them all.
-    pub(crate) fn live_views(&self) -> Vec<Entity<SessionView>> {
-        let mut views: Vec<Entity<SessionView>> = Vec::new();
-        let all = self
-            .active
-            .iter()
-            .chain(self.session_cache.iter().map(|(_, view)| view))
-            .chain(self.browser_chat.iter());
-        for view in all {
-            if !views.contains(view) {
-                views.push(view.clone());
-            }
-        }
-        views
-    }
-
-    /// One subscription per live view ([`Self::live_views`]): after a failed
-    /// open, so a parked turn finishing behind the failure view still
-    /// reaches its row (docs/81 A F17), and when a browser chat is set.
+    /// One subscription per live view ([`SessionRegistry::resubscribe`]):
+    /// after a failed open, so a parked turn finishing behind the failure
+    /// view still reaches its row (docs/81 A F17), and when a browser chat
+    /// is set.
+    ///
+    /// [`SessionRegistry::resubscribe`]: super::registry::SessionRegistry::resubscribe
     pub(crate) fn resubscribe_live_views(&mut self, cx: &mut Context<Self>) {
-        self.view_subscriptions.clear();
-        for view in self.live_views() {
-            self.view_subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        }
+        let active = self.active.clone();
+        self.registry.resubscribe(active.as_ref(), cx);
     }
 
     fn park_active(&mut self, cx: &mut Context<Self>) {
@@ -4586,8 +4541,7 @@ impl Harness {
             && !self.overrides.get(&session_id).is_some_and(|m| m.hidden)
             && !self.overrides.get(&session_id).is_some_and(|m| m.archived);
         if cacheable {
-            self.session_cache.retain(|(id, _)| *id != session_id);
-            self.session_cache.insert(0, (session_id, view));
+            self.registry.park(session_id, view);
             // Views named in `drafts` are never evicted from the MRU: the
             // draft outlives whatever else was parked since. Nor is a view
             // with work in hand (`must_stay_alive`): one still starting — a
@@ -4596,33 +4550,19 @@ impl Harness {
             // or one with a turn running or the person's answer pending,
             // whose drop would shut its lane and kill the child mid-turn
             // (docs/81 A F1). Only idle views count toward the cap.
-            let mut kept: std::collections::HashSet<String> = self.drafts.values().cloned().collect();
-            kept.extend(
-                self.session_cache
-                    .iter()
-                    .filter(|(_, view)| view.read(cx).must_stay_alive())
-                    .map(|(id, _)| id.clone()),
-            );
-            let ids: Vec<String> =
-                self.session_cache.iter().map(|(id, _)| id.clone()).collect();
-            let surviving = evict_parked(&ids, &kept, SESSION_CACHE_LIMIT);
-            let failed_drafts: Vec<String> = self
-                .session_cache
-                .iter()
-                .filter(|(id, view)| !surviving.contains(id) && view.read(cx).is_opening_lane())
-                .map(|(id, _)| id.clone())
-                .collect();
-            self.session_cache.retain(|(id, _)| surviving.contains(id));
-            for id in failed_drafts {
-                self.forget_provisional(&id);
+            let drafts: std::collections::HashSet<String> = self.drafts.values().cloned().collect();
+            let evicted = self.registry.evict_idle(&drafts, SESSION_CACHE_LIMIT, cx);
+            for (id, view) in evicted {
+                if view.read(cx).is_opening_lane() {
+                    self.forget_provisional(&id);
+                }
             }
         }
     }
 
     /// Take a parked view back out of the MRU.
     fn cache_take(&mut self, session_id: &str) -> Option<Entity<SessionView>> {
-        let ix = self.session_cache.iter().position(|(id, _)| id == session_id)?;
-        Some(self.session_cache.remove(ix).1)
+        self.registry.take(session_id)
     }
 
     /// Whether any session this window has open — the active view, or one
@@ -4637,7 +4577,7 @@ impl Harness {
     /// ([`Harness::route`]) — so this is best-effort for a session parked
     /// mid-turn, same as every other read of parked state in this module.
     pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
-        self.live_views().iter().any(|view| view.read(cx).is_sending())
+        !self.registry.iter_running(self.active.as_ref(), cx).is_empty()
     }
 
     /// Store a pick as the one every new session starts with, in any
@@ -5238,14 +5178,7 @@ impl Harness {
     /// so the transcript re-folds from the next frame. Shared with
     /// [`Harness::flip_setting`](crate::settings::Harness::flip_setting).
     pub(crate) fn apply_fold_to_views(&mut self, on: bool, cx: &mut Context<Self>) {
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| {
-                view.fold_finished_turns = on;
-                view.refresh_render_cache();
-                cx.notify();
-            });
-        }
-        for (_, view) in self.session_cache.clone() {
+        for view in self.registry.live(self.active.as_ref()) {
             view.update(cx, |view, cx| {
                 view.fold_finished_turns = on;
                 view.refresh_render_cache();
@@ -5275,15 +5208,7 @@ fn parse_scroll_sweep(rest: &str) -> Result<(f32, u32, u32), String> {
 impl Harness {
     /// The view for `session_id`: the active one, else a parked one.
     pub(crate) fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
-        if let Some(view) = self.active.clone() {
-            if view.read(cx).session_id == session_id {
-                return Some(view);
-            }
-        }
-        if let Some(view) = self.browser_chat.clone().filter(|view| view.read(cx).session_id == session_id) {
-            return Some(view);
-        }
-        self.session_cache.iter().find(|(id, _)| id == session_id).map(|(_, view)| view.clone())
+        self.registry.find(self.active.as_ref(), session_id, cx)
     }
 
     /// "Hand off to X…" with a confirm first: freeze the pack preview and
@@ -7339,7 +7264,7 @@ mod tests {
             assert!(harness.provider_open_error.is_none(), "no full-centre failure view for a lane that opened");
             assert!(harness.active.as_ref() == Some(&view), "the session stays open, transcript and composer");
             assert!(
-                !harness.session_cache.iter().any(|(_, parked)| *parked == view),
+                !harness.registry.is_view_parked(&view),
                 "the view is not parked"
             );
             let failure = view.read(cx).child_failure().cloned().expect("the banner grew into the failure");
@@ -7688,7 +7613,7 @@ mod tests {
                     "the tier would banner any view shown, so its absence is the failure state's"
                 );
                 let parked: Vec<String> =
-                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                    harness.registry.parked_ids();
                 assert_eq!(
                     parked,
                     vec![first.clone()],
@@ -7785,7 +7710,7 @@ mod tests {
                 assert_eq!(harness.pending_id.as_deref(), Some("s-codex-old"));
                 assert!(!harness.session_switch_pending, "the switch landed");
                 let parked: Vec<String> =
-                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                    harness.registry.parked_ids();
                 assert_eq!(
                     parked,
                     vec![first.clone()],
@@ -7923,10 +7848,7 @@ mod tests {
                 assert!(!harness.session_switch_pending, "the switch landed");
                 assert!(harness.provider_open_error.is_none(), "no inline failure on success");
                 let parked = harness
-                    .session_cache
-                    .iter()
-                    .find(|(id, _)| id == &first)
-                    .map(|(_, view)| view.clone())
+                    .registry.parked(&first)
                     .expect("the previous session parks intact");
                 assert_eq!(
                     parked.read(cx).draft_text(cx),
@@ -8205,11 +8127,11 @@ mod tests {
                 let view = harness.active.clone().expect("the session is still open");
                 assert_eq!(view.read(cx).session_id, first, "no switch ever landed");
                 assert!(
-                    harness.session_cache.iter().all(|(id, _)| id != "s-codex-old"),
+                    !harness.registry.is_parked("s-codex-old"),
                     "the discarded destination parks no view"
                 );
                 assert!(
-                    harness.session_cache.iter().all(|(id, _)| id != &first),
+                    !harness.registry.is_parked(&first),
                     "staying put parks nothing either: exactly one view"
                 );
                 assert_eq!(
@@ -8372,10 +8294,7 @@ mod tests {
                     "the pane is the winner's, never the late landing's"
                 );
                 let parked = harness
-                    .session_cache
-                    .iter()
-                    .find(|(id, _)| id == &first)
-                    .map(|(_, view)| view.clone())
+                    .registry.parked(&first)
                     .expect("the previous session parks intact");
                 assert_eq!(
                     parked.read(cx).draft_text(cx),
@@ -8383,7 +8302,7 @@ mod tests {
                     "the previous draft survives"
                 );
                 assert!(
-                    harness.session_cache.iter().all(|(id, _)| id != "s-codex-old"),
+                    !harness.registry.is_parked("s-codex-old"),
                     "the discarded destination parks no view"
                 );
             });
@@ -8493,7 +8412,7 @@ mod tests {
                 );
                 assert!(!harness.session_switch_pending, "nothing is still opening");
                 assert!(
-                    harness.session_cache.iter().all(|(id, _)| id != "s-fork"),
+                    !harness.registry.is_parked("s-fork"),
                     "the discarded fork parks no view"
                 );
                 assert!(harness.provider_open_error.is_none(), "no inline failure");
@@ -8607,7 +8526,7 @@ mod tests {
                 );
                 assert!(!harness.session_switch_pending, "nothing is still opening");
                 let cached: Vec<String> =
-                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                    harness.registry.parked_ids();
                 assert_eq!(
                     cached,
                     vec!["s-codex-old".to_owned()],
@@ -9255,11 +9174,11 @@ done
                 }
                 harness.park_active(cx);
                 assert!(
-                    harness.session_cache.iter().any(|(parked, _)| *parked == id),
+                    harness.registry.is_parked(&id),
                     "the opening draft survives {} later parks",
                     SESSION_CACHE_LIMIT + 1
                 );
-                assert!(harness.session_cache.len() <= SESSION_CACHE_LIMIT + 1);
+                assert!(harness.registry.parked_len() <= SESSION_CACHE_LIMIT + 1);
             })
         });
         lane_restore(state);
@@ -9386,11 +9305,11 @@ done
                 }
                 harness.park_active(cx);
                 assert!(
-                    harness.session_cache.iter().any(|(parked, _)| *parked == busy_id),
+                    harness.registry.is_parked(&busy_id),
                     "the busy view survives {} later parks",
                     SESSION_CACHE_LIMIT + 1
                 );
-                let idle = harness.session_cache.iter().filter(|(id, _)| id.starts_with("s-idle-")).count();
+                let idle = harness.registry.parked_ids().iter().filter(|id| id.starts_with("s-idle-")).count();
                 assert_eq!(idle, SESSION_CACHE_LIMIT, "idle views are still capped");
                 view
             })
@@ -9844,7 +9763,7 @@ done
             assert_ne!(view.read(cx).session_id, old, "the draft did not survive the switch");
             assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the replacement rides the provider lane");
             assert!(
-                !harness.session_cache.iter().any(|(id, _)| id == &old),
+                !harness.registry.is_parked(&old),
                 "the discarded draft was closed, never parked"
             );
             assert!(
@@ -10352,7 +10271,7 @@ done
             assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "unsent draft carries across");
             assert!(!view.read(cx).is_input_locked(), "the new view takes sends");
             assert!(harness.replacing.is_none(), "the marker clears on landing");
-            let total = usize::from(harness.active.is_some()) + harness.session_cache.len();
+            let total = usize::from(harness.active.is_some()) + harness.registry.parked_len();
             assert_eq!(total, 1, "exactly one view exists after the swap");
             assert!(!harness.session_switch_pending, "the switch landed");
         });
@@ -10414,7 +10333,7 @@ done
             );
             assert!(harness.replacing.is_none(), "the marker is gone");
             assert!(!harness.session_switch_pending, "the verbs are released");
-            assert!(harness.session_cache.is_empty(), "the old draft closed");
+            assert!(harness.registry.parked_len() == 0, "the old draft closed");
         });
         lane_restore(state);
     }
@@ -10666,7 +10585,7 @@ done
             assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode, "drawn on the click");
             assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "the typed text carried");
             assert!(harness.replacing.is_none(), "nothing waits to be replaced");
-            assert!(harness.session_cache.iter().all(|(id, _)| id != &first), "the old draft closed");
+            assert!(!harness.registry.is_parked(&first), "the old draft closed");
             view
         });
         vc.update(|window, cx| {
@@ -10679,7 +10598,7 @@ done
             assert_eq!(view.read(cx).session_id, second, "the click wins");
             assert!(!harness.session_switch_pending, "the verbs are released");
             assert!(
-                harness.session_cache.iter().any(|(_, parked)| *parked == switched),
+                harness.registry.is_view_parked(&switched),
                 "the replacement parks like any draft"
             );
             assert_eq!(switched.read(cx).draft_text(cx), "hello unsent", "its text stays with it");
@@ -10739,7 +10658,7 @@ done
             assert_eq!(view.draft_text(cx), "carry me");
             assert_eq!(view.draft_settings(), (PermissionMode::DenyUnmatched, Some(ReasoningEffort::High)));
             assert_eq!(view.banner_text(), None, "no old-provider banner");
-            assert!(harness.session_cache.is_empty(), "the old draft closed");
+            assert!(harness.registry.parked_len() == 0, "the old draft closed");
         });
         assert_eq!(shared.inner.lock().expect("y2b2").shutdowns, vec![old], "its child hung up");
         vc.run_until_parked();
@@ -10779,7 +10698,7 @@ done
             assert_eq!(view.read(cx).draft_text(cx), "hello unsent");
             assert!(harness.replacing.is_none());
             assert!(!harness.session_switch_pending, "the verbs are released");
-            assert!(harness.session_cache.is_empty(), "the old draft closed, nothing parks");
+            assert!(harness.registry.parked_len() == 0, "the old draft closed, nothing parks");
             assert!(!harness.provider_sessions.contains_key(&old), "the old draft persists nowhere");
         });
         let locked = shared.inner.lock().expect("y2b2");
@@ -10827,7 +10746,7 @@ done
             );
             assert!(harness.replacing.is_none(), "the marker is gone");
             assert!(!harness.session_switch_pending, "the verbs are released");
-            assert!(harness.session_cache.is_empty(), "nothing parks");
+            assert!(harness.registry.parked_len() == 0, "nothing parks");
             let records: Vec<String> = harness.provider_sessions.keys().cloned().collect();
             assert_eq!(
                 records,
@@ -10877,7 +10796,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(harness.active.is_none(), "the centre stays empty");
-            assert!(harness.session_cache.is_empty(), "nothing parks");
+            assert!(harness.registry.parked_len() == 0, "nothing parks");
             assert!(harness.replacing.is_none(), "the marker is gone");
             assert!(!harness.session_switch_pending, "the verbs are released");
             assert!(
@@ -10911,7 +10830,7 @@ done
             baaz.update(cx, |harness, cx| {
                 let view = harness.active.take().expect("the lane opened");
                 harness.set_browser_chat(view, cx);
-                assert!(harness.active.is_none() && harness.session_cache.is_empty(), "held by the line alone");
+                assert!(harness.active.is_none() && harness.registry.parked_len() == 0, "held by the line alone");
                 harness.shutdown_provider_views(cx);
             });
         });
@@ -11025,7 +10944,7 @@ done
             let harness = baaz.read(cx);
             assert!(harness.active.is_none(), "the closed view is gone from the centre");
             assert!(
-                !harness.session_cache.iter().any(|(id, _)| id == &open_id),
+                !harness.registry.is_parked(&open_id),
                 "the closed view is gone from the MRU too"
             );
         });
@@ -11424,7 +11343,7 @@ done
                 if let Some(view) = harness.active.take() {
                     forgotten.push(view);
                 }
-                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                forgotten.extend(harness.registry.drain_parked());
                 harness.sessions.clear();
                 harness.provider_sessions = crate::provider_sessions::read();
                 harness.merge_provider_rows();
@@ -13090,7 +13009,7 @@ done
                 if let Some(view) = harness.active.take() {
                     forgotten.push(view);
                 }
-                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                forgotten.extend(harness.registry.drain_parked());
                 harness.sessions.clear();
                 harness.provider_sessions = crate::provider_sessions::read();
                 harness.merge_provider_rows();
@@ -13435,7 +13354,7 @@ done
                 "setup: the row reads Working before the switch"
             );
         });
-        let subs_before = vc.update(|_, cx| baaz.read(cx).view_subscriptions.len());
+        let subs_before = vc.update(|_, cx| baaz.read(cx).registry.subscription_count());
         // Switching away parks the first view; its subscription must stay.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
@@ -13450,11 +13369,11 @@ done
                 harness.active.clone().expect("the second lane opened").read(cx).session_id.clone();
             assert_ne!(second, first, "the second open is another session");
             assert!(
-                harness.session_cache.iter().any(|(id, _)| id == &first),
+                harness.registry.is_parked(&first),
                 "the first view parks instead of closing"
             );
             assert_eq!(
-                harness.view_subscriptions.len(),
+                harness.registry.subscription_count(),
                 subs_before + 1,
                 "both live views stay subscribed"
             );
@@ -13463,10 +13382,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness
-                    .session_cache
-                    .iter()
-                    .find(|(id, _)| id == &first)
-                    .map(|(_, view)| view.clone())
+                    .registry.parked(&first)
                     .expect("the parked view");
                 view.update(cx, |_, cx| {
                     cx.emit(SessionEvent::ProviderTurnFinished {
@@ -13628,14 +13544,14 @@ done
             let harness = baaz.read(cx);
             assert_eq!(harness.browser_chat_id(cx).as_deref(), Some("s-chat-next"));
             assert!(harness.find_view("s-chat-busy", cx).is_some(), "the busy chat is still findable");
-            assert_eq!(harness.live_views().len(), 2, "and still live, and subscribed with the new one");
+            assert_eq!(harness.registry.live(harness.active.as_ref()).len(), 2, "and still live, and subscribed with the new one");
         });
         assert!(weak.upgrade().is_some(), "the busy chat's view was not dropped");
         // Shown again from its folder: back on the line, out of the MRU.
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| assert!(harness.show_browser_chat("s-chat-busy", cx)));
             let harness = baaz.read(cx);
-            assert!(harness.session_cache.iter().all(|(id, _)| id != "s-chat-busy"), "one holder at a time");
+            assert!(!harness.registry.is_parked("s-chat-busy"), "one holder at a time");
         });
         lane_restore(state);
     }
@@ -13892,7 +13808,7 @@ done
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                baaz.read(cx).session_cache.iter().any(|(id, _)| id == &first),
+                baaz.read(cx).registry.is_parked(&first),
                 "the approval session parks instead of closing"
             );
         });
@@ -13901,10 +13817,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness
-                    .session_cache
-                    .iter()
-                    .find(|(id, _)| id == &first)
-                    .map(|(_, view)| view.clone())
+                    .registry.parked(&first)
                     .expect("the parked view");
                 view.update(cx, |view, cx| {
                     view.decide_external_approval(
@@ -13920,10 +13833,7 @@ done
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness
-                .session_cache
-                .iter()
-                .find(|(id, _)| id == &first)
-                .map(|(_, view)| view.clone())
+                .registry.parked(&first)
                 .expect("the parked view");
             assert_eq!(
                 view.read(cx).row_pending(),
@@ -13935,10 +13845,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let view = harness
-                    .session_cache
-                    .iter()
-                    .find(|(id, _)| id == &first)
-                    .map(|(_, view)| view.clone())
+                    .registry.parked(&first)
                     .expect("the parked view");
                 view.update(cx, |_, cx| {
                     cx.emit(SessionEvent::ProviderTurnFinished {
@@ -14196,7 +14103,7 @@ done
             );
             assert!(harness.active.is_none(), "the open view is gone");
             assert!(
-                !harness.session_cache.iter().any(|(id, _)| id == &open_id),
+                !harness.registry.is_parked(&open_id),
                 "no parked view survives to reopen it"
             );
             assert!(
@@ -14409,7 +14316,7 @@ done
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
                 forgotten.extend(harness.active.take());
-                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                forgotten.extend(harness.registry.drain_parked());
                 harness.sessions.clear();
                 std::sync::Arc::make_mut(&mut harness.index).clear();
                 harness.provider_sessions = crate::provider_sessions::read();
