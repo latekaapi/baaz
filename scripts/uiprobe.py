@@ -37,6 +37,33 @@ def keep_display_awake(seconds=900):
     atexit.register(proc.terminate)
     time.sleep(1.0)
 
+def pointer_over_capture(w=1440, h=900):
+    """The pointer's position when it rests over the capture window (opened
+    at the display's top-left, `w`×`h` points), else None. A resting pointer
+    there hovers whatever sits under it: on 16 Nov `launch-failure` captured
+    a sidebar hover card (with a real path in it) because the pointer had
+    been left at (150, 349). macOS only; elsewhere None."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes, ctypes.util
+        cg = ctypes.CDLL(ctypes.util.find_library("CoreGraphics"))
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+        cg.CGEventCreate.restype = ctypes.c_void_p
+        cg.CGEventGetLocation.restype = Point
+        cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+        cg.CFRelease.argtypes = [ctypes.c_void_p]
+        event = cg.CGEventCreate(None)
+        at = cg.CGEventGetLocation(event)
+        cg.CFRelease(event)
+    except (OSError, AttributeError):
+        return None
+    return (at.x, at.y) if 0 <= at.x < w and 0 <= at.y < h else None
+
+
 # How many captures to take looking for two that agree.
 SETTLE_TRIES = 6
 
@@ -992,6 +1019,12 @@ def main():
         return {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
 
     if a.probe_shot:
+        over = pointer_over_capture()
+        if over:
+            sys.stderr.write(f"uiprobe: the pointer rests over the capture area at "
+                             f"({over[0]:.0f}, {over[1]:.0f}); move it off the top-left "
+                             f"1440x900 and rerun (a hover would be captured)\n")
+            return 1
         env = merged_env("shot")
         cmd = boot(a.entry, "shot") + extra
         # Per-entry scripted environment (provider statuses for the connect
