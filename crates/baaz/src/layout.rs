@@ -26,6 +26,65 @@ pub enum GroupBy {
     Project,
 }
 
+/// Settings › Appearance › Theme (docs/83 §7, task 2.9): follow macOS, or
+/// keep Baaz light or dark. Dark when nothing is stored — Baaz has always
+/// opened dark, and a deterministic capture reads the default, so a capture
+/// never depends on the machine's appearance (docs/83 §9).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    /// Follow the system's light/dark appearance, and its changes.
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    #[default]
+    Dark,
+}
+
+impl ThemePref {
+    /// Every choice, in the segmented control's order.
+    pub const ALL: [ThemePref; 3] = [ThemePref::System, ThemePref::Light, ThemePref::Dark];
+
+    /// The control's word for the choice.
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePref::System => "System",
+            ThemePref::Light => "Light",
+            ThemePref::Dark => "Dark",
+        }
+    }
+
+    /// `system` / `light` / `dark` (case-insensitive), as the store and the
+    /// `settings-set:theme=` step spell them.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "system" => Some(ThemePref::System),
+            "light" => Some(ThemePref::Light),
+            "dark" => Some(ThemePref::Dark),
+            _ => None,
+        }
+    }
+
+    /// The theme this choice paints with while the system's appearance is
+    /// `system_dark`: the seam System follows the OS through. Pure, so the
+    /// tests drive both appearances without a window.
+    pub fn resolve(self, system_dark: bool) -> aui_tokens::ThemeKind {
+        match self {
+            ThemePref::System if system_dark => aui_tokens::ThemeKind::Dark,
+            ThemePref::System => aui_tokens::ThemeKind::Light,
+            ThemePref::Light => aui_tokens::ThemeKind::Light,
+            ThemePref::Dark => aui_tokens::ThemeKind::Dark,
+        }
+    }
+}
+
+/// Whether gpui's window appearance is a dark one (`darkAqua` or the
+/// vibrant dark variant).
+pub fn appearance_is_dark(appearance: gpui::WindowAppearance) -> bool {
+    matches!(appearance, gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
+}
+
 /// How sessions are ordered inside their group (the view menu's Sort by).
 /// Pinned rows stay first whatever the order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,7 +313,11 @@ pub struct Layout {
     /// is accepted and ignored — Settings no longer offers it.
     #[serde(rename = "groupBar", default)]
     pub group_bar: bool,
-    /// Settings › Sidebar › "Show a summary line" (docs/83 §4): every
+    /// Settings › Appearance › Theme: see [`ThemePref`]. An unknown value
+    /// reads as the default rather than failing the file.
+    #[serde(rename = "theme", default, deserialize_with = "crate::store::lenient")]
+    pub theme: ThemePref,
+    /// Settings › Appearance › "Show a summary line" (docs/83 §4): every
     /// session row takes a second line under its title (52 px) — the status
     /// sentence, else the byline. OFF by default: rows are one line (32).
     /// Replaces the old `compactRows` key (whose default was the two-line
@@ -460,6 +523,7 @@ impl Default for Layout {
             sort_by: SortBy::Recent,
             group_chevron: false,
             group_bar: false,
+            theme: ThemePref::Dark,
             summary_line: false,
             group_branch: false,
             auto_title: true,
@@ -637,6 +701,7 @@ mod tests {
             sort_by: SortBy::Recent,
             group_chevron: true,
             group_bar: true,
+            theme: ThemePref::System,
             summary_line: true,
             group_branch: true,
             auto_title: true,
@@ -668,6 +733,7 @@ mod tests {
         assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
         assert!(text.contains("\"summaryLine\":true"));
+        assert!(text.contains("\"theme\":\"system\""));
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"foldFinishedTurns\":false"));
         assert!(text.contains("\"feedbackMode\":true"));
@@ -690,6 +756,7 @@ mod tests {
         assert!(back.group_chevron);
         assert!(back.group_bar);
         assert!(back.summary_line);
+        assert_eq!(back.theme, ThemePref::System);
         assert!(back.group_branch);
         assert!(!back.fold_finished_turns);
         assert!(back.feedback_mode);
@@ -972,5 +1039,35 @@ mod tests {
             let back: Layout = serde_json::from_str(&text).unwrap();
             assert_eq!(back.sort_by, sort);
         }
+    }
+
+    /// Settings › Appearance › Theme (task 2.9): dark when nothing is
+    /// stored (old files and unknown values included), each choice round
+    /// trips, and System follows the OS appearance through `resolve`.
+    #[test]
+    fn the_theme_choice_persists_and_system_follows_the_os() {
+        use aui_tokens::ThemeKind;
+        assert_eq!(Layout::default().theme, ThemePref::Dark);
+        let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
+        assert_eq!(old.theme, ThemePref::Dark);
+        let odd: Layout = serde_json::from_str("{\"theme\":\"sepia\"}").unwrap();
+        assert_eq!(odd.theme, ThemePref::Dark, "an unknown theme never fails the file");
+        for pref in ThemePref::ALL {
+            let stored = Layout { theme: pref, ..Layout::default() };
+            let back: Layout = serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+            assert_eq!(back.theme, pref);
+            assert_eq!(ThemePref::parse(pref.label()), Some(pref));
+        }
+        assert_eq!(ThemePref::parse("sepia"), None);
+        assert_eq!(ThemePref::System.resolve(true), ThemeKind::Dark);
+        assert_eq!(ThemePref::System.resolve(false), ThemeKind::Light);
+        for system_dark in [true, false] {
+            assert_eq!(ThemePref::Light.resolve(system_dark), ThemeKind::Light);
+            assert_eq!(ThemePref::Dark.resolve(system_dark), ThemeKind::Dark);
+        }
+        assert!(appearance_is_dark(gpui::WindowAppearance::Dark));
+        assert!(appearance_is_dark(gpui::WindowAppearance::VibrantDark));
+        assert!(!appearance_is_dark(gpui::WindowAppearance::Light));
+        assert!(!appearance_is_dark(gpui::WindowAppearance::VibrantLight));
     }
 }

@@ -87,17 +87,17 @@ fn probe_entries_drive_the_f3_flows() {
     assert_offline_signed_in(&entries["pins"], "feedback-pins");
     assert_eq!(
         steps_arg(&entries["hover"]),
-        "feedback-mode:on;feedback-mode:hover:846,551",
+        "feedback-mode:on;feedback-mode:hover:846,517",
         "feedback-hover names the hero button"
     );
     assert_eq!(
         steps_arg(&entries["note"]),
-        "feedback-mode:on;feedback-mode:click:846,551",
+        "feedback-mode:on;feedback-mode:click:846,517",
         "feedback-note clicks the hero button and leaves the popover open"
     );
     assert_eq!(
         steps_arg(&entries["pins"]),
-        "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here",
+        "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here",
         "feedback-pins saves an element note and an area note"
     );
 }

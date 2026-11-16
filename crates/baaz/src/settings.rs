@@ -5,11 +5,12 @@
 //! B11: Settings is a full page (`Route::Settings`), not a modal. While it
 //! is open the left column shows the section list (with a "← Back" row at
 //! its top) instead of the session sidebar; the centre+right columns merge
-//! into one settings surface (max 680 px, centred, own scroll, 32 px top
-//! padding). The right pane and terminal dock are hidden, not closed —
+//! into one settings surface (content at most 720 px, centred, own scroll,
+//! docs/83 §7). The right pane and terminal dock are hidden, not closed —
 //! their state is untouched and restored on exit.
 //!
-//! The six sidebar flags stay in `layout.json` — there is no second store.
+//! The switches and the Appearance theme stay in `layout.json` — there is
+//! no second store.
 //! [`crate::app::Harness::settings_sections`] builds the sections' rows
 //! from that state every frame, and a switch intent flips the matching
 //! layout field back through [`crate::layout::write`].
@@ -84,10 +85,13 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
 /// settings surface, shown in a Browse person tab.
 pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
 
-/// The Settings column's widest measure, centred in the surface; the
-/// Skills page takes the same column (owner 2026-10-31: full width "looks
-/// too wide").
-pub(crate) const SETTINGS_COLUMN_MAX: f32 = 680.0;
+/// The Settings content's widest measure (docs/83 §7: "content column max
+/// 720"); the column adds its side padding, so its rows span at most this.
+pub(crate) const SETTINGS_CONTENT_MAX: f32 = 720.0;
+/// The Settings column's widest measure, centred in the surface: the
+/// content plus its side padding. The Skills page takes the same column
+/// (owner 2026-10-31: full width "looks too wide").
+pub(crate) const SETTINGS_COLUMN_MAX: f32 = SETTINGS_CONTENT_MAX + 2.0 * SETTINGS_COLUMN_PAD_X;
 /// The Shortcuts page's search field width.
 const SHORTCUT_SEARCH_W: f32 = 280.0;
 /// The Settings column's side padding.
@@ -101,10 +105,15 @@ pub(crate) const SETTINGS_NAV_TOP: f32 = LIST_INSET;
 /// line (the column's content begins under the header); the Skills page's
 /// header takes the same inset.
 pub(crate) const SETTINGS_COLUMN_TOP: f32 = scale::SP_6;
+/// The space between a page's description and its first section, and
+/// between sections: a section reads as a block of its own, not as rows
+/// that run on from the heading.
+pub(crate) const SETTINGS_SECTION_GAP: f32 = scale::SP_7;
 
 /// The page's sections, in list order (a muted divider before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
+    ("appearance", "Appearance"),
     ("sidebar", "Sidebar"),
     ("browser", "Browser"),
     ("providers", "Providers"),
@@ -116,6 +125,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
 pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
+        "appearance" => "How Baaz looks. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
@@ -211,6 +221,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
     }
     match section {
         "general" => crumbs.push("General".to_owned()),
+        "appearance" => crumbs.push("Appearance".to_owned()),
         "sidebar" => crumbs.push("Sidebar".to_owned()),
         "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
@@ -244,7 +255,8 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
         "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
         | "feedback_mode" => Some("general"),
-        "group_chevron" | "summary_line" | "group_branch" => Some("sidebar"),
+        "theme" | "summary_line" => Some("appearance"),
+        "group_chevron" | "group_branch" => Some("sidebar"),
         "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
@@ -293,18 +305,33 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
         SettingsRow::Switch {
             id: SharedString::from("feedback_mode"),
             label: SharedString::from("Feedback mode"),
-            detail: Some(SharedString::from(
-                "⌃⌥⌘F points at parts of Baaz to leave notes for Claude. Saves a report folder.",
-            )),
+            detail: Some(SharedString::from(FEEDBACK_MODE_DETAIL)),
             on: layout.feedback_mode,
         },
     ]
 }
 
-/// Settings › Sidebar's summary-line switch (docs/83 §4), shared by the
-/// row model and the page so the two cannot drift.
+/// General › Advanced's feedback-mode line, shared by the row model and
+/// the page. Names no provider (docs/83 rule 14).
+const FEEDBACK_MODE_DETAIL: &str = "⌃⌥⌘F points at parts of Baaz to leave notes on them. Saves a report folder.";
+
+/// Settings › Appearance's summary-line switch (docs/83 §4; moved from
+/// Sidebar in task 2.9), shared by the row model and the page so the two
+/// cannot drift.
 const SUMMARY_LINE_LABEL: &str = "Show a summary line";
 const SUMMARY_LINE_DETAIL: &str = "Add a second line under each session: what it is waiting on, or what it last said.";
+
+/// The Appearance page's switch rows, from the layout they read: the row
+/// model the coverage test enumerates. The theme is a segmented choice,
+/// not a switch; its id (`theme`) homes through [`setting_home`].
+pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
+    vec![SettingsRow::Switch {
+        id: SharedString::from("summary_line"),
+        label: SharedString::from(SUMMARY_LINE_LABEL),
+        detail: Some(SharedString::from(SUMMARY_LINE_DETAIL)),
+        on: layout.summary_line,
+    }]
+}
 
 /// The Sidebar page's switch rows, from the layout they read: the row
 /// model the page renders and the coverage test enumerates.
@@ -317,18 +344,22 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             on: layout.group_chevron,
         },
         SettingsRow::Switch {
-            id: SharedString::from("summary_line"),
-            label: SharedString::from(SUMMARY_LINE_LABEL),
-            detail: Some(SharedString::from(SUMMARY_LINE_DETAIL)),
-            on: layout.summary_line,
-        },
-        SettingsRow::Switch {
             id: SharedString::from("group_branch"),
             label: SharedString::from("Branch name"),
             detail: Some(SharedString::from("Show each project's git branch on its row")),
             on: layout.group_branch,
         },
     ]
+}
+
+/// The theme a window opens in: the `--theme` flag when the run names one,
+/// else the stored Settings › Appearance choice, System resolved against the
+/// system's appearance at launch. A deterministic capture reads no store,
+/// so it opens dark unless its entry passes `--theme`.
+pub(crate) fn boot_theme(flag: Option<aui_tokens::ThemeKind>, cx: &gpui::App) -> aui_tokens::ThemeKind {
+    flag.unwrap_or_else(|| {
+        crate::layout::read().theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()))
+    })
 }
 
 /// The page state. `open` is the route: while open the left column shows
@@ -339,7 +370,7 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 pub(crate) struct SettingsPageState {
     /// Whether the page stands open (`Route::Settings`).
     pub open: bool,
-    /// The page id: `general` | `sidebar` | `browser` | `providers` |
+    /// The page id: `general` | `appearance` | `sidebar` | `browser` | `providers` |
     /// `providers/<wire>` | `shortcuts` | `archived`.
     pub section: String,
     /// Last-visited section this run (⌘, reopens it; General on first open).
@@ -435,8 +466,9 @@ pub(crate) fn terminal_taken_keys() -> Vec<&'static str> {
 
 impl Harness {
     /// Every section's rows, built from state each frame: General (the
-    /// three model-spending switches plus the fold switch), Sidebar
-    /// (chevron/density/branch), Providers (enable switches), Shortcuts
+    /// three model-spending switches, the fold switch and feedback mode),
+    /// Appearance (the summary line; the theme is a segmented choice),
+    /// Sidebar (chevron/branch), Providers (enable switches), Shortcuts
     /// (live keymap). Archived has no switches — its page lists sessions.
     ///
     /// A later section is one more arm here (and one more `on_switch` id in
@@ -447,6 +479,11 @@ impl Harness {
                 id: SharedString::from("general"),
                 label: SharedString::from("General"),
                 rows: general_settings_rows(&self.layout),
+            },
+            SettingsSection {
+                id: SharedString::from("appearance"),
+                label: SharedString::from("Appearance"),
+                rows: appearance_settings_rows(&self.layout),
             },
             SettingsSection {
                 id: SharedString::from("sidebar"),
@@ -474,8 +511,8 @@ impl Harness {
     }
 
     /// Open the Settings page on legacy dialog index `section` (menu rows,
-    /// ⌘,): 0 General, 1 Sidebar, 2 Browser, 3 Providers, 4 Shortcuts,
-    /// 5 Archived. Idempotent (open, never toggle). Menus, palette and
+    /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 General, 1 Appearance,
+    /// 2 Sidebar, 3 Browser, 4 Providers, 5 Shortcuts, 6 Archived). Idempotent (open, never toggle). Menus, palette and
     /// modal go first.
     pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
         let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
@@ -683,6 +720,35 @@ impl Harness {
         cx.notify();
     }
 
+    /// Settings › Appearance › Theme: store `pref` and paint with it now.
+    /// The stored choice is what the next launch opens in (see
+    /// [`boot_theme`]); View → Toggle Theme goes through here too, so the
+    /// page always shows what the window paints.
+    pub(crate) fn set_theme_pref(
+        &mut self,
+        pref: crate::layout::ThemePref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout.theme = pref;
+        self.persist_layout();
+        self.apply_theme_pref(window, cx);
+    }
+
+    /// Paint with the stored theme choice, System resolved against the
+    /// system's appearance now. A no-op when the window already paints it.
+    /// The window's appearance observer calls this while the choice is
+    /// System, so a macOS switch repaints Baaz too.
+    pub(crate) fn apply_theme_pref(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let kind = self.layout.theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()));
+        if cx.aui().kind != kind {
+            aui_tokens::AuiTheme::set_kind(kind, window, cx);
+            // Rows cached with the old palette rebuild on the next frame.
+            self.invalidate_list();
+        }
+        cx.notify();
+    }
+
     /// Set the engine an address commit searches with. The Settings →
     /// Browser page's rows own it; the toolbar reads it on every commit.
     pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
@@ -760,10 +826,11 @@ impl Harness {
         }
     }
 
-    /// `settings-set:<key>=<value>`: the scripted twin of the Settings →
-    /// Browser rows. `search-engine=<name>` lands instantly; an unknown key
-    /// or an engine name that does not parse is an `Err`, never a silent
-    /// no-op.
+    /// `settings-set:<key>=<value>`: the scripted twin of the Settings
+    /// rows that are not plain switches. `search-engine=<name>`,
+    /// `summary-line=<on|off>` and `theme=<system|light|dark>` land
+    /// instantly; an unknown key or a value that does not parse is an
+    /// `Err`, never a silent no-op.
     pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (key, value) =
             rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
@@ -784,7 +851,16 @@ impl Harness {
                 self.flip_setting("summary_line", on, cx);
                 Ok(())
             }
-            _ => Err(format!("unknown settings key {key:?} (expected search-engine=<name> or summary-line=<on|off>)")),
+            "theme" => match crate::layout::ThemePref::parse(value) {
+                Some(pref) => {
+                    self.set_theme_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("theme wants system, light or dark, not {value:?}")),
+            },
+            _ => Err(format!(
+                "unknown settings key {key:?} (expected search-engine=<name>, summary-line=<on|off> or theme=<system|light|dark>)"
+            )),
         }
     }
 
@@ -928,10 +1004,10 @@ impl Harness {
         ));
         for (index, crumb) in crumbs.iter().enumerate() {
             if index > 0 {
-                trail = trail.child(div().flex_none().ui(scale::FS_13).text_color(p.ink_4).child("/"));
+                trail = trail.child(div().flex_none().role_in(TextRole::Body, cx).text_color(p.ink_4).child("/"));
             }
             let last = index + 1 == crumbs.len();
-            let crumb_el = div().flex_none().ui(scale::FS_13).text_color(if last { p.ink } else { p.fg_muted }).child(crumb.clone());
+            let crumb_el = div().flex_none().role_in(TextRole::Body, cx).text_color(if last { p.ink } else { p.fg_muted }).child(crumb.clone());
             // Every crumb but the page itself is a link to its page (owner,
             // 2026-10-29: the crumbs looked clickable and were not).
             let crumb_el = match settings_crumb_target(&self.settings_page.section, index) {
@@ -964,11 +1040,13 @@ impl Harness {
         }
     }
 
-    /// The settings surface: centre+right merged into one column, max 680
-    /// px, centred, scrolling on its own, 32 px top padding. The surface is
-    /// always the full column, so moving between sections never resizes
-    /// anything. Each page: H1 + one muted line + sections (a title over
-    /// line-split rows, no box around them).
+    /// The settings surface: centre+right merged into one column (content
+    /// at most [`SETTINGS_CONTENT_MAX`], centred), scrolling on its own,
+    /// starting [`SETTINGS_COLUMN_TOP`] under the header's line. The
+    /// surface is always the full column, so moving between sections never
+    /// resizes anything. Each page: the title (`t-title`) over one Body
+    /// `fg-muted` line, then sections [`SETTINGS_SECTION_GAP`] apart (a
+    /// `t-subtitle` title over line-split rows, no box around them).
     pub(crate) fn render_settings_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Keep the filter source in one place: the search entity owns the
         // text while the page stands open.
@@ -984,6 +1062,7 @@ impl Harness {
         let blurb = settings_blurb(&section);
         let body: AnyElement = match section.as_str() {
             "general" => self.settings_general_page(cx),
+            "appearance" => self.settings_appearance_page(cx),
             "sidebar" => self.settings_sidebar_page(cx),
             "browser" => self.settings_browser_page(cx),
             "providers" => self.settings_providers_overview(window, cx),
@@ -1032,24 +1111,29 @@ impl Harness {
                     // the heading sits this far below it.
                     .pt(px(SETTINGS_COLUMN_TOP))
                     .px(px(SETTINGS_COLUMN_PAD_X))
-                    .pb(px(scale::SP_5))
-                    .gap(px(scale::SP_4))
+                    .pb(px(SETTINGS_SECTION_GAP))
+                    .gap(px(SETTINGS_SECTION_GAP))
                     .child(
-                        div()
-                            .id("settings-h1")
+                        v_flex()
                             .flex_none()
-                            .role_in(TextRole::Title, cx)
-                            .text_color(p.ink)
-                            .role(gpui::Role::Heading)
-                            .aria_label(format!("Settings page, {title}"))
-                            .child(title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ui(scale::FS_13)
-                            .text_color(p.fg_muted)
-                            .child(blurb.to_string()),
+                            .gap(px(scale::SP_1))
+                            .child(
+                                div()
+                                    .id("settings-h1")
+                                    .flex_none()
+                                    .role_in(TextRole::Title, cx)
+                                    .text_color(p.ink)
+                                    .role(gpui::Role::Heading)
+                                    .aria_label(format!("Settings page, {title}"))
+                                    .child(title.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .role_in(TextRole::Body, cx)
+                                    .text_color(p.fg_muted)
+                                    .child(blurb.to_string()),
+                            ),
                     )
                     .child(body),
             )
@@ -1120,19 +1204,52 @@ impl Harness {
             self.layout.fold_finished_turns,
             cx,
         )];
-        let feedback = vec![self.settings_switch_row(
+        let advanced = vec![self.settings_switch_row(
             "feedback_mode",
             "Feedback mode",
-            "⌃⌥⌘F points at parts of Baaz to leave notes for Claude. Saves a report folder.",
+            FEEDBACK_MODE_DETAIL,
             self.layout.feedback_mode,
             cx,
         )];
-        v_flex()
-            .w_full()
-            .gap(px(scale::SP_4))
+        settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
-            .child(self.settings_group("Feedback", feedback, cx))
+            .child(self.settings_group("Advanced", advanced, cx))
+            .into_any_element()
+    }
+
+    /// Appearance (task 2.9): the theme, and the sidebar's summary line
+    /// (moved here from Sidebar: it changes how the list looks, not what
+    /// it holds). Text size and density join once task 2.10 builds the type
+    /// and height mechanism they switch (docs/83 §9).
+    fn settings_appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::layout::ThemePref;
+        let active = ThemePref::ALL.iter().position(|pref| *pref == self.layout.theme).unwrap_or(0);
+        let set = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+            if let Some(pref) = ThemePref::ALL.get(*index) {
+                this.set_theme_pref(*pref, Some(window), cx);
+            }
+        });
+        let theme = settings_row("Theme")
+            .description("System follows macOS as it switches between light and dark.")
+            .control(
+                div().debug_selector(|| "settings-theme".into()).child(
+                    segmented("settings-theme", ThemePref::ALL.iter().map(|pref| SharedString::from(pref.label())).collect(), active)
+                        .accessibility_label("Theme")
+                        .on_select(move |index, window, cx| set(&index, window, cx)),
+                ),
+            )
+            .into_any_element();
+        let summary = self.settings_switch_row(
+            "summary_line",
+            SUMMARY_LINE_LABEL,
+            SUMMARY_LINE_DETAIL,
+            self.layout.summary_line,
+            cx,
+        );
+        settings_sections_stack()
+            .child(self.settings_group("Window", vec![theme], cx))
+            .child(self.settings_group("Sidebar", vec![summary], cx))
             .into_any_element()
     }
 
@@ -1469,7 +1586,6 @@ impl Harness {
     /// fixed capture text instead, so captures never depend on the
     /// machine's handler.
     fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let handler = self.default_browser_handler().map(str::to_owned);
         let status = crate::default_browser::row_status_text(
             handler.as_deref(),
@@ -1499,9 +1615,7 @@ impl Harness {
         // Chromium owns its settings UI, so the row shows only where the
         // engine can load `chrome://` pages (the `cef` backend) — anywhere
         // else it would be a dead row.
-        let mut page = v_flex()
-            .w_full()
-            .gap(px(scale::SP_4))
+        let mut page = settings_sections_stack()
             .child(self.settings_browser_data_group(cx))
             .child(self.settings_browser_assistant_group(cx))
             .child(self.settings_browser_agents_group(cx))
@@ -1511,41 +1625,26 @@ impl Harness {
         if cfg!(feature = "cef") {
             page = page.child(self.settings_browser_chromium_group(cx));
         }
-        page.child(self.settings_group(
-                "Default browser",
-                vec![row.into_any_element()],
-                cx,
-            ))
-            .child(
-                div()
-                    .w_full()
-                    .flex_none()
-                    .ui(scale::FS_12)
-                    .text_color(p.fg_muted)
-                    .child("Links from other apps open as person tabs in Browse.".to_string()),
-            )
-            .into_any_element()
+        page.child(
+            section("Default browser")
+                .row(row)
+                .note("Links from other apps open as person tabs in Browse."),
+        )
+        .into_any_element()
     }
 
-    /// Sidebar: chevron, summary line, branch name — plus the note
-    /// that grouping and sort live in the sidebar's view menu. The active
+    /// Sidebar: chevron and branch name — plus the note that grouping and
+    /// sort live in the sidebar's view menu (the summary line lives on
+    /// Appearance). The active
     /// session's project marks itself with an accent bar in every mode; no
     /// switch gates it anymore.
     fn settings_sidebar_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
         let rows = vec![
             self.settings_switch_row(
                 "group_chevron",
                 "Collapse chevron",
                 "Show a chevron on project rows to fold them.",
                 self.layout.group_chevron,
-                cx,
-            ),
-            self.settings_switch_row(
-                "summary_line",
-                SUMMARY_LINE_LABEL,
-                SUMMARY_LINE_DETAIL,
-                self.layout.summary_line,
                 cx,
             ),
             self.settings_switch_row(
@@ -1556,17 +1655,11 @@ impl Harness {
                 cx,
             ),
         ];
-        v_flex()
-            .w_full()
-            .gap(px(scale::SP_4))
-            .child(self.settings_group("Project rows", rows, cx))
+        settings_sections_stack()
             .child(
-                div()
-                    .w_full()
-                    .flex_none()
-                    .ui(scale::FS_12)
-                    .text_color(p.fg_muted)
-                    .child("Grouping and sort live in the sidebar's view menu.".to_string()),
+                section("Project rows")
+                    .rows(rows)
+                    .note("Grouping and sort live in the sidebar's view menu."),
             )
             .into_any_element()
     }
@@ -1612,9 +1705,7 @@ impl Harness {
         }
         let setup = cx.listener(|this: &mut Self, _: &(), _, cx| this.open_connect_screen(cx));
         let _ = window;
-        v_flex()
-            .w_full()
-            .gap(px(scale::SP_4))
+        settings_sections_stack()
             .child(self.settings_group("Providers", rows, cx))
             .child(self.settings_default_provider_group(&statuses, cx))
             // The one-time move of Baaz's older sessions into its own
@@ -1718,7 +1809,7 @@ impl Harness {
             Some(line) => aui::data::card().flush().label(format!("{} account", id.label())).section(card).section(line).into_any_element(),
             None => card,
         };
-        let mut page = v_flex().w_full().gap(px(scale::SP_4)).child(card);
+        let mut page = settings_sections_stack().child(card);
         if crate::settings_providers::own_mcp_providers().contains(&id) {
             page = page.child(self.settings_group("Tools", vec![self.use_own_mcp_row(id, cx)], cx));
         }
@@ -1739,7 +1830,7 @@ impl Harness {
             crate::app::bind_keys(cx);
             cx.notify();
         });
-        let mut column = v_flex().w_full().gap(px(scale::SP_4));
+        let mut column = settings_sections_stack();
         let mut header_row = h_flex().w_full().flex_none().items_center().gap(px(scale::SP_3));
         header_row = header_row.child(
             aui::data::field_frame("settings-shortcut-search", &self.settings_search, window, cx)
@@ -1851,7 +1942,7 @@ impl Harness {
                     div()
                         .id("settings-archived-empty")
                         .w_full()
-                        .ui(scale::FS_13)
+                        .role_in(TextRole::Body, cx)
                         .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label("No archived sessions")
@@ -1869,7 +1960,7 @@ impl Harness {
                 order.push(name);
             }
         }
-        let mut column = v_flex().w_full().gap(px(scale::SP_4));
+        let mut column = settings_sections_stack();
         for name in order {
             let rows = by_project.remove(&name).unwrap_or_default();
             let mut els = Vec::new();
@@ -1893,6 +1984,11 @@ impl Harness {
         }
         column.into_any_element()
     }
+}
+
+/// A page's sections, [`SETTINGS_SECTION_GAP`] apart.
+fn settings_sections_stack() -> gpui::Div {
+    v_flex().w_full().gap(px(SETTINGS_SECTION_GAP))
 }
 
 /// One per-site rule or exception under its group's row: the host as the
@@ -2229,7 +2325,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "sidebar", "browser", "providers", "shortcuts", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "browser", "providers", "shortcuts", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");
@@ -2240,6 +2336,36 @@ mod tests {
         assert_eq!(settings_blurb("browser"), "How Baaz browses: the assistant, tabs, search, downloads.");
         assert_eq!(setting_home("search-engine"), Some("browser"));
         assert_eq!(setting_home("download-dir"), Some("browser"));
+    }
+
+    /// Task 2.9: Appearance is registered after General — normalised,
+    /// crumbed, blurbed, and home to the theme and the summary line, which
+    /// left Sidebar (one control, one place).
+    #[test]
+    fn appearance_section_is_registered() {
+        assert_eq!(normalize_settings_target("appearance", ""), "appearance");
+        assert_eq!(normalize_settings_target("theme", ""), "appearance");
+        assert_eq!(normalize_settings_target("summary_line", ""), "appearance");
+        assert!(settings_target_known("appearance"));
+        assert_eq!(settings_breadcrumb("appearance"), vec!["Settings".to_owned(), "Appearance".to_owned()]);
+        assert_eq!(settings_blurb("appearance"), "How Baaz looks. Changes apply live.");
+        let layout = Layout::default();
+        let sidebar: Vec<String> = sidebar_settings_rows(&layout)
+            .iter()
+            .filter_map(|row| match row {
+                SettingsRow::Switch { id, .. } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(!sidebar.contains(&"summary_line".to_owned()), "the summary line lives on Appearance only");
+    }
+
+    /// No provider name in the feedback-mode line (docs/83 rule 14).
+    #[test]
+    fn the_feedback_mode_line_names_no_provider() {
+        for name in ["Claude", "Codex", "Muse"] {
+            assert!(!FEEDBACK_MODE_DETAIL.contains(name), "{name} in {FEEDBACK_MODE_DETAIL:?}");
+        }
     }
 
     /// A row id round-trips to the action and context the handler writes
@@ -2483,7 +2609,7 @@ mod tests {
         assert_eq!(normalize_settings_target("providers/nope", ""), "general");
         // A row id opens its home page.
         assert_eq!(normalize_settings_target("auto_title", ""), "general");
-        assert_eq!(normalize_settings_target("summary_line", ""), "sidebar");
+        assert_eq!(normalize_settings_target("summary_line", ""), "appearance");
         assert_eq!(normalize_settings_target("fold_finished_turns", ""), "general");
         assert_eq!(normalize_settings_target("provider-enabled:codex", ""), "providers");
         assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "providers");
@@ -2547,6 +2673,7 @@ mod tests {
         // Page id → the setting ids that page renders.
         let mut pages: Vec<(String, Vec<String>)> = vec![
             ("general".to_owned(), switch_ids(&general_settings_rows(&layout))),
+            ("appearance".to_owned(), switch_ids(&appearance_settings_rows(&layout))),
             ("sidebar".to_owned(), switch_ids(&sidebar_settings_rows(&layout))),
             ("providers".to_owned(), switch_ids(&crate::settings_providers::providers_section().rows)),
             ("archived".to_owned(), vec!["archived:s-1".to_owned()]),
@@ -2580,6 +2707,7 @@ mod tests {
             ("provider-enabled:codex", "providers"),
             ("use-own-mcp:codex", "providers/*"),
             ("auto_title", "general"),
+            ("theme", "appearance"),
         ];
         for (id, home) in links {
             assert_eq!(setting_home(id), Some(home), "the link home of {id}");

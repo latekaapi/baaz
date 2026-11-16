@@ -342,32 +342,43 @@ ENTRIES = {
     # generate on main after merge, never to silence a finding.
     "settings-general":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:general"]},
+    # Settings › Appearance (task 2.9): the theme choice and the summary
+    # line. `-light` switches the theme by the page's own setter
+    # (`settings-set:theme=light`), not by `--theme`, so it proves the live
+    # switch repaints the whole window. A capture reads no store, so it
+    # writes none either. Offline, idempotent (set, never toggle). No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "settings-appearance":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:appearance"]},
+    "settings-appearance-light": {"shot": ["--no-connect", "--login", "signed-in",
+                                           "--steps", "settings:appearance;settings-set:theme=light"]},
     # F2 feedback mode shell: the header slot while Active
     # (`feedback-mode:on` parks the run-only flag and enters Active) and
     # paused with a note in the draft (`feedback-mode:pause` after a click
-    # and a note). The paused entry's `click:846,551` is the empty-state
+    # and a note). The paused entry's `click:846,517` is the empty-state
     # hero button at the probe's fixed 1440×900 capture size. Offline,
     # idempotent. No baseline yet — generate on main after merge, never to
     # silence a finding.
     "feedback-header-active": {"shot": ["--no-connect", "--login", "signed-in",
                                         "--steps", "feedback-mode:on"]},
     "feedback-header-paused": {"shot": ["--no-connect", "--login", "signed-in",
-                                        "--steps", "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:x;feedback-mode:pause"]},
+                                        "--steps", "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:x;feedback-mode:pause"]},
     # F3 feedback commenting: `feedback-hover` names the empty-state
     # hero's `New session` button under the outline, `feedback-note`
     # leaves its note popover open, `feedback-pins` saves two notes (an
     # element and a dragged area) so the numbered pins show. The
-    # `click:846,551`/`hover:846,551` is the hero button at the probe's
+    # `click:846,517`/`hover:846,517` is the hero button at the probe's
     # fixed 1440×900 capture size. Window-only scripts: no `wait:`
     # (a session verb — it would wait for a session that never opens).
     # No baseline yet — generate on main after merge, never to silence a
     # finding.
     "feedback-hover":       {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:hover:846,551"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:hover:846,517"]},
     "feedback-note":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:846,551"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:click:846,517"]},
     "feedback-pins":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here"]},
+                                      "--steps", "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here"]},
     # The Settings page's Archived section: offline, idempotent. No
     # baseline yet — generate on main after merge, never to silence a
     # finding.
@@ -487,8 +498,14 @@ ENTRIES = {
     # over fixed rows, and the New dialog with empty fields. Each steps
     # verb sets its state rather than toggling it, so both settle shots
     # agree.
+    # Muse is connected in the add-menu entry, so its own "Ask Muse to write
+    # one" row (shown only while Muse is connected) is in the capture.
     "skills-add-menu":      {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "skills:add-menu"]},
+                                      "--steps", "skills:add-menu"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":
+                                      '[{"provider":"muse","installed":{"Yes":{"version":"1.4.0","path":"/bin/muse"}},'
+                                      '"auth":{"SignedIn":{"email":"ada@example.com","plan":"Pro","method":"oauth"}},'
+                                      '"enabled":true,"advisory":"None","checked_at":1,"usage":null}]'}},
     "skills-import-preview": {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:import-preview"]},
     "skills-new":           {"shot": ["--no-connect", "--login", "signed-in",

@@ -80,7 +80,7 @@ fn probe_entries_drive_feedback_mode_steps() {
     );
     assert_eq!(
         steps_arg(&entries["paused"]),
-        "feedback-mode:on;feedback-mode:click:846,551;feedback-mode:note:x;feedback-mode:pause",
+        "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:x;feedback-mode:pause",
         "feedback-header-paused pauses with a note in the draft",
     );
 }

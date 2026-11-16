@@ -1313,7 +1313,8 @@ impl Harness {
         cx.notify();
     }
 
-    /// "Ask Muse to write one" (A5): a new session in the current project —
+    /// "Ask Muse to write one" (A5; shown only while Muse is connected): a
+    /// new session in the current project —
     /// always on the **muse** lane, whatever the remembered provider — with
     /// the `/create-skill ` draft in the composer, focused, never sent.
     pub(crate) fn ask_muse_to_write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1554,7 +1555,7 @@ impl Harness {
                     .on_click(open_menu),
             )
             .child(div().flex_1())
-            .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Search"))
+            .child(div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("Search"))
             .child(
                 aui::data::field_frame("skills-search-field", &self.skills_query, window, cx)
                     .flex_none()
@@ -1652,7 +1653,7 @@ impl Harness {
                     .on_select(move |index, window, cx| pick_filter(&index, window, cx)),
             )
             .child(div().flex_1())
-            .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Hide off"))
+            .child(div().flex_none().role_in(TextRole::Body, cx).text_color(p.fg_muted).child("Hide off"))
             .child(
                 switch("skills-hide-off", self.skills.hide_off, false)
                     .accessibility_label("Hide off")
@@ -1699,7 +1700,13 @@ impl Harness {
                 } else {
                     live.clone()
                 };
+                // Rows on the Settings pattern: a 1 px `line` between
+                // them, none above the first (docs/83 §7).
+                let mut first = true;
                 for index in shown {
+                    if !std::mem::take(&mut first) {
+                        list = list.child(skills_row_rule(cx));
+                    }
                     list = list.child(self.render_skill_row(index, cx));
                 }
                 if section == ScopeSection::Builtin && live.len() > 2 {
@@ -1731,6 +1738,9 @@ impl Harness {
                     }
                 }
                 for index in losers {
+                    if !std::mem::take(&mut first) {
+                        list = list.child(skills_row_rule(cx));
+                    }
                     list = list.child(self.render_overridden_row(index, cx));
                 }
             }
@@ -1842,6 +1852,12 @@ impl Harness {
             this.skills.add_menu_open = false;
             cx.notify();
         });
+        // "Ask Muse to write one" is Muse's own row: it always opens a Muse
+        // session (`/create-skill` is Muse's), so it names its provider
+        // (docs/83 rule 14) and shows only while Muse is connected (rule
+        // 13) — the Import rows name the CLI whose folder they read.
+        let muse_connected = crate::connect::connected_choices(&crate::provider_status::live_statuses())
+            .contains(&crate::providers::ProviderId::Muse);
         let card = v_flex()
                     .id("skills-add-menu")
                     .w_full()
@@ -1892,18 +1908,19 @@ impl Harness {
                         .trailing(self.add_menu_trail(skills::ImportSource::Codex))
                         .on_activate(move |key, window, cx| import_codex(key, window, cx)),
                     )
-                    .child(dropdown_separator(cx))
-                    .child(
-                        menu_row_two_line(
-                            "skills-add-ask",
-                            IconName::Sparkle,
-                            "Ask Muse to write one",
-                            "Drafts /create-skill in a new muse session",
+                    .when(muse_connected, |card| {
+                        card.child(dropdown_separator(cx)).child(
+                            menu_row_two_line(
+                                "skills-add-ask",
+                                IconName::Sparkle,
+                                "Ask Muse to write one",
+                                "Drafts /create-skill in a new Muse session",
+                            )
+                            .key("ask")
+                            .trailing("uses a turn")
+                            .on_activate(move |key, window, cx| ask(key, window, cx)),
                         )
-                        .key("ask")
-                        .trailing("uses a turn")
-                        .on_activate(move |key, window, cx| ask(key, window, cx)),
-                    );
+                    });
         // The one floating panel (docs/83 §7).
         let card = menu_panel(card, cx).flex_none().w(px(ADD_MENU_W));
         // The popover layer, never the column: the menu floats right-
@@ -2563,10 +2580,15 @@ impl Harness {
             .justify_center()
             .gap(px(scale::SP_3))
             .py(px(EMPTY_PAD_Y))
-            .child(div().role_in(TextRole::Subtitle, cx).text_color(p.fg_muted).child("Nothing here"))
+            .child(div().role_in(TextRole::Subtitle, cx).text_color(p.ink).child("Nothing here"))
             .child(div().role_in(TextRole::Body, cx).text_color(p.fg_muted).child(copy))
             .into_any_element()
     }
+}
+
+/// The 1 px `line` between two skill rows, inset like the rows' text.
+fn skills_row_rule(cx: &App) -> AnyElement {
+    div().mx(px(SKILLS_ROW_INSET)).h(px(1.0)).flex_none().bg(cx.aui().colors.line).into_any_element()
 }
 
 /// Files under an arbitrary folder, relative to it, capped: the install

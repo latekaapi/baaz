@@ -4901,7 +4901,7 @@ mod tests {
             provider: "echo".into(),
             provider_explicit: false,
             program: "muse".into(),
-            theme: aui_tokens::ThemeKind::Dark,
+            theme: Some(aui_tokens::ThemeKind::Dark),
             screenshot: None,
             delay: std::time::Duration::from_millis(500),
             session: None,

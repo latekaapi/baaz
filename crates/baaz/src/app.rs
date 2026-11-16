@@ -65,7 +65,7 @@ use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, 
 use aui_icons::{icon, IconName, Provider};
 use aui_motion::{SpringKind, spring_px};
 use aui_terminal::{terminal_grid, TerminalGridIntent};
-use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme, Density, TextRole};
+use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -1870,6 +1870,15 @@ impl Harness {
             tab_menu_bounds: None,
             browse_session_tab: None,
         };
+        // Settings › Appearance › System follows macOS: an appearance
+        // change repaints while the stored choice is System (a Light or
+        // Dark choice ignores it). Detached: it lives as long as the window.
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.layout.theme == layout::ThemePref::System {
+                this.apply_theme_pref(Some(window), cx);
+            }
+        })
+        .detach();
         // Booting into Browse stands its right pane closed, like a switch.
         if this.mode == layout::Mode::Browse {
             this.layout.enter_browse();
@@ -5853,9 +5862,11 @@ impl Harness {
             .gap(px(scale::SP_3))
             .pb(px(HERO_LIFT))
             .px(px(scale::SP_7))
-            .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink).child(title))
-            .child(div().ui(scale::FS_13).text_color(p.fg_muted).child(sentence))
-            .children(detail.map(|detail| div().ui(scale::FS_12).text_color(p.fg_muted).child(detail)));
+            // The empty-state type (docs/83 §7): title Subtitle, the
+            // sentence Body `fg-muted`, any detail Caption.
+            .child(div().text_role(aui_tokens::TextRole::Subtitle).text_color(p.ink).child(title))
+            .child(div().text_role(aui_tokens::TextRole::Body).text_color(p.fg_muted).child(sentence))
+            .children(detail.map(|detail| div().text_role(aui_tokens::TextRole::Caption).text_color(p.fg_muted).child(detail)));
         if !failure.stderr_excerpt.is_empty() {
             // The child's own last words, verbatim and at most twelve
             // lines: what a person (or a bug report) needs to tell a
@@ -5870,11 +5881,11 @@ impl Harness {
                     .mt(px(scale::SP_2))
                     .px(px(scale::SP_3))
                     .py(px(scale::SP_2))
+                    // A nested block: one fill step up, no edge (docs/83
+                    // §1 rule 3), as the dialog's detail block (2.8).
                     .rounded(px(scale::R_SM))
-                    .bg(p.surface_1)
-                    .border_1()
-                    .border_color(p.line)
-                    .mono(scale::FS_12)
+                    .bg(p.surface_3)
+                    .text_role(aui_tokens::TextRole::MonoSmall)
                     .text_color(p.fg_muted)
                     .child(failure.stderr_excerpt.join("\n")),
             );
@@ -5929,10 +5940,10 @@ impl Harness {
                 .pb(px(HERO_LIFT))
                 .on_drop(drop)
                 .child(crate::mascot::boot_mascot(window, cx))
-                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.fg_muted).child("Ready when you are"))
+                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink).child("Ready when you are"))
                 .child(
                     div()
-                        .ui(scale::FS_12)
+                        .text_role(aui_tokens::TextRole::Body)
                         .text_color(p.fg_muted)
                         .child("Start a session now, or add a project folder to work in."),
                 )
@@ -5945,22 +5956,28 @@ impl Harness {
                 )
                 .into_any_element();
         }
+        // An empty state (docs/83 §7): the mascot at 72, the title in
+        // Subtitle, one Body line in `fg-muted`, one button.
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap(px(scale::SP_4))
+            .gap(px(scale::SP_3))
             .pb(px(HERO_LIFT))
-            .child(crate::mascot::boot_mascot(window, cx))
-            .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.fg_muted).child(self.workspace_name()))
+            .child(crate::mascot::empty_mascot(window, cx))
+            .child(div().text_role(aui_tokens::TextRole::Subtitle).text_color(p.ink).child(self.workspace_name()))
             .child(
                 div()
-                    .ui(scale::FS_12)
+                    .text_role(aui_tokens::TextRole::Body)
                     .text_color(p.fg_muted)
                     .child("Pick a session on the left, or \u{2318}N to start one."),
             )
-            .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new))
+            .child(
+                div()
+                    .mt(px(scale::SP_2))
+                    .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new)),
+            )
             .into_any_element()
     }
 
@@ -6953,7 +6970,14 @@ impl Render for Harness {
                     if this.feedback.blocks_chrome_action() {
                         return;
                     }
-                    AuiTheme::toggle_kind(Some(window), cx)
+                    // The opposite of what the window paints, stored as the
+                    // Appearance choice so Settings shows what is painted.
+                    let next = if cx.aui().kind.is_dark() {
+                        crate::layout::ThemePref::Light
+                    } else {
+                        crate::layout::ThemePref::Dark
+                    };
+                    this.set_theme_pref(next, Some(window), cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleFeedback, window, cx| this.toggle_feedback(window, cx)))
                 .on_action(cx.listener(|this, _: &FeedbackEscape, window, cx| this.escape_feedback(window, cx)))
@@ -7360,7 +7384,7 @@ mod tests {
             provider: "echo".into(),
             provider_explicit: false,
             program: "muse".into(),
-            theme: aui_tokens::ThemeKind::Dark,
+            theme: Some(aui_tokens::ThemeKind::Dark),
             screenshot: None,
             delay: std::time::Duration::from_millis(500),
             session: None,
@@ -8700,7 +8724,7 @@ mod tests {
     }
 
     /// The Skills page keeps Settings' column: at a wide window its rows
-    /// sit in a centred 680 px measure instead of running edge to edge
+    /// sit in a centred measure (Settings' column) instead of running edge to edge
     /// (owner 2026-10-31: "looks too wide and ugly"); at a narrow one the
     /// column is the page, never wider.
     #[gpui::test]
@@ -8719,7 +8743,7 @@ mod tests {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
                 h.step_skills("page", window, cx).expect("the Skills page opens");
-                // No skill picked: the list alone, in Settings' 680.
+                // No skill picked: the list alone, in Settings' column.
                 h.skills.selected = None;
             })
         });

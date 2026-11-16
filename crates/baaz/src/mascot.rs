@@ -26,8 +26,8 @@ use gpui::{AssetSource, SharedString, div, img, prelude::*, px, AnyElement, App,
 /// The boot-screen mascot.
 pub const BOOT_GREETING: &str = "mascot/boot/greeting-wave.png";
 
-/// Layout size of the hero mascots — the boot screen and the new session
-/// screen use the same size.
+/// Layout size of the hero mascot on the first-run screen (no project yet):
+/// the one branded moment keeps the large greeting (docs/83 §7).
 pub const BOOT_PT: f32 = 132.0;
 /// Layout size of the error mascot, in points.
 pub const ERROR_PT: f32 = 56.0;
@@ -205,6 +205,16 @@ impl AssetSource for BaazAssets {
 pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
     mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", (BOOT_PT, BOOT_PT), window, cx)
 }
+
+/// An empty state's mascot (docs/83 §7: "mascot at 72 px max"): the
+/// greeting at [`EMPTY_PT`], with the hero's one-time fade. The first-run
+/// screen keeps [`boot_mascot`].
+pub fn empty_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
+    mascot_hero_element(BOOT_GREETING, "baaz-empty-mascot", (EMPTY_PT, EMPTY_PT), window, cx)
+}
+
+/// Layout size of an empty state's mascot, in points.
+pub const EMPTY_PT: f32 = 72.0;
 
 /// The connect screen's mascot (D5 board): 72 × 81, the greeting contained
 /// in it — smaller than the boot hero, so the rows lead.

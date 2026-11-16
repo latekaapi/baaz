@@ -2952,7 +2952,7 @@ mod tests {
             provider: "echo".into(),
             provider_explicit: false,
             program: "muse".into(),
-            theme: aui_tokens::ThemeKind::Dark,
+            theme: Some(aui_tokens::ThemeKind::Dark),
             screenshot: None,
             delay: std::time::Duration::from_millis(500),
             session: None,
@@ -3631,16 +3631,16 @@ mod tests {
     /// R2c2: the paused probe's exact step sequence through `step_feedback`
     /// with real frames ends Paused with 1 note and no recorded step
     /// failure. The scripted probe stands in for the hero button at
-    /// 846,551; every verb runs through the real step dispatch in order —
+    /// 846,517; every verb runs through the real step dispatch in order —
     /// `pause` queues behind the in-flight capture instead of dropping it.
     #[gpui::test]
     fn paused_probe_sequence_files_one_note_and_pauses(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("paused-sequence");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
-        inject_hits(&baaz, vc, vec![f3_hit(800.0, 530.0, 100.0, 40.0, "New session")]);
+        inject_hits(&baaz, vc, vec![f3_hit(800.0, 497.0, 100.0, 40.0, "New session")]);
         let failures_before = crate::steps::step_failures();
-        for sub in ["on", "click:846,551", "note:x", "pause"] {
+        for sub in ["on", "click:846,517", "note:x", "pause"] {
             vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback(sub, window, cx).expect("the step runs")));
         }
         pump_frames(vc, 8);

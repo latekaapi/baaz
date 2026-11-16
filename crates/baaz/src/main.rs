@@ -168,8 +168,12 @@ pub struct Args {
     pub provider_explicit: bool,
     /// The `muse` binary to drive.
     pub program: String,
-    /// Which theme to open in.
-    pub theme: ThemeKind,
+    /// `--theme light|dark`: the theme this run opens in, over the stored
+    /// Settings › Appearance choice. `None` (no flag) opens in the stored
+    /// choice (dark when nothing is stored, and always in a deterministic
+    /// capture, which reads no store) and follows the system's appearance
+    /// when that choice is System.
+    pub theme: Option<ThemeKind>,
     /// `--screenshot <png>`: render, save and quit.
     pub screenshot: Option<PathBuf>,
     /// How long to wait before that capture.
@@ -314,7 +318,7 @@ impl Args {
             provider: "echo".into(),
             provider_explicit: false,
             program: "muse".into(),
-            theme: ThemeKind::Dark,
+            theme: Some(ThemeKind::Dark),
             screenshot: None,
             delay: SHOT_DELAY,
             session: None,
@@ -356,7 +360,7 @@ fn parse_args() -> Args {
         // Overwritten from the parsed flag and env at the end of parsing.
         provider_explicit: false,
         program: std::env::var("BAAZ_MUSE").unwrap_or_else(|_| "muse".into()),
-        theme: ThemeKind::Dark,
+        theme: None,
         screenshot: None,
         delay: SHOT_DELAY,
         session: None,
@@ -399,7 +403,7 @@ fn parse_args() -> Args {
             }
             "--theme" => {
                 let value = args.next().unwrap_or_default();
-                out.theme = ThemeKind::parse(&value).unwrap_or_else(|| usage(&format!("unknown theme `{value}`")));
+                out.theme = Some(ThemeKind::parse(&value).unwrap_or_else(|| usage(&format!("unknown theme `{value}`"))));
             }
             "--screenshot" => {
                 let value = args.next().unwrap_or_else(|| usage("--screenshot needs <out.png>"));
@@ -583,7 +587,7 @@ fn run_bench(args: Args) {
     // The shell branch rebuilds these into the `Harness` boot below.
     let (bench_bare, shell_args) = (args.bench_bare, args.clone());
     gpui_kit::application().with_assets(crate::mascot::BaazAssets).run(move |cx| {
-        aui::init(theme, cx);
+        aui::init(theme.unwrap_or_default(), cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
         // measures stable numbers.
         if crate::clock::deterministic() {
@@ -920,7 +924,7 @@ fn main() {
     app.run(move |cx| {
         crate::log::boot_mark("app-running");
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
-        aui::init(theme, cx);
+        aui::init(crate::settings::boot_theme(theme, cx), cx);
         crate::log::boot_mark("aui-init-done");
         // A deterministic capture holds the platform's reduced-motion switch:
         // every motion primitive (loops, tweens, presence, springs, the
