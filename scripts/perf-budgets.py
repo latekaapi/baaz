@@ -40,6 +40,31 @@ exit 1; a run that could not measure is exit 2 (never a pass).
 """
 import argparse, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 
+
+def keep_display_awake(seconds=900):
+    """Hold the display awake while this script measures or captures.
+
+    gpui-pre 0.3.12 paces frames on the display link, which stops while the
+    display sleeps: a capture then misses frames that settle a layout (a
+    banner that grows in a second step sat under the composer, 16 Nov), and
+    `switch.cached_300_ms` read ~930 ms instead of ~10. `caffeinate -u`
+    declares user activity, which wakes the display; it takes no focus and
+    the process ends with this script. macOS only; elsewhere a no-op.
+
+    Measured 16 Nov: after the display slept on its own this restores both
+    (banner whole, switch 10 ms). After a forced `pmset displaysleepnow` it
+    does not: the display wakes but the window still is not painted. So a
+    ~930 ms switch, or a grown banner cut under the composer, means the
+    window was not painting, not a regression; rerun with the screen on.
+    """
+    import atexit
+    if sys.platform != "darwin" or not os.path.exists("/usr/bin/caffeinate"):
+        return
+    proc = subprocess.Popen(["/usr/bin/caffeinate", "-u", "-t", str(seconds)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    atexit.register(proc.terminate)
+    time.sleep(1.0)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUDGETS = os.path.join(REPO, "scripts", "perf-budgets.json")
 STRESS = "fixtures/msp/synthetic-stress-300.jsonl"
@@ -244,6 +269,7 @@ def measure_idle(binary, settle_s, window_s, state):
 
 
 def main():
+    keep_display_awake()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--binary", default=os.path.join(REPO, "target", "debug", "baaz"))
     ap.add_argument("--only", action="append", choices=GROUPS)

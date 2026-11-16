@@ -12,6 +12,31 @@ run costs nothing and reaches no model.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
 
+
+def keep_display_awake(seconds=900):
+    """Hold the display awake while this script measures or captures.
+
+    gpui-pre 0.3.12 paces frames on the display link, which stops while the
+    display sleeps: a capture then misses frames that settle a layout (a
+    banner that grows in a second step sat under the composer, 16 Nov), and
+    `switch.cached_300_ms` read ~930 ms instead of ~10. `caffeinate -u`
+    declares user activity, which wakes the display; it takes no focus and
+    the process ends with this script. macOS only; elsewhere a no-op.
+
+    Measured 16 Nov: after the display slept on its own this restores both
+    (banner whole, switch 10 ms). After a forced `pmset displaysleepnow` it
+    does not: the display wakes but the window still is not painted. So a
+    ~930 ms switch, or a grown banner cut under the composer, means the
+    window was not painting, not a regression; rerun with the screen on.
+    """
+    import atexit
+    if sys.platform != "darwin" or not os.path.exists("/usr/bin/caffeinate"):
+        return
+    proc = subprocess.Popen(["/usr/bin/caffeinate", "-u", "-t", str(seconds)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    atexit.register(proc.terminate)
+    time.sleep(1.0)
+
 # How many captures to take looking for two that agree.
 SETTLE_TRIES = 6
 
@@ -858,6 +883,7 @@ def boot(entry, verb):
 
 
 def main():
+    keep_display_awake()
     ap = argparse.ArgumentParser()
     ap.add_argument("--entry", required=True)
     ap.add_argument("--probe-shot")
