@@ -568,7 +568,7 @@ impl Harness {
             return None;
         }
         let toast = !self.overlays.read(cx).toasts.is_empty();
-        let slot = self.layout.feedback_mode || self.feedback.forced_on;
+        let slot = self.feedback_slot_shown();
         let pills = usize::from(toast) + usize::from(slot);
         if pills == 0 {
             return None;

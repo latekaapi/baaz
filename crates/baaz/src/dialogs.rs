@@ -43,6 +43,8 @@ enum OverflowAction {
     Rename,
     Fork,
     Archive,
+    /// Feedback mode on or off (docs/83 §5: the feedback button lives here).
+    Feedback,
 }
 
 /// One palette section's rows under one icon.
@@ -716,17 +718,28 @@ impl Harness {
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
     /// the title for the dense inline field, Fork opens the fork picker, and
-    /// Archive asks first through the archive dialog.
+    /// Archive asks first through the archive dialog. With the feedback
+    /// setting on, a fourth row toggles feedback mode exactly as ⌃⌥⌘F does
+    /// (docs/83 §5: the floating feedback button left the transcript; it is
+    /// this row, and a header icon only while the mode is on), checked while
+    /// the mode is on.
     pub(crate) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
         }
-        let rows = vec![
+        let mut rows = vec![
             MenuRow::Toggle { label: "Rename".into(), checked: false },
             MenuRow::Toggle { label: "Fork".into(), checked: false },
             MenuRow::Toggle { label: "Archive".into(), checked: false },
         ];
-        let actions = [OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
+        let mut actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
+        if self.feedback_menu_row_shown() {
+            rows.push(MenuRow::Toggle {
+                label: "Feedback mode".into(),
+                checked: self.feedback.phase != crate::app::feedback_ui::FeedbackPhase::Off,
+            });
+            actions.push(OverflowAction::Feedback);
+        }
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
@@ -743,6 +756,12 @@ impl Harness {
                     cx.notify();
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
+                Some(OverflowAction::Feedback) => {
+                    if !this.feedback.saving {
+                        this.toggle_feedback(window, cx);
+                    }
+                    cx.notify();
+                }
                 Some(OverflowAction::Archive) => {
                     if let Some(session_id) = this.active_id(cx) {
                         this.open_archive_dialog(session_id, cx);
@@ -1364,8 +1383,8 @@ impl Harness {
         );
     }
 
-    /// The corner stack (D4, docs/41 §2.11): the newest toast above the
-    /// feedback slot, 8 apart, right-aligned. The host places it — in
+    /// The corner stack (D4, docs/41 §2.11): the newest toast — and in
+    /// Browse the feedback slot under it, 8 apart — right-aligned. The host places it — in
     /// Sessions 12 from the sheet's right with its bottom 8 above the
     /// composer ([`Self::corner_above_band`]), with no composer 12 above
     /// the sheet's bottom ([`Self::corner_at_sheet_bottom`]); in Browse in
@@ -1376,7 +1395,10 @@ impl Harness {
             return None;
         }
         let toast = self.render_toast_pill(cx);
-        let slot = self.render_feedback_header_slot(cx);
+        // The feedback slot left the transcript for the centre header
+        // (docs/83 §5); only Browse, whose header has no actions, keeps it
+        // in the corner window over the page.
+        let slot = if self.corner_in_overlay() { self.render_feedback_header_slot(cx) } else { None };
         if toast.is_none() && slot.is_none() {
             return None;
         }

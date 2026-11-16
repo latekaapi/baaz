@@ -4398,9 +4398,9 @@ impl Harness {
     /// toggle past the window's lights, the mode switch at the sidebar's
     /// edge, the title slot (the session title; in Browse, closed only, the
     /// page's way back, back / forward / reload and the address at rest) and
-    /// the actions at the right (the session's actions; the toast and the
-    /// feedback slot moved to the corner stack in D4). The shell draws
-    /// every slot at the same spot in both states.
+    /// the actions at the right (the session's actions, the feedback slot
+    /// while that mode is on; the toast moved to the corner stack in D4).
+    /// The shell draws every slot at the same spot in both states.
     fn render_bar_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> BarChrome {
         let lead = self.render_sidebar_toggle(cx);
         let switch_to = cx.entity().downgrade();
@@ -4560,8 +4560,9 @@ impl Harness {
         }
     }
 
-    /// The session header's actions — terminal, the session menu, the right
-    /// pane — drawn in the centre column's header.
+    /// The session header's actions — the feedback slot while feedback mode
+    /// is on (docs/83 §5), the right pane's views, terminal, the session
+    /// menu — drawn in the centre column's header.
     fn session_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -4588,6 +4589,7 @@ impl Harness {
             .flex_none()
             .items_center()
             .gap(px(ROW_GAP))
+            .children(self.render_feedback_header_slot(cx))
             .child(toggles)
             .child(term_button)
             .child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line))
@@ -5469,11 +5471,12 @@ impl Harness {
                 // The composer floats over the transcript (owner 2026-10-15:
                 // "it's not floating on top of the transcript"): the band is
                 // absolute at the column's bottom and the list runs under it.
-                // Its ground fades from clear at the field's top edge to the
-                // column's ground by the controls row, so the transcript
-                // stays visible beside the field; the band's painted height
-                // goes to the session view, whose list ends that far up. The
-                // corner stack rides the band: its bottom 8 above the composer.
+                // Flat (docs/83 §1, §9 task 2.6): the band's ground is the
+                // column's own, solid from the box's top edge down, so text
+                // scrolled under the quiet row is hidden — no fade, no
+                // lead-in. The band's painted height goes to the session
+                // view, whose list ends that far up. The corner stack rides
+                // the band: its bottom 8 above the composer.
                 let ground = cx.aui().colors.surface_1;
                 let inset_to = view.downgrade();
                 let band = div()
@@ -5481,23 +5484,10 @@ impl Harness {
                     .left_0()
                     .right_0()
                     .bottom_0()
-                    .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(ground.alpha(0.55), 0.0), gpui::linear_color_stop(ground, 0.5)))
-                    // The lead-in: 32 px above the field, clear to half the
-                    // ground, so the text dissolves into the composer instead
-                    // of meeting its edge.
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom(gpui::relative(1.0))
-                            .h(px(scale::SP_7))
-                            .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(ground.alpha(0.0), 0.0), gpui::linear_color_stop(ground.alpha(0.55), 1.0))),
-                    )
-                    // Measured on the composer itself: the band's first child is
-                    // the lead-in fade, and reporting *its* 32 px left the list's
-                    // end, the status stack and the caret menus under the
-                    // composer (owner 2026-10-15).
+                    .bg(ground)
+                    // Measured on the composer itself (and the signed-out
+                    // banner riding it), so the list's end, the status stack
+                    // and the caret menus clear it (owner 2026-10-15).
                     .child(
                         div()
                             .w_full()
@@ -8731,10 +8721,11 @@ mod tests {
         restore_state(state);
     }
 
-    /// Feedback mode on (the owner's real layout) puts the feedback slot in
-    /// the corner stack, which wraps the centre's body. The wrapper was a
-    /// block `div`, and the Skills page's root is `flex_1` — it took no
-    /// height there, so the page drew a blank body (QA 2026-10-30).
+    /// A corner stack over a centre with no composer wraps the centre's
+    /// body. The wrapper was a block `div`, and the Skills page's root is
+    /// `flex_1` — it took no height there, so the page drew a blank body
+    /// (QA 2026-10-30, with feedback mode's slot in the stack). The slot
+    /// lives in the header since docs/83 §5, so a toast holds the stack up.
     #[gpui::test]
     fn the_skills_page_fills_the_centre_with_feedback_mode_on(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("skills-feedback-mode");
@@ -8751,8 +8742,13 @@ mod tests {
                 h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.overlays.update(cx, |o, _| {
+                o.toast("Saved", "A toast in the corner stack.");
+            });
+        }));
         draw_shell(&mut *vc, &baaz);
-        assert!(vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some())), "the slot shows");
+        assert!(vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_corner_stack(cx).is_some())), "the corner stack shows");
         let list = vc.debug_bounds("skills-header").expect("the Skills header draws");
         assert!(f32::from(list.size.height) > 0.0, "the header has height: {list:?}");
         let page = vc.debug_bounds("skills-page").expect("the Skills page draws");

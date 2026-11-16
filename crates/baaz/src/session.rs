@@ -86,14 +86,13 @@ const PAGE_LIMIT: u32 = 1000;
 /// (790 events) fetches in ~3 ms and folds in ~11 ms, so a smaller first
 /// page would buy nothing: every page, first included, runs at the ceiling.
 const FIRST_PAGE_LIMIT: u32 = PAGE_LIMIT;
-/// The transcript's own padding, matching the assistant screen's `.tr`.
-pub(crate) const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
-/// The transcript measure: the design bounds the transcript column to
-/// ~760-800 px and centres it, composer included. At the 1.1 text scale that
-/// is 880 px here (800 x 1.1). Centre-pane rows keep their `TRANSCRIPT_PAD_X`
-/// gutters and centre their content inside them with [`centred`], so below
-/// 880 px of content nothing changes.
-pub(crate) const TRANSCRIPT_MEASURE: f32 = 880.0;
+/// The transcript column's minimum side inset (docs/83 §2.5, §5): 32.
+pub(crate) const TRANSCRIPT_PAD_X: f32 = scale::TRANSCRIPT_INSET;
+/// The transcript column's maximum width (docs/83 §2.5, §5): 760, centred,
+/// composer and the rows over it included. Centre-pane rows keep their
+/// `TRANSCRIPT_PAD_X` gutters and centre their content inside them with
+/// [`centred`], so below 760 px of content nothing changes.
+pub(crate) const TRANSCRIPT_MEASURE: f32 = scale::TRANSCRIPT_MAX;
 /// Bound a full-width centre-pane row to the transcript measure and centre it.
 ///
 /// An inner `w_full` wrapper: capped at `TRANSCRIPT_MEASURE`, the leftover
@@ -152,15 +151,16 @@ fn reply_complete(turn: &Turn) -> bool {
 }
 /// Top inset: the list starts under the centre header's line (docs/83 §3),
 /// and the first turn sits this far below it — the 48 it sat below the v3
-/// sheet's 32 px title row (canvas "Baaz v3": 80 from the sheet's top), kept
-/// until task 2.6 sets the centre column. One value for both sidebar states.
+/// sheet's 32 px title row (canvas "Baaz v3": 80 from the sheet's top); §5
+/// sets no other value, so task 2.6 kept it. One value for both sidebar
+/// states.
 const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7 + scale::SP_5;
 /// Between blocks of one turn, and between turns: the 16 / 26 reading
 /// scale's rhythm (owner 2026-10-14; were 8 and 16).
 const BLOCK_GAP: f32 = 14.0;
 const TURN_GAP: f32 = 28.0;
-/// The space under the composer's controls row to the column's bottom edge:
-/// 20 (owner 2026-10-14, Claude's shape: the field, its controls under it,
+/// The space under the composer's quiet row to the column's bottom edge:
+/// 20 (owner 2026-10-14, Claude's shape: the box, its quiet row under it,
 /// then air).
 const COMPOSER_BOTTOM: f32 = 20.0;
 /// The key context the transcript list wears, so ⌘C reaches the selection

@@ -89,7 +89,7 @@ impl SessionView {
             .children(tier_banner)
             .children(queue)
             // The caret menus anchor to the measure: the positioned ancestor is
-            // the centred inner wrapper, so the popover spans 880 px, not the
+            // the centred inner wrapper, so the popover spans the 760 px measure, not the
             // pane.
             .child(
                 div().w_full().px(px(TRANSCRIPT_PAD_X)).child(
@@ -882,8 +882,8 @@ impl SessionView {
                     }
                 }
             })
-            // The wheel is taken over the whole sheet, margins included —
-            // on the 880 px measure alone, a wheel beside the text scrolled
+            // The wheel is taken over the whole column, margins included —
+            // on the 760 px measure alone, a wheel beside the text scrolled
             // nothing (owner 2026-10-15). Positioned, so the capture's
             // absolute canvas spans this box.
             .relative()

@@ -8,10 +8,11 @@
 //!
 //! Phases: `Off` (nothing shown) → `Active` (the capture layer blocks the
 //! app; the header icon reads tinted) → `Paused` (the app is usable, the
-//! icon untinted, notes kept). ⌃⌥⌘F — or the header icon — toggles
-//! Off→Active→Paused→Active; Escape pauses; Done writes the report and
-//! goes Off. The header slot is the only chrome: setting off shows
-//! nothing.
+//! icon untinted, notes kept). ⌃⌥⌘F — or the centre header's `⋯` menu
+//! row, or the header icon while on — toggles Off→Active→Paused→Active;
+//! Escape pauses; Done writes the report and goes Off. The header slot
+//! shows only while the mode is on (docs/83 §5); setting off shows
+//! nothing, not even the menu row.
 //!
 //! F3 hook: hover/click/drag note-taking attaches to the capture layer
 //! built by [`FeedbackUi::layer_base`] — add handlers there, next to the
@@ -2291,17 +2292,17 @@ impl crate::app::Harness {
         Some(div().children(pins).into_any_element())
     }
 
-    /// The header slot is the only chrome: setting off shows nothing, and
-    /// nothing shows while capturing, when the window must read clean.
-    /// The three header variants all call this just left of their icon
-    /// buttons — a region native pages never cover. While Active a second
-    /// copy floats above the capture layer, anchored by the slot's recorded
-    /// right edge (see [`Self::render_feedback_slot_overlay`]), so the
-    /// toggle, Done and Discard stay clickable under the layer; the
-    /// in-header copy stays for layout. Setting on: always the toggle icon;
-    /// while Active or with notes in the draft, the `N notes` count plus
-    /// the Done and Discard icons follow it; a fresh Done flash replaces
-    /// the count and the actions for its ~4 s.
+    /// The header slot: nothing while the mode is off or a capture reads
+    /// the window ([`Self::feedback_slot_shown`]). In Sessions the centre
+    /// header draws it just left of its icon buttons — a region native
+    /// pages never cover; in Browse it rides the corner window. While
+    /// Active a second copy floats above the capture layer, anchored by the
+    /// slot's recorded right edge (see [`Self::render_feedback_slot_overlay`]),
+    /// so the toggle, Done and Discard stay clickable under the layer; the
+    /// in-header copy stays for layout. While on: the toggle icon; while
+    /// Active or with notes in the draft, the `N notes` count plus the Done
+    /// and Discard icons follow it; a fresh Done flash replaces the count
+    /// and the actions for its ~4 s.
     pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Browse: the slot draws in the corner window over the page
         // ([`crate::app::Harness::corner_in_overlay`]), never here — its
@@ -2389,27 +2390,24 @@ impl crate::app::Harness {
     /// handlers and no bounds recorders — a screen reader hears each
     /// control once, from the floating copy.
     fn feedback_slot_row(&self, cx: &mut Context<Self>, decorative: bool) -> Option<AnyElement> {
-        if self.feedback.capturing {
-            return None;
-        }
-        if !(self.layout.feedback_mode || self.feedback.forced_on) {
+        if !self.feedback_slot_shown() {
             return None;
         }
         let active = self.feedback.phase == FeedbackPhase::Active;
-        let flashing = !active
-            && self
-                .feedback
-                .saved_flash
-                .as_ref()
-                .is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH);
+        let flashing = self.feedback_flashing();
         // The decorative copy gets its own id (ids must be unique) and none
-        // of the occlusion, role or label the live copy carries. The row is
-        // the corner stack's floating pill (D4, docs/41 §2.11): padding
-        // 0 / 4, the toggle, then the count, Done and Discard while active.
-        let mut row = aui::feedback::floating_pill(if decorative { "feedback-header-ghost" } else { "feedback-header" }, cx)
-            .px(px(scale::SP_2))
-            .gap(px(scale::SP_2))
-            .when(!decorative, |row| row.occlude());
+        // of the occlusion, role or label the live copy carries. In the
+        // centre header the row is plain header icons (docs/83 §5); in
+        // Browse's corner window, over the page, it is the corner stack's
+        // floating pill (D4, docs/41 §2.11). Padding 0 / 4, the toggle, then
+        // the count, Done and Discard while active.
+        let row_id = if decorative { "feedback-header-ghost" } else { "feedback-header" };
+        let row = if self.corner_in_overlay() {
+            aui::feedback::floating_pill(row_id, cx)
+        } else {
+            h_flex().id(row_id).flex_none().items_center()
+        };
+        let mut row = row.px(px(scale::SP_2)).gap(px(scale::SP_2)).when(!decorative, |row| row.occlude());
         row = row.child(self.render_feedback_toggle(cx, active, decorative));
         if flashing {
             row = row.child(self.render_feedback_flash(cx, decorative)).pr(px(scale::SP_4));
@@ -2431,6 +2429,31 @@ impl crate::app::Harness {
                 .pr(px(scale::SP_2));
         }
         Some(row.into_any_element())
+    }
+
+    /// Whether the feedback slot shows at all: only while the mode is on —
+    /// Active or Paused — or while a fresh Done flash holds, and never while
+    /// a capture reads the window (docs/83 §5: "a header icon only while
+    /// feedback mode is on"). Off, the mode is reached from the centre
+    /// header's `⋯` menu ([`Self::feedback_menu_row_shown`]), Help →
+    /// Feedback Mode or ⌃⌥⌘F.
+    pub(crate) fn feedback_slot_shown(&self) -> bool {
+        !self.feedback.capturing
+            && (self.layout.feedback_mode || self.feedback.forced_on)
+            && (self.feedback.phase != FeedbackPhase::Off || self.feedback_flashing())
+    }
+
+    /// A Done flash is still holding (it shows only once the mode is Off
+    /// or Paused again).
+    fn feedback_flashing(&self) -> bool {
+        self.feedback.phase != FeedbackPhase::Active
+            && self.feedback.saved_flash.as_ref().is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH)
+    }
+
+    /// Whether the centre header's `⋯` menu carries the "Feedback mode"
+    /// row: the setting is on (or a scripted run forced it).
+    pub(crate) fn feedback_menu_row_shown(&self) -> bool {
+        self.layout.feedback_mode || self.feedback.forced_on
     }
 
     /// One small text control in the slot's pill — Done (the primary) or
@@ -3126,8 +3149,8 @@ mod tests {
 
     /// The layer element exists only while Active; the header slot is the
     /// only chrome — there is no floating bar anymore. Setting off shows
-    /// nothing; setting on shows the toggle icon in every phase, with the
-    /// count and the action icons while Active or holding notes.
+    /// nothing; setting on shows the slot only while the mode is on —
+    /// Active or Paused (docs/83 §5) — never while Off.
     #[gpui::test]
     fn layer_and_header_slot_follow_the_phase(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("layer-phase");
@@ -3142,7 +3165,7 @@ mod tests {
         assert!(!layer(vc), "Off renders no layer");
         assert!(!slot(vc), "setting off renders no header slot");
         vc.update(|_, cx| baaz.update(cx, |h, _| h.layout.feedback_mode = true));
-        assert!(slot(vc), "setting on renders the toggle icon while Off");
+        assert!(!slot(vc), "setting on renders no header icon while Off (the `⋯` menu holds it)");
         enter_active(&baaz, vc);
         assert!(layer(vc), "Active renders the layer");
         assert!(slot(vc), "Active renders the header slot, never a bar");
@@ -3378,7 +3401,7 @@ mod tests {
     }
 
     /// R2c2: the overlay seats by drawing, never by hand-set bounds. Off
-    /// with the setting on (icon-only slot) draws, then Active draws twice;
+    /// with the setting on (no slot) draws, then Active draws twice;
     /// the overlay's right edge equals the recorded in-header slot's right
     /// edge — and a simulated click at the overlay Done's centre writes the
     /// report, the note arriving first through the real `click:`/`note:`
@@ -3387,12 +3410,12 @@ mod tests {
     fn overlay_drawn_right_edge_and_done_click_saves(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("overlay-drawn-done");
         let (baaz, vc) = live_harness(cx, &state.2);
-        // Off with the setting on: the icon-only slot draws and records its
-        // bounds, but the overlay never exists while Off.
+        // Off with the setting on: no slot draws (docs/83 §5), so nothing
+        // is recorded, and the overlay never exists while Off.
         draw_window(vc);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
-            "the icon-only slot records its bounds"
+            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
+            "no slot, no bounds while Off"
         );
         assert!(
             vc.update(|window, cx| baaz
@@ -3860,10 +3883,11 @@ mod tests {
             labels
         };
         let off_labels = draw(vc);
-        assert!(off_labels.contains(&"Feedback mode".to_owned()), "the icon names itself: {off_labels:?}");
+        // docs/83 §5: Off, the mode lives in the `⋯` menu — no header icon.
+        assert!(!off_labels.contains(&"Feedback mode".to_owned()), "no header icon while Off: {off_labels:?}");
         assert!(
             !off_labels.contains(&"Done — save feedback report".to_owned()),
-            "icon only while Off with no notes"
+            "no Done while Off with no notes"
         );
         assert!(
             !off_labels.contains(&"Discard feedback notes".to_owned()),
