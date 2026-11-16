@@ -64,7 +64,6 @@ use crate::providers::ProviderId;
 /// and redraw around it.
 pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     match id {
-        "group_chevron" => layout.group_chevron = on,
         "summary_line" => layout.summary_line = on,
         "group_branch" => layout.group_branch = on,
         "auto_title" => layout.auto_title = on,
@@ -256,7 +255,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
         "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
         | "feedback_mode" => Some("general"),
         "theme" | "summary_line" => Some("appearance"),
-        "group_chevron" | "group_branch" => Some("sidebar"),
+        "group_branch" => Some("sidebar"),
         "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
@@ -337,12 +336,6 @@ pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 /// model the page renders and the coverage test enumerates.
 pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![
-        SettingsRow::Switch {
-            id: SharedString::from("group_chevron"),
-            label: SharedString::from("Collapse chevron"),
-            detail: Some(SharedString::from("Show a chevron on project rows to fold them")),
-            on: layout.group_chevron,
-        },
         SettingsRow::Switch {
             id: SharedString::from("group_branch"),
             label: SharedString::from("Branch name"),
@@ -482,7 +475,7 @@ impl Harness {
     /// Every section's rows, built from state each frame: General (the
     /// three model-spending switches, the fold switch and feedback mode),
     /// Appearance (the summary line; the theme is a segmented choice),
-    /// Sidebar (chevron/branch), Providers (enable switches), Shortcuts
+    /// Sidebar (branch), Providers (enable switches), Shortcuts
     /// (live keymap). Archived has no switches — its page lists sessions.
     ///
     /// A later section is one more arm here (and one more `on_switch` id in
@@ -1729,20 +1722,13 @@ impl Harness {
         .into_any_element()
     }
 
-    /// Sidebar: chevron and branch name — plus the note that grouping and
+    /// Sidebar: the branch name — plus the note that grouping and
     /// sort live in the sidebar's view menu (the summary line lives on
     /// Appearance). The active
     /// session's project marks itself with an accent bar in every mode; no
     /// switch gates it anymore.
     fn settings_sidebar_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = vec![
-            self.settings_switch_row(
-                "group_chevron",
-                "Collapse chevron",
-                "Show a chevron on project rows to fold them.",
-                self.layout.group_chevron,
-                cx,
-            ),
             self.settings_switch_row(
                 "group_branch",
                 "Branch name",
@@ -2396,8 +2382,8 @@ mod tests {
     #[test]
     fn every_sidebar_switch_flips_by_id() {
         let mut layout = Layout::default();
-        assert!(apply_setting(&mut layout, "group_chevron", true));
-        assert!(layout.group_chevron);
+        // The retired chevron switch (docs/83 §9, 16 Nov) is an unknown id.
+        assert!(!apply_setting(&mut layout, "group_chevron", true));
         assert!(apply_setting(&mut layout, "summary_line", true));
         assert!(layout.summary_line);
         assert!(apply_setting(&mut layout, "summary_line", false));
@@ -2831,7 +2817,6 @@ mod tests {
             "handoff_model_summary",
             "fold_finished_turns",
             "feedback_mode",
-            "group_chevron",
             "summary_line",
             "group_branch",
         ] {

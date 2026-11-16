@@ -370,19 +370,8 @@ impl Harness {
         Ok(())
     }
 
-    /// `group-chevron`: flip the group-row chevron flag and persist it. The
-    /// switch itself lives in the Settings dialog; this
-    /// verb is what captures flip until it exists.
-    pub(crate) fn step_group_chevron(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.layout.group_chevron = !self.layout.group_chevron;
-        crate::layout::write(&self.layout);
-        self.invalidate_list();
-        cx.notify();
-        Ok(())
-    }
-
     /// `group-bar`: flip the current-project accent bar flag and persist it.
-    /// See [`Self::step_group_chevron`].
+    /// The flag no longer draws anything (see `Layout::group_bar`).
     pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) -> StepResult {
         self.layout.group_bar = !self.layout.group_bar;
         crate::layout::write(&self.layout);
@@ -391,8 +380,8 @@ impl Harness {
         Ok(())
     }
 
-    /// `group-branch`: flip the trailing-branch flag and persist it. See
-    /// [`Self::step_group_chevron`].
+    /// `group-branch`: flip the trailing-branch flag and persist it, as the
+    /// Settings › Sidebar switch does.
     pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) -> StepResult {
         self.layout.group_branch = !self.layout.group_branch;
         crate::layout::write(&self.layout);

@@ -284,12 +284,13 @@ the line the nav icons and the session dots sit on); with the chevron flag
 the chevron takes that box and the label follows at `NAV_LABEL_X` like every
 other label. Every project label reads the same muted `ink-3` — the current
 project is never brighter; only the accent bar marks it, and
-the bar alone never moves or recolours the label. The collapse chevron, the
-current-project accent bar and the trailing
-branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
-default off). The Settings dialog owns the switches:
+the bar alone never moves or recolours the label. The current-project
+accent bar and the trailing branch are layout flags (`group_bar`,
+`group_branch`, both default off; `group_bar` no longer draws anything). The
+group label's chevron has no flag: it follows the label on hover or while
+the group is closed (docs/83 §4; the `group_chevron` switch was deleted). The Settings dialog owns the switches:
 ⌘, (File → Settings…), the account footer menu's "Settings…" row, or
-`--steps settings[:<section>]`; its Sidebar section holds those three plus
+`--steps settings[:<section>]`; its Sidebar section holds the branch switch plus
 the two auto switches below — `auto_title` ("Name sessions
 automatically") and `auto_summary` ("Summarise sessions in the sidebar"),
 both default ON — and later sections add arms in
@@ -300,7 +301,7 @@ off-global, reserved rows read-only with their reason — and edits write
 through `keymap::set_binding`/`clear_binding`, reloading the live bindings
 at once; a refused keystroke hangs its reason on the row and keeps the old
 binding. `--steps
-group-chevron|group-bar|group-branch|auto-title|auto-summary` flips them
+group-bar|group-branch|auto-title|auto-summary` flips them
 without opening the dialog.
 Activating a session from outside the sidebar reveals it: the least scroll
 that brings the row — or, when its group is closed or folded past the cut,
@@ -541,7 +542,7 @@ sidebar. The window-level
 `view-menu`, `account`, `pin`, `archive`, `archive-confirm`,
 `show-archived`, `projects`, `project:<path>`, `project-menu[:<name>]`,
 `project-colour:<n>`, `group-by:<date|project>`, `group-bar`,
-`group-branch`, `group-chevron`, `auto-title`, `auto-summary`,
+`group-branch`, `auto-title`, `auto-summary`,
 `title-pending`, `title-timeout`, `title-land:<text>`, `remove-project:<name>` and
 `remove-confirm`, beside the older `search`,
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.

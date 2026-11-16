@@ -1630,8 +1630,8 @@ pub struct GroupView<'a> {
 /// the visible-session count (an empty project still gets its row, counting
 /// `"0"`), a running dot when any of its sessions runs, the current-project
 /// accent mark on the open session's project (from `current(true)` alone —
-/// no layout flag gates it), and, only when the layout flags ask, the
-/// collapse chevron and the trailing branch. Sessions inside run
+/// no layout flag gates it), and, only when its layout flag asks, the
+/// trailing branch. Sessions inside run
 /// newest-first with pinned rows first, each drawn exactly as the date view
 /// draws it. Entries that resolve to no project land in a last muted "Other
 /// workspaces" group, each row tagged with its workspace's folder name. A
@@ -1745,12 +1745,12 @@ pub fn grouping_by_project(
         // is empty, which the absent rows already say, and it puts a
         // meaningless digit on the same baseline as the meaningful ones.
         let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
-        // The plain default group row: no mark; the chevron and the
-        // trailing branch only when the layout flags ask. The current mark
-        // draws from `current(true)` below alone; the retired
+        // The plain default group row: no mark; the trailing branch only
+        // when its layout flag asks. The label draws its own chevron on
+        // hover or while closed (docs/83 §4), with no switch. The current
+        // mark draws from `current(true)` below alone; the retired
         // `group_bar` flag no longer draws a second bar. The count stays.
-        let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count)
-            .chevron(layout.group_chevron);
+        let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count);
         if layout.group_branch {
             if let Some(branch) = branches.get(&project.id) {
                 group = group.trailing(branch.clone());
@@ -3301,15 +3301,16 @@ mod tests {
         assert!(!group.current_bar);
     }
 
-    /// The three flags are state only: the grouping passes each one through
-    /// to the row, and the branch trails only when its flag is on.
+    /// The two flags are state only: the grouping passes each one through
+    /// to the row, and the branch trails only when its flag is on. No flag
+    /// asks the leading-box chevron (the switch is gone, docs/83 §9).
     #[test]
     fn group_chrome_follows_the_layout_flags() {
         let projects = grouped_projects();
         let entries = vec![grouped_entry("s1", Some("p-baaz"), Some("/work/p-baaz"), 0)];
         let mut branches = HashMap::new();
         branches.insert("p-baaz".to_owned(), "main".to_owned());
-        let layout = crate::layout::Layout { group_chevron: true, group_bar: true, group_branch: true, ..Default::default() };
+        let layout = crate::layout::Layout { group_bar: true, group_branch: true, ..Default::default() };
         let empty = HashSet::new();
         let view = GroupView { closed: &empty, expanded: &empty, active: None, active_project: None, pending: None };
         let Grouping::Project(groups) =
@@ -3318,7 +3319,7 @@ mod tests {
             panic!("project grouping must yield project groups");
         };
         let group = folded_group(&groups, "p-baaz");
-        assert!(group.chevron);
+        assert!(!group.chevron, "no switch asks the leading-box chevron");
         assert!(!group.current_bar, "the retired group_bar flag never draws a second bar");
         assert_eq!(group.trailing.as_deref(), Some("main"));
     }

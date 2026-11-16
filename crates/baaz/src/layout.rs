@@ -383,12 +383,6 @@ pub struct Layout {
     /// The session order inside each group (Sort by).
     #[serde(rename = "sortBy", default, deserialize_with = "crate::store::lenient")]
     pub sort_by: SortBy,
-    /// Whether project group rows draw the collapse chevron in the leading
-    /// box. Off by default: the row is a plain label.
-    /// The Settings dialog's Sidebar section (⌘,) owns the switch; `--steps
-    /// group-chevron` flips it for captures meanwhile.
-    #[serde(rename = "groupChevron", default)]
-    pub group_chevron: bool,
     /// Retained for old `layout.json` files and the `group-bar` step verb:
     /// no longer gates anything. The current project's 2 px accent mark
     /// draws from `current(true)` alone (agentic-ui v0.3.15), so this flag
@@ -416,8 +410,8 @@ pub struct Layout {
     #[serde(rename = "summaryLine", default)]
     pub summary_line: bool,
     /// Whether project group rows trail the workspace branch in mono. Off
-    /// by default (O4). Owned by the Settings dialog — see
-    /// [`Self::group_chevron`].
+    /// by default (O4). Settings › Sidebar owns the switch; `--steps
+    /// group-branch` flips it for captures.
     #[serde(rename = "groupBranch", default)]
     pub group_branch: bool,
     /// Whether a first send earns one cheap model call for a generated
@@ -609,7 +603,6 @@ impl Default for Layout {
             expanded_groups: Vec::new(),
             search_all_projects: true,
             sort_by: SortBy::Recent,
-            group_chevron: false,
             group_bar: false,
             theme: ThemePref::Dark,
             density: DensityPref::Comfortable,
@@ -778,7 +771,6 @@ mod tests {
         assert!(layout.closed_groups.is_empty());
         assert!(layout.expanded_groups.is_empty());
         assert!(layout.search_all_projects);
-        assert!(!layout.group_chevron);
         assert!(!layout.group_bar);
         assert!(!layout.summary_line);
         assert!(!layout.group_branch);
@@ -789,7 +781,6 @@ mod tests {
             expanded_groups: vec!["p-baaz".into()],
             search_all_projects: false,
             sort_by: SortBy::Recent,
-            group_chevron: true,
             group_bar: true,
             theme: ThemePref::System,
             density: DensityPref::Compact,
@@ -822,7 +813,6 @@ mod tests {
         assert!(text.contains("\"closedGroups\":[\"other\"]"));
         assert!(text.contains("\"expandedGroups\":[\"p-baaz\"]"));
         assert!(text.contains("\"searchAllProjects\":false"));
-        assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
         assert!(text.contains("\"summaryLine\":true"));
         assert!(text.contains("\"theme\":\"system\""));
@@ -845,7 +835,6 @@ mod tests {
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
         assert_eq!(back.expanded_groups, vec!["p-baaz".to_owned()]);
         assert!(!back.search_all_projects);
-        assert!(back.group_chevron);
         assert!(back.group_bar);
         assert!(back.summary_line);
         assert_eq!(back.theme, ThemePref::System);
@@ -872,13 +861,17 @@ mod tests {
         assert_eq!(old.group_by, None);
         assert!(old.expanded_groups.is_empty());
         assert!(old.search_all_projects);
-        assert!(!old.group_chevron);
         assert!(!old.group_bar);
         assert!(!old.summary_line);
         // The retired `compactRows` key reads as nothing: a two-line choice
         // made under it lands on the new one-line default too.
         let retired: Layout = serde_json::from_str("{\"compactRows\":false}").unwrap();
         assert!(!retired.summary_line);
+        // The retired `groupChevron` key (docs/83 §9, 16 Nov) reads as
+        // nothing: the group label draws its chevron on hover or when
+        // closed, with no switch.
+        let retired: Layout = serde_json::from_str("{\"groupChevron\":true}").unwrap();
+        assert!(!serde_json::to_string(&retired).unwrap().contains("groupChevron"));
         assert!(!old.group_branch);
         // Both auto switches default ON, old files included: new behaviour
         // without a migration.

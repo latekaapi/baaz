@@ -159,7 +159,6 @@
 //! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
 //! | `group-bar` | flip the current-project accent bar flag |
 //! | `group-branch` | flip the trailing-branch flag |
-//! | `group-chevron` | flip the group-row chevron flag |
 //! | `auto-title` | flip the automatic session-naming switch |
 //! | `auto-summary` | flip the sidebar-summaries switch |
 //! | `transcript:fold` | flip the persisted "Fold finished turns" switch and apply it live to every open view |
@@ -449,7 +448,6 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "auto-summary", run: |this, _, _, cx| this.step_auto_summary(cx) },
     WindowVerb { verb: "group-bar", run: |this, _, _, cx| this.step_group_bar(cx) },
     WindowVerb { verb: "group-branch", run: |this, _, _, cx| this.step_group_branch(cx) },
-    WindowVerb { verb: "group-chevron", run: |this, _, _, cx| this.step_group_chevron(cx) },
     WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
     WindowVerb { verb: "new", run: |this, rest, window, cx| this.step_new(rest, window, cx) },
