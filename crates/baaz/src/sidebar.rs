@@ -48,6 +48,32 @@ pub fn display_label(label: &str, title_pending: bool) -> &str {
 /// The second line while a generated title is still being written.
 pub const PLACEHOLDER_NAMING: &str = "Naming this session…";
 
+/// What a session is doing, from the person's side (task 3.1): the one
+/// answer [`SessionEntry::session_state`] gives, read by the row's mark, its
+/// words, the project header and (stage 3) notifications and the badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionState {
+    /// A turn is running and nothing waits on the person.
+    Working,
+    /// The session cannot go on without the person.
+    NeedsYou(NeedKind),
+    /// A turn finished and the person has not read it to the end.
+    DoneUnread,
+    /// The last turn ended in an error.
+    Failed,
+    /// Nothing to report.
+    Idle,
+}
+
+/// What a [`SessionState::NeedsYou`] session waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NeedKind {
+    /// A tool call waits for an approval.
+    Approval,
+    /// A question waits for an answer.
+    Question,
+}
+
 /// One row of the sidebar, joined from the wire, the local index and
 /// Baaz's own overrides.
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +202,12 @@ pub struct SessionEntry {
     /// `error` (terminal `"failed"`), cleared by the next turn's start or
     /// its success.
     pub last_error: Option<String>,
+    /// A turn finished here while nobody was reading it: set when a turn
+    /// ends anywhere but the open session scrolled to its end, cleared when
+    /// that session is opened and read to its end (task 3.1). Persisted in
+    /// the cache half of the store (`SessionMeta::unread`); losing it reads
+    /// as "nothing unread", never as everything unread.
+    pub unread: bool,
 }
 
 /// The row's time: content activity, never the server's resume-stamped clock.
@@ -402,6 +434,7 @@ impl SessionEntry {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
+            unread: meta.is_some_and(|m| m.unread),
             branch: session.branch.clone(),
             terminals_running: 0,
         }
@@ -498,6 +531,7 @@ impl SessionEntry {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
+            unread: meta.is_some_and(|m| m.unread),
             branch: None,
             terminals_running: 0,
         })
@@ -589,6 +623,7 @@ impl SessionEntry {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
+            unread: meta.is_some_and(|m| m.unread),
             branch: None,
             terminals_running: 0,
         }
@@ -642,6 +677,7 @@ impl SessionEntry {
             pending_question: None,
             turn_started: None,
             last_error: None,
+            unread: false,
             branch: None,
             terminals_running: 0,
         }
@@ -675,20 +711,44 @@ impl SessionEntry {
             && self.last_ask.as_deref().map(str::trim).is_none_or(str::is_empty)
     }
 
-    /// The row's state: running sessions spin, sessions waiting on a person
-    /// read waiting, sessions holding a terminal error read failed,
-    /// everything else is idle. The one-line row (docs/83 §4) has no status
-    /// line and no leading glyph, so the trailing state slot is the only
-    /// place the state reads: spinner, amber dot, danger dot.
-    pub(crate) fn state(&self) -> AgentState {
-        if self.running {
-            AgentState::Running
-        } else if self.needs_approval() || self.asked() {
-            AgentState::Waiting
+    /// The session's one state (task 3.1): every mark, word and count that
+    /// says what a session is doing reads this, so the dot and the text can
+    /// no longer disagree. Total and ordered:
+    ///
+    /// 1. waiting on a person beats everything — an approval mid-turn is
+    ///    `NeedsYou(Approval)`, never `Working` (the audit's "running dot +
+    ///    needs approval text" row); an approval beats a question;
+    /// 2. a running turn is `Working`;
+    /// 3. the last turn's terminal error is `Failed`;
+    /// 4. a turn that finished while nobody read it is `DoneUnread`;
+    /// 5. anything else is `Idle`.
+    pub(crate) fn session_state(&self) -> SessionState {
+        if self.needs_approval() {
+            SessionState::NeedsYou(NeedKind::Approval)
+        } else if self.asked() {
+            SessionState::NeedsYou(NeedKind::Question)
+        } else if self.running {
+            SessionState::Working
         } else if self.last_error.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
-            AgentState::Failed
+            SessionState::Failed
+        } else if self.unread {
+            SessionState::DoneUnread
         } else {
-            AgentState::Idle
+            SessionState::Idle
+        }
+    }
+
+    /// The library's state for the row's trailing slot, from
+    /// [`Self::session_state`]: spinner, amber dot, danger dot, the unread
+    /// dot (`Idle` + [`SessionSummary::unread`]) or nothing. The one-line
+    /// row (docs/83 §4) has no status line and no leading glyph, so this
+    /// slot is the only place the state reads.
+    pub(crate) fn state(&self) -> AgentState {
+        match self.session_state() {
+            SessionState::Working => AgentState::Running,
+            SessionState::NeedsYou(_) => AgentState::Waiting,
+            SessionState::Failed => AgentState::Failed,
+            SessionState::DoneUnread | SessionState::Idle => AgentState::Idle,
         }
     }
 
@@ -746,37 +806,29 @@ impl SessionEntry {
     /// in which colour. The one-line row (docs/83 §4) draws no status line
     /// of its own — the state rides the trailing slot (and the hover card),
     /// and the sentence is the summary line's when Settings turns it on.
-    /// Total — every entry maps to
-    /// exactly one state:
-    ///
-    /// 1. waiting on a person beats everything (an approval mid-turn still
-    ///    reads `Needs approval`, never `Working`);
-    /// 2. a running turn reads `Working` with its own elapsed;
-    /// 3. the last turn's terminal error reads `Failed` with the session's
-    ///    elapsed (`Failed · 1h` — the message itself lives in the hover
-    ///    detail, where it fits);
-    /// 4. a session with turns reads `Settled` with elapsed and turn count;
-    /// 5. anything else never replied.
+    /// The words for [`Self::session_state`], so they always agree with the
+    /// mark: `Needs approval`, the question, `Working` with its own
+    /// elapsed, `Failed` with the session's elapsed (`Failed · 1h` — the
+    /// message itself lives in the hover detail, where it fits), else
+    /// `Settled` with elapsed and turn count, or never replied.
     pub fn row_status(&self, now: DateTime<Local>) -> RowStatus {
-        if self.needs_approval() {
-            return RowStatus::new(RowStatusKind::NeedsApproval, "");
+        match self.session_state() {
+            SessionState::NeedsYou(NeedKind::Approval) => RowStatus::new(RowStatusKind::NeedsApproval, ""),
+            SessionState::NeedsYou(NeedKind::Question) => {
+                RowStatus::new(RowStatusKind::Asked, self.question_text().unwrap_or_default())
+            }
+            SessionState::Working => {
+                let start = self.turn_started.unwrap_or(self.updated);
+                RowStatus::new(RowStatusKind::Working, elapsed_at(start, now))
+            }
+            SessionState::Failed => RowStatus::new(RowStatusKind::Failed, elapsed_at(self.updated, now)),
+            SessionState::DoneUnread | SessionState::Idle if self.turns > 0 => {
+                let elapsed = elapsed_at(self.updated, now);
+                let detail = format!("{elapsed} · {} turn{}", self.turns, if self.turns == 1 { "" } else { "s" });
+                RowStatus::new(RowStatusKind::Settled, detail)
+            }
+            SessionState::DoneUnread | SessionState::Idle => RowStatus::new(RowStatusKind::NoReply, ""),
         }
-        if self.asked() {
-            return RowStatus::new(RowStatusKind::Asked, self.question_text().unwrap_or_default());
-        }
-        if self.running {
-            let start = self.turn_started.unwrap_or(self.updated);
-            return RowStatus::new(RowStatusKind::Working, elapsed_at(start, now));
-        }
-        if self.last_error.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
-            return RowStatus::new(RowStatusKind::Failed, elapsed_at(self.updated, now));
-        }
-        if self.turns > 0 {
-            let elapsed = elapsed_at(self.updated, now);
-            let detail = format!("{elapsed} · {} turn{}", self.turns, if self.turns == 1 { "" } else { "s" });
-            return RowStatus::new(RowStatusKind::Settled, detail);
-        }
-        RowStatus::new(RowStatusKind::NoReply, "")
     }
 
     /// The row's second line, option B's context: the approval command or
@@ -916,6 +968,9 @@ impl SessionEntry {
         if self.running {
             row = row.pulse();
         }
+        if self.session_state() == SessionState::DoneUnread {
+            row = row.unread();
+        }
         row
     }
 }
@@ -1001,6 +1056,7 @@ pub fn local_started_row(
         pending_question: None,
         turn_started: Some(updated),
         last_error: None,
+        unread: false,
         branch: None,
         terminals_running: 0,
     }
@@ -2116,6 +2172,94 @@ mod tests {
         assert!(summary.pulse, "a working row is live");
     }
 
+    /// Task 3.1: one function decides, in one order — needs-you beats
+    /// working beats failed beats unread beats idle — and the mark and the
+    /// words both come from it. The audit's row (running with an approval
+    /// pending) read a spinner beside "Needs approval"; it now reads
+    /// waiting in both places.
+    #[test]
+    fn one_state_drives_the_mark_and_the_words() {
+        use aui::nav::{row_trailing_kind, RowStatusKind};
+        let now = Local::now();
+        let mut running_approval = entry("running-approval");
+        running_approval.turns = 1;
+        running_approval.running = true;
+        running_approval.attention = vec![Attention::ApprovalPending];
+        assert_eq!(running_approval.session_state(), SessionState::NeedsYou(NeedKind::Approval));
+        let summary = running_approval.summary(now);
+        assert_eq!(summary.state, AgentState::Waiting, "no spinner beside Needs approval");
+        assert_eq!(summary.status.as_ref().map(|s| s.kind), Some(RowStatusKind::NeedsApproval));
+        assert_eq!(row_trailing_kind(&summary).text(&summary).as_ref(), "Needs approval");
+
+        let mut both = entry("both");
+        both.attention = vec![Attention::InputPending, Attention::ApprovalPending];
+        assert_eq!(both.session_state(), SessionState::NeedsYou(NeedKind::Approval), "an approval beats a question");
+        let mut asked = entry("asked");
+        asked.running = true;
+        asked.pending_question = Some("Which file?".into());
+        assert_eq!(asked.session_state(), SessionState::NeedsYou(NeedKind::Question));
+        assert_eq!(asked.state(), AgentState::Waiting);
+
+        let mut failed_unread = entry("failed-unread");
+        failed_unread.turns = 2;
+        failed_unread.last_error = Some("boom".into());
+        failed_unread.unread = true;
+        assert_eq!(failed_unread.session_state(), SessionState::Failed, "failed beats unread");
+        let mut working_unread = entry("working-unread");
+        working_unread.running = true;
+        working_unread.unread = true;
+        assert_eq!(working_unread.session_state(), SessionState::Working, "a new turn's run beats the old unread");
+
+        let mut unread = entry("unread");
+        unread.turns = 4;
+        unread.unread = true;
+        assert_eq!(unread.session_state(), SessionState::DoneUnread);
+        let summary = unread.summary(now);
+        assert_eq!(summary.state, AgentState::Idle);
+        // The production slot (`aui::screens::sidebar` `state_slot`) draws
+        // the accent "Unread" dot for an idle row with `unread` set.
+        assert!(summary.unread, "the unread dot shows");
+        assert_eq!(summary.status.as_ref().map(|s| s.kind), Some(RowStatusKind::Settled));
+
+        let mut idle = entry("idle");
+        idle.turns = 4;
+        assert_eq!(idle.session_state(), SessionState::Idle);
+        assert!(!idle.summary(now).unread);
+    }
+
+    /// Every combination of the inputs gives a mark and words that agree:
+    /// waiting words only on a waiting mark, `Working` only on a spinner,
+    /// `Failed` only on a failed mark.
+    #[test]
+    fn the_mark_and_the_words_never_disagree() {
+        use aui::nav::RowStatusKind;
+        let now = Local::now();
+        for bits in 0u8..32 {
+            let mut row = entry("combo");
+            row.turns = 1;
+            row.running = bits & 1 != 0;
+            if bits & 2 != 0 {
+                row.attention.push(Attention::ApprovalPending);
+            }
+            if bits & 4 != 0 {
+                row.attention.push(Attention::InputPending);
+            }
+            if bits & 8 != 0 {
+                row.last_error = Some("boom".into());
+            }
+            row.unread = bits & 16 != 0;
+            let summary = row.summary(now);
+            let kind = summary.status.as_ref().map(|s| s.kind).expect("a status");
+            let expected = match kind {
+                RowStatusKind::NeedsApproval | RowStatusKind::Asked => AgentState::Waiting,
+                RowStatusKind::Working => AgentState::Running,
+                RowStatusKind::Failed => AgentState::Failed,
+                RowStatusKind::Settled | RowStatusKind::NoReply => AgentState::Idle,
+            };
+            assert_eq!(summary.state, expected, "inputs {bits:05b}: {kind:?} words on a {:?} mark", summary.state);
+        }
+    }
+
     /// A 2,000-char single-line first message joins to a one-line row
     /// title of at most 80 chars.
     #[test]
@@ -2934,6 +3078,7 @@ mod tests {
             pending_question: None,
             turn_started: None,
             last_error: None,
+            unread: false,
             branch: None,
             terminals_running: 0,
         }

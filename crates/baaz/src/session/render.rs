@@ -828,8 +828,18 @@ impl SessionView {
         // instead of standing pinned over the composer.
         let progress = self.inline_progress();
         // Whether the list stood at its end as this frame began (see
-        // `note_list_height`).
+        // `note_list_height`). Arriving there is the person reading the
+        // session to its end: tell the application, outside this draw (an
+        // event made inside it would ride the same lost-effect path as an
+        // in-draw notify).
+        let was_at_end = self.at_end_before;
         self.at_end_before = self.list_state.is_scrolled_to_end().unwrap_or(true);
+        if self.at_end_before && !was_at_end && !self.loading_history {
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |_, cx| cx.emit(SessionEvent::SeenToEnd));
+            });
+        }
         // The list's end clears the floating band and the stack above it.
         let tail_h = super::TAIL_SPACER_H + self.bottom_inset + self.stack_h.get();
         let counts = std::mem::take(&mut self.row_counts);

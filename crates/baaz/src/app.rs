@@ -10309,6 +10309,7 @@ mod tests {
                 pending_question: None,
                 turn_started: None,
                 last_error: None,
+                unread: false,
             }
         }
         // The live turn, the way `turn/started` leaves it: the view holds

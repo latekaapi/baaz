@@ -1625,6 +1625,9 @@ impl Harness {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
             }
+            // Read state is Baaz's own record for every row, scripted ones
+            // included: a replayed turn that finishes unseen is unread too.
+            entry.unread = meta.is_some_and(|m| m.unread);
             entry.named = name.is_some();
         }
         // A handoff chain is one row at view time: member rows stay in
@@ -3496,6 +3499,7 @@ impl Harness {
                         pending_question: None,
                         turn_started: None,
                         last_error: None,
+                        unread: false,
                         branch: None,
                         terminals_running: 0,
                     });
@@ -4471,6 +4475,12 @@ impl Harness {
         view.update(cx, |_, cx| cx.notify());
         self.right_cache.page_menu = false;
         self.active = Some(view.clone());
+        // Reopening a session that stands at its end reads it (task 3.1);
+        // one still loading reads on its `HistoryReady`.
+        if view.read(cx).at_transcript_end() && !view.read(cx).history_loading() {
+            let session_id = view.read(cx).session_id.clone();
+            self.mark_read(&session_id, cx);
+        }
         self.focus_composer = true;
         // "Ask Muse to write one" (A5): the fresh session opens with the
         // `/create-skill ` draft and the composer focused. Never sent. The
@@ -4633,6 +4643,11 @@ impl Harness {
                     "session {session_id}: the agent died twice in a row ({message}; {} stderr lines)",
                     stderr_excerpt.len()
                 );
+                // Baaz stopped restarting it: the row reads `Failed` until
+                // a turn succeeds again (task 3.1 — a lost child used to
+                // leave the row idle).
+                let message = message.clone();
+                self.record_turn_outcome(&session_id, true, Some(&message), cx);
             }
             // The grown lost banner's typed action: the D5 flow of that
             // name for this session's provider.
@@ -4665,6 +4680,15 @@ impl Harness {
             SessionEvent::HistoryReady => {
                 if self.active.as_ref().is_some_and(|active| *active == view) {
                     view.update(cx, |view, cx| view.follow_tail(cx));
+                    let session_id = view.read(cx).session_id.clone();
+                    self.mark_read(&session_id, cx);
+                }
+            }
+            // The open session was read to its end (task 3.1).
+            SessionEvent::SeenToEnd => {
+                if self.active.as_ref().is_some_and(|active| *active == view) {
+                    let session_id = view.read(cx).session_id.clone();
+                    self.mark_read(&session_id, cx);
                 }
             }
             // `/clear` is emitted from the session view with no window of its
@@ -7320,6 +7344,58 @@ mod tests {
         vc.update(|_, cx| {
             let error = baaz.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
             assert!(error.is_none(), "a later success stands it down");
+        });
+        lane_restore(state);
+    }
+
+    /// Task 3.1: a turn that finishes anywhere but the open session read at
+    /// its end leaves the row `DoneUnread` (persisted), reading it to the
+    /// end clears it, and a child Baaz stopped restarting reads `Failed`.
+    #[gpui::test]
+    fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("unread");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
+        let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
+        let unread = |id: &str, cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| baaz.read(cx).overrides.get(id).is_some_and(|meta| meta.unread))
+        };
+        // The open session, at its end: the finish is read as it lands.
+        let done = crate::session::SessionEvent::ProviderTurnOutcome { session_id: session_id.clone(), failed: false, error: None };
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &done, cx)));
+        assert!(!unread(&session_id, vc), "a finish read as it lands is not unread");
+        // Another session's finish: nobody read it.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.record_turn_outcome("s-elsewhere", false, None, cx)));
+        assert!(unread("s-elsewhere", vc), "an unseen finish is unread");
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.mark_read("s-elsewhere", cx)));
+        assert!(!unread("s-elsewhere", vc), "reading it clears it");
+        // The open session, flagged unread, arriving at its end clears.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.set_override(&session_id, |meta| meta.unread = true, cx)));
+        let seen = crate::session::SessionEvent::SeenToEnd;
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &seen, cx)));
+        assert!(!unread(&session_id, vc), "arriving at the end reads it");
+        // Baaz stopped restarting the child: the row reads Failed.
+        let lost = crate::session::SessionEvent::ChildFailed { message: "the agent exited".into(), stderr_excerpt: Vec::new() };
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &lost, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let error = harness.overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+            assert_eq!(error.as_deref(), Some("the agent exited"), "a lost child is recorded as failed");
         });
         lane_restore(state);
     }
@@ -11452,6 +11528,7 @@ done
             pending_question: None,
             turn_started: None,
             last_error: None,
+            unread: false,
             branch: None,
             terminals_running: 0,
         }

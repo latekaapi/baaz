@@ -114,6 +114,7 @@ pub(crate) fn sidebar_fixture() -> (Vec<SessionEntry>, HashMap<String, IndexEntr
             pending_question: None,
             turn_started: None,
             last_error: None,
+            unread: false,
             branch: None,
             terminals_running: 0,
         });

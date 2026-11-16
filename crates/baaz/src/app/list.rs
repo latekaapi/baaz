@@ -493,11 +493,41 @@ impl Harness {
                 entry.apply_turn_outcome(failed, error);
                 entry.last_error != before
             });
-        let current = self.overrides.get(session_id).and_then(|m| m.last_error.clone());
-        if current != next {
-            self.set_override(session_id, |meta| meta.last_error = next, cx);
+        // The turn's end is unread unless the person is reading this
+        // session at its end right now (task 3.1).
+        let unread = !self.reading_at_end(session_id, cx);
+        let current = self.overrides.get(session_id);
+        let current_error = current.and_then(|m| m.last_error.clone());
+        let current_unread = current.is_some_and(|m| m.unread);
+        if current_error != next || current_unread != unread {
+            self.set_override(
+                session_id,
+                |meta| {
+                    meta.last_error = next;
+                    meta.unread = unread;
+                },
+                cx,
+            );
         } else if changed_entry {
             self.invalidate_list();
+        }
+    }
+
+    /// Whether `session_id` is the open session with its transcript at its
+    /// end: the only place a finished turn is read as it lands.
+    pub(crate) fn reading_at_end(&self, session_id: &str, cx: &gpui::App) -> bool {
+        self.active.as_ref().is_some_and(|view| {
+            let view = view.read(cx);
+            view.session_id == session_id && view.at_transcript_end()
+        })
+    }
+
+    /// The person read `session_id` to its end: its `DoneUnread` clears
+    /// (task 3.1). A no-op for a row that is not unread, so the store is
+    /// not rewritten on every arrival at the end.
+    pub(crate) fn mark_read(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.overrides.get(session_id).is_some_and(|m| m.unread) {
+            self.set_override(session_id, |meta| meta.unread = false, cx);
         }
     }
 

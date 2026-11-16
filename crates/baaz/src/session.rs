@@ -559,6 +559,11 @@ pub enum SessionEvent {
     /// The backfill's first page applied: the application pins the tail while
     /// later pages land. The view is already on screen; this swaps nothing.
     HistoryReady,
+    /// The transcript came to rest at its end in a drawn frame — the
+    /// person has read this session to the end, so the application clears
+    /// its `DoneUnread` (task 3.1). Emitted on the frame the list arrives at
+    /// its end, not on every frame it stays there.
+    SeenToEnd,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
     /// for the rest of this app run.
     TierOverride,
@@ -2380,6 +2385,19 @@ impl SessionView {
         cx.defer(move |cx| {
             let _ = view.update(cx, |_, cx| cx.notify());
         });
+    }
+
+    /// Whether the transcript stands at its end — the person can see the
+    /// newest turn. An unmeasured list counts as at its end, like
+    /// everywhere else that asks.
+    pub(crate) fn at_transcript_end(&self) -> bool {
+        self.list_state.is_scrolled_to_end().unwrap_or(true)
+    }
+
+    /// Whether the transcript is still being read back from the provider
+    /// (its end is not the session's end yet).
+    pub(crate) fn history_loading(&self) -> bool {
+        self.loading_history
     }
 
     /// Text size or density changed: every transcript row is now a

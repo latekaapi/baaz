@@ -124,6 +124,12 @@ pub struct SessionMeta {
     /// carries no per-session error, so Baaz remembers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// A turn finished while nobody read it to the end (task 3.1): what a
+    /// row's `DoneUnread` stands on across restarts. In the cache half: it
+    /// is rewritten on finished turns, and losing it reads as "nothing
+    /// unread", which is harmless.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
     /// The project this session was started in: the adoption it groups
     /// under even when its folder is a worktree of the project's root.
     /// Written at `session/start`; always serialized, so a file that says
