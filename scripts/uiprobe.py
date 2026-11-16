@@ -420,6 +420,10 @@ ENTRIES = {
     # finding.
     "settings-archived":    {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:archived"]},
+    # Task 3.5: Settings › Notifications, at its defaults (every event on,
+    # the badge on, no sound). Offline, idempotent.
+    "settings-notifications": {"shot": ["--no-connect", "--login", "signed-in",
+                                        "--steps", "settings:notifications"]},
     # B2a-H6b: the Settings page's Browser section (tabs layout, search
     # engine, downloads, the Default-browser row with its fixed capture
     # text; the Chromium row only where the engine loads chrome:// pages).

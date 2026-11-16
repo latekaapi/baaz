@@ -71,6 +71,11 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "handoff_model_summary" => layout.handoff_model_summary = on,
         "fold_finished_turns" => layout.fold_finished_turns = on,
         "feedback_mode" => layout.feedback_mode = on,
+        "notify_needs_you" => layout.set_notify(|n| n.needs_you = on),
+        "notify_done" => layout.set_notify(|n| n.done = on),
+        "notify_failed" => layout.set_notify(|n| n.failed = on),
+        "notify_sound" => layout.set_notify(|n| n.sound = on),
+        "notify_badge" => layout.set_notify(|n| n.badge = on),
         "adblock_enabled" => {
             layout.adblock.enabled = on;
             crate::browser::adblock::apply(&layout.adblock);
@@ -114,6 +119,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
     ("appearance", "Appearance"),
     ("sidebar", "Sidebar"),
+    ("notifications", "Notifications"),
     ("browser", "Browser"),
     ("providers", "Providers"),
     ("shortcuts", "Shortcuts"),
@@ -126,6 +132,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
         "appearance" => "How Baaz looks. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
+        "notifications" => "When Baaz tells you a session needs you. Changes apply live.",
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
@@ -222,6 +229,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "general" => crumbs.push("General".to_owned()),
         "appearance" => crumbs.push("Appearance".to_owned()),
         "sidebar" => crumbs.push("Sidebar".to_owned()),
+        "notifications" => crumbs.push("Notifications".to_owned()),
         "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
@@ -256,6 +264,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
         | "feedback_mode" => Some("general"),
         "theme" | "summary_line" => Some("appearance"),
         "group_branch" => Some("sidebar"),
+        "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
         "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
@@ -519,7 +528,8 @@ impl Harness {
 
     /// Open the Settings page on legacy dialog index `section` (menu rows,
     /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 General, 1 Appearance,
-    /// 2 Sidebar, 3 Browser, 4 Providers, 5 Shortcuts, 6 Archived). Idempotent (open, never toggle). Menus, palette and
+    /// 2 Sidebar, 3 Notifications, 4 Browser, 5 Providers, 6 Shortcuts,
+    /// 7 Archived). Idempotent (open, never toggle). Menus, palette and
     /// modal go first.
     pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
         let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
@@ -724,6 +734,11 @@ impl Harness {
             self.feedback_setting_off(cx);
         }
         self.invalidate_list();
+        // A Notifications switch applies now: the Dock badge follows its
+        // switch without waiting for a session to move (task 3.5).
+        if id.starts_with("notify_") {
+            self.check_attention(cx);
+        }
         cx.notify();
     }
 
@@ -1131,6 +1146,7 @@ impl Harness {
             "general" => self.settings_general_page(cx),
             "appearance" => self.settings_appearance_page(cx),
             "sidebar" => self.settings_sidebar_page(cx),
+            "notifications" => self.settings_notifications_page(cx),
             "browser" => self.settings_browser_page(cx),
             "providers" => self.settings_providers_overview(window, cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
@@ -1753,6 +1769,30 @@ impl Harness {
                     .rows(rows)
                     .note("Grouping and sort live in the sidebar's view menu."),
             )
+            .into_any_element()
+    }
+
+    /// Notifications (task 3.3, 3.5): which moves post a Mac notification,
+    /// the sound, and the Dock badge. macOS asks permission the first time
+    /// one fires; the note says so, since the switches cannot.
+    fn settings_notifications_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let prefs = self.layout.notify_prefs();
+        let events = vec![
+            self.settings_switch_row("notify_needs_you", "Needs you", "A session waits for your approval or answer.", prefs.needs_you, cx),
+            self.settings_switch_row("notify_done", "Finished", "A turn finished while you were in another session or app.", prefs.done, cx),
+            self.settings_switch_row("notify_failed", "Failed", "A turn stopped with an error.", prefs.failed, cx),
+        ];
+        let extras = vec![
+            self.settings_switch_row("notify_sound", "Sound", "Play a short sound with each notification.", prefs.sound, cx),
+            self.settings_switch_row("notify_badge", "Dock badge", "Count the sessions that need you on the Dock icon.", prefs.badge, cx),
+        ];
+        settings_sections_stack()
+            .child(
+                section("Notify me when")
+                    .rows(events)
+                    .note("Nothing is sent for the session you are looking at. macOS asks to allow notifications the first time one fires."),
+            )
+            .child(section("Also").rows(extras))
             .into_any_element()
     }
 
@@ -2413,11 +2453,12 @@ mod tests {
     }
 
     /// B2a-H6: the Browser section is registered — listed after
-    /// Sidebar, normalised, crumbed, blurbed, and home to its rows.
+    /// Sidebar (and Notifications, task 3.5), normalised, crumbed, blurbed,
+    /// and home to its rows.
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "browser", "providers", "shortcuts", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "browser", "providers", "shortcuts", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");
@@ -2428,6 +2469,28 @@ mod tests {
         assert_eq!(settings_blurb("browser"), "How Baaz browses: the assistant, tabs, search, downloads.");
         assert_eq!(setting_home("search-engine"), Some("browser"));
         assert_eq!(setting_home("download-dir"), Some("browser"));
+    }
+
+    /// Task 3.5: Notifications is a section (after Sidebar), its switches
+    /// open it, each changes only its own preference, and an old layout
+    /// reads every event on, the badge on, no sound.
+    #[test]
+    fn notifications_section_and_switches() {
+        assert_eq!(normalize_settings_target("notifications", ""), "notifications");
+        assert_eq!(normalize_settings_target("notify_sound", ""), "notifications");
+        assert!(settings_target_known("notifications"));
+        assert_eq!(settings_breadcrumb("notifications"), vec!["Settings".to_owned(), "Notifications".to_owned()]);
+        let mut layout = Layout::default();
+        assert_eq!(layout.notify_prefs(), crate::attention::NotifyPrefs::default());
+        let old: Layout = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.notify_prefs(), crate::attention::NotifyPrefs::default());
+        assert!(apply_setting(&mut layout, "notify_sound", true));
+        assert!(apply_setting(&mut layout, "notify_done", false));
+        let prefs = layout.notify_prefs();
+        assert!(prefs.sound && !prefs.done && prefs.needs_you && prefs.failed && prefs.badge);
+        let text = serde_json::to_string(&layout).unwrap();
+        let back: Layout = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.notify_prefs(), prefs, "the switches persist");
     }
 
     /// Task 2.9: Appearance is registered after General — normalised,

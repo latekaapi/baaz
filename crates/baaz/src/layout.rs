@@ -354,6 +354,37 @@ pub struct UseOwnMcp {
     pub claude_code: bool,
 }
 
+/// Settings › Notifications, as stored (task 3.5). Every field defaults the
+/// way [`crate::attention::NotifyPrefs::default`] does, so a partial
+/// record reads the rest as defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NotifySettings {
+    /// A session needs you (an approval or a question).
+    pub needs_you: bool,
+    /// A turn finished while you were elsewhere.
+    pub done: bool,
+    /// A turn ended in an error.
+    pub failed: bool,
+    /// Play a sound with each notification.
+    pub sound: bool,
+    /// Count the sessions that need you on the Dock icon.
+    pub badge: bool,
+}
+
+impl Default for NotifySettings {
+    fn default() -> Self {
+        let d = crate::attention::NotifyPrefs::default();
+        Self { needs_you: d.needs_you, done: d.done, failed: d.failed, sound: d.sound, badge: d.badge }
+    }
+}
+
+impl NotifySettings {
+    fn prefs(self) -> crate::attention::NotifyPrefs {
+        crate::attention::NotifyPrefs { needs_you: self.needs_you, done: self.done, failed: self.failed, sound: self.sound, badge: self.badge }
+    }
+}
+
 /// What `layout.json` holds. `None` is "never resized": the default width.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layout {
@@ -409,6 +440,10 @@ pub struct Layout {
     /// (docs/83 §9, task 2.5).
     #[serde(rename = "summaryLine", default)]
     pub summary_line: bool,
+    /// Settings › Notifications (task 3.5). `None` is the default, so an
+    /// old `layout.json` reads every event on, the badge on, no sound.
+    #[serde(rename = "notify", default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<NotifySettings>,
     /// Whether project group rows trail the workspace branch in mono. Off
     /// by default (O4). Settings › Sidebar owns the switch; `--steps
     /// group-branch` flips it for captures.
@@ -573,9 +608,16 @@ fn default_search_all() -> bool {
 
 impl Layout {
     /// What the person asked to be told about (Settings › Notifications,
-    /// task 3.5; until it lands, every event on, the badge on, no sound).
+    /// task 3.5): every event on, the badge on, no sound until changed.
     pub(crate) fn notify_prefs(&self) -> crate::attention::NotifyPrefs {
-        crate::attention::NotifyPrefs::default()
+        self.notify.map(NotifySettings::prefs).unwrap_or_default()
+    }
+
+    /// Change one Notifications switch, starting from the defaults.
+    pub(crate) fn set_notify(&mut self, edit: impl FnOnce(&mut NotifySettings)) {
+        let mut settings = self.notify.unwrap_or_default();
+        edit(&mut settings);
+        self.notify = Some(settings);
     }
 
     /// Set the Sessions right pane aside for Browse, whose own pane stands
@@ -614,6 +656,7 @@ impl Default for Layout {
             density: DensityPref::Comfortable,
             text_size: TextSizePref::Default,
             summary_line: false,
+            notify: None,
             group_branch: false,
             auto_title: true,
             auto_summary: true,
@@ -792,6 +835,7 @@ mod tests {
             density: DensityPref::Compact,
             text_size: TextSizePref::Large,
             summary_line: true,
+            notify: None,
             group_branch: true,
             auto_title: true,
             auto_summary: true,
