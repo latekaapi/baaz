@@ -4407,7 +4407,7 @@ impl Harness {
                 cx.update(|cx| {
                     let Some(target) = cx.active_window() else { return };
                     let _ = target.update(cx, |_, window, cx| {
-                        window.dispatch_event(gpui::PlatformInput::ScrollWheel(page_wheel_event(&wheel)), cx);
+                        window.dispatch_event(gpui::PlatformInput::Scroll(page_wheel_event(&wheel)), cx);
                     });
                 });
             }

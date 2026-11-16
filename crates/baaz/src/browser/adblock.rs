@@ -52,6 +52,9 @@ impl Default for AdblockPrefs {
 
 impl AdblockPrefs {
     /// Whether ads are allowed on `host` (the site or a subdomain of it).
+    /// The blocker itself reads `allowed` natively (CEF); this is the rule
+    /// in Rust, for the tests that pin it.
+    #[cfg(test)]
     pub fn allows(&self, host: &str) -> bool {
         let host = host.strip_prefix("www.").unwrap_or(host);
         self.allowed.iter().any(|site| host == site || host.ends_with(&format!(".{site}")))
