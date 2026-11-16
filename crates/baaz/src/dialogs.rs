@@ -1350,7 +1350,7 @@ impl Harness {
         // gets its own rather than sharing the secondary button's.
         let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         // Critical errors (`DialogKind::Error`) lead the library dialog with
-        // the error mascot (56 pt, centred on the title row) in place of the
+        // the error mascot (56 pt, at the head of the body) in place of the
         // kind tile; confirmations keep the tile, and the toast stack stays
         // text-only.
         let mascot = (kind == DialogKind::Error).then(|| crate::mascot::error_mascot(crate::mascot::ErrorMascot::classify(&title, &detail)));

@@ -6,11 +6,16 @@
 
 use super::*;
 
+// Search syncs started on this thread, and the scoped (one session's rows)
+// ones among them, for the B7 and speed S4 tests. Per thread, not per
+// process: every gpui test drives its app on its own thread, so a process
+// counter let a parallel test's boot rebuild land between one test's reset
+// and its assert (a flake seen at Gate 2, 16 Nov).
 #[cfg(test)]
-static SEARCH_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// Scoped search syncs (one session's rows), for the speed S4 tests.
-#[cfg(test)]
-static SEARCH_SCOPED_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static SEARCH_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_SCOPED_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 /// One search sync at a time: two overlapping ones fought over the
 /// database lock (8 s and 20 s at boot), and the second now finds the
 /// first's fingerprint and writes nothing.
@@ -369,26 +374,26 @@ impl Harness {
         }
     }
 
-    /// How many times [`Self::rebuild_search_index`] ran in this process.
+    /// How many times [`Self::rebuild_search_index`] ran on this thread.
     /// Test builds only: the B7 pane-toggle test resets it, toggles, and
     /// asserts it stays put — right-pane state is not searchable, so a
     /// toggle must never rebuild.
     #[cfg(test)]
     pub(crate) fn search_rebuild_count() -> usize {
-        SEARCH_REBUILDS.load(std::sync::atomic::Ordering::Relaxed)
+        SEARCH_REBUILDS.get()
     }
 
     /// Zero [`Self::search_rebuild_count`]; see above.
     #[cfg(test)]
     pub(crate) fn reset_search_rebuild_count() {
-        SEARCH_REBUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
-        SEARCH_SCOPED_REBUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+        SEARCH_REBUILDS.set(0);
+        SEARCH_SCOPED_REBUILDS.set(0);
     }
 
     /// Scoped (one-session) search syncs since the last reset (tests).
     #[cfg(test)]
     pub(crate) fn search_scoped_rebuild_count() -> usize {
-        SEARCH_SCOPED_REBUILDS.load(std::sync::atomic::Ordering::Relaxed)
+        SEARCH_SCOPED_REBUILDS.get()
     }
 
     /// Rebuild the session half of `search.db` off the UI thread.
@@ -415,8 +420,8 @@ impl Harness {
         };
         #[cfg(test)]
         {
-            SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            SEARCH_SCOPED_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            SEARCH_REBUILDS.set(SEARCH_REBUILDS.get() + 1);
+            SEARCH_SCOPED_REBUILDS.set(SEARCH_SCOPED_REBUILDS.get() + 1);
         }
         let index_path = crate::index::index_path();
         let provider_of = self.search_body_owners();
@@ -438,7 +443,7 @@ impl Harness {
 
     pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
-        SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SEARCH_REBUILDS.set(SEARCH_REBUILDS.get() + 1);
         let at = std::time::Instant::now();
         let rows = self.search_sync_rows();
         crate::log::boot_mark(&format!("search-rows-built rows={} in={}ms", rows.len(), at.elapsed().as_millis()));
