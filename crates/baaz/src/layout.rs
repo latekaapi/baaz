@@ -572,6 +572,12 @@ fn default_search_all() -> bool {
 }
 
 impl Layout {
+    /// What the person asked to be told about (Settings › Notifications,
+    /// task 3.5; until it lands, every event on, the badge on, no sound).
+    pub(crate) fn notify_prefs(&self) -> crate::attention::NotifyPrefs {
+        crate::attention::NotifyPrefs::default()
+    }
+
     /// Set the Sessions right pane aside for Browse, whose own pane stands
     /// closed on the default kind. A pane already aside (a relaunch into
     /// Browse) stays what Sessions gets back.

@@ -7403,6 +7403,68 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Task 3.3: a session in the background that moves to needing the
+    /// person posts one notification (tagged with its id) and the badge
+    /// counts it; the first look after launch posts nothing; a click opens
+    /// the notification's session.
+    #[gpui::test]
+    fn a_background_session_needing_you_posts_and_badges(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("attention");
+        // The test platform, like macOS, shows nothing outside an app with
+        // an identity (an unbundled `cargo run` posts nothing).
+        cx.update(|cx| cx.set_app_identity("sh.baaz.test", "Baaz"));
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                mark_muse_up(harness);
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let shown_before = vc.shown_system_notifications().len();
+        // A parked session, working: the first look learns it.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let mut row = crate::sidebar::tests::entry("s-parked");
+                row.label = "Rotate the keys".into();
+                row.turns = 1;
+                row.running = true;
+                harness.sessions.push(row);
+                harness.invalidate_list();
+                harness.check_attention(cx);
+            })
+        });
+        assert_eq!(vc.shown_system_notifications().len(), shown_before, "a first look announces nothing");
+        // It asks for an approval.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let row = harness.sessions.iter_mut().find(|e| e.id == "s-parked").expect("the row");
+                row.apply_status_changed(true, &[provider::facts::Attention::ApprovalPending]);
+                harness.invalidate_list();
+                harness.check_attention(cx);
+            })
+        });
+        let shown = vc.shown_system_notifications();
+        assert_eq!(shown.len(), shown_before + 1, "one notification");
+        let last = shown.last().expect("posted");
+        assert_eq!(last.tag.as_ref(), "s-parked");
+        assert_eq!(last.title.as_ref(), "Rotate the keys");
+        assert_eq!(last.body.as_ref(), "Waiting for your approval");
+        assert_eq!(vc.update(|_, cx| crate::attention::Notifier::badge(cx)), Some(1), "the badge counts it");
+        // Nothing moved: nothing new.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.check_attention(cx)));
+        assert_eq!(vc.shown_system_notifications().len(), shown_before + 1);
+        lane_restore(state);
+    }
+
     /// docs/71 §3: a failed open is typed from the refusal's own hint, and
     /// the kind decides the extra action (Install for a missing CLI).
     #[gpui::test]

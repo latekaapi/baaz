@@ -37,6 +37,7 @@
 
 mod account_usage;
 mod app;
+mod attention;
 mod attachments;
 mod auth;
 mod bench;

@@ -165,7 +165,10 @@ impl SessionRegistry {
     pub(crate) fn resubscribe(&mut self, active: Option<&Entity<SessionView>>, cx: &mut Context<Harness>) {
         self.subscriptions.clear();
         for view in self.live(active) {
-            self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+            self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| {
+                this.on_session_event(view, event, cx);
+                this.check_attention(cx);
+            }));
         }
     }
 

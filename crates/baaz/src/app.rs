@@ -757,7 +757,7 @@ pub struct Harness {
     /// themselves, the overrides that relabel them, the index, or the
     /// show-hidden/empty/archived flags. It is the key [`Harness::list_cache`]
     /// is validated against (findings `performance-5`, `support-2`).
-    list_epoch: u64,
+    pub(crate) list_epoch: u64,
     /// One sorted visible list and one grouping per change, not per frame.
     list_cache: RefCell<ListCache>,
     /// The handoff chains over full storage, built once per `list_epoch`
@@ -2152,6 +2152,8 @@ impl Harness {
                 harness.maybe_offer_session_migration(cx);
             });
         });
+        // A click on a notification opens its session (task 3.3).
+        Self::on_notification_click(cx);
         crate::log::boot_mark("harness-new-done");
         this
     }
@@ -2444,7 +2446,13 @@ impl Harness {
             // The hub keeps one connection stream across respawns, so this
             // outlives a child's exit and hears the next child's events.
             while let Some(event) = events.next().await {
-                if this.update(cx, |this, cx| this.on_hub_event(event, cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.on_hub_event(event, cx);
+                        this.check_attention(cx);
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }

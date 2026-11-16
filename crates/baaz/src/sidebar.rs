@@ -2104,7 +2104,7 @@ pub(crate) fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::Sessio
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The prefix-only flattening reads exactly what flattening the whole
@@ -3079,7 +3079,8 @@ mod tests {
         assert!(row.hidden && row.side_marker);
     }
 
-    fn entry(id: &str) -> SessionEntry {
+    /// A plain idle row, for tests here and in `attention`.
+    pub(crate) fn entry(id: &str) -> SessionEntry {
         SessionEntry {
             id: id.to_owned(),
             label: "x".into(),
