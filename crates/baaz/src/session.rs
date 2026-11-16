@@ -2382,6 +2382,16 @@ impl SessionView {
         });
     }
 
+    /// Text size or density changed: every transcript row is now a
+    /// different height, but the list keeps the heights it measured at the
+    /// old sizes until something asks again, so a transcript read at its end
+    /// ended under the composer — at Large the "Waiting for approval…" row
+    /// sat hidden behind it (Gate 2, 16 Nov). Measure every row afresh and
+    /// keep a reader at the end there.
+    pub(crate) fn retype(&mut self, cx: &mut Context<Self>) {
+        self.keep_end_through(cx, |this| this.list_state.remeasure());
+    }
+
     /// Draw the cards settled, for a `--screenshot` run.
     pub fn set_at_rest(&mut self, at_rest: bool) {
         self.at_rest = at_rest;

@@ -770,6 +770,7 @@ impl Harness {
             aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
             // Rows cached at the old sizes rebuild on the next frame.
             self.invalidate_list();
+            self.retype_sessions(cx);
         }
         cx.notify();
     }
@@ -787,8 +788,17 @@ impl Harness {
         if cx.aui().text_size != pref.text_size() {
             aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
             self.invalidate_list();
+            self.retype_sessions(cx);
         }
         cx.notify();
+    }
+
+    /// Every live transcript (open, parked, the browser chat) measures its
+    /// rows again at the new type: see [`crate::session::SessionView::retype`].
+    fn retype_sessions(&mut self, cx: &mut Context<Self>) {
+        for view in self.registry.live(self.active.as_ref()) {
+            view.update(cx, |view, cx| view.retype(cx));
+        }
     }
 
     /// Set the engine an address commit searches with. The Settings →
