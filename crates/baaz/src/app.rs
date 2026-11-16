@@ -335,11 +335,6 @@ pub(crate) const BROWSE_ROOT_CONTEXT: &str = "AuiRoot BaazBrowse";
 
 /// How long the "Session hidden" toast's Undo stays honest.
 const UNDO_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
-/// How far below the window's top edge the palette hangs, and how dark the
-/// ground behind it goes. The library's `palette_scrim` is a design-card block
-/// of a fixed height; a window overlay places itself.
-pub(crate) const PALETTE_TOP: f32 = 96.0;
-
 /// How far above dead centre a hero column sits, in points.
 ///
 /// A column centred exactly in the pane reads low: the eye puts the optical
@@ -347,7 +342,6 @@ pub(crate) const PALETTE_TOP: f32 = 96.0;
 /// window weight at the bottom already. Applied as bottom padding, so the
 /// column still centres — just in a slightly shorter box.
 pub(crate) const HERO_LIFT: f32 = 48.0;
-pub(crate) const PALETTE_SCRIM: f32 = 0.4;
 /// How many rows the palette lists. The sidebar's search is the way through a
 /// longer list; this is the way back to something recent.
 pub(crate) const PALETTE_ROWS: usize = 12;
@@ -3723,9 +3717,9 @@ impl Harness {
 
 
 
-    /// The address field's live input with its omnibox keys (B2a-H4):
-    /// the one element the toolbar and the new-tab field share — only one
-    /// ever renders it per frame. ↑/↓ move the highlight, Tab completes,
+    /// The address field's live input with its omnibox keys (B2a-H4), as
+    /// the new-tab field draws it; the Field panel (`field_panel`) draws the
+    /// same input in its own query row — only one of them renders per frame. ↑/↓ move the highlight, Tab completes,
     /// Escape restores; plain Enter commits and ⌘↵ asks, both through the
     /// input's own PressEnter (⌘↵ rides the input context's
     /// `secondary-enter` binding, so it never also fires the commit).
@@ -3787,8 +3781,9 @@ impl Harness {
             .h(px(MENU_ROW_H))
             .px(metrics.item_px)
             .gap(metrics.gap)
-            .child(div().flex_1().min_w_0().truncate().ui(scale::FS_12).child(label.to_owned()))
-            .children(hint.map(|hint| div().flex_none().ui(scale::FS_11).text_color(p.fg_muted).child(hint.to_owned())));
+            .child(div().flex_1().min_w_0().truncate().text_role_in(TextRole::Body, Density::Standard).child(label.to_owned()))
+            // Shortcut hints: `t-micro` in `ink-4` (docs/83 §7).
+            .children(hint.map(|hint| div().flex_none().role_in(TextRole::Micro, cx).text_color(p.ink_4).child(hint.to_owned())));
         interactive(id, content).role("menuitem").label(label.to_owned()).on_click(click)
     }
 
@@ -4872,15 +4867,14 @@ impl Harness {
         } else {
             body
         };
-        // The omnibox dropdown drops down over the page — painted after it,
+        // With the sidebar hidden there is no overlay window for the Field:
+        // its panel draws in this window over the page — painted after it,
         // so gpui draws it above the screenshot stand-in the covering rule
-        // shows while it renders rows. The toolbar field's list anchors
-        // under the toolbar (the top of the centre); the new-tab field
-        // renders its own list in flow, under the centred field.
-        // The Field overlay carries its own rows over the page: no second
-        // list in the window under it.
+        // shows while it has rows. The new-tab field renders its own list
+        // in flow, under the centred field; the Field overlay carries its
+        // own rows over the page, so no second list draws under it.
         let omnibox = (!blank_page && !self.field_overlay_wanted(cx))
-            .then(|| self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Toolbar))
+            .then(|| self.render_field_in_window(window, cx))
             .flatten();
         // The sidebar's downloads popover draws in the overlay window, over the live page.
         let downloads = (!self.downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
@@ -5063,7 +5057,7 @@ impl Harness {
         let mut column = v_flex().w(field_w).mt(px(scale::SP_7 * 6.25)).gap(px(scale::SP_6)).child(field);
         // Typing drops the Field's own rows under it (the omnibox list);
         // the pick-up panel steps aside while they show.
-        let dropdown = self.render_omnibox_dropdown(window, cx, crate::browser::OmniAnchor::Newtab);
+        let dropdown = self.render_omnibox_dropdown(window, cx);
         let typing = dropdown.is_some();
         if let Some(list) = dropdown {
             column = column.child(list);
@@ -5206,19 +5200,15 @@ impl Harness {
         }
     }
 
-    /// The omnibox suggestion list (B2a-H4): the palette look — Ask the
-    /// agent, Tabs and sessions, History and pages you read (omitted until
-    /// B2b fills it), then the engine row — dropping down over the page.
-    /// Rows are list-box options; ↑/↓/Tab/⌘↵/Enter ride the field's own
-    /// keys. Rows press on mouse-down (pointer timing: before the address
-    /// input's blur drops the field) and also answer clicks for
-    /// accessibility presses; the second call is a no-op.
-    fn render_omnibox_dropdown(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        anchor: crate::browser::OmniAnchor,
-    ) -> Option<AnyElement> {
+    /// The new-tab Field's suggestion list (B2a-H4): Ask the agent, Tabs and
+    /// sessions, History and pages you read, then the engine row — in flow
+    /// under the new-tab page's own centred field. Everywhere else the Field
+    /// is the library panel ([`Self::field_panel`]). Rows are list-box
+    /// options; ↑/↓/Tab/⌘↵/Enter ride the field's own keys. Rows press on
+    /// mouse-down (pointer timing: before the address input's blur drops
+    /// the field) and also answer clicks for accessibility presses; the
+    /// second call is a no-op.
+    fn render_omnibox_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.browse_omnibox_open(cx) {
             return None;
         }
@@ -5226,22 +5216,11 @@ impl Harness {
         if rows.is_empty() {
             return None;
         }
-        let list = self.omnibox_list(&rows, window, cx);
-        Some(match anchor {
-            // Under the toolbar's address field.
-            crate::browser::OmniAnchor::Toolbar => list
-                .absolute()
-                .top(px(crate::browser::OMNIBOX_DROPDOWN_TOP))
-                .left(px(scale::SP_4))
-                .right(px(scale::SP_4))
-                .into_any_element(),
-            crate::browser::OmniAnchor::Newtab => list.w(px(NEWTAB_FIELD_W)).into_any_element(),
-        })
+        Some(self.omnibox_list(&rows, window, cx).w(px(NEWTAB_FIELD_W)).into_any_element())
     }
 
-    /// The omnibox list box itself, unpositioned: section headers and rows
-    /// for the already-ranked `rows`, with `anchor` deciding the placement
-    /// in [`Self::render_omnibox_dropdown`].
+    /// The new-tab list box itself, unsized: section headers and rows for
+    /// the already-ranked `rows` ([`Self::render_omnibox_dropdown`]).
     /// Row-list indices for the suggestion lists' group labels: past any
     /// row index, static (never lit, never activated).
     pub(crate) const OMNI_HEADER_BASE: usize = 10_000;
@@ -8601,6 +8580,50 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         assert!(vc.debug_bounds("browse-omni-list").is_none(), "the Field overlay, not an in-window list");
         assert!(vc.update(|_, cx| baaz.read(cx).field_overlay_wanted(cx)), "the Field overlay is wanted");
+        restore_state(state);
+    }
+
+    /// With the sidebar hidden there is no overlay window: the Field is the
+    /// same library panel in the main window, 640 wide, centred, its top at
+    /// 18 % of the window (docs/83 §7) — never a full-width list.
+    #[gpui::test]
+    fn the_field_with_the_sidebar_hidden_is_the_centred_panel(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-field-in-window");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // A real window root (not `draw_shell`'s free element): the panel
+        // rides a deferred draw, which needs the window's own frame.
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_tab_new("https://www.wikipedia.org/", window, cx))
+        })
+        .expect("the tab opens");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                if h.sidebar_open {
+                    h.toggle_sidebar(cx);
+                }
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.focus_browse_address_with("wiki", window, cx))
+        });
+        vc.simulate_resize(gpui::size(gpui::px(1440.), gpui::px(900.)));
+        vc.run_until_parked();
+        assert!(!vc.update(|_, cx| baaz.read(cx).field_overlay_wanted(cx)), "no overlay window with the sidebar hidden");
+        let panel = vc.debug_bounds("field-panel").expect("the Field panel draws in the window");
+        let win = vc.update(|window, _| window.viewport_size());
+        let width = aui::overlay::palette_width(win.width);
+        assert!((panel.size.width - width).abs() < gpui::px(1.0), "the panel is {:?} wide, not {width:?}", panel.size.width);
+        assert!((panel.origin.x - (win.width - width) / 2.0).abs() < gpui::px(1.0), "centred: left {:?}", panel.origin.x);
+        assert!((panel.origin.y - aui::overlay::palette_top(win.height)).abs() < gpui::px(1.0), "top at 18 %: {:?}", panel.origin.y);
+        assert!(vc.debug_bounds("browse-omni-list").is_none(), "no full-width list under the toolbar");
         restore_state(state);
     }
 

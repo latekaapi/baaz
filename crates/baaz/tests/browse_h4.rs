@@ -164,9 +164,10 @@ fn browse_centre_hides_the_library_nav_row() {
 }
 
 
-/// The new-tab field carries the placeholder, and each field's dropdown
-/// anchors under it: the toolbar's under the toolbar, the new-tab's under
-/// the centred field.
+/// The new-tab field carries the placeholder; its list drops in flow under
+/// the centred field, and away from the new tab the Field is the one
+/// library panel, centred (docs/83 §7) — in the overlay window or, with
+/// the sidebar hidden, in the main window.
 #[test]
 fn newtab_placeholder_and_dropdown_anchors() {
     let browser = source("browser/mod.rs");
@@ -176,8 +177,14 @@ fn newtab_placeholder_and_dropdown_anchors() {
         "the field carries the placeholder"
     );
     let app = source("app.rs");
-    assert!(app.contains("OmniAnchor::Toolbar"), "the toolbar list anchors under the toolbar");
-    assert!(app.contains("OmniAnchor::Newtab"), "the new-tab list anchors under the centred field");
+    assert!(app.contains("self.render_omnibox_dropdown(window, cx)"), "the new-tab list drops under the centred field");
+    assert!(app.contains("self.render_field_in_window(window, cx)"), "away from the new tab the Field is the library panel");
+    let overlay = source("overlay.rs");
+    let in_window = fn_body(&overlay, "render_field_in_window");
+    assert!(
+        in_window.contains("palette_width") && in_window.contains("palette_top") && in_window.contains("self.field_panel(window, cx)"),
+        "the in-window Field is the palette-sized, centred panel"
+    );
 }
 
 

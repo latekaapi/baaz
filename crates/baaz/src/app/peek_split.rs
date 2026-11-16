@@ -169,7 +169,7 @@ impl Harness {
                         .id("browse-peek-scrim")
                         .absolute()
                         .inset_0()
-                        .bg(gpui::black().opacity(0.35))
+                        .bg(aui::overlay::scrim())
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label("Close Peek")

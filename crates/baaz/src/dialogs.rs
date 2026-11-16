@@ -28,10 +28,10 @@ use gpui::{
     div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
 };
 use aui::interact::dismiss_layer;
-use aui::util::{h_flex, v_flex};
+use aui::util::v_flex;
 use gpui_kit::component::input::Textarea;
 
-use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP};
+use crate::app::{Harness, Wire, PALETTE_ROWS};
 use crate::layout::{self, RightKind};
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Palette, PaletteKind};
 use crate::wire::WireCall;
@@ -1146,12 +1146,15 @@ impl Harness {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
-                    .bg(gpui::black().opacity(PALETTE_SCRIM))
+                    .bg(aui::overlay::scrim())
+                    // Centred, its top at 18 % of the window (docs/83 §7):
+                    // a spacer of that share of the layer's height, then
+                    // the card.
                     .child(
-                        h_flex()
-                            .w_full()
-                            .justify_center()
-                            .pt(px(PALETTE_TOP))
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .child(div().flex_none().w_full().h(gpui::relative(scale::PALETTE_TOP)))
                             .child(centred),
                     ),
             )

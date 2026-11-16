@@ -147,13 +147,9 @@ const FRAME_LOSS: f32 = 6.0;
 /// Spare height above the line in its float window (see `wanted_agent_line`).
 const LINE_SLACK: f32 = 0.0;
 
-/// The Field's measure: the library component's 640 (aui `browse/field`).
-const FIELD_WIDTH: f32 = 640.0;
-/// The Field's top edge in the window: the prototype's 40 px under the
-/// 28 px traffic-light strip.
-const FIELD_TOP: f32 = 68.0;
 /// The tallest the Field's window gets: the input row, the 512 px body and
-/// the footer.
+/// the footer. Its width and top are the palette's (docs/83 §7:
+/// `aui::overlay::palette_width`, `palette_top`).
 const FIELD_MAX_H: f32 = 46.0 + 512.0 + 32.0 + 2.0;
 
 /// The clear margin around every overlay panel inside its window: room for
@@ -382,14 +378,14 @@ impl Harness {
             return Some((OverlayKind::Modal, window.bounds()));
         }
         if self.field_overlay_wanted(cx) {
-            // One fixed transparent rect, centred on the window near its top
-            // (the prototype's Field, owner 8 Nov): the panel draws at its top
-            // and grows inside it, so typing never resizes the window; a
-            // click on the clear part is outside.
+            // One fixed transparent rect, centred on the window with its top
+            // at 18 % of the height, like the palette (docs/83 §7): the panel
+            // draws at its top and grows inside it, so typing never resizes
+            // the window; a click on the clear part is outside.
             let pad = gpui::px(SHADOW_PAD);
             let win = window.bounds().size;
-            let top = gpui::px(FIELD_TOP);
-            let width = gpui::px(FIELD_WIDTH).min(win.width - gpui::px(32.0)) + pad * 2.0;
+            let top = aui::overlay::palette_top(win.height);
+            let width = aui::overlay::palette_width(win.width) + pad * 2.0;
             let left = (win.width - width) / 2.0;
             let origin = window.bounds().origin + gpui::point(left, top - pad);
             let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
@@ -1188,6 +1184,29 @@ impl Harness {
     /// the rows only borrow the component's kinds for their glyph and group.
     /// ↑/↓ move, Tab completes, Enter opens, Escape leaves.
     fn render_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = cx.aui().colors;
+        let panel = self.field_panel(window, cx);
+        let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+            this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx));
+        });
+        // The clear rest of the rect is outside: a press there leaves the Field.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .p(gpui::px(SHADOW_PAD))
+            .text_color(p.ink)
+            .on_mouse_down(gpui::MouseButton::Left, leave)
+            .child(panel)
+            .into_any_element()
+    }
+
+    /// The Field's panel itself — the library component with Baaz's rows,
+    /// keys and intents — for the overlay window ([`Self::render_field`])
+    /// and for the main window when the sidebar is hidden
+    /// ([`Self::render_field_in_window`]): one Field, two hosts.
+    pub(crate) fn field_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use aui::browse::field::{field, FieldIntent, FieldModel, FieldRow, FieldRowKind};
         let p = cx.aui().colors;
         let omni = self.browse_suggestions(cx);
@@ -1283,22 +1302,9 @@ impl Harness {
         if let Some(input) = input {
             panel = panel.query_slot(input);
         }
-        let _ = window;
-        let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx));
-        });
-        // The clear rest of the rect is outside: a press there leaves the Field.
         div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .p(gpui::px(SHADOW_PAD))
-            .text_color(p.ink)
-            .on_mouse_down(gpui::MouseButton::Left, leave)
-            .child(
-                div()
-                    .id("field-panel")
+            .id("field-panel")
+            .debug_selector(|| "field-panel".into())
                     .occlude()
                     .role(gpui::Role::Dialog)
                     .aria_label("Open a page, switch tab or ask")
@@ -1315,10 +1321,32 @@ impl Harness {
                             cx.stop_propagation();
                         }
                     }))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(panel),
-            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(panel)
             .into_any_element()
+    }
+
+    /// The Field in the main window, for Browse with the sidebar hidden
+    /// (no overlay window then): the same panel, 640 wide, centred on the
+    /// window with its top at 18 % of the height (docs/83 §7), lifted above
+    /// the page's stand-in. `None` while it has no rows, as the covering
+    /// rule (`omnibox_open`) only covers the page then.
+    pub(crate) fn render_field_in_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.browse_omnibox_open(cx) {
+            return None;
+        }
+        let win = window.viewport_size();
+        let width = aui::overlay::palette_width(win.width);
+        let top = aui::overlay::palette_top(win.height);
+        let panel = self.field_panel(window, cx);
+        Some(
+            aui::overlay::popover_layer(
+                gpui::anchored()
+                    .position(gpui::point((win.width - width) / 2.0, top))
+                    .child(div().w(width).child(panel)),
+            )
+            .into_any_element(),
+        )
     }
 
     /// The site-information panel (owner 2026-10-11: "certificate details

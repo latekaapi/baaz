@@ -192,10 +192,6 @@ pub(crate) fn column_page_rect(content: Bounds<Pixels>, sidebar: Pixels, right: 
     }
 }
 
-/// The toolbar-anchored omnibox list's top offset within the Browse
-/// centre: under the address field's row.
-pub(crate) const OMNIBOX_DROPDOWN_TOP: f32 = 6.0;
-
 /// The window's content box in window coordinates. `Window::content_mask`
 /// is only valid while painting (a debug assertion aborts a debug build when
 /// it is read from a mouse handler); the viewport is valid at any time and,
@@ -4467,15 +4463,6 @@ pub(crate) enum PickupTarget {
     Session(String),
     /// Reopen this closed tab.
     Closed(TabId),
-}
-
-/// Where an omnibox dropdown anchors: under the toolbar field (floating
-/// over the page top), or in flow under the new-tab page's centred field.
-pub(crate) enum OmniAnchor {
-    /// The toolbar field's list: absolute, under the toolbar.
-    Toolbar,
-    /// The new-tab field's list: in flow, under the centred field.
-    Newtab,
 }
 
 /// All webviews a [`Harness`](crate::app::Harness) holds. Kept here so the
