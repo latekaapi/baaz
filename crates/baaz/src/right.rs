@@ -288,6 +288,10 @@ pub(crate) struct RightCache {
     /// project root. Transient view state, never persisted: a re-read keeps
     /// the expansion, a restart does not.
     pub changes_expanded: HashMap<PathBuf, HashSet<String>>,
+    /// Where the tab row's `＋` was laid out (window coordinates): the seat
+    /// of the view menu ([`crate::overlays::MenuKind::RightViews`]). Never
+    /// persists.
+    pub views_menu_seat: Option<gpui::Bounds<gpui::Pixels>>,
 }
 
 impl RightCache {
@@ -610,7 +614,30 @@ pub(crate) fn screen_index(kind: RightKind) -> usize {
     }
 }
 
-/// The glyph a screen wears in its row and toggle (docs/43 §2.2).
+/// The tab id of an open file's tab in the pane's tab row.
+pub(crate) const FILE_TAB: &str = "file";
+
+/// The pane's tabs (docs/83 §6): Changes · Files · Page, each keyed by its
+/// kind's slug, then — while Files previews one — the open file's tab,
+/// keyed [`FILE_TAB`] and closable. The file's tab is the lit one while it
+/// shows; Files is lit only over the tree. Baaz keeps one preview per
+/// project, so there is at most one file tab.
+pub(crate) fn pane_tab_list(kind: RightKind, open_file: Option<SharedString>) -> Vec<aui::workbench::PaneTab> {
+    let file_lit = kind == RightKind::Files && open_file.is_some();
+    let mut tabs: Vec<aui::workbench::PaneTab> =
+        RightKind::ALL.into_iter().map(|k| aui::workbench::PaneTab::new(k.slug(), k.label(), k == kind && !file_lit)).collect();
+    if let Some(name) = open_file {
+        tabs.push(aui::workbench::PaneTab::new(FILE_TAB, name, file_lit).closable());
+    }
+    tabs
+}
+
+/// Whether the pane stands at the widest the divider allows (maximised).
+pub(crate) fn right_maximised(width: f32) -> bool {
+    width >= aui::shell::RIGHT_MAX_WIDTH - 0.5
+}
+
+/// The glyph a screen wears in its centre-header toggle (docs/43 §2.2).
 pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
     match kind {
         RightKind::Changes => IconName::Git,
@@ -619,10 +646,11 @@ pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
     }
 }
 
-/// One screen on the strip (D6, docs/43 §2.2): its row — the column's 44 px
-/// header (docs/83 §3): glyph, name, its own actions, ✕ — over its body; no
-/// fade under the row. The pane is `complementary` "Right pane"; each screen a group named
-/// for itself.
+/// One screen on the strip (D6, docs/43 §2.2): under the pane's tab row
+/// (which the shell draws in the column's 44 px header, docs/83 §6), the
+/// screen's own 36 px sub-header when it has controls of its own — Files'
+/// filter, a pushed view's ←, the Page's nav row — over its body. The pane is
+/// `complementary` "Right pane"; each screen a group named for itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_screen(
     kind: RightKind,
@@ -638,8 +666,6 @@ pub(crate) fn render_screen(
 ) -> AnyElement {
     let slug = kind.slug();
     let screen = screen_index(kind);
-    let close = cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx));
-    let pane_row = || aui::workbench::pane_row(SharedString::from(format!("right-row-{slug}")), screen_glyph(kind), kind.label());
     if cache.pushed.contains_key(&screen) && cache.pushed_at.get(&screen).is_some_and(|at| at.elapsed().as_secs_f32() < 0.16) {
         browser.window.request_animation_frame();
     }
@@ -662,38 +688,25 @@ pub(crate) fn render_screen(
     if back_since.is_some() {
         browser.window.request_animation_frame();
     }
-    let (row, body, pushed): (AnyElement, AnyElement, bool) = if let Some(view) = cache.pushed.get(&screen) {
-        let (row, body) = crate::right_views::pushed_screen(screen, view, width, browser.window, cx);
-        (row, body, true)
+    let (row, body, pushed): (Option<AnyElement>, AnyElement, bool) = if let Some(view) = cache.pushed.get(&screen) {
+        let (row, body) = crate::right_views::pushed_screen(screen, view, browser.window, cx);
+        (Some(row), body, true)
     } else {
         match (kind, project) {
             (RightKind::Changes, Some((root, _))) => {
                 let (row, body) = crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx);
                 let pushed = row.is_some();
-                (row.unwrap_or_else(|| pane_row().on_close(close).into_any_element()), body, pushed)
+                (row, body, pushed)
             }
             (RightKind::Browser, _) => {
-                // One bar (owner 2026-10-21, canvas D6OneBar): while a page
-                // shows, the nav row is the screen's only row — it carries
-                // the Recent pages chevron and ✕ — and the pane row goes.
+                // While a page shows, its nav row is the screen's sub-header
+                // (inside the page's own pane, with the Recent pages
+                // chevron); before one shows, the screen has none.
                 let merged = crate::right_page::shows_page(browser.state, cx);
                 // Over a native page the menu sits in its own window: a press
                 // anywhere else in this one closes it (live 2026-10-19).
                 let overlay_menu = cache.page_menu
                     && browser.state.is_some_and(|st| st.read(cx).is_native() && !crate::right_page::page_covered(st.read(cx), cache));
-                let close_menu = cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
-                let row = if merged {
-                    div().into_any_element()
-                } else {
-                    let row = crate::right_page::page_row(pane_row(), cache.page_menu, browser.state, cx).on_close(close);
-                    // (The in-window menu closes itself on an outside press;
-                    // this one would also fire on a press inside it.)
-                    if overlay_menu {
-                        div().on_mouse_down_out(close_menu).child(row).into_any_element()
-                    } else {
-                        row.into_any_element()
-                    }
-                };
                 let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, cache, width, merged, cx);
                 let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cache.page_menu, cx);
                 let body = match menu {
@@ -705,7 +718,7 @@ pub(crate) fn render_screen(
                         .into_any_element(),
                     None => body,
                 };
-                (row, body, false)
+                (None, body, false)
             }
             (RightKind::Files, project) => {
                 let (row, body) = crate::right_files::files_screen(cache, project.clone(), width, files_focus, browser.window, cx);
@@ -713,7 +726,7 @@ pub(crate) fn render_screen(
                 (row, body, pushed)
             }
             (RightKind::Changes, None) => (
-                pane_row().on_close(close).into_any_element(),
+                None,
                 aui::workbench::state_block("right-changes-noproject", IconName::Git, "No project").line("Open or add a project to see its changes.").into_any_element(),
                 false,
             ),
@@ -741,12 +754,74 @@ pub(crate) fn render_screen(
         .on_action(cx.listener(move |this: &mut Harness, _: &crate::app::RightBack, _, cx| {
             this.pop_right_view(screen, cx);
         }))
-        .child(row)
+        .children(row)
         .child(div().flex_1().min_h(px(0.0)).child(body))
         .into_any_element()
 }
 
 impl Harness {
+    /// The pane's tab row (docs/83 §6), for the shell to seat in the right
+    /// column's 44 px header in both modes: the tabs ([`pane_tab_list`]),
+    /// `＋` (the view menu), maximise and ✕. `open_file` is the project root
+    /// and name of the file Files previews, when the strip shows one.
+    pub(crate) fn render_right_tabs(&self, kind: RightKind, open_file: Option<(PathBuf, SharedString)>, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = pane_tab_list(kind, open_file.as_ref().map(|(_, name)| name.clone()));
+        let preview_root = open_file.map(|(root, _)| root);
+        let close_root = preview_root.clone();
+        let (select, seat) = (cx.weak_entity(), cx.weak_entity());
+        let maximised = right_maximised(self.right_resize.width);
+        let menu_open = self.overlays.read(cx).is_open(crate::overlays::MenuKind::RightViews);
+        aui::workbench::pane_tabs("right-tabs", tabs)
+            .on_select(move |id, window, cx| {
+                let _ = select.update(cx, |this, cx| this.pane_tab_click(id, preview_root.as_deref(), window, cx));
+            })
+            .on_close_tab(cx.listener(move |this: &mut Harness, _: &SharedString, window, cx| {
+                if let Some(root) = close_root.as_deref() {
+                    this.close_file_preview_for(root, cx);
+                    // The tree takes the keyboard back, so ↑ ↓ go on from
+                    // the row that was open (live 2026-10-19).
+                    window.focus(&this.right_files_focus.clone(), cx);
+                }
+            }))
+            .on_add(menu_open, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
+                this.open_menu(crate::overlays::MenuKind::RightViews, cx);
+            }))
+            .on_add_bounds(move |bounds, _, cx| {
+                let _ = seat.update(cx, |this, cx| Harness::note_trigger_bounds(&mut this.right_cache.views_menu_seat, bounds, cx));
+            })
+            .on_maximise(maximised, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right_maximised(cx)))
+            .on_close(cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx)))
+            .into_any_element()
+    }
+
+    /// A tab's click: the file's tab shows Files (where the file is open);
+    /// Files over an open file goes back to the tree — the file's tab goes
+    /// with it, since Baaz holds one preview per project; any other tab
+    /// opens the pane on its view (never closing it).
+    pub(crate) fn pane_tab_click(&mut self, id: &str, preview_root: Option<&Path>, window: &mut Window, cx: &mut Context<Self>) {
+        if id == FILE_TAB {
+            self.select_right(RightKind::Files, cx);
+            return;
+        }
+        let Some(kind) = RightKind::parse(id) else { return };
+        let on_files = self.layout.right_open && crate::layout::right_kind(&self.layout) == RightKind::Files;
+        if let (RightKind::Files, true, Some(root)) = (kind, on_files, preview_root) {
+            self.close_file_preview_for(root, cx);
+            window.focus(&self.right_files_focus.clone(), cx);
+            return;
+        }
+        self.select_right(kind, cx);
+    }
+
+    /// Maximise (docs/83 §6): the pane to the widest the divider allows, or
+    /// back to the default width when it is there already. Persists like a
+    /// drag does.
+    pub(crate) fn toggle_right_maximised(&mut self, cx: &mut Context<Self>) {
+        self.right_resize.width = if right_maximised(self.right_resize.width) { aui::shell::RIGHT_WIDTH } else { aui::shell::RIGHT_MAX_WIDTH };
+        self.right_resize.persist();
+        cx.notify();
+    }
+
     /// Flip the directory `id` open or closed for `root` and re-read, so
     /// the toggle draws its children (or hides them) on the next frame.
     pub(crate) fn toggle_files_dir(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {

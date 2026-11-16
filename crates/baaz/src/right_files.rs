@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aui::workbench::{
-    code_skeleton, code_view, file_tree, filter_bar, image_facts, image_missing, image_view, markdown_view, pane_action, pane_row, pushed_row,
+    code_skeleton, code_view, file_tree, filter_bar, image_facts, image_missing, image_view, markdown_view, pane_action, pushed_row,
     secondary_action, skeleton_rows, state_block, FileNode, FileTreeAction,
 };
 use aui_icons::{FileType, IconName};
@@ -241,7 +241,10 @@ impl Harness {
     }
 }
 
-/// The Files screen: its row and body. A preview is a pushed view.
+/// The Files screen: its sub-header and body. A preview is a pushed view.
+/// The sub-header (docs/83 §6) names the project's folder (`t-caption`,
+/// `fg-muted`, as the preview names its path) and holds the filter; while
+/// filtering it is the field. No project: no sub-header.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn files_screen(
     cache: &RightCache,
@@ -250,10 +253,10 @@ pub(crate) fn files_screen(
     focus: &gpui::FocusHandle,
     window: &mut Window,
     cx: &mut Context<Harness>,
-) -> (AnyElement, AnyElement) {
-    let Some((root, _name)) = project else {
+) -> (Option<AnyElement>, AnyElement) {
+    let Some((root, name)) = project else {
         return (
-            pane_row("right-row-files", IconName::Folder, "Files").on_close(cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx))).into_any_element(),
+            None,
             state_block("right-files-empty", IconName::Folder, "No project").line("Open or add a project to see its files.").into_any_element(),
         );
     };
@@ -263,7 +266,7 @@ pub(crate) fn files_screen(
     let ui = &cache.files_ui;
     let filter_open = ui.filter.is_some();
     let search_root = root.clone();
-    let mut row = pane_row("right-row-files", IconName::Folder, "Files")
+    let mut row = pushed_row("right-files-head", name)
         .action(pane_action("right-files-filter", IconName::Search, "Filter files").toggled(filter_open).on_click(cx.listener(move |this: &mut Harness, _, window, cx| {
             if this.right_cache.files_ui.filter.is_some() {
                 this.close_files_filter(cx);
@@ -271,7 +274,6 @@ pub(crate) fn files_screen(
                 this.open_files_filter(&search_root, window, cx);
             }
         })))
-        .on_close(cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx)))
         .into_any_element();
     let tree = cache.git_for(&root).flatten();
     let query = ui.filter.as_ref().map(|f| f.read(cx).value().to_string()).unwrap_or_default();
@@ -292,7 +294,7 @@ pub(crate) fn files_screen(
             }
             None => {
                 let body = skeleton_rows(&[(0, 64.0), (0, 88.0), (0, 56.0), (0, 112.0), (1, 72.0), (1, 96.0), (0, 60.0)], cx).into_any_element();
-                return (row, body);
+                return (Some(row), body);
             }
         }
     };
@@ -345,7 +347,7 @@ pub(crate) fn files_screen(
             }
         }));
     // One bar (owner 2026-10-21, canvas D6OneBar): while filtering, the
-    // row itself is the field — no second row under it.
+    // sub-header itself is the field — no second row under it.
     if let Some(filter) = &ui.filter {
         // The field's keys (Esc, ↑ ↓, ⏎) reach the tree's handler as they
         // did when the field sat inside the body.
@@ -362,10 +364,13 @@ pub(crate) fn files_screen(
         .into_any_element();
     }
     let body = body.child(div().flex_1().min_h(px(0.0)).child(t)).into_any_element();
-    (row, body)
+    (Some(row), body)
 }
 
-/// The preview: a view pushed on Files (docs/43 §2.5).
+/// The preview: a view pushed on Files (docs/43 §2.5) under its own tab
+/// (docs/83 §6). Its sub-header is the file's path (`t-caption`,
+/// `fg-muted`) and its actions; the way back to the tree is the Files tab
+/// (or the file tab's ✕, or Esc).
 fn preview_screen(
     cache: &RightCache,
     root: &Path,
@@ -374,26 +379,12 @@ fn preview_screen(
     focus: &gpui::FocusHandle,
     window: &mut Window,
     cx: &mut Context<Harness>,
-) -> (AnyElement, AnyElement) {
+) -> (Option<AnyElement>, AnyElement) {
     let p = cx.aui().colors;
     let abs = root.join(&preview.path);
-    let folder = preview.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-    let back_root = root.to_path_buf();
     let open_abs = abs.clone();
     let gone = matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("gone"));
-    let mut row = pushed_row("right-file-row", preview.name.clone())
-        .back_label("Back to files")
-        .width(px(width))
-        .on_back(cx.listener(move |this: &mut Harness, _, window, cx| {
-            this.close_file_preview_for(&back_root, cx);
-            // The tree takes the keyboard back, so ↑ ↓ go on from the row
-            // that was open (live 2026-10-19: the keys went nowhere).
-            window.focus(&this.right_files_focus.clone(), cx);
-        }))
-        .on_close(cx.listener(|this: &mut Harness, _, _, cx| this.toggle_right(cx)));
-    if !folder.is_empty() {
-        row = row.context(folder);
-    }
+    let mut row = pushed_row("right-file-row", preview.path.clone());
     if !gone {
         row = row.action(pane_action("right-file-open", IconName::External, "Open in default app").on_click(move |_, _, cx| {
             if open_abs.exists() {
@@ -468,7 +459,7 @@ fn preview_screen(
         }))
         .child(body)
         .into_any_element();
-    (row.into_any_element(), body)
+    (Some(row.into_any_element()), body)
 }
 
 /// ⌥Z, VS Code's "Toggle Word Wrap".

@@ -731,7 +731,7 @@ pub(crate) fn changes_screen(
     let root_buf = root.to_path_buf();
     let ui = &cache.changes;
     if ui.form.is_some() {
-        return pr_form_view(ui, &root_buf, &tree, width, window, cx);
+        return pr_form_view(ui, &root_buf, &tree, window, cx);
     }
     let expanded = cache.changes_expanded_for(root);
     let p = cx.aui().colors;
@@ -874,7 +874,7 @@ pub(crate) fn changes_screen(
             .child(list)
             .into_any_element()
     };
-    // The sticky row: an open file whose row scrolled under the pane row
+    // The sticky row: an open file whose row scrolled under the tab row
     // while its diff still shows sticks at the top (docs/43 §2.6).
     let sticky = (!clean)
         .then(|| {
@@ -1020,21 +1020,18 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
 }
 
 /// The Create PR pushed view: its row and its body (docs/43 §2.6).
-fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, width: f32, window: &mut Window, cx: &mut Context<Harness>) -> (Option<AnyElement>, AnyElement) {
+fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window, cx: &mut Context<Harness>) -> (Option<AnyElement>, AnyElement) {
     let busy = ui.busy;
     let form = ui.form.as_ref().expect("the form stands open");
     let (base, bases, title, body, draft, menu, drafting) = (form.base.clone(), form.bases.clone(), form.title.clone(), form.body.clone(), form.draft, form.base_menu, form.drafting);
     let p = cx.aui().colors;
     let back_root = root.to_path_buf();
-    let close = cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx));
     let row = pushed_row("right-pr-row", "Create pull request")
         .back_label("Back to changes")
-        .width(px(width))
         .on_back(cx.listener(move |this, _, _, cx| {
             this.changes_ui(&back_root).form = None;
             cx.notify();
         }))
-        .on_close(close)
         .into_any_element();
     let title_focused = gpui::Focusable::focus_handle(title.read(cx), cx).is_focused(window);
     let body_focused = gpui::Focusable::focus_handle(body.read(cx), cx).is_focused(window);

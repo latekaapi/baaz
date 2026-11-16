@@ -803,6 +803,57 @@ impl Harness {
         )
     }
 
+    /// The right pane's view menu (docs/83 §6), anchored under the tab
+    /// row's `＋`: Changes, Files, Page — the shown one checked — open the
+    /// pane on that view, as their tabs and the centre header's toggles do;
+    /// in Sessions a fourth row, Terminal, toggles the dock exactly as ⌃`
+    /// does (checked while it stands open). Browse has no dock, so no row.
+    pub(crate) fn render_right_views_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).is_open(MenuKind::RightViews) {
+            return None;
+        }
+        let shown = layout::right_kind(&self.layout);
+        let mut rows: Vec<MenuRow> =
+            RightKind::ALL.into_iter().map(|kind| MenuRow::Toggle { label: kind.label().into(), checked: kind == shown }).collect();
+        let terminal = self.mode != layout::Mode::Browse;
+        if terminal {
+            rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: self.layout.terminal_open });
+        }
+        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            match RightKind::ALL.get(*index) {
+                Some(kind) => this.select_right(*kind, cx),
+                None if terminal => this.toggle_terminal(window, cx),
+                None => {}
+            }
+            cx.notify();
+        });
+        // No `＋` bounds yet: no menu this frame (the button is drawn
+        // whenever the pane is, so the notify lands next frame).
+        let Some(trigger) = self.right_cache.views_menu_seat else {
+            cx.notify();
+            return None;
+        };
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        });
+        let catcher = dismiss_layer("right-views-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(catcher)
+                .child(anchored_menu(
+                    trigger,
+                    MenuSide::Below,
+                    MenuAlign::Start,
+                    view_menu("right-views", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx)),
+                ))
+                .into_any_element(),
+        )
+    }
+
     /// The Browse header back button's history menu (B2a-H4), anchored
     /// under the back button: the shown tab's back stack, newest first.
     /// Picking a row steps back to it through the history (go back N), so

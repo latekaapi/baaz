@@ -146,7 +146,8 @@ impl SessionView {
                 | MenuKind::Account
                 | MenuKind::Project
                 | MenuKind::BackHistory
-                | MenuKind::SessionRow,
+                | MenuKind::SessionRow
+                | MenuKind::RightViews,
             ) => 0,
             None => 0,
         }
@@ -226,7 +227,8 @@ impl SessionView {
             | MenuKind::Account
             | MenuKind::Project
             | MenuKind::BackHistory
-                | MenuKind::SessionRow => {}
+                | MenuKind::SessionRow
+                | MenuKind::RightViews => {}
         }
     }
 

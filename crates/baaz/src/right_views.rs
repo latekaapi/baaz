@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use aui::workbench::{image_facts, image_missing, image_view, output_fetching, output_title, output_view, pane_action, pushed_row, pushed_row_with};
 use aui_icons::IconName;
-use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, IntoElement, SharedString, Window};
+use gpui::{div, prelude::*, AnyElement, ClipboardItem, Context, IntoElement, SharedString, Window};
 
 use crate::app::Harness;
 
@@ -195,11 +195,10 @@ impl Harness {
 }
 
 /// The pushed view's row and body for `screen`, when one is pushed.
-pub(crate) fn pushed_screen(screen: usize, view: &Pushed, width: f32, window: &mut Window, cx: &mut Context<Harness>) -> (AnyElement, AnyElement) {
+pub(crate) fn pushed_screen(screen: usize, view: &Pushed, window: &mut Window, cx: &mut Context<Harness>) -> (AnyElement, AnyElement) {
     let back = cx.listener(move |this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
         this.pop_right_view(screen, cx);
     });
-    let close = cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx));
     match view {
         Pushed::Output(out) => {
             let running = out.running_since.map(|t| t.elapsed().as_secs());
@@ -217,10 +216,8 @@ pub(crate) fn pushed_screen(screen: usize, view: &Pushed, width: f32, window: &m
                 .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())));
             let row = pushed_row_with(SharedString::from(format!("right-output-row-{screen}")), title)
                 .back_label("Back")
-                .width(px(width))
                 .action(copy)
                 .on_back(back)
-                .on_close(close)
                 .into_any_element();
             let body = match &out.lines {
                 OutputLines::Fetching => output_fetching(cx).into_any_element(),
@@ -235,14 +232,12 @@ pub(crate) fn pushed_screen(screen: usize, view: &Pushed, width: f32, window: &m
             let open_path = image.path.clone();
             let row = pushed_row(SharedString::from(format!("right-image-row-{screen}")), image.name.clone())
                 .back_label("Back")
-                .width(px(width))
                 .action(pane_action(SharedString::from(format!("right-image-open-{screen}")), IconName::External, "Open in default app").on_click(move |_, _, cx| {
                     if open_path.exists() {
                         cx.open_with_system(&open_path);
                     }
                 }))
                 .on_back(back)
-                .on_close(close)
                 .into_any_element();
             let body = match image.facts.clone() {
                 Some((w, h, kind, bytes)) => {

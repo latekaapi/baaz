@@ -1,10 +1,10 @@
 //! D6's Page screen in Baaz (docs/43 §2.7): the session's one page under its
-//! 36 px nav row; "No page yet" with an address field before the agent (or
+//! 36 px nav row (the screen's sub-header under the pane's tab row); "No page yet" with an address field before the agent (or
 //! the person) opens one; Baaz's own "This page couldn’t load" over a failed
 //! or crashed page. The pill and the notes panel float over the native page
 //! in their own window (`overlay.rs`, `OverlayKind::PageFloat`).
 
-use aui::workbench::{address_field_frame, no_page_state, page_error_state, recent_pages_menu, state_block, PaneRow, RecentRow};
+use aui::workbench::{address_field_frame, no_page_state, page_error_state, recent_pages_menu, state_block, RecentRow};
 use aui_webview::WebviewState;
 use aui_icons::IconName;
 use aui_tokens::ActiveAui;
@@ -110,29 +110,15 @@ pub(crate) fn recent_rows(state: &WebviewState) -> Vec<RecentRow> {
     state.recent_pages().iter().map(|p| RecentRow::new(&p.url, &p.title, p.url == current)).collect()
 }
 
-/// The Page row: its title is the Recent pages button once the session's
-/// page has shown an address (owner 2026-10-18, canvas v50 `D6PageRecent`).
-pub(crate) fn page_row(row: PaneRow, open: bool, state: Option<&Entity<WebviewState>>, cx: &mut Context<Harness>) -> PaneRow {
-    let has = state.is_some_and(|s| !s.read(cx).recent_pages().is_empty());
-    if !has {
-        return row;
-    }
-    let row = row.title_menu(open, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
-        let open = !this.right_cache.page_menu;
-        this.set_page_menu(open, cx);
-    }));
-    row
-}
-
 /// Whether the Page screen shows a page (not the "No page yet" state): then
-/// its nav row is the screen's one bar and the pane row goes.
+/// its nav row is the screen's sub-header under the tab row.
 pub(crate) fn shows_page(state: Option<&Entity<WebviewState>>, cx: &gpui::App) -> bool {
     state.is_some_and(|s| !is_blank(&s.read(cx).url()))
 }
 
-/// Where the Recent pages menu hangs, inside the screen: under the bar from
-/// the address field's left edge when the bar is merged, else from the old
-/// pane row's title.
+/// Where the Recent pages menu hangs, inside the screen: under the nav row
+/// from the address field's left edge while a page shows, else at the
+/// screen's top-left corner.
 pub(crate) fn recent_menu_seat(merged: bool, width: f32) -> (f32, f32) {
     if merged {
         (aui::workbench::page_address_left(width), aui::workbench::RECENT_MENU_TOP)
@@ -203,12 +189,6 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
         .agent(SharedString::from(agent.to_string()))
         .on_intent(move |intent, window, cx| {
             let _ = weak.update(cx, |harness, cx| harness.handle_browser_intent(intent, window, cx));
-        })
-        .on_close({
-            let weak = cx.weak_entity();
-            move |_, cx| {
-                let _ = weak.update(cx, |this, cx| this.toggle_right(cx));
-            }
         });
     if has_recent {
         let weak = cx.weak_entity();

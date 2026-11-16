@@ -210,10 +210,10 @@ fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
 /// The browser pane's page in window coordinates, derived from the window's
 /// content box: the right column hangs off the content's right edge,
 /// `right_width` wide, its first pixel the divider; the page sits under the
-/// pane's one bar (the column's 44 px header, [`aui::workbench::PAGE_NAV_H`]).
-/// Pure so tests can drive it.
+/// pane's tab row (the column's 44 px header) and the Page's 36 px nav row
+/// ([`aui::workbench::PAGE_NAV_H`]). Pure so tests can drive it.
 pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) -> Bounds<Pixels> {
-    let bar = gpui::px(aui::workbench::PAGE_NAV_H);
+    let bar = gpui::px(aui_tokens::scale::BAR_DEFAULT + aui::workbench::PAGE_NAV_H);
     Bounds {
         origin: Point {
             x: content.origin.x + content.size.width - right_width + gpui::px(DIVIDER_PX),
@@ -2550,8 +2550,8 @@ impl Harness {
             return;
         };
         let content = window_content_bounds(window);
-        // The live page sits under the pane's one bar: a press on the bar
-        // itself is outside the page and takes the keyboard back too.
+        // The live page sits under the pane's tab row and nav row: a press
+        // on either is outside the page and takes the keyboard back too.
         let page = browser_page_bounds(content, gpui::px(self.right_resize.width));
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
@@ -5103,9 +5103,9 @@ mod tests {
         };
         let pane = browser_page_bounds(content, gpui::px(400.0));
         assert_eq!(f32::from(pane.origin.x), 1041.0, "past the column's 1 px divider");
-        assert_eq!(f32::from(pane.origin.y), 44.0, "under the pane's 44 px bar");
+        assert_eq!(f32::from(pane.origin.y), 80.0, "under the pane's 44 px tab row and the 36 px nav row");
         assert_eq!(f32::from(pane.size.width), 399.0);
-        assert_eq!(f32::from(pane.size.height), 900.0 - 44.0);
+        assert_eq!(f32::from(pane.size.height), 900.0 - 80.0);
     }
 
     #[test]

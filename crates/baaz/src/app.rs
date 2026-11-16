@@ -53,13 +53,13 @@ use std::sync::Arc;
 
 use aui::a11y_text::a11y_text_input;
 use aui::composer::composer_state_rows;
-use aui::data::{button, icon_button, ButtonSize};
+use aui::data::{button, icon_button};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
 use aui::shell::{
-    RESIZE_HANDLE_W, TabItem, app_shell, clamp_sidebar_width, drag_capture_overlay,
-    header_cell, resize_handle, tab_strip,
+    RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
+    resize_handle,
 };
 use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
 use aui_icons::{icon, IconName, Provider};
@@ -279,8 +279,6 @@ const NEWTAB_FIELD_W: f32 = scale::SP_7 * 17.5;
 const BROWSE_POPOVER_W: f32 = 320.0;
 /// The launch-failure screen's stderr block: its widest measure.
 const LAUNCH_STDERR_MAX_W: f32 = 640.0;
-/// The right pane's close ✕: its glyph inside the extra-small button.
-const RIGHT_CLOSE_GLYPH: f32 = 10.0;
 
 /// What the host hands the shell's chrome row (see `Harness::render_bar_chrome`).
 pub(crate) struct BarChrome {
@@ -2847,33 +2845,6 @@ impl Harness {
         }
     }
 
-    /// The header tab index showing `kind` (B8): Changes first, then Files,
-    /// then Browser. Legacy `diff`/`git` kinds sit on the Changes tab, the
-    /// view they load into.
-    pub(crate) fn right_tab_index(kind: layout::RightKind) -> usize {
-        match kind {
-            layout::RightKind::Changes => 0,
-            layout::RightKind::Files => 1,
-            layout::RightKind::Browser => 2,
-        }
-    }
-
-    /// The right pane's three header tabs (B8): Changes · Files · Browser,
-    /// fixed and unclosable, in that order. Each tab's id and label are its
-    /// [`RightKind`](layout::RightKind) slug and label, so `on_select`
-    /// parses straight back to the kind; roles and labels come from the
-    /// library's tab strip (TabList named "Right pane", one Tab per tab).
-    pub(crate) fn right_tab_items() -> Vec<TabItem> {
-        [
-            (layout::RightKind::Changes, IconName::Git),
-            (layout::RightKind::Files, IconName::Folder),
-            (layout::RightKind::Browser, IconName::Globe),
-        ]
-        .into_iter()
-        .map(|(kind, icon)| TabItem::new(kind.slug(), kind.label(), icon).closable(false))
-        .collect()
-    }
-
     /// Persist one session's right-pane state without the session-list
     /// settle (B7): the in-memory override is edited at once, and the
     /// `sessions.json` write follows debounced off the UI thread. No
@@ -3709,11 +3680,12 @@ impl Harness {
         let open = self.layout.right_open && !self.settings_page.open;
         let shown = layout::right_kind(&self.layout);
         let mut row = h_flex().flex_none().items_center().gap(px(ROW_GAP));
-        for (kind, glyph, label, id) in [
-            (layout::RightKind::Changes, IconName::Git, "Changes", "hd-centre-pane-changes"),
-            (layout::RightKind::Files, IconName::Folder, "Files", "hd-centre-pane-files"),
-            (layout::RightKind::Browser, IconName::Globe, "Page", "hd-centre-pane-page"),
+        for (kind, id) in [
+            (layout::RightKind::Changes, "hd-centre-pane-changes"),
+            (layout::RightKind::Files, "hd-centre-pane-files"),
+            (layout::RightKind::Browser, "hd-centre-pane-page"),
         ] {
+            let (glyph, label) = (right::screen_glyph(kind), kind.label());
             let lit = open && shown == kind;
             let click = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.pane_toggle_click(kind, cx);
@@ -6508,10 +6480,12 @@ impl Render for Harness {
             // rides the live layout into the shell, which is what holds
             // the width steady.
             // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
-            // three screens on a strip — Changes · Files · Page — each with
-            // its own row; a toggle slides the strip (240 ms ease-out), a
+            // three screens on a strip — Changes · Files · Page — under the
+            // pane's tab row (docs/83 §6), each with its own sub-header if
+            // any; a tab or toggle slides the strip (240 ms ease-out), a
             // two-finger sideways swipe moves one screen. Browse keeps its
-            // pane as it was (out of D6's scope): one body under the tabs.
+            // pane's body as it was (out of D6's scope): one body under the
+            // same tab row.
             let strip_mode = !browse_mode && !pending_neutral;
             if !self.right_cache.pushed.is_empty() {
                 self.sync_pushed_outputs(cx);
@@ -6521,6 +6495,12 @@ impl Render for Harness {
             if let Some((body, text)) = self.pending_pr_body.take() {
                 body.update(cx, |state, cx| state.set_value(&text, window, cx));
             }
+            // The file Files previews gets its own tab (docs/83 §6).
+            let open_file = if strip_mode && !pending_neutral {
+                right_project.as_ref().and_then(|(root, _)| self.right_cache.preview_for(root).map(|preview| (root.clone(), SharedString::from(preview.name))))
+            } else {
+                None
+            };
             let right = if pending_neutral {
                 v_flex().size_full().into_any_element()
             } else if strip_mode {
@@ -6591,68 +6571,10 @@ impl Render for Harness {
                     cx,
                 )
             };
-            // The right pane's header: its tab strip and the close control.
-            let header_right_el = {
-                    // B8: the pane's tab strip — Changes · Files · Browser —
-                    // in place of the old plain title. No title (the tabs
-                    // name the pane) and no `+` (the tabs are fixed). The
-                    // strip's ←/→, TabList role and per-tab labels come from
-                    // the library; selecting a tab opens that kind without
-                    // ever closing, and the close X toggles the pane.
-                    //
-                    // B8fix: the strip rides the PLAIN (non-shell) variant
-                    // inside a `header_cell`, never the library's
-                    // `right_header(...).tabs(...)`: the shell variant lifts
-                    // its ink indicator into a deferred layer, and a deferred
-                    // element prepainted by `VisualTestContext::draw`
-                    // outlives that draw's element arena — the next frame
-                    // panics dereferencing it ("attempted to dereference an
-                    // ArenaRef after its Arena was cleared"). The plain
-                    // variant draws its indicator inline, so every frame
-                    // stays arena-local. Handlers capture only the weak
-                    // entity handle and owned tab ids.
-                    let select = cx.weak_entity();
-                    let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                        this.toggle_right(cx);
-                    });
-                    header_cell("hd-right").child(
-                        h_flex()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .gap(px(ROW_GAP))
-                            .child(
-                                tab_strip(
-                                    "hd-right-tabs",
-                                    Self::right_tab_items(),
-                                    Self::right_tab_index(kind),
-                                )
-                                .accessibility_label("Right pane")
-                                .on_select(move |id, _, cx| {
-                                    if let Some(kind) = layout::RightKind::parse(id) {
-                                        let _ = select
-                                            .update(cx, |this, cx| this.select_right(kind, cx));
-                                    }
-                                }),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id("hd-right-close")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Close right pane")
-                                    .child(
-                                        icon_button("hd-right-close", IconName::X)
-                                            .ghost()
-                                            .muted()
-                                            .size(ButtonSize::Xs)
-                                            .icon_size(px(RIGHT_CLOSE_GLYPH))
-                                            .accessibility_label("Close right pane")
-                                            .on_click(close),
-                                    ),
-                            ),
-                    )
-                };
+            // The pane's tab row (docs/83 §6), in its 44 px header in both
+            // modes: Changes · Files · Page, the open file's tab, ＋,
+            // maximise, ✕. The screens below carry only their sub-headers.
+            let header_right_el = self.render_right_tabs(kind, open_file, cx);
             // One shell for every page (docs/83 §3, flat): the sidebar column
             // full height with the chrome row at its top; the centre and the
             // right pane plain columns, each with its 44 px header and line;
@@ -6702,11 +6624,7 @@ impl Render for Harness {
                 })
                 .right(right)
                 .centre(centre);
-            // Browse keeps the pane's old tab header; Sessions' screens
-            // carry their own rows on the strip.
-            if browse_mode {
-                shell = shell.header_right(header_right_el);
-            }
+            shell = shell.header_right(header_right_el);
             if let Some(switch) = chrome.switch {
                 shell = shell.chrome_switch(switch);
             }
@@ -6845,6 +6763,7 @@ impl Render for Harness {
                     .into_any_element()
             });
         let overflow = self.render_overflow_menu(cx);
+        let right_views = self.render_right_views_menu(cx);
         let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
         let project_menu = self.render_project_menu(cx);
@@ -6873,7 +6792,7 @@ impl Render for Harness {
             })
         };
         let (palette, dialog, settings, muse_sheet) = (held(palette), held(dialog), held(settings), held(muse_sheet));
-        let (overflow, back_history, project_menu) = (held(overflow), held(back_history), held(project_menu));
+        let (overflow, back_history, project_menu, right_views) = (held(overflow), held(back_history), held(project_menu), held(right_views));
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the
@@ -7228,6 +7147,7 @@ impl Render for Harness {
                 .children(muse_sheet)
                 .children(row_detail)
                 .children(overflow)
+                .children(right_views)
                 .children(back_history)
                 .children(project_menu)
                 .children(files_menu)
@@ -9376,27 +9296,38 @@ mod tests {
         restore_state(state);
     }
 
-    /// B8: the header carries exactly the three tabs Changes · Files ·
-    /// Browser, each id parsing back to its kind, with the active index
-    /// following the kind.
+    /// docs/83 §6: the tab row carries Changes · Files · Page, each id
+    /// parsing back to its kind and sitting at its strip index, the active
+    /// one lit; a previewed file adds one closable tab that is lit in Files'
+    /// place.
     #[test]
-    fn the_three_header_tabs_map_to_the_three_kinds() {
-        let tabs = Harness::right_tab_items();
-        assert_eq!(tabs.len(), 3, "Changes, Files, Browser — no more");
+    fn the_tab_row_maps_to_the_three_kinds_and_the_open_file() {
+        use crate::layout::RightKind;
+        let tabs = crate::right::pane_tab_list(RightKind::Files, None);
+        assert_eq!(tabs.len(), 3, "Changes, Files, Page — no more without an open file");
         for (index, tab) in tabs.iter().enumerate() {
-            let kind = crate::layout::RightKind::parse(&tab.id).unwrap_or_else(|| {
-                panic!("header tab {:?} parses back to no kind", tab.id)
-            });
-            assert_eq!(Harness::right_tab_index(kind), index, "tab {:?} sits at its own index", tab.id);
+            let kind = RightKind::parse(&tab.id).unwrap_or_else(|| panic!("tab {:?} parses back to no kind", tab.id));
+            assert_eq!(crate::right::screen_index(kind), index, "tab {:?} sits at its own index", tab.id);
             assert_eq!(kind.label(), tab.label.as_ref(), "tab {:?} is labelled as its kind", tab.id);
+            assert_eq!(tab.active, kind == RightKind::Files);
         }
-        assert_eq!(tabs[0].label.as_ref(), "Changes");
-        assert_eq!(tabs[1].label.as_ref(), "Files");
-        assert_eq!(tabs[2].label.as_ref(), "Page");
-        assert!(!tabs.iter().any(|tab| tab.closable), "header tabs are fixed, never closable");
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
-        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Browser), 2);
+        assert_eq!(tabs.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page"]);
+        assert!(!tabs.iter().any(|tab| tab.closable), "the views' tabs are fixed");
+
+        let tabs = crate::right::pane_tab_list(RightKind::Files, Some("right.rs".into()));
+        assert_eq!(tabs.len(), 4);
+        assert_eq!((tabs[3].id.as_ref(), tabs[3].label.as_ref(), tabs[3].active, tabs[3].closable), (crate::right::FILE_TAB, "right.rs", true, true));
+        assert!(!tabs[1].active, "Files is not lit while its file shows");
+        let tabs = crate::right::pane_tab_list(RightKind::Changes, Some("right.rs".into()));
+        assert!(tabs[0].active && !tabs[3].active, "on Changes the file's tab waits unlit");
+    }
+
+    /// Maximise flips between the widest pane and the default width.
+    #[test]
+    fn maximise_toggles_between_the_widest_and_the_default_width() {
+        assert!(crate::right::right_maximised(aui::shell::RIGHT_MAX_WIDTH));
+        assert!(!crate::right::right_maximised(aui::shell::RIGHT_WIDTH));
+        assert!(!crate::right::right_maximised(aui::shell::RIGHT_MAX_WIDTH - 1.0));
     }
 
     /// Z2: the right pane belongs to each session and a switch restores it

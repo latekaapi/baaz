@@ -85,11 +85,11 @@ impl Default for RightKind {
 }
 
 impl RightKind {
-    /// Every kind the header tabs offer: Changes · Files · Browser.
+    /// Every kind the pane's tab row offers: Changes · Files · Page.
     pub const ALL: [RightKind; 3] =
         [RightKind::Changes, RightKind::Files, RightKind::Browser];
 
-    /// The user-visible name: the header tabs' labels, and T3's ⌘K labels.
+    /// The user-visible name: the tab row's labels, and T3's ⌘K labels.
     /// The legacy aliases label as the view they load into.
     pub fn label(self) -> &'static str {
         match self {
@@ -100,7 +100,7 @@ impl RightKind {
         }
     }
 
-    /// The machine name: the header tabs' ids, and T4's `right:<kind>` verb
+    /// The machine name: the tab row's ids, and T4's `right:<kind>` verb
     /// parses these back. The legacy aliases slug as the kind they load
     /// into, so a stored `diff`/`git` round-trips through `changes`.
     pub fn slug(self) -> &'static str {

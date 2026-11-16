@@ -2338,7 +2338,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Account
             | MenuKind::Project
             | MenuKind::BackHistory
-                | MenuKind::SessionRow => return None,
+                | MenuKind::SessionRow
+                | MenuKind::RightViews => return None,
         };
         Some(
             popover_layer(
@@ -2833,7 +2834,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Account
             | MenuKind::Project
             | MenuKind::BackHistory
-                | MenuKind::SessionRow => Vec::new(),
+                | MenuKind::SessionRow
+                | MenuKind::RightViews => Vec::new(),
         }
     }
 }

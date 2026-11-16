@@ -109,6 +109,10 @@ pub enum MenuKind {
     /// Archive. The session id lives on [`Menu::session`]; the screen draws
     /// and drives it.
     SessionRow,
+    /// The right pane's view menu, under the tab row's `＋` (docs/83 §6):
+    /// Changes, Files, Page and (in Sessions) Terminal, the ones showing
+    /// checked.
+    RightViews,
 }
 
 /// An open menu: which one, where the keyboard is, and what has been typed.
