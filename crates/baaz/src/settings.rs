@@ -362,6 +362,20 @@ pub(crate) fn boot_theme(flag: Option<aui_tokens::ThemeKind>, cx: &gpui::App) ->
     })
 }
 
+/// The stored density and text size, applied once at launch right after
+/// `aui::init` (which starts Comfortable / Default). A deterministic capture
+/// reads no store, so it stays on the design's values unless a step sets
+/// them (`settings-set:density=compact`).
+pub(crate) fn boot_type(cx: &mut gpui::App) {
+    let layout = crate::layout::read();
+    if layout.density != crate::layout::DensityPref::default() {
+        aui_tokens::AuiTheme::set_density(layout.density.density(), None, cx);
+    }
+    if layout.text_size != crate::layout::TextSizePref::default() {
+        aui_tokens::AuiTheme::set_text_size(layout.text_size.text_size(), None, cx);
+    }
+}
+
 /// The page state. `open` is the route: while open the left column shows
 /// the section list and the centre+right merge into the settings surface.
 /// Right-pane and terminal state are never written while open — hidden,
@@ -749,6 +763,41 @@ impl Harness {
         cx.notify();
     }
 
+    /// Settings › Appearance › Density: store `pref` and lay the window out
+    /// at it now — every text role and the shared row height (task 2.10).
+    pub(crate) fn set_density_pref(
+        &mut self,
+        pref: crate::layout::DensityPref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout.density = pref;
+        self.persist_layout();
+        if cx.aui().density != pref.density() {
+            aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
+            // Rows cached at the old sizes rebuild on the next frame.
+            self.invalidate_list();
+        }
+        cx.notify();
+    }
+
+    /// Settings › Appearance › Text size: store `pref` and set every text
+    /// role at it now (task 2.10).
+    pub(crate) fn set_text_size_pref(
+        &mut self,
+        pref: crate::layout::TextSizePref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout.text_size = pref;
+        self.persist_layout();
+        if cx.aui().text_size != pref.text_size() {
+            aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
+            self.invalidate_list();
+        }
+        cx.notify();
+    }
+
     /// Set the engine an address commit searches with. The Settings →
     /// Browser page's rows own it; the toolbar reads it on every commit.
     pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
@@ -828,7 +877,8 @@ impl Harness {
 
     /// `settings-set:<key>=<value>`: the scripted twin of the Settings
     /// rows that are not plain switches. `search-engine=<name>`,
-    /// `summary-line=<on|off>` and `theme=<system|light|dark>` land
+    /// `summary-line=<on|off>`, `theme=<system|light|dark>`,
+    /// `density=<comfortable|compact>` and `text-size=<default|large>` land
     /// instantly; an unknown key or a value that does not parse is an
     /// `Err`, never a silent no-op.
     pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -858,8 +908,22 @@ impl Harness {
                 }
                 None => Err(format!("theme wants system, light or dark, not {value:?}")),
             },
+            "density" => match crate::layout::DensityPref::parse(value) {
+                Some(pref) => {
+                    self.set_density_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("density wants comfortable or compact, not {value:?}")),
+            },
+            "text-size" => match crate::layout::TextSizePref::parse(value) {
+                Some(pref) => {
+                    self.set_text_size_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("text-size wants default or large, not {value:?}")),
+            },
             _ => Err(format!(
-                "unknown settings key {key:?} (expected search-engine=<name>, summary-line=<on|off> or theme=<system|light|dark>)"
+                "unknown settings key {key:?} (expected search-engine=<name>, summary-line=<on|off>, theme=<system|light|dark>, density=<comfortable|compact> or text-size=<default|large>)"
             )),
         }
     }
@@ -1218,12 +1282,12 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Appearance (task 2.9): the theme, and the sidebar's summary line
+    /// Appearance: the theme (task 2.9), text size and density (task 2.10,
+    /// through `TextRole` and `Metrics`), and the sidebar's summary line
     /// (moved here from Sidebar: it changes how the list looks, not what
-    /// it holds). Text size and density join once task 2.10 builds the type
-    /// and height mechanism they switch (docs/83 §9).
+    /// it holds).
     fn settings_appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::layout::ThemePref;
+        use crate::layout::{DensityPref, TextSizePref, ThemePref};
         let active = ThemePref::ALL.iter().position(|pref| *pref == self.layout.theme).unwrap_or(0);
         let set = cx.listener(|this: &mut Self, index: &usize, window, cx| {
             if let Some(pref) = ThemePref::ALL.get(*index) {
@@ -1240,6 +1304,38 @@ impl Harness {
                 ),
             )
             .into_any_element();
+        let size_active = TextSizePref::ALL.iter().position(|pref| *pref == self.layout.text_size).unwrap_or(0);
+        let set_size = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+            if let Some(pref) = TextSizePref::ALL.get(*index) {
+                this.set_text_size_pref(*pref, Some(window), cx);
+            }
+        });
+        let text_size = settings_row("Text size")
+            .description("Large sets every piece of text one step up.")
+            .control(
+                div().debug_selector(|| "settings-text-size".into()).child(
+                    segmented("settings-text-size", TextSizePref::ALL.iter().map(|pref| SharedString::from(pref.label())).collect(), size_active)
+                        .accessibility_label("Text size")
+                        .on_select(move |index, window, cx| set_size(&index, window, cx)),
+                ),
+            )
+            .into_any_element();
+        let density_active = DensityPref::ALL.iter().position(|pref| *pref == self.layout.density).unwrap_or(0);
+        let set_density = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+            if let Some(pref) = DensityPref::ALL.get(*index) {
+                this.set_density_pref(*pref, Some(window), cx);
+            }
+        });
+        let density = settings_row("Density")
+            .description("Compact uses smaller text and shorter rows.")
+            .control(
+                div().debug_selector(|| "settings-density".into()).child(
+                    segmented("settings-density", DensityPref::ALL.iter().map(|pref| SharedString::from(pref.label())).collect(), density_active)
+                        .accessibility_label("Density")
+                        .on_select(move |index, window, cx| set_density(&index, window, cx)),
+                ),
+            )
+            .into_any_element();
         let summary = self.settings_switch_row(
             "summary_line",
             SUMMARY_LINE_LABEL,
@@ -1248,7 +1344,7 @@ impl Harness {
             cx,
         );
         settings_sections_stack()
-            .child(self.settings_group("Window", vec![theme], cx))
+            .child(self.settings_group("Window", vec![theme, text_size, density], cx))
             .child(self.settings_group("Sidebar", vec![summary], cx))
             .into_any_element()
     }
@@ -1291,7 +1387,7 @@ impl Harness {
         let mut anchor = div().relative().flex_none();
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
         let mut chip = button("settings-assistant-model", chip_label)
-            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
+            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_SM)).color(p.fg_muted))
             .menu_open(self.assistant_menu_open)
             .accessibility_label(format!("Assistant model, {chip_label}. Change"))
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
@@ -1567,7 +1663,7 @@ impl Harness {
                 .description("Passwords, cookies, site settings and everything else Chromium owns.")
                 .control(
                     button("settings-browser-chromium", "Open chrome://settings")
-                        .trailing(aui_icons::icon(IconName::External).size(px(scale::ICON_COMPACT)))
+                        .trailing(aui_icons::icon(IconName::External).size(px(scale::ICON_SM)))
                         .accessibility_label("Open Chromium settings")
                         .on_click(open),
                 ),
@@ -1842,7 +1938,7 @@ impl Harness {
                     gpui_kit::component::input::Textarea::new(&self.settings_search)
                         .appearance(false)
                         .bordered(false)
-                        .text_size(aui_tokens::scaled(scale::FS_13))
+                        .role_size(TextRole::Body)
                         .h_auto()
                         .whitespace_nowrap()
                         .into_any_element(),

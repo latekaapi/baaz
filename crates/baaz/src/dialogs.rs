@@ -15,6 +15,7 @@
 //! enter presence never lands on the same frame twice.
 
 use aui::feedback::ToastKind;
+use aui_tokens::TextRole;
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
 use aui::overlay::{
@@ -38,13 +39,30 @@ use crate::wire::WireCall;
 use crate::{files, skills};
 
 /// Actions of the header's overflow menu, in row order.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverflowAction {
     Rename,
     Fork,
     Archive,
     /// Feedback mode on or off (docs/83 §5: the feedback button lives here).
     Feedback,
+}
+
+/// The header overflow menu's rows and their actions: Rename, Fork,
+/// Archive, then — only while the feedback setting is on — a "Feedback
+/// mode" row, checked while the mode is on (docs/83 §5, task 2.6).
+fn overflow_rows(feedback_shown: bool, feedback_on: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+    let mut rows = vec![
+        MenuRow::Toggle { label: "Rename".into(), checked: false },
+        MenuRow::Toggle { label: "Fork".into(), checked: false },
+        MenuRow::Toggle { label: "Archive".into(), checked: false },
+    ];
+    let mut actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
+    if feedback_shown {
+        rows.push(MenuRow::Toggle { label: "Feedback mode".into(), checked: feedback_on });
+        actions.push(OverflowAction::Feedback);
+    }
+    (rows, actions)
 }
 
 /// One palette section's rows under one icon.
@@ -327,7 +345,7 @@ impl Harness {
         Textarea::new(&self.projects_query)
             .appearance(false)
             .bordered(false)
-            .text_size(aui_tokens::scaled(scale::FS_14))
+            .text_size(TextRole::Subtitle.size())
             .h_auto()
             .whitespace_nowrap()
             .into_any_element()
@@ -727,19 +745,10 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
         }
-        let mut rows = vec![
-            MenuRow::Toggle { label: "Rename".into(), checked: false },
-            MenuRow::Toggle { label: "Fork".into(), checked: false },
-            MenuRow::Toggle { label: "Archive".into(), checked: false },
-        ];
-        let mut actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
-        if self.feedback_menu_row_shown() {
-            rows.push(MenuRow::Toggle {
-                label: "Feedback mode".into(),
-                checked: self.feedback.phase != crate::app::feedback_ui::FeedbackPhase::Off,
-            });
-            actions.push(OverflowAction::Feedback);
-        }
+        let (rows, actions) = overflow_rows(
+            self.feedback_menu_row_shown(),
+            self.feedback.phase != crate::app::feedback_ui::FeedbackPhase::Off,
+        );
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
@@ -937,7 +946,7 @@ impl Harness {
         Textarea::new(&self.search_query)
             .appearance(false)
             .bordered(false)
-            .text_size(aui_tokens::scaled(scale::FS_14))
+            .text_size(TextRole::Subtitle.size())
             .h_auto()
             .whitespace_nowrap()
             .into_any_element()
@@ -952,7 +961,7 @@ impl Harness {
         Textarea::new(&self.commands_query)
             .appearance(false)
             .bordered(false)
-            .text_size(aui_tokens::scaled(scale::FS_14))
+            .text_size(TextRole::Subtitle.size())
             .h_auto()
             .whitespace_nowrap()
             .into_any_element()
@@ -1541,6 +1550,28 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
+    use aui::nav::MenuRow;
+
+    /// The header ⋯ menu's "Feedback mode" row (docs/83 §5, task 2.6):
+    /// absent while the setting is off, last and checked while the mode is
+    /// on, and it toggles feedback mode.
+    #[test]
+    fn overflow_menu_has_a_feedback_row_only_while_the_setting_is_on() {
+        let label = |row: &MenuRow| match row {
+            MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
+            _ => panic!("overflow rows are toggles"),
+        };
+        let (rows, actions) = super::overflow_rows(false, false);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
+        assert!(!actions.contains(&super::OverflowAction::Feedback));
+        let (rows, actions) = super::overflow_rows(true, false);
+        assert_eq!(label(rows.last().unwrap()), ("Feedback mode".to_owned(), false));
+        assert_eq!(actions.last(), Some(&super::OverflowAction::Feedback));
+        assert_eq!(rows.len(), actions.len());
+        let (rows, _) = super::overflow_rows(true, true);
+        assert_eq!(label(rows.last().unwrap()), ("Feedback mode".to_owned(), true), "checked while the mode is on");
+    }
+
     use super::{filter_commands, tilde_root};
     use crate::app::Harness;
         use crate::layout::{Mode, RightKind};

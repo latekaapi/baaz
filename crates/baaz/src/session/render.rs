@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use aui_tokens::TextRole;
 use std::path::Path;
 use aui::data::button;
 use aui_tokens::{ActiveAui, AuiStyled as _};
@@ -1752,7 +1753,7 @@ impl SessionView {
                     Textarea::new(&self.feedback)
                         .appearance(false)
                         .bordered(false)
-                        .text_size(aui_tokens::scaled(scale::FS_12)),
+                        .role_size(TextRole::Caption),
                 )
                 .into_any_element()
         });
@@ -1763,7 +1764,7 @@ impl SessionView {
                     Textarea::new(&self.clarify)
                         .appearance(false)
                         .bordered(false)
-                        .text_size(aui_tokens::scaled(scale::FS_12)),
+                        .role_size(TextRole::Caption),
                 )
                 .into_any_element()
         });
@@ -2070,7 +2071,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         );
         let mut body = v_flex().w_full().gap(px(scale::SP_2));
         if let Some(detail) = failure.kind.detail(&failure.message, &sentence, &failure.stderr_excerpt) {
-            body = body.child(div().ui(scale::FS_12).text_color(p.fg_muted).child(detail));
+            body = body.child(div().ui(TextRole::Caption).text_color(p.fg_muted).child(detail));
         }
         if !failure.stderr_excerpt.is_empty() {
             // The child's own last words, verbatim and at most twelve lines.
@@ -2087,7 +2088,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .bg(p.surface_2)
                     .border_1()
                     .border_color(p.line)
-                    .mono(scale::FS_12)
+                    .mono(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .child(failure.stderr_excerpt[lines..].join("\n")),
             );

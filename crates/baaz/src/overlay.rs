@@ -17,7 +17,7 @@
 use aui::interact::menu_panel;
 use aui::screens::sidebar::{browse_menu, browse_menu_size, SidebarIntent};
 use aui_icons::{icon, IconName};
-use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui::{
     div, prelude::*, AnyWindowHandle, App, Bounds, Context, FocusHandle, Pixels, Render, WeakEntity, Window,
@@ -1378,7 +1378,7 @@ impl Harness {
                 .px(metrics.item_px)
                 .py(gpui::px(scale::SP_1))
                 .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(name))
-                .child(div().text_role_in(TextRole::Body, Density::Standard).text_color(p.fg).child(value))
+                .child(div().text_role(TextRole::Body).text_color(p.fg).child(value))
         };
         let (headline, detail) = if secure {
             ("Connection is secure", "Information you send to this site, like passwords or card numbers, stays private.")
@@ -1396,7 +1396,7 @@ impl Harness {
                     .px(metrics.item_px)
                     .pt(metrics.item_px)
                     .pb(gpui::px(scale::SP_1))
-                    .text_role_in(TextRole::Body, Density::Standard)
+                    .text_role(TextRole::Body)
                     .semibold()
                     .text_color(p.fg)
                     .truncate()
@@ -1413,7 +1413,7 @@ impl Harness {
                         v_flex()
                             .flex_1()
                             .min_w(gpui::px(0.0))
-                            .child(div().text_role_in(TextRole::Body, Density::Standard).text_color(if secure { p.fg } else { p.danger }).child(headline))
+                            .child(div().text_role(TextRole::Body).text_color(if secure { p.fg } else { p.danger }).child(headline))
                             .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(detail)),
                     ),
             );

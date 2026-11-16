@@ -28,7 +28,7 @@
 //! *follows* an approval does spend one.
 //!
 //! The window boots exactly the way `aui/examples/minimal.rs` does — the asset
-//! source, then `aui::init`, then the text scale, then the window — because
+//! source, then `aui::init`, then the stored density and text size, then the window — because
 //! that order is the library's contract and nothing here has earned an
 //! exception to it.
 
@@ -564,7 +564,7 @@ fn usage(err: &str) -> ! {
 
 /// `--bench`: boot the bench window — one replayed session, streamed on a
 /// timer — and drive it. The boot order is the library's contract, exactly as
-/// in [`main`]: assets, `aui::init`, text scale, keys, menus, then the
+/// in [`main`]: assets, `aui::init`, density and text size, keys, menus, then the
 /// window. Free: no child is ever spawned and no server is ever dialled.
 fn run_bench(args: Args) {
     // Frame stats before the first frame: the flag is read once, so forcing
@@ -588,6 +588,7 @@ fn run_bench(args: Args) {
     let (bench_bare, shell_args) = (args.bench_bare, args.clone());
     gpui_kit::application().with_assets(crate::mascot::BaazAssets).run(move |cx| {
         aui::init(theme.unwrap_or_default(), cx);
+        crate::settings::boot_type(cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
         // measures stable numbers.
         if crate::clock::deterministic() {
@@ -925,6 +926,7 @@ fn main() {
         crate::log::boot_mark("app-running");
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(crate::settings::boot_theme(theme, cx), cx);
+        crate::settings::boot_type(cx);
         crate::log::boot_mark("aui-init-done");
         // A deterministic capture holds the platform's reduced-motion switch:
         // every motion primitive (loops, tweens, presence, springs, the

@@ -1550,7 +1550,7 @@ impl Harness {
             .child(
                 button("skills-crumb", project_name.clone())
                     .ghost()
-                    .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_COMPACT)))
+                    .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_SM)))
                     .accessibility_label(format!("Skills project, {project_name}. Switch project."))
                     .on_click(open_menu),
             )
@@ -1564,7 +1564,7 @@ impl Harness {
                         Textarea::new(&self.skills_query)
                             .appearance(false)
                             .bordered(false)
-                            .text_size(aui_tokens::scaled(scale::FS_13))
+                            .role_size(TextRole::Body)
                             .h_auto()
                             .whitespace_nowrap()
                             .into_any_element(),
@@ -2005,7 +2005,7 @@ impl Harness {
                 v_flex()
                     .w_full()
                     .gap(px(scale::SP_2))
-                    .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Name"))
+                    .child(div().flex_none().ui(TextRole::Caption).text_color(p.fg_muted).child("Name"))
                     .child(
                         aui::data::field_frame("skills-new-name-field", &self.skills_new_name, window, cx)
                             .flex_none()
@@ -2014,7 +2014,7 @@ impl Harness {
                                 Textarea::new(&self.skills_new_name)
                                     .appearance(false)
                                     .bordered(false)
-                                    .text_size(aui_tokens::scaled(scale::FS_13))
+                                    .role_size(TextRole::Body)
                                     .h_auto()
                                     .whitespace_nowrap()
                                     .into_any_element(),
@@ -2024,7 +2024,7 @@ impl Harness {
                         div()
                             .flex_none()
                             .w_full()
-                            .ui(scale::FS_12)
+                            .ui(TextRole::Caption)
                             .text_color(p.fg_muted)
                             .child("Lowercase letters, digits, hyphens · up to 64."),
                     ),
@@ -2033,7 +2033,7 @@ impl Harness {
                 v_flex()
                     .w_full()
                     .gap(px(scale::SP_2))
-                    .child(div().flex_none().ui(scale::FS_12).text_color(p.fg_muted).child("Description"))
+                    .child(div().flex_none().ui(TextRole::Caption).text_color(p.fg_muted).child("Description"))
                     .child(
                         aui::data::field_frame("skills-new-desc-field", &self.skills_new_desc, window, cx)
                             .flex_none()
@@ -2042,7 +2042,7 @@ impl Harness {
                                 Textarea::new(&self.skills_new_desc)
                                     .appearance(false)
                                     .bordered(false)
-                                    .text_size(aui_tokens::scaled(scale::FS_13))
+                                    .role_size(TextRole::Body)
                                     .h_auto()
                                     .into_any_element(),
                             ),
@@ -2051,7 +2051,7 @@ impl Harness {
                         div()
                             .flex_none()
                             .w_full()
-                            .ui(scale::FS_12)
+                            .ui(TextRole::Caption)
                             .text_color(p.fg_muted)
                             .child("Say what it does and when to use it."),
                     ),
@@ -2062,7 +2062,7 @@ impl Harness {
                     .on_select(move |index, window, cx| pick_scope(&index, window, cx)),
             );
         if let Some(error) = error {
-            card = card.child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.warning).child(error));
+            card = card.child(div().flex_none().w_full().ui(TextRole::Body).text_color(p.warning).child(error));
         }
         card = card.child(
             h_flex()
@@ -2123,26 +2123,26 @@ impl Harness {
             .w_full()
             .gap(px(scale::SP_3))
             .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Install skill"))
-            .child(div().flex_none().w_full().ui(scale::FS_13).medium().text_color(p.ink).child(name))
-            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.fg_muted).child(description))
+            .child(div().flex_none().w_full().ui(TextRole::Body).medium().text_color(p.ink).child(name))
+            .child(div().flex_none().w_full().ui(TextRole::Body).text_color(p.fg_muted).child(description))
             .child(
                 div()
                     .flex_none()
                     .w_full()
-                    .mono(scale::FS_12)
+                    .mono(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .child(format!("~{} tokens at startup · {}", format_tokens(tokens), dir)),
             )
             .child(
-                div().flex_none().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(file_list),
+                div().flex_none().w_full().mono(TextRole::Caption).text_color(p.fg_muted).child(file_list),
             )
-            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(diagnostics))
+            .child(div().flex_none().w_full().ui(TextRole::Body).text_color(p.ink).child(diagnostics))
             .child(
                 segmented("skills-install-scope", labels, active)
                     .accessibility_label("Where the skill lands")
                     .on_select(move |index, window, cx| pick_scope(&index, window, cx)),
             )
-            .child(div().flex_none().w_full().ui(scale::FS_12).text_color(p.fg_muted).child(hint))
+            .child(div().flex_none().w_full().ui(TextRole::Caption).text_color(p.fg_muted).child(hint))
             .child(
                 h_flex()
                     .flex_none()
@@ -2180,12 +2180,12 @@ impl Harness {
                 .child(
                     div()
                         .flex_none()
-                        .ui(17.6)
+                        .ui(TextRole::Title)
                         .semibold()
                         .text_color(p.ink)
                         .child(format!("Import from {}", source.label())),
                 )
-                .child(div().flex_none().ui(scale::FS_13).text_color(p.fg_muted).child("Reading skills…"))
+                .child(div().flex_none().ui(TextRole::Body).text_color(p.fg_muted).child("Reading skills…"))
                 .child(
                     h_flex().flex_none().w_full().justify_end().child(
                         button("skills-import-cancel", "Cancel")
@@ -2203,12 +2203,12 @@ impl Harness {
                 .child(
                     div()
                         .flex_none()
-                        .ui(17.6)
+                        .ui(TextRole::Title)
                         .semibold()
                         .text_color(p.ink)
                         .child(format!("Import from {}", source.label())),
                 )
-                .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.warning).child(error))
+                .child(div().flex_none().w_full().ui(TextRole::Body).text_color(p.warning).child(error))
                 .child(
                     h_flex().flex_none().w_full().justify_end().child(
                         button("skills-import-close", "Close")
@@ -2258,8 +2258,8 @@ impl Harness {
             .w_full()
             .gap(px(scale::SP_3))
             .child(div().flex_none().role_in(TextRole::Title, cx).text_color(p.ink).child("Remove skill"))
-            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(headline))
-            .child(div().flex_none().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(detail))
+            .child(div().flex_none().w_full().ui(TextRole::Body).text_color(p.ink).child(headline))
+            .child(div().flex_none().w_full().mono(TextRole::Caption).text_color(p.fg_muted).child(detail))
             .child(
                 h_flex()
                     .flex_none()
@@ -2396,7 +2396,7 @@ impl Harness {
         if !description.trim().is_empty() {
             detail = detail.section(
                 "What the model sees",
-                div().w_full().ui(scale::FS_13).line_height(gpui::relative(1.5)).text_color(p.ink).child(description),
+                div().w_full().ui(TextRole::Body).line_height(gpui::relative(1.5)).text_color(p.ink).child(description),
             );
         }
 
@@ -2410,16 +2410,15 @@ impl Harness {
                     ink: p.ink,
                     code_ink: p.ink,
                     code_bg: p.surface_2,
-                    size: 13.0,
-                    line_height: 1.5,
+                    role: TextRole::Body,
                     paragraph_gap: 8.0,
                 },
             )
             .into_any_element(),
             _ if self.skills.detail_loading => {
-                div().w_full().ui(scale::FS_13).text_color(p.fg_muted).child("Loading…").into_any_element()
+                div().w_full().ui(TextRole::Body).text_color(p.fg_muted).child("Loading…").into_any_element()
             }
-            _ => div().w_full().ui(scale::FS_13).text_color(p.fg_muted).child("No preview available.").into_any_element(),
+            _ => div().w_full().ui(TextRole::Body).text_color(p.fg_muted).child("No preview available.").into_any_element(),
         };
         // Virtual skills read through `inspect`, which carries no body —
         // the section says whose preview it is (D60, K2 gap).
@@ -2430,7 +2429,7 @@ impl Harness {
         if !files.is_empty() {
             detail = detail.section(
                 "Files",
-                div().w_full().mono(scale::FS_12).text_color(p.fg_muted).child(files.join("\n")),
+                div().w_full().mono(TextRole::Caption).text_color(p.fg_muted).child(files.join("\n")),
             );
         }
 
@@ -2440,7 +2439,7 @@ impl Harness {
             for diagnostic in &skill.diagnostics {
                 let line = diagnostic.message.clone().unwrap_or_else(|| diagnostic.code.clone());
                 diagnostics = diagnostics.child(
-                    div().w_full().ui(scale::FS_13).text_color(p.warning).child(format!("{}: {line}", diagnostic.code)),
+                    div().w_full().ui(TextRole::Body).text_color(p.warning).child(format!("{}: {line}", diagnostic.code)),
                 );
             }
             detail = detail.section("Diagnostics", diagnostics);
@@ -2452,7 +2451,7 @@ impl Harness {
             let mut menu = v_flex().w_full().gap(px(scale::SP_2));
             if skill.section() == ScopeSection::Personal {
                 menu = menu.child(
-                    div().w_full().ui(scale::FS_12).text_color(p.fg_muted).child("Personal skills apply to every project."),
+                    div().w_full().ui(TextRole::Caption).text_color(p.fg_muted).child("Personal skills apply to every project."),
                 );
             }
             let disk = skill.disk_path(&root);
@@ -2560,7 +2559,7 @@ impl Harness {
             .hint("Applies to new sessions")
             .section(
                 "Status",
-                div().w_full().ui(scale::FS_13).text_color(p.ink).child(message),
+                div().w_full().ui(TextRole::Body).text_color(p.ink).child(message),
             )
             .into_any_element()
     }

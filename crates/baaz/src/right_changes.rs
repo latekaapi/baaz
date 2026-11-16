@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aui::interact::{dropdown, row_list, DropdownItem, LIST_INSET, LIST_ROW_H};
+use aui::interact::{dropdown, row_list, DropdownItem, LIST_INSET};
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
     ahead_behind, base_and_head, base_picker, branch_label, change_row, changes_caption, diff_fold, commit_foot, commit_frame,
@@ -816,7 +816,7 @@ pub(crate) fn changes_screen(
                         .px(px(scale::SP_6))
                         .flex()
                         .items_center()
-                        .text_role_in(TextRole::Body, aui_tokens::Density::Standard)
+                        .text_role(TextRole::Body)
                         .text_color(muted)
                         .child("Binary file — no text diff.")
                         .into_any_element(),
@@ -900,7 +900,7 @@ pub(crate) fn changes_screen(
 fn loading_body(cx: &Context<Harness>) -> gpui::Div {
     v_flex().pt(px(scale::SP_2)).px(px(LIST_INSET)).child(changes_caption("right-changes-loading-cap", "This session", None, true, cx)).children(SKELETON_WIDTHS.iter().map(|w| {
         h_flex()
-            .h(px(LIST_ROW_H))
+            .h(aui_tokens::Metrics::active().control)
             .gap(px(scale::SP_3))
             .pl(px(scale::SP_6))
             .pr(px(scale::SP_3))
@@ -946,7 +946,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                         .on_action(cx.listener(move |this, _: &crate::app::CommitMessage, _, cx| this.commit_changes(&r1, cx)))
                         .on_mouse_down_out(cx.listener(move |this, _, _, cx| this.settle_commit_message(&r2, cx)))
                         .key_context("CommitMessage")
-                        .child(Textarea::new(&editor).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(EDITOR_LH)))
+                        .child(Textarea::new(&editor).appearance(false).bordered(false).role_size(TextRole::Body).line_height(px(EDITOR_LH)))
                         .into_any_element()
                 }
                 None => {
@@ -1076,7 +1076,7 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window
             "Description",
             well_input(
                 v_flex()
-                    .child(Textarea::new(&body).appearance(false).bordered(false).text_size(aui_tokens::scaled(14.3)).line_height(px(EDITOR_LH)))
+                    .child(Textarea::new(&body).appearance(false).bordered(false).role_size(TextRole::Body).line_height(px(EDITOR_LH)))
                     .child(div().mt(px(scale::SP_3)).text_color(p.fg_muted).child(if drafting { "Drafting from this session…" } else { "Drafted from this session · edit freely" })),
                 150.0,
                 body_focused,

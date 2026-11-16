@@ -3,7 +3,7 @@
 //! gpui, shown through holes cut in the pages where they overlap.
 
 use aui_icons::{icon, IconName};
-use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{div, prelude::*, px, relative, AnyElement, Context, Pixels, SharedString, Window};
 use gpui_kit::base::{h_flex, v_flex};
 
@@ -234,7 +234,7 @@ impl Harness {
                                         .cursor_pointer()
                                         .role(gpui::Role::Button)
                                         .aria_label("Open Peek as a tab")
-                                        .text_role_in(TextRole::Body, Density::Compact)
+                                        .text_role(TextRole::Caption)
                                         .text_color(gpui::white())
                                         .child("Open as tab")
                                         .on_click(to_tab),

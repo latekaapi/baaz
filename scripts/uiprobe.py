@@ -353,6 +353,15 @@ ENTRIES = {
                                       "--steps", "settings:appearance"]},
     "settings-appearance-light": {"shot": ["--no-connect", "--login", "signed-in",
                                            "--steps", "settings:appearance;settings-set:theme=light"]},
+    # Task 2.10: Density and Text size, set by the page's own setters
+    # (`settings-set:density=` / `text-size=`), so the capture proves the
+    # live switch re-lays the whole window. Compact is the type and 28 px
+    # rows Baaz drew before 2.10. Offline, idempotent (set, never toggle).
+    # No baseline yet — generate on main after merge.
+    "settings-appearance-compact": {"shot": ["--no-connect", "--login", "signed-in",
+                                             "--steps", "settings:appearance;settings-set:density=compact"]},
+    "settings-appearance-large": {"shot": ["--no-connect", "--login", "signed-in",
+                                           "--steps", "settings:appearance;settings-set:text-size=large"]},
     # F2 feedback mode shell: the header slot while Active
     # (`feedback-mode:on` parks the run-only flag and enters Active) and
     # paused with a note in the draft (`feedback-mode:pause` after a click
@@ -862,6 +871,9 @@ ENTRIES.update({
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
     "transcript-full-top":     _populated("top", replay=True, sidebar=False),
     "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),
+    "transcript-full-compact": _populated("settings-set:density=compact", replay=True, sidebar=False),
+    "sidebar-projects-compact": _populated(_PROJECTS + ";settings-set:density=compact"),
+    "transcript-full-large":   _populated("settings-set:text-size=large", replay=True, sidebar=False),
     "composer-menu-model":     _populated("fixture-models;model", replay=True),
     "composer-menu-effort":    _populated("effort", replay=True),
     "composer-menu-provider":  _populated("provider", replay=True),

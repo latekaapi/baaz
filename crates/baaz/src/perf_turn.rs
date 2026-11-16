@@ -312,8 +312,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
         ink: gpui::black(),
         code_ink: gpui::black(),
         code_bg: gpui::white(),
-        size: 13.0,
-        line_height: 1.5,
+        role: aui_tokens::TextRole::Body,
         paragraph_gap: 10.0,
     };
     let mut samples = Vec::new();

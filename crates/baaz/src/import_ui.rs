@@ -24,7 +24,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
 use aui::data::{button, checkbox, ButtonSize, CheckboxIntent, CheckboxState, CARD_PAD_X, CARD_PAD_Y};
-use aui::interact::{interactive, Shape, LIST_ROW_H, ROW_GAP};
+use aui::interact::{interactive, Shape, ROW_GAP};
 use aui::screens::{dialog_sheet, SHEET_PAD_X};
 use aui::util::{h_flex, v_flex};
 use aui_icons::{icon, provider_mark, IconName};
@@ -725,7 +725,7 @@ impl Harness {
             .px(px(CARD_PAD_X))
             .py(px(CARD_PAD_Y))
             .text_color(p.fg_muted)
-            .child(icon(IconName::Clock).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
+            .child(icon(IconName::Clock).size(px(scale::ICON_SM)).color(p.fg_muted))
             .child(div().flex_1().min_w_0().role_in(TextRole::Caption, cx).child(line.text.clone()));
         if let Some(label) = line.button {
             let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_import_sheet(cx));
@@ -875,7 +875,7 @@ impl Harness {
         if listed.is_empty() {
             list = list.child(
                 div()
-                    .h(px(LIST_ROW_H))
+                    .h(aui_tokens::Metrics::active().control)
                     .px(px(scale::SP_4))
                     .flex()
                     .items_center()
@@ -1108,13 +1108,13 @@ impl Harness {
                     div()
                         .truncate()
                         .font_family(scale::FONT_MONO)
-                        .text_px(scale::FS_11)
+                        .role_size(TextRole::Micro)
                         .text_color(p.fg_muted)
                         .child(crate::layout::tilde_path(path)),
                 );
             }
             if unreadable > 12 {
-                list = list.child(div().text_px(scale::FS_11).text_color(p.ink_4).child(format!("and {} more", unreadable - 12)));
+                list = list.child(div().role_size(TextRole::Micro).text_color(p.ink_4).child(format!("and {} more", unreadable - 12)));
             }
             body.push(list.into_any_element());
         }
@@ -1168,7 +1168,7 @@ fn folder_row(
     let label = if parent.is_empty() { name.to_owned() } else { format!("{name}, in {parent}") };
     let mut row = h_flex()
         .id(id.clone())
-        .h(px(LIST_ROW_H))
+        .h(aui_tokens::Metrics::active().control)
         .px(px(scale::SP_4))
         .gap(px(scale::SP_3))
         .items_center()
@@ -1197,7 +1197,7 @@ fn folder_row(
                         .min_w_0()
                         .truncate()
                         .font_family(scale::FONT_MONO)
-                        .text_px(scale::FS_11)
+                        .role_size(TextRole::Micro)
                         .text_color(p.ink_4)
                         .child(parent.to_owned()),
                 ),
@@ -1215,7 +1215,7 @@ fn folder_row(
                 .gap(px(scale::SP_2))
                 .items_center()
                 .text_color(p.fg_muted)
-                .child(provider_mark(provider.icon()).size(px(scale::ICON_COMPACT)))
+                .child(provider_mark(provider.icon()).size(px(scale::ICON_SM)))
                 .child(thousands(n)),
         );
     }

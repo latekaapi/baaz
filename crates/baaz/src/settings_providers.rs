@@ -19,6 +19,7 @@
 //! `BAAZ_STATE_DIR=$(mktemp -d)`.
 
 use aui::data::{button, card, settings_row, switch, SwitchIntent, SETTINGS_ROW_GAP};
+use aui_tokens::TextRole;
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
@@ -546,9 +547,9 @@ impl Harness {
         let go = cx.listener(|this: &mut Self, _: &(), _, cx| this.confirm_session_migration(cx));
         let toggle = cx.listener(|this: &mut Self, _: &(), _, cx| this.toggle_migration_paths(cx));
         let mut text = v_flex().flex_1().min_w_0().child(
-            gpui::div().text_color(p.ink).ui(scale::FS_13).semibold().child(SharedString::from(title)),
+            gpui::div().text_color(p.ink).ui(TextRole::Body).semibold().child(SharedString::from(title)),
         ).child(
-            gpui::div().text_color(p.fg_muted).ui(scale::FS_12).child(
+            gpui::div().text_color(p.fg_muted).ui(TextRole::Caption).child(
                 "Sessions you started in Baaz before this update still sit in your Claude and Codex \
                  folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them \
                  resumable here; nothing is deleted. Codex for Mac may keep stale entries until you \
@@ -561,7 +562,7 @@ impl Harness {
                 list = list.child(
                     gpui::div()
                         .text_color(p.fg_muted)
-                        .ui(scale::FS_12)
+                        .ui(TextRole::Caption)
                         .child(SharedString::from(path)),
                 );
             }

@@ -79,6 +79,88 @@ impl ThemePref {
     }
 }
 
+/// Settings › Appearance › Density (task 2.10, docs/83 §2.4–2.5):
+/// Comfortable is the design's type and 32 px rows; Compact is the type
+/// and 28 px rows Baaz drew before 2.10. Comfortable when nothing is stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DensityPref {
+    /// The design's values.
+    #[default]
+    Comfortable,
+    /// The pre-2.10 type, rows 28.
+    Compact,
+}
+
+impl DensityPref {
+    /// Every choice, in the segmented control's order.
+    pub const ALL: [DensityPref; 2] = [DensityPref::Comfortable, DensityPref::Compact];
+
+    /// The library's density for this choice.
+    pub fn density(self) -> aui_tokens::Density {
+        match self {
+            DensityPref::Comfortable => aui_tokens::Density::Comfortable,
+            DensityPref::Compact => aui_tokens::Density::Compact,
+        }
+    }
+
+    /// The control's word for the choice.
+    pub fn label(self) -> &'static str {
+        self.density().label()
+    }
+
+    /// `comfortable` / `compact` (case-insensitive), as the store and the
+    /// `settings-set:density=` step spell them.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "comfortable" => Some(DensityPref::Comfortable),
+            "compact" => Some(DensityPref::Compact),
+            _ => None,
+        }
+    }
+}
+
+/// Settings › Appearance › Text size (task 2.10): Large moves every text
+/// role one step up the type ladder (`aui_tokens::TextRole::larger`).
+/// Default when nothing is stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSizePref {
+    /// The ladder as designed.
+    #[default]
+    Default,
+    /// One step up the ladder.
+    Large,
+}
+
+impl TextSizePref {
+    /// Every choice, in the segmented control's order.
+    pub const ALL: [TextSizePref; 2] = [TextSizePref::Default, TextSizePref::Large];
+
+    /// The library's text size for this choice.
+    pub fn text_size(self) -> aui_tokens::TextSize {
+        match self {
+            TextSizePref::Default => aui_tokens::TextSize::Default,
+            TextSizePref::Large => aui_tokens::TextSize::Large,
+        }
+    }
+
+    /// The control's word for the choice.
+    pub fn label(self) -> &'static str {
+        self.text_size().label()
+    }
+
+    /// `default` / `large` (case-insensitive), as the store and the
+    /// `settings-set:text-size=` step spell them.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "default" => Some(TextSizePref::Default),
+            "large" => Some(TextSizePref::Large),
+            _ => None,
+        }
+    }
+}
+
 /// Whether gpui's window appearance is a dark one (`darkAqua` or the
 /// vibrant dark variant).
 pub fn appearance_is_dark(appearance: gpui::WindowAppearance) -> bool {
@@ -317,6 +399,12 @@ pub struct Layout {
     /// reads as the default rather than failing the file.
     #[serde(rename = "theme", default, deserialize_with = "crate::store::lenient")]
     pub theme: ThemePref,
+    /// Settings › Appearance › Density: see [`DensityPref`].
+    #[serde(rename = "density", default, deserialize_with = "crate::store::lenient")]
+    pub density: DensityPref,
+    /// Settings › Appearance › Text size: see [`TextSizePref`].
+    #[serde(rename = "textSize", default, deserialize_with = "crate::store::lenient")]
+    pub text_size: TextSizePref,
     /// Settings › Appearance › "Show a summary line" (docs/83 §4): every
     /// session row takes a second line under its title (52 px) — the status
     /// sentence, else the byline. OFF by default: rows are one line (32).
@@ -524,6 +612,8 @@ impl Default for Layout {
             group_chevron: false,
             group_bar: false,
             theme: ThemePref::Dark,
+            density: DensityPref::Comfortable,
+            text_size: TextSizePref::Default,
             summary_line: false,
             group_branch: false,
             auto_title: true,
@@ -702,6 +792,8 @@ mod tests {
             group_chevron: true,
             group_bar: true,
             theme: ThemePref::System,
+            density: DensityPref::Compact,
+            text_size: TextSizePref::Large,
             summary_line: true,
             group_branch: true,
             auto_title: true,
@@ -1039,6 +1131,28 @@ mod tests {
             let back: Layout = serde_json::from_str(&text).unwrap();
             assert_eq!(back.sort_by, sort);
         }
+    }
+
+    /// Settings › Appearance › Density and Text size (task 2.10): the
+    /// design's values when nothing is stored, an unknown value never fails
+    /// the file, each choice round-trips and maps onto the library's.
+    #[test]
+    fn density_and_text_size_persist() {
+        assert_eq!(Layout::default().density, DensityPref::Comfortable);
+        assert_eq!(Layout::default().text_size, TextSizePref::Default);
+        let odd: Layout = serde_json::from_str("{\"density\":\"cosy\",\"textSize\":\"huge\"}").unwrap();
+        assert_eq!((odd.density, odd.text_size), (DensityPref::Comfortable, TextSizePref::Default));
+        for (density, text_size) in [(DensityPref::Compact, TextSizePref::Large), (DensityPref::Comfortable, TextSizePref::Default)] {
+            let stored = Layout { density, text_size, ..Layout::default() };
+            let text = serde_json::to_string(&stored).unwrap();
+            let back: Layout = serde_json::from_str(&text).unwrap();
+            assert_eq!((back.density, back.text_size), (density, text_size));
+            assert_eq!(DensityPref::parse(density.label()), Some(density));
+            assert_eq!(TextSizePref::parse(text_size.label()), Some(text_size));
+        }
+        assert!(serde_json::to_string(&Layout { density: DensityPref::Compact, ..Layout::default() }).unwrap().contains("\"density\":\"compact\""));
+        assert_eq!(DensityPref::Compact.density(), aui_tokens::Density::Compact);
+        assert_eq!(TextSizePref::Large.text_size(), aui_tokens::TextSize::Large);
     }
 
     /// Settings › Appearance › Theme (task 2.9): dark when nothing is

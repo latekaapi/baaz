@@ -150,7 +150,7 @@ impl Harness {
                         list = list.child(
                             list_row(SharedString::from(format!("chrome-profile-{i}")), profile.name.clone())
                                 .selected(on)
-                                .when(on, |r| r.trailing(aui_icons::icon(IconName::Check).size(px(scale::ICON_COMPACT)).color(p.ink)))
+                                .when(on, |r| r.trailing(aui_icons::icon(IconName::Check).size(px(scale::ICON_SM)).color(p.ink)))
                                 .on_click(pick),
                         );
                     }

@@ -144,7 +144,7 @@
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
 //! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number fails the step, free |
-//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`) and of Settings → Sidebar's summary line (`summary-line=<on\|off>`); unknown keys or values fail the step, free |
+//! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`) and of Settings → Appearance (`summary-line=<on\|off>`, `theme=<system\|light\|dark>`, `density=<comfortable\|compact>`, `text-size=<default\|large>`); unknown keys or values fail the step, free |
 //! | `sidebar-hover:<session_id>` | capture aid: stand the sidebar's pointer state on that session's row (its trailing slot shows the age and the `⋯`), as the row's own hover report would; an id with no row fails the step, free |
 //! | `row-menu:<session_id>` | open that session row's `⋯` menu (idempotent: open, never toggle); an id with no row fails the step, free |
 //! | `pin` | pin or unpin the open session |

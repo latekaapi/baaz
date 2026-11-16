@@ -5,7 +5,7 @@
 //! keyboard and holds its name input focused.
 
 use aui_icons::{icon, IconName};
-use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 use gpui_kit::base::input::InputState;
 use gpui_kit::base::{h_flex, v_flex};
@@ -111,8 +111,8 @@ impl Harness {
         let field_box = |inner: gpui::AnyElement| {
             h_flex()
                 .mx(metrics.item_px)
-                .h(px(30.0))
-                .px(px(9.0))
+                .h(px(scale::FIELD_H))
+                .px(px(scale::ROW_PAD_X))
                 .gap(px(scale::SP_2))
                 .items_center()
                 .rounded(px(scale::R_SM))
@@ -140,7 +140,7 @@ impl Harness {
                     .gap(px(scale::SP_2))
                     .items_center()
                     .child(icon(IconName::StarFill).size(metrics.icon).color(p.fg))
-                    .child(div().flex_1().text_role_in(TextRole::Body, Density::Standard).semibold().text_color(p.fg).child("Bookmarked"))
+                    .child(div().flex_1().text_role(TextRole::Body).semibold().text_color(p.fg).child("Bookmarked"))
                     .child(div().role_in(TextRole::Micro, cx).text_color(p.fg_muted).child("⌘D")),
             )
             .child(label("Name", cx))
@@ -159,7 +159,7 @@ impl Harness {
                             .gap(px(scale::SP_2))
                             .items_center()
                             .child(icon(IconName::Folder).size(px(13.0)).color(p.fg_muted))
-                            .child(div().flex_1().truncate().text_role_in(TextRole::Body, Density::Standard).text_color(p.fg).child(folder_name))
+                            .child(div().flex_1().truncate().text_role(TextRole::Body).text_color(p.fg).child(folder_name))
                             .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.fg_muted))
                             .into_any_element(),
                     )),
@@ -179,8 +179,8 @@ impl Harness {
                 list = list.child(
                     h_flex()
                         .id(SharedString::from(format!("bookmark-folder-{id}")))
-                        .h(px(28.0))
-                        .px(px(9.0))
+                        .h(px(scale::MENU_ROW))
+                        .px(px(scale::ROW_PAD_X))
                         .gap(px(scale::SP_2))
                         .items_center()
                         .cursor_pointer()
@@ -188,7 +188,7 @@ impl Harness {
                         .role(gpui::Role::Button)
                         .aria_label(SharedString::from(format!("Move to {path}")))
                         .on_click(pick)
-                        .child(div().flex_1().truncate().text_role_in(TextRole::Body, Density::Standard).text_color(p.fg).child(path))
+                        .child(div().flex_1().truncate().text_role(TextRole::Body).text_color(p.fg).child(path))
                         .when(id == folder, |d| d.child(icon(IconName::Check).size(px(12.0)).color(p.fg))),
                 );
             }

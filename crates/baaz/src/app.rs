@@ -65,7 +65,7 @@ use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, 
 use aui_icons::{icon, IconName, Provider};
 use aui_motion::{SpringKind, spring_px};
 use aui_terminal::{terminal_grid, TerminalGridIntent};
-use aui_tokens::{scale, ActiveAui, AuiStyled, Density, TextRole};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -3790,7 +3790,7 @@ impl Harness {
             .h(px(MENU_ROW_H))
             .px(metrics.item_px)
             .gap(metrics.gap)
-            .child(div().flex_1().min_w_0().truncate().text_role_in(TextRole::Body, Density::Standard).child(label.to_owned()))
+            .child(div().flex_1().min_w_0().truncate().text_role(TextRole::Body).child(label.to_owned()))
             // Shortcut hints: `t-micro` in `ink-4` (docs/83 §7).
             .children(hint.map(|hint| div().flex_none().role_in(TextRole::Micro, cx).text_color(p.ink_4).child(hint.to_owned())));
         interactive(id, content).role("menuitem").label(label.to_owned()).on_click(click)
@@ -3875,7 +3875,7 @@ impl Harness {
                     .flex_1()
                     .min_w_0()
                     .gap(px(scale::SP_2))
-                    .child(icon(IconName::Search).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
+                    .child(icon(IconName::Search).size(px(scale::ICON_SM)).color(p.fg_muted))
                     .child(
                         a11y_text_input("browse-find-field", "Find in page", &input, cx).flex_1().min_w_0(),
                     ),
@@ -3886,7 +3886,7 @@ impl Harness {
                     div()
                         .id("browse-find-count")
                         .flex_none()
-                        .ui(scale::FS_12)
+                        .ui(TextRole::Caption)
                         .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label(format!("{active} of {total} matches"))
@@ -3898,7 +3898,7 @@ impl Harness {
                     div()
                         .id("browse-find-count")
                         .flex_none()
-                        .ui(scale::FS_12)
+                        .ui(TextRole::Caption)
                         .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label("No matches yet")
@@ -3963,12 +3963,12 @@ impl Harness {
             .border_color(p.line)
             .role(gpui::Role::Group)
             .aria_label("Permission request")
-            .child(icon(IconName::Globe).size(px(scale::ICON_COMPACT)).color(p.fg_muted))
+            .child(icon(IconName::Globe).size(px(scale::ICON_SM)).color(p.fg_muted))
             .child(
                 div()
                     .id("browse-permission-host")
                     .flex_none()
-                    .ui(scale::FS_13)
+                    .ui(TextRole::Body)
                     .semibold()
                     .text_color(p.ink)
                     // The host, as the toolbar shows it (userinfo and scheme
@@ -3984,7 +3984,7 @@ impl Harness {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .ui(scale::FS_13)
+                    .ui(TextRole::Body)
                     .text_color(p.ink)
                     .role(gpui::Role::Label)
                     .aria_label(sentence.clone())
@@ -4034,8 +4034,8 @@ impl Harness {
             .gap(px(scale::SP_3))
             .role(gpui::Role::Group)
             .aria_label("This page stopped")
-            .child(div().ui(scale::FS_14).text_color(p.ink).child("This page stopped"))
-            .child(div().ui(scale::FS_12).text_color(p.fg_muted).child(reason))
+            .child(div().ui(TextRole::Subtitle).text_color(p.ink).child("This page stopped"))
+            .child(div().ui(TextRole::Caption).text_color(p.fg_muted).child(reason))
             .child(reload)
             .into_any_element()
     }
@@ -4057,7 +4057,7 @@ impl Harness {
         if downloads.is_empty() {
             // R4: the button is always in the footer; an empty list says so.
             menu = menu.child(
-                div().w_full().px(cx.aui().metrics.item_px).py(px(scale::SP_2)).ui(scale::FS_13).text_color(p.fg_muted).child("No downloads yet."),
+                div().w_full().px(cx.aui().metrics.item_px).py(px(scale::SP_2)).ui(TextRole::Body).text_color(p.fg_muted).child("No downloads yet."),
             );
             let folder = self.browse_menu_row(
                 "browse-downloads-folder",
@@ -4097,14 +4097,14 @@ impl Harness {
                     div()
                         .w_full()
                         .truncate()
-                        .ui(scale::FS_13)
+                        .ui(TextRole::Body)
                         .text_color(p.ink)
                         .child(download.file_name.clone()),
                 )
                 .child(
                     div()
                         .id(("browse-download-line", id))
-                        .ui(scale::FS_11)
+                        .ui(TextRole::Micro)
                         .text_color(p.fg_muted)
                         .role(gpui::Role::Label)
                         .aria_label(detail.clone())
@@ -4478,7 +4478,7 @@ impl Harness {
             .items_center()
             .gap(px(scale::SP_3))
             .text_color(p.ink)
-            .ui(scale::FS_13)
+            .ui(TextRole::Body)
             .semibold();
         // A project rename (from the project menu) swaps the lead for the
         // same dense field the sidebar row uses; the commit path is the
@@ -4785,7 +4785,7 @@ impl Harness {
                     .child(
                         div()
                             .w_full()
-                            .ui(scale::FS_12)
+                            .ui(TextRole::Caption)
                             .text_color(p.fg_muted)
                             .child("Loading history…"),
                     ),
@@ -5046,7 +5046,7 @@ impl Harness {
                     .shadow(p.floating_shadow())
                     // FF's composer text: subtitle 14/20 at weight 400 (our
                     // Subtitle role carries the semibold heading weight).
-                    .text_role_in(TextRole::Subtitle, Density::Standard)
+                    .text_role(TextRole::Subtitle)
                     .font_weight(gpui::FontWeight::NORMAL),
             )
         };
@@ -5148,7 +5148,7 @@ impl Harness {
                         .items_center()
                         .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(div().flex_none().size(metrics.icon).flex().items_center().justify_center().child(lead))
-                        .child(div().flex_shrink(1.0).min_w_0().truncate().text_role_in(TextRole::Body, Density::Standard).child(row.title.clone()))
+                        .child(div().flex_shrink(1.0).min_w_0().truncate().text_role(TextRole::Body).child(row.title.clone()))
                         .child(div().flex_1())
                         .child(div().flex_none().pl(px(scale::SP_4)).role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(row.detail.clone())),
                 );
@@ -5337,7 +5337,7 @@ impl Harness {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_role_in(TextRole::Body, Density::Standard)
+                        .text_role(TextRole::Body)
                         .text_color(if lit { p.fg } else { p.fg_muted })
                         .child(row.suggestion.title.clone()),
                 );
@@ -5379,7 +5379,7 @@ impl Harness {
             .aria_label("Browse, no tabs")
             .child(
                 div()
-                    .ui(scale::FS_12)
+                    .ui(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .child("No tabs — ⌘T for a new tab"),
             )
@@ -5885,7 +5885,7 @@ impl Harness {
                     // §1 rule 3), as the dialog's detail block (2.8).
                     .rounded(px(scale::R_SM))
                     .bg(p.surface_3)
-                    .text_role(aui_tokens::TextRole::MonoSmall)
+                    .mono(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .child(failure.stderr_excerpt.join("\n")),
             );

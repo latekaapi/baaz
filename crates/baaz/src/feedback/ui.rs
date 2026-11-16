@@ -19,6 +19,7 @@
 //! swallowing ones, so every pointer trap stays in one place.
 
 use std::collections::VecDeque;
+use aui_tokens::TextRole;
 use std::time::{Duration, Instant};
 
 use aui::data::{button, icon_button, ButtonSize};
@@ -2193,7 +2194,7 @@ impl crate::app::Harness {
                         .bg(accent)
                         .px(px(CHIP_PAD_X))
                         .py(px(CHIP_PAD_Y))
-                        .mono(11.5)
+                        .mono(TextRole::Micro)
                         .text_color(on_accent)
                         .whitespace_nowrap()
                         .child(chip),
@@ -2281,7 +2282,7 @@ impl crate::app::Harness {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .mono(11.5)
+                            .mono(TextRole::Micro)
                             .semibold()
                             .text_color(on_accent)
                             .child(index.to_string()),
@@ -2417,7 +2418,7 @@ impl crate::app::Harness {
                 .id(if decorative { "feedback-count-ghost" } else { "feedback-count" })
                 .flex_none()
                 .pl(px(scale::SP_1))
-                .mono(scale::FS_11)
+                .mono(TextRole::Micro)
                 .text_color(cx.aui().colors.ink_4)
                 .whitespace_nowrap()
                 .child(count.clone())
@@ -2609,7 +2610,7 @@ impl crate::app::Harness {
             .child(
                 div()
                     .flex_none()
-                    .ui(scale::FS_12)
+                    .ui(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .whitespace_nowrap()
                     .child(format!("Saved · {} {unit} — path copied", flash.notes)),
@@ -2672,10 +2673,10 @@ impl crate::app::Harness {
             .child(
                 v_flex()
                     .gap(px(scale::SP_1))
-                    .child(div().ui(scale::FS_13).semibold().text_color(p.ink).child(title))
+                    .child(div().ui(TextRole::Body).semibold().text_color(p.ink).child(title))
                     .child(
                         div()
-                            .mono(scale::FS_12)
+                            .mono(TextRole::Caption)
                             .text_color(p.fg_muted)
                             .child(subtitle),
                     ),
@@ -2708,7 +2709,7 @@ impl crate::app::Harness {
             )
             .child(
                 div()
-                    .ui(scale::FS_12)
+                    .ui(TextRole::Caption)
                     .text_color(p.fg_muted)
                     .child("↵ save · ⇧↵ new line · Esc cancel"),
             );
@@ -2766,7 +2767,7 @@ impl gpui::Render for FeedbackTip {
             .border_color(p.line_strong)
             .bg(p.overlay)
             .text_color(p.ink)
-            .ui(scale::FS_12)
+            .ui(TextRole::Caption)
             .whitespace_nowrap()
             .child(self.text.clone())
     }

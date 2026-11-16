@@ -14,6 +14,7 @@
 //! quietly doing nothing.
 
 use std::cell::RefCell;
+use aui_tokens::TextRole;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -29,7 +30,6 @@ use aui_protocol::{
     ActivityState, Answer, ApprovalState, Block, Diff, DiffKind, DiffLine, HandoffState, Hunk, MarkerKind,
     PlanSection, PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, ToolStatus, Turn, TurnMeta,
 };
-use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
 use gpui::{div, prelude::*, px, AnyElement, App, ElementId, SharedString, Window};
@@ -1922,7 +1922,7 @@ fn skill_load_row(id: ElementId, name: &str, folds: &Folds, cx: &mut App) -> Any
     let scope = folds.skill_scopes.get(name).cloned();
     let mut row = aui::transcript::quiet_status_row(id, aui_icons::icon(IconName::Sparkle).size(px(14.0)).color(p.fg_muted))
         .part(div().flex_none().child("Loaded skill"))
-        .part(div().flex_none().mono(scale::FS_12).child(name.to_owned()));
+        .part(div().flex_none().mono(TextRole::Caption).child(name.to_owned()));
     if let Some(scope) = scope {
         row = row.part(div().flex_none().text_color(p.ink_4).child(format!("· {scope}")));
     }
@@ -2680,8 +2680,8 @@ pub fn empty_state(provider: crate::providers::ProviderId, display: &str, cx: &m
                 .justify_center()
                 .child(aui_icons::provider_mark(provider.icon()).size(px(24.0))),
         )
-        .child(div().mt(px(12.0)).ui(scale::FS_16).font_weight(gpui::FontWeight::SEMIBOLD).text_color(p.ink).child(display.to_owned()))
-        .child(div().mt(px(6.0)).ui(scale::FS_13).text_color(p.fg_muted).child(provider.composer_placeholder()))
+        .child(div().mt(px(12.0)).ui(TextRole::Title).font_weight(gpui::FontWeight::SEMIBOLD).text_color(p.ink).child(display.to_owned()))
+        .child(div().mt(px(6.0)).ui(TextRole::Body).text_color(p.fg_muted).child(provider.composer_placeholder()))
         .into_any_element()
 }
 
