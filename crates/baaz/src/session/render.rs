@@ -113,6 +113,7 @@ impl SessionView {
                     .left_0()
                     .right_0()
                     .bottom(px(self.bottom_inset))
+                    .debug_selector(|| "session-stack".into())
                     .on_children_prepainted(move |bounds, _, cx| {
                         let height = bounds.first().map(|b| f32::from(b.size.height)).unwrap_or(0.0);
                         if (stack_h.get() - height).abs() > 0.5 {

@@ -2357,6 +2357,17 @@ impl SessionView {
     /// at its end stays there. The inset arrives a frame after the first
     /// layout, so a transcript opened at its end used to sit one inset short
     /// of it, with "Jump to latest" up (owner 2026-10-15).
+    ///
+    /// Both callers measure in prepaint, inside a draw, where gpui-pre's
+    /// `invalidate_view` records the view dirty but schedules nothing and
+    /// the draw's end clears the dirty set: the notify below is lost, and
+    /// the cached column keeps the inset it was built with until something
+    /// else happens to notify it. A window whose frame source is stopped
+    /// (display asleep, covered) builds its first column with a zero inset
+    /// and never corrects it — the stack, its banner included, painted
+    /// behind the composer (`child-lost-banner`, 2026-11-16). So the
+    /// notify is also deferred to the end of the effect cycle, outside the
+    /// draw, where it marks the view dirty and asks for a frame.
     fn keep_end_through(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Self)) {
         let at_end = self.list_state.is_scrolled_to_end().unwrap_or(true);
         change(self);
@@ -2365,6 +2376,10 @@ impl SessionView {
             self.list_state.scroll_to_end();
         }
         cx.notify();
+        let view = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = view.update(cx, |_, cx| cx.notify());
+        });
     }
 
     /// Draw the cards settled, for a `--screenshot` run.

@@ -5092,6 +5092,42 @@ mod tests {
         }
     }
 
+    /// The floating stack (status, banners) rides the composer band's
+    /// measured height even when the column was built before the band was
+    /// measured — a window whose frame source was stopped (display asleep)
+    /// draws its first column at inset 0 and measures the band inside that
+    /// same draw. That in-draw notify used to be dropped, so every later
+    /// draw reused the cached column and the lost banner sat behind the
+    /// composer (`child-lost-banner`, 2026-11-16).
+    #[gpui::test]
+    fn the_stack_clears_the_band_measured_inside_a_draw(cx: &mut gpui::TestAppContext) {
+        let sandbox = crate::providers::TestEnvSandbox::enter("stack-clears-band");
+        let (vc, view, _tx, _handle) = keyed_lane(cx, &sandbox, "codex");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
+        // The column rebuilt with no band measured yet, then the frames a
+        // capture draws by hand with nothing else waking the window.
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.bottom_inset = 0.0;
+                cx.notify();
+            })
+        });
+        for _ in 0..3 {
+            vc.update(|window, cx| window.draw(cx).clear(cx));
+            vc.run_until_parked();
+        }
+        let inset = vc.update(|_, cx| view.read(cx).bottom_inset);
+        assert!(inset > 0.0, "the band measured itself");
+        let stack = vc.debug_bounds("session-stack").expect("the stack draws");
+        let window_h = vc.update(|window, _| f32::from(window.viewport_size().height));
+        let stack_bottom = f32::from(stack.bottom());
+        assert!(
+            (stack_bottom - (window_h - inset)).abs() < 1.0,
+            "the stack ends on the band ({stack_bottom} vs {} = {window_h} - {inset})",
+            window_h - inset
+        );
+    }
+
     /// ⏎ in the composer with words in it always sends, even while a card
     /// field stands open (the reader clicked back into the composer), and
     /// a field whose card settled without the press closing it (a
