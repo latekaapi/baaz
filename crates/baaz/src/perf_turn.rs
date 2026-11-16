@@ -308,10 +308,11 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
         }
         view.refresh_render_cache();
     });
+    let palette = aui_tokens::dark();
     let style = aui::transcript::ProseStyle {
-        ink: gpui::black(),
-        code_ink: gpui::black(),
-        code_bg: gpui::white(),
+        ink: palette.fg,
+        code_ink: palette.fg,
+        code_bg: palette.surface_3,
         role: aui_tokens::TextRole::Body,
         paragraph_gap: 10.0,
     };
