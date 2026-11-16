@@ -322,6 +322,25 @@ impl Harness {
         Ok(())
     }
 
+    /// `project-close:<name>`: close the group of the project named, so its
+    /// header shows the strongest state of the sessions it hides (task
+    /// 3.2). A setter, never a toggle: a capture's second run finds it
+    /// closed and changes nothing. No project by that name fails the step.
+    pub(crate) fn step_project_close(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        let name = rest.trim();
+        let id = self
+            .projects
+            .projects
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| format!("no project named `{name}`"))?;
+        if !self.layout.closed_groups.iter().any(|g| g == &id) {
+            self.toggle_group(id, cx);
+        }
+        Ok(())
+    }
+
     /// `project-colour:<n>`: the current project's colour slot, 1–8.
     /// Anything else is not a slot and fails the step, as does no current
     /// project. With no payload, open the Colour submenu instead (opening

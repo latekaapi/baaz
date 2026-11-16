@@ -65,6 +65,38 @@ pub(crate) enum SessionState {
     Idle,
 }
 
+impl SessionState {
+    /// How strongly a project header must show this state when it rolls
+    /// several sessions up (task 3.2): what needs the person first, then
+    /// what went wrong, then what is running, then what is unread.
+    fn strength(self) -> u8 {
+        match self {
+            SessionState::NeedsYou(_) => 4,
+            SessionState::Failed => 3,
+            SessionState::Working => 2,
+            SessionState::DoneUnread => 1,
+            SessionState::Idle => 0,
+        }
+    }
+
+    /// The library's mark for this state; `DoneUnread` is an idle mark with
+    /// the unread flag beside it.
+    pub(crate) fn agent_state(self) -> AgentState {
+        match self {
+            SessionState::Working => AgentState::Running,
+            SessionState::NeedsYou(_) => AgentState::Waiting,
+            SessionState::Failed => AgentState::Failed,
+            SessionState::DoneUnread | SessionState::Idle => AgentState::Idle,
+        }
+    }
+}
+
+/// The strongest state among `rows`, or `None` when every one is idle (or
+/// there are none): a project header rolls its sessions up to this.
+pub(crate) fn strongest_state<'a>(rows: impl IntoIterator<Item = &'a SessionEntry>) -> Option<SessionState> {
+    rows.into_iter().map(SessionEntry::session_state).filter(|s| *s != SessionState::Idle).max_by_key(|s| s.strength())
+}
+
 /// What a [`SessionState::NeedsYou`] session waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NeedKind {
@@ -744,12 +776,7 @@ impl SessionEntry {
     /// row (docs/83 §4) has no status line and no leading glyph, so this
     /// slot is the only place the state reads.
     pub(crate) fn state(&self) -> AgentState {
-        match self.session_state() {
-            SessionState::Working => AgentState::Running,
-            SessionState::NeedsYou(_) => AgentState::Waiting,
-            SessionState::Failed => AgentState::Failed,
-            SessionState::DoneUnread | SessionState::Idle => AgentState::Idle,
-        }
+        self.session_state().agent_state()
     }
 
     /// The pending approval's command, trimmed, when the open session holds
@@ -1812,8 +1839,12 @@ pub fn grouping_by_project(
                 group = group.trailing(branch.clone());
             }
         }
-        if rows.iter().any(|e| e.running) {
-            group = group.state(AgentState::Running);
+        // The strongest state of the project's sessions (task 3.2): what
+        // its header shows while the group is closed.
+        match strongest_state(rows.iter().copied()) {
+            Some(SessionState::DoneUnread) => group = group.state(AgentState::Idle).unread(true),
+            Some(state) => group = group.state(state.agent_state()),
+            None => {}
         }
         if !view.closed.contains(&project.id) {
             group = group.open(shown);
@@ -3444,6 +3475,36 @@ mod tests {
         assert_eq!(group.trailing.as_deref(), None);
         assert!(!group.chevron);
         assert!(!group.current_bar);
+    }
+
+    /// Task 3.2: a project header carries its sessions' strongest state —
+    /// needs you over failed over working over unread — and nothing when
+    /// all are idle.
+    #[test]
+    fn a_group_rolls_up_its_strongest_state() {
+        let projects = grouped_projects();
+        let rolled = |entries: &[SessionEntry]| {
+            let Grouping::Project(groups) = by_project(entries, &projects) else {
+                panic!("project grouping must yield project groups");
+            };
+            let group = folded_group(&groups, "p-baaz");
+            (group.state, group.unread)
+        };
+        let row = |id: &str| grouped_entry(id, Some("p-baaz"), Some("/work/p-baaz"), 1);
+        let mut running = row("s1");
+        running.running = true;
+        let mut waiting = row("s2");
+        waiting.attention = vec![Attention::ApprovalPending];
+        let mut failed = row("s3");
+        failed.last_error = Some("boom".into());
+        let mut unread = row("s4");
+        unread.unread = true;
+        let idle = row("s5");
+        assert_eq!(rolled(&[running.clone(), waiting.clone(), failed.clone(), unread.clone()]), (Some(AgentState::Waiting), false));
+        assert_eq!(rolled(&[running.clone(), failed.clone(), unread.clone()]), (Some(AgentState::Failed), false));
+        assert_eq!(rolled(&[running.clone(), unread.clone()]), (Some(AgentState::Running), false));
+        assert_eq!(rolled(&[idle.clone(), unread]), (Some(AgentState::Idle), true));
+        assert_eq!(rolled(&[idle]), (None, false));
     }
 
     /// The two flags are state only: the grouping passes each one through

@@ -830,8 +830,8 @@ ENTRIES.update({
 # every older entry shows an empty or near-empty window. The parts:
 #   - fixtures/sidebar/populated.json: 24 sessions over two projects and
 #     three providers, two running, three waiting on the person (two
-#     approvals, one question), two failed, the rest idle. (No "unread"
-#     row: Baaz has no unread state yet; Stage 3 adds it.)
+#     approvals, one question), two failed, two unread (task 3.1), the
+#     rest idle.
 #   - fixtures/msp/synthetic-full.jsonl (make-full.py): one transcript
 #     with markdown, code, a table, every tool card, a diff, a plan, and an
 #     approval and a question still waiting.
@@ -905,6 +905,10 @@ ENTRIES.update({
     "shell-populated":         _populated(replay=True),
     "shell-populated-light":   _populated(replay=True, theme="light"),
     "sidebar-projects":        _populated(_PROJECTS),
+    # Task 3.2: acme-internal closed, so its header shows the strongest
+    # state of the sessions it hides (one waiting: the amber dot); acme-web
+    # stays open with a row in every state. `project-close` is a setter.
+    "sidebar-projects-collapsed": _populated(_PROJECTS + ";project-close:acme-internal"),
     "sidebar-projects-light":  _populated(_PROJECTS, theme="light"),
     "transcript-full":         _populated(replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
@@ -984,7 +988,7 @@ POPULATED_ENTRIES = [
     "transcript-full", "transcript-full-light", "transcript-full-top", "transcript-full-mid",
     "composer-menu-model", "composer-menu-effort", "composer-menu-provider", "composer-menu-mode",
     "right-changes-full", "right-files-preview", "right-page", "terminal-dock", "settings-sidebar",
-    "palette-populated", "dialog", "menu", "browse-spaces",
+    "palette-populated", "dialog", "menu", "browse-spaces", "sidebar-projects-collapsed",
 ]
 
 

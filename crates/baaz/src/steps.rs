@@ -158,6 +158,7 @@
 //! | `project-colour:<n>` | set the current project's colour slot (1–8); with no payload, open the Colour submenu |
 //! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
 //! | `group-bar` | flip the current-project accent bar flag |
+//! | `project-close:<name>` | close the project group named (a setter: a closed group stays closed); its header then shows the strongest state inside |
 //! | `group-branch` | flip the trailing-branch flag |
 //! | `auto-title` | flip the automatic session-naming switch |
 //! | `auto-summary` | flip the sidebar-summaries switch |
@@ -447,6 +448,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "auto-title", run: |this, _, _, cx| this.step_auto_title(cx) },
     WindowVerb { verb: "auto-summary", run: |this, _, _, cx| this.step_auto_summary(cx) },
     WindowVerb { verb: "group-bar", run: |this, _, _, cx| this.step_group_bar(cx) },
+    WindowVerb { verb: "project-close", run: |this, rest, _, cx| this.step_project_close(rest, cx) },
     WindowVerb { verb: "group-branch", run: |this, _, _, cx| this.step_group_branch(cx) },
     WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },

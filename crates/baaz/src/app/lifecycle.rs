@@ -361,6 +361,10 @@ struct FixtureSession {
     /// `turn/completed` record: what `Failed` stands on.
     #[serde(default)]
     error: Option<String>,
+    /// A turn finished unread (task 3.1), standing in for the store's
+    /// `unread` record: what `DoneUnread` stands on.
+    #[serde(default)]
+    unread: bool,
     /// Which provider serves the row, by its wire id (`claude-code`,
     /// `codex`, `muse`); absent or unknown keeps what the join resolved.
     #[serde(default)]
@@ -417,6 +421,7 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     if let Some(error) = row.error.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         entry.last_error = Some(error.to_owned());
     }
+    entry.unread = row.unread;
     if let Some(provider) = row.provider.as_deref().and_then(crate::providers::ProviderId::parse_known) {
         entry.provider = provider;
     }
@@ -1624,10 +1629,8 @@ impl Harness {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
+                entry.unread = meta.is_some_and(|m| m.unread);
             }
-            // Read state is Baaz's own record for every row, scripted ones
-            // included: a replayed turn that finishes unseen is unread too.
-            entry.unread = meta.is_some_and(|m| m.unread);
             entry.named = name.is_some();
         }
         // A handoff chain is one row at view time: member rows stay in
