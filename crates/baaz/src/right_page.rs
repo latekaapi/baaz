@@ -181,7 +181,7 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
             Some(input) => div().flex_1().min_w(px(0.0)).child(Input::new(&input)).into_any_element(),
             None => div().text_color(p.fg_muted).child("Search or enter an address").into_any_element(),
         });
-        return no_page_state("right-page-none", field, agent, cx).into_any_element();
+        return no_page_state("right-page-none", field, agent).into_any_element();
     }
     let weak = cx.weak_entity();
     let has_recent = !state.read(cx).recent_pages().is_empty();

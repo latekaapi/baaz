@@ -892,6 +892,49 @@ ENTRIES.update({
                                           "tab-new:https://doc.rust-lang.org/book/"),
 })
 
+# Task 2.11 · light theme pass: the light twin of the screens a person
+# sees filled, plus one of each floating kind (menu, palette, dialog, sheet)
+# and the pages, so "renders light everywhere" is looked at rather than
+# assumed. Populated twins go through `_populated(theme=...)`; the rest take
+# the same `--theme light` the populated ones do, on a fresh state dir so no
+# dark run's store leaks in. Offline, nothing sends a turn.
+def _light(entry):
+    spec = dict(ENTRIES[entry])
+    spec["shot"] = ["--theme", "light"] + list(spec["shot"])
+    spec["env"] = {**spec.get("env", {}),
+                   "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-light-state-")}
+    return spec
+
+
+ENTRIES.update({
+    "composer-menu-model-light": _populated("fixture-models;model", replay=True, theme="light"),
+    "right-changes-full-light":  _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs",
+                                            replay=True, theme="light"),
+    "right-files-preview-light": _populated("right-width:440;right:files;files-select:src/lib.rs",
+                                            workspace=_REPO_ACME, theme="light"),
+    "terminal-dock-light":       _populated("terminal-dock:zsh", replay=True, theme="light"),
+    "palette-populated-light":   _populated("palette", theme="light"),
+    "dialog-light":              _populated("error-dialog:offline", theme="light"),
+    "menu-light":                _populated("view-menu", theme="light"),
+    "browse-spaces-light":       _populated("mode:browse;tab-new:https://example.com;tab-new:https://docs.rs/;"
+                                            "space-new:Research;tab-new:https://www.wikipedia.org/;"
+                                            "tab-new:https://doc.rust-lang.org/book/", theme="light"),
+    "settings-general-light":    _light("settings-general"),
+    "skills-page-light":         _light("skills-page"),
+    "import-sheet-light":        _light("import-sheet"),
+    "setup-sheet-install-light": _light("setup-sheet-install"),
+    # Code blocks, diffs and tool output in the transcript, and the two
+    # Browse pieces that were drawn dark in both themes before 2.11 (the
+    # Peek's caption and ×) beside the new-tab page.
+    "transcript-full-top-light": _populated("top", replay=True, sidebar=False, theme="light"),
+    "transcript-full-mid-light": _populated("mid", replay=True, sidebar=False, theme="light"),
+    "browse-newtab-light":       _light("browse-newtab"),
+    "browse-peek-light":         _light("browse-peek"),
+})
+
+LIGHT_ENTRIES = sorted(e for e in ENTRIES if e.endswith("-light"))
+
+
 POPULATED_ENTRIES = [
     "shell-populated", "shell-populated-light", "sidebar-projects", "sidebar-projects-light",
     "transcript-full", "transcript-full-light", "transcript-full-top", "transcript-full-mid",

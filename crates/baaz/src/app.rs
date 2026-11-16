@@ -5175,8 +5175,12 @@ impl Harness {
             let list = list.on_press(move |index, w, cx| press(&index, w, cx)).on_activate(move |index, w, cx| open(&index, w, cx));
             rows = rows.child(list);
             // The frosted panel: the ground at 62 %, a `line-strong` edge and
-            // the float shadow (docs/83 §2.3).
-            let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(p.bg.alpha(0.62)).border_1().border_color(p.line_strong).shadow(p.floating_shadow()).child(rows));
+            // the float shadow (docs/83 §2.3). The picture under it is dimmed
+            // dark in both themes, so light's white at 62 % came out mid-grey
+            // under `fg-muted` text (2.4:1): light fills it opaque with the
+            // Field's own `surface-3` (docs/83 §9, task 2.11).
+            let panel_fill = if cx.aui().kind.is_dark() { p.bg.alpha(0.62) } else { p.surface(3) };
+            let panel = aui::interact::Shape::Container.rounded(div().w_full().bg(panel_fill).border_1().border_color(p.line_strong).shadow(p.floating_shadow()).child(rows));
             column = column.child(panel);
         }
         // The new tab is the page column, square like a page (docs/83 §3).
@@ -6719,10 +6723,14 @@ impl Render for Harness {
         let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
         let settings = self.render_settings(cx);
+        // The connect screen draws its own setup and import sheets
+        // (`render_connect`); drawing them here as well stacked a second
+        // scrim under the first (the window behind went to 25 %).
+        let connect_owns_sheets = self.show_connect;
         let muse_sheet = self
             .render_muse_sheet(window, cx)
-            .or_else(|| self.render_setup_sheet(cx))
-            .or_else(|| self.render_import_sheet(cx))
+            .or_else(|| if connect_owns_sheets { None } else { self.render_setup_sheet(cx) })
+            .or_else(|| if connect_owns_sheets { None } else { self.render_import_sheet(cx) })
             .or_else(|| self.render_chrome_import(cx));
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the

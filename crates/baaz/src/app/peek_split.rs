@@ -12,8 +12,9 @@ use crate::browser::peek_split::{self, CLOSE, CLOSE_INSET, PEEK_H, PEEK_W};
 use crate::browser::TabId;
 
 impl Harness {
-    /// The round × the Peek and each Split half carry (24 px, a dark disc so
-    /// it reads over any page).
+    /// The round × the Peek and each Split half carry: 24 px, a floating
+    /// disc (`overlay`, a `line-strong` edge, the float shadow) so it reads
+    /// over any page in either theme.
     fn page_close(&self, id: SharedString, label: &'static str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
         aui::data::record_ax_label(label);
@@ -21,15 +22,18 @@ impl Harness {
             .id(id)
             .size(px(CLOSE))
             .rounded_full()
-            .bg(gpui::rgba(0x1b1b1fe6))
+            .bg(p.overlay)
+            .border_1()
+            .border_color(p.line_strong)
+            .shadow(p.floating_shadow())
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
             .role(gpui::Role::Button)
             .aria_label(label)
-            .child(icon(IconName::X).size(px(12.0)).color(gpui::white()))
-            .hover(move |s| s.bg(p.fg_muted))
+            .child(icon(IconName::X).size(px(12.0)).color(p.fg))
+            .hover(move |s| s.bg(p.surface_4))
     }
 
     /// The centre as a Split when the shown tab is a half of the open one:
@@ -216,26 +220,26 @@ impl Harness {
                                 .pr(px(scale::SP_1))
                                 .py(px(scale::SP_1))
                                 .rounded(px(scale::R_LG))
-                                // Dark in both themes (its text is white over
-                                // the scrim): the dark overlay, its edge and
-                                // the float shadow.
-                                .bg(aui_tokens::dark().overlay)
+                                // A float over the scrim in the theme's own
+                                // colours: `overlay`, its `line-strong` edge
+                                // and the float shadow (docs/83 §7).
+                                .bg(p.overlay)
                                 .border_1()
-                                .border_color(aui_tokens::dark().line_strong)
+                                .border_color(p.line_strong)
                                 .shadow(p.floating_shadow())
-                                .child(div().role_in(TextRole::Caption, cx).text_color(gpui::white().opacity(0.85)).child(caption))
+                                .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(caption))
                                 .child(
                                     div()
                                         .id("browse-peek-to-tab")
                                         .px(px(scale::SP_2))
                                         .py(px(2.0))
                                         .rounded(px(scale::R_SM))
-                                        .bg(gpui::white().opacity(0.14))
+                                        .bg(p.surface_4)
                                         .cursor_pointer()
                                         .role(gpui::Role::Button)
                                         .aria_label("Open Peek as a tab")
                                         .text_role(TextRole::Caption)
-                                        .text_color(gpui::white())
+                                        .text_color(p.fg)
                                         .child("Open as tab")
                                         .on_click(to_tab),
                                 ),
