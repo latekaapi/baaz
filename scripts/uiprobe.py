@@ -843,10 +843,22 @@ _POPULATED_SIDEBAR = ["--sidebar-fixture", _p6_sidebar_fixture("populated.json")
 _FULL = ["--replay", "fixtures/msp/synthetic-full.jsonl"]
 
 
+# The fixture's two projects. Its rows name them by `workspaceRoot`, but a
+# row only sits under a project the store has adopted; a fresh state dir
+# has adopted only the launch directory, so without these every row fell
+# under "Unfiled" beside an empty project head. Adopting is a setter (the
+# second settle run finds them adopted and changes nothing).
+_ADOPT = "project:fixtures/ws/acme-web;project:fixtures/ws/acme-internal"
+
+
 def _populated(steps=None, replay=False, theme=None, workspace=None, sidebar=True):
     args = ["--no-connect", "--login", "signed-in"]
     if sidebar:
         args += _POPULATED_SIDEBAR
+        # Every populated sidebar shows the sessions grouped under the two
+        # projects (docs/83 §8 item 4), not only `sidebar-projects`.
+        if not steps or "project:" not in steps:
+            steps = _ADOPT + (";" + steps if steps else "")
     if replay:
         args += _FULL
     if theme:
@@ -860,7 +872,7 @@ def _populated(steps=None, replay=False, theme=None, workspace=None, sidebar=Tru
                     "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(_P6_CLAUDE)}}
 
 
-_PROJECTS = "project:fixtures/ws/acme-web;project:fixtures/ws/acme-internal;group-by:project"
+_PROJECTS = _ADOPT + ";group-by:project"
 
 ENTRIES.update({
     "shell-populated":         _populated(replay=True),
@@ -885,6 +897,11 @@ ENTRIES.update({
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
     "settings-sidebar":        _populated("settings:sidebar"),
     "palette-populated":       _populated("palette"),
+    # Task 2.4's peek, held open with the sidebar closed: `sidebar` closes
+    # it (deterministic runs never write the layout, so both settle shots
+    # start open and agree) and `sidebar-peek` holds the hover peek with
+    # no pointer. The populated rows, so the peek reads filled.
+    "sidebar-peek":            _populated("sidebar;sidebar-peek", replay=True),
     "dialog":                  _populated("error-dialog:offline"),
     "menu":                    _populated("view-menu"),
     "browse-spaces":           _populated("mode:browse;tab-new:https://example.com;tab-new:https://docs.rs/;"
