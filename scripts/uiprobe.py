@@ -883,8 +883,11 @@ def _populated(steps=None, replay=False, theme=None, workspace=None, sidebar=Tru
     if sidebar:
         args += _POPULATED_SIDEBAR
         # Every populated sidebar shows the sessions grouped under the two
-        # projects (docs/83 §8 item 4), not only `sidebar-projects`.
-        if not steps or "project:" not in steps:
+        # projects (docs/83 §8 item 4), not only `sidebar-projects`. Not
+        # for an entry that opens its own repo (`workspace`): adopting
+        # leaves acme-internal current, so the Files pane looked for the
+        # repo's files in the wrong folder ("This file is gone", Gate 2).
+        if not workspace and (not steps or "project:" not in steps):
             steps = _ADOPT + (";" + steps if steps else "")
     if replay:
         args += _FULL
