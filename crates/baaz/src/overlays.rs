@@ -417,6 +417,8 @@ pub enum Command {
     Terminal,
     /// Open a new terminal tab.
     NewTerminalCmd,
+    /// Open the next session that needs the person (task 3.4, ⌘⇧J).
+    NextWaiting,
 }
 
 impl Command {
@@ -446,7 +448,7 @@ impl Command {
     /// legacy `/diff` spelling of the Changes command: it stays a variant so
     /// older call sites compile, but it lists no palette row of its own —
     /// [`Command::parse`] maps the typed `/diff` onto `RightGit`.
-    pub const ALL: [Command; 24] = [
+    pub const ALL: [Command; 25] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -470,6 +472,7 @@ impl Command {
         Command::Terminal,
         Command::NewTerminalCmd,
         Command::Skills,
+        Command::NextWaiting,
         Command::Help,
     ];
 
@@ -517,6 +520,7 @@ impl Command {
             Command::Terminal => "/terminal",
             Command::NewTerminalCmd => "/new-terminal",
             Command::Skills => "/skills",
+            Command::NextWaiting => "/next-waiting",
         }
     }
 
@@ -548,6 +552,7 @@ impl Command {
             Command::Terminal => "Toggle the terminal dock",
             Command::NewTerminalCmd => "Open a new terminal tab",
             Command::Skills => "Open the Skills page",
+            Command::NextWaiting => "Jump to the next session that needs you",
         }
     }
 
@@ -733,7 +738,7 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
-        assert_eq!(Command::ALL.len(), 24, "the palette lists every command");
+        assert_eq!(Command::ALL.len(), 25, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
             assert_eq!(Command::parse_line(command.slash()), Some((command, "")));

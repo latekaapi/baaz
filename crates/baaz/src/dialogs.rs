@@ -670,6 +670,10 @@ impl Harness {
                 self.open_skills(cx);
                 true
             }
+            Command::NextWaiting => {
+                self.jump_to_next_waiting(window, cx);
+                true
+            }
             Command::RightBrowser => {
                 self.select_right(RightKind::Browser, cx);
                 true
@@ -1720,12 +1724,13 @@ mod tests {
                     | Command::RightFiles
                     | Command::Terminal
                     | Command::Skills
+                    | Command::NextWaiting
                     | Command::NewTerminalCmd
             );
             assert_eq!(handled, is_window, "{command:?} is classified on the wrong side");
             window_count += usize::from(handled);
         }
-        assert_eq!(window_count, 6, "exactly the six window commands are window-level");
+        assert_eq!(window_count, 7, "exactly the seven window commands are window-level");
         restore_state(state);
     }
 
@@ -2256,8 +2261,8 @@ mod tests {
         assert_eq!(filter_commands("BROW", None), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("reasoning", None), vec![Command::Effort]);
         assert!(filter_commands("zzz-no-such-command", None).is_empty());
-        assert_eq!(filter_commands("", None).len(), 24, "an empty query lists every command");
-        assert_eq!(filter_commands("   ", None).len(), 24, "whitespace is an empty query");
+        assert_eq!(filter_commands("", None).len(), 25, "an empty query lists every command");
+        assert_eq!(filter_commands("   ", None).len(), 25, "whitespace is an empty query");
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
@@ -2276,7 +2281,7 @@ mod tests {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
         });
-        assert_eq!(empty, 24, "an empty query lists every command");
+        assert_eq!(empty, 25, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));

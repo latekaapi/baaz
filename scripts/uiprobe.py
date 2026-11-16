@@ -912,6 +912,9 @@ ENTRIES.update({
     # state of the sessions it hides (one waiting: the amber dot); acme-web
     # stays open with a row in every state. `project-close` is a setter.
     "sidebar-projects-collapsed": _populated(_PROJECTS + ";project-close:acme-internal"),
+    # Task 3.4: the "Needs you" row at the top of the nav, its filter on —
+    # only the three sessions waiting on the person, the row lit. A setter.
+    "sidebar-needs-you":       _populated(_PROJECTS + ";needs-you-filter:on"),
     "sidebar-projects-light":  _populated(_PROJECTS, theme="light"),
     "transcript-full":         _populated(replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
@@ -992,6 +995,7 @@ POPULATED_ENTRIES = [
     "composer-menu-model", "composer-menu-effort", "composer-menu-provider", "composer-menu-mode",
     "right-changes-full", "right-files-preview", "right-page", "terminal-dock", "settings-sidebar",
     "palette-populated", "dialog", "menu", "browse-spaces", "sidebar-projects-collapsed",
+    "sidebar-needs-you",
 ]
 
 

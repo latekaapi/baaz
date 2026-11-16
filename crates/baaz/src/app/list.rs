@@ -769,6 +769,14 @@ impl Harness {
     /// identical run to run.
     pub(crate) fn sidebar_grouping(&self, cx: &gpui::App) -> Rc<sidebar::Grouping> {
         let visible = self.visible_sessions(cx);
+        // The "Needs you" filter (task 3.4) narrows what the sidebar draws,
+        // never what the palettes list. Toggling it invalidates the list, so
+        // the cached grouping below rebuilds.
+        let visible = if crate::attention::Notifier::filter_on(cx) {
+            Rc::new(crate::attention::waiting(visible.iter()).into_iter().cloned().collect::<Vec<_>>())
+        } else {
+            visible
+        };
         let now = sidebar::grouping_now(&visible);
         let minute = now.timestamp().div_euclid(60);
         let mut cache = self.list_cache.borrow_mut();

@@ -892,10 +892,18 @@ impl Harness {
         // the screen draws none at zero (docs/83 §4). Automations is gone
         // until the feature exists (plan stage P).
         let on = self.skills.catalog.on_count();
-        let nav = vec![
-            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None },
-            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32) },
+        let mut nav = vec![
+            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false },
+            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32), active: false },
         ];
+        // "Needs you" (task 3.4): first among the nav rows while anything
+        // waits on the person, and while its filter is on (so it can be
+        // turned off when the last one is answered).
+        let waiting = crate::attention::waiting(self.visible_sessions(cx).iter()).len();
+        let filter = crate::attention::Notifier::filter_on(cx);
+        if waiting > 0 || filter {
+            nav.insert(0, NavItem { id: NAV_NEEDS_YOU.into(), label: "Needs you".into(), icon: IconName::Bell, count: Some(waiting as u32), active: filter });
+        }
         let group_by = match self.effective_group_by() {
             crate::layout::GroupBy::Project => GroupKey::Project,
             crate::layout::GroupBy::Date => GroupKey::Date,
@@ -1160,6 +1168,7 @@ impl Harness {
             SidebarIntent::Nav(id) => match id.as_ref() {
                 NAV_PROJECTS => self.open_projects(false, window, cx),
                 NAV_SKILLS => self.open_skills(cx),
+                NAV_NEEDS_YOU => self.toggle_needs_you_filter(cx),
                 _ => {}
             },
             SidebarIntent::Select(id) => {
@@ -2030,6 +2039,8 @@ pub(crate) fn muse_plan_label(tier: Option<&Tier>) -> Option<String> {
 /// The nav row ids the screen reports back through `SidebarIntent::Nav`.
 const NAV_PROJECTS: &str = "projects";
 const NAV_SKILLS: &str = "skills";
+/// The sidebar's "Needs you" filter row (task 3.4).
+const NAV_NEEDS_YOU: &str = "needs-you";
 
 /// A Browse tab's id as the screen's stable row key, and back.
 fn browse_tab_key(id: crate::browser::TabId) -> String {

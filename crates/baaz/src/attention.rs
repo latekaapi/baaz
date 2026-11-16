@@ -124,6 +124,23 @@ pub(crate) fn transitions<'a>(
     look
 }
 
+/// The sessions that need the person, in the order of `rows`: what the
+/// "Needs you" filter shows and what ⌘⇧J walks.
+pub(crate) fn waiting<'a>(rows: impl IntoIterator<Item = &'a SessionEntry>) -> Vec<&'a SessionEntry> {
+    rows.into_iter().filter(|row| counted(row) && matches!(row.session_state(), SessionState::NeedsYou(_))).collect()
+}
+
+/// The waiting session after `current` in `order`, wrapping at the end;
+/// the first one when `current` is not waiting (or nothing is open).
+pub(crate) fn next_waiting(order: &[String], current: Option<&str>) -> Option<String> {
+    let first = order.first()?;
+    let at = current.and_then(|id| order.iter().position(|w| w == id));
+    Some(match at {
+        Some(i) => order[(i + 1) % order.len()].clone(),
+        None => first.clone(),
+    })
+}
+
 /// The last look: each session's state then, the list epoch it was taken
 /// at, and the badge last set.
 #[derive(Default)]
@@ -131,11 +148,18 @@ pub(crate) struct Notifier {
     states: HashMap<String, SessionState>,
     epoch: Option<u64>,
     badge: Option<usize>,
+    /// The sidebar's "Needs you" filter is on (task 3.4).
+    filter: bool,
 }
 
 impl Global for Notifier {}
 
 impl Notifier {
+    /// Whether the sidebar shows only the sessions that need the person.
+    pub(crate) fn filter_on(cx: &App) -> bool {
+        cx.try_global::<Notifier>().is_some_and(|n| n.filter)
+    }
+
     /// The badge last set, for tests.
     #[cfg(test)]
     pub(crate) fn badge(cx: &App) -> Option<usize> {
@@ -181,6 +205,43 @@ impl Harness {
                 play_sound();
             }
         }
+    }
+
+    /// ⌘⇧J and `/next-waiting`: open the next session that needs the
+    /// person, in the sidebar's order, wrapping; from Browse it switches to
+    /// Sessions first. Nothing waiting does nothing.
+    pub(crate) fn jump_to_next_waiting(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let visible = self.visible_sessions(cx);
+        let order: Vec<String> = waiting(visible.iter()).into_iter().map(|row| row.id.clone()).collect();
+        let current = self.active_id(cx);
+        let Some(next) = next_waiting(&order, current.as_deref()) else { return };
+        if self.mode == crate::layout::Mode::Browse {
+            self.set_mode(crate::layout::Mode::Sessions, window, cx);
+        }
+        self.resume_quiet(next, window, cx);
+    }
+
+    /// The sidebar's "Needs you" row: show only the waiting sessions, or
+    /// all again.
+    pub(crate) fn toggle_needs_you_filter(&mut self, cx: &mut Context<Self>) {
+        let notifier = cx.default_global::<Notifier>();
+        notifier.filter = !notifier.filter;
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `needs-you-filter:<on|off>`: the filter set, not toggled, so a
+    /// capture's second run changes nothing.
+    pub(crate) fn step_needs_you_filter(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let want = match rest.trim() {
+            "on" => true,
+            "off" => false,
+            other => return Err(format!("needs-you-filter takes on or off, not `{other}`")),
+        };
+        if Notifier::filter_on(cx) != want {
+            self.toggle_needs_you_filter(cx);
+        }
+        Ok(())
     }
 
     /// Wire a notification click to its session: bring Baaz forward and
@@ -339,6 +400,26 @@ mod tests {
         let working = states(&[("w", SessionState::Working)]);
         assert!(transitions(&working, [&waiting], Some("w"), true, NotifyPrefs::default()).posts.is_empty(), "the person is looking at it");
         assert_eq!(transitions(&working, [&waiting], Some("w"), false, NotifyPrefs::default()).posts.len(), 1, "the app is behind another one");
+    }
+
+    /// ⌘⇧J walks the waiting sessions in order and wraps; from a session
+    /// that is not waiting it starts at the first; nothing waiting is None.
+    #[test]
+    fn next_waiting_cycles_in_order() {
+        let order: Vec<String> = ["a", "b", "c"].iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(next_waiting(&order, None).as_deref(), Some("a"));
+        assert_eq!(next_waiting(&order, Some("a")).as_deref(), Some("b"));
+        assert_eq!(next_waiting(&order, Some("b")).as_deref(), Some("c"));
+        assert_eq!(next_waiting(&order, Some("c")).as_deref(), Some("a"), "wraps");
+        assert_eq!(next_waiting(&order, Some("x")).as_deref(), Some("a"), "from a session not waiting");
+        assert_eq!(next_waiting(&[], Some("a")), None);
+        let mut w1 = entry("w1");
+        w1.attention = vec![Attention::ApprovalPending];
+        let idle = entry("i");
+        let mut w2 = entry("w2");
+        w2.pending_question = Some("?".into());
+        let ids: Vec<&str> = waiting([&w1, &idle, &w2]).into_iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["w1", "w2"], "in the rows' order, idle skipped");
     }
 
     /// Hidden, archived and side sessions are neither counted nor announced;

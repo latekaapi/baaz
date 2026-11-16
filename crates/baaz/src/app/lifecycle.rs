@@ -7465,6 +7465,62 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Task 3.4: ⌘⇧J (`jump_to_next_waiting`) opens the waiting sessions
+    /// one after another in the sidebar's order and wraps; the "Needs you"
+    /// filter narrows the sidebar to them.
+    #[gpui::test]
+    fn jump_to_next_waiting_cycles_in_order(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("next-waiting");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                mark_muse_up(harness);
+                let now = chrono::Local::now();
+                for (id, minutes, waiting) in [("w-new", 1, true), ("idle", 2, false), ("w-old", 3, true)] {
+                    let mut row = crate::sidebar::tests::entry(id);
+                    row.turns = 1;
+                    row.updated = now - chrono::Duration::minutes(minutes);
+                    if waiting {
+                        row.attention = vec![provider::facts::Attention::ApprovalPending];
+                    }
+                    harness.sessions.push(row);
+                }
+                harness.invalidate_list();
+            });
+        });
+        let target = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                let harness = baaz.read(cx);
+                harness.pending_id.clone().or_else(|| harness.active_id(cx))
+            })
+        };
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.jump_to_next_waiting(window, cx)));
+            vc.run_until_parked();
+            seen.push(target(vc).unwrap_or_default());
+        }
+        assert_eq!(seen, ["w-new", "w-old", "w-new"], "newest first, the idle row skipped, wrapping");
+        // The filter: only the two waiting rows are drawn.
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_needs_you_filter(cx)));
+        let drawn = vc.update(|_, cx| {
+            let grouping = baaz.read(cx).sidebar_grouping(cx);
+            let mut ids = Vec::new();
+            if let aui::nav::Grouping::Date(buckets) = grouping.as_ref() {
+                for bucket in buckets {
+                    ids.extend(bucket.sessions.iter().map(|s| s.id.to_string()));
+                }
+            }
+            ids
+        });
+        assert!(drawn.iter().all(|id| id == "w-new" || id == "w-old"), "only waiting rows: {drawn:?}");
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_needs_you_filter(cx)));
+        lane_restore(state);
+    }
+
     /// docs/71 §3: a failed open is typed from the refusal's own hint, and
     /// the kind decides the extra action (Install for a missing CLI).
     #[gpui::test]

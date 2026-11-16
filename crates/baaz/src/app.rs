@@ -159,6 +159,8 @@ actions!(
         ConfirmRename,
         /// Toggle the terminal dock (⌃`).
         ToggleTerminal,
+        /// Open the next session that needs the person (⌘⇧J, task 3.4).
+        JumpNextWaiting,
         /// Toggle the right pane (⌘-backslash, from the library).
         ToggleRightPane,
         /// D6: commit from the commit message (⌘⏎).
@@ -5572,6 +5574,9 @@ impl Harness {
             }))
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.with_session(cx, |view, cx| view.copy_selected(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &JumpNextWaiting, window, cx| {
+                this.jump_to_next_waiting(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);

@@ -112,6 +112,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "OpenSettings", keystroke: "cmd-,", context: None, category: "settings", label: "Open settings" },
     KeymapEntry { action: "ConfirmRename", keystroke: "enter", context: Some(crate::app::RENAME_CONTEXT), category: "sidebar", label: "Confirm rename" },
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
+    KeymapEntry { action: "JumpNextWaiting", keystroke: "cmd-shift-j", context: Some(aui::keys::ROOT_CONTEXT), category: "session", label: "Jump to the next session that needs you" },
     KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
     KeymapEntry { action: "CommitMessage", keystroke: "cmd-enter", context: Some("CommitMessage"), category: "pane", label: "Commit from the message" },
     KeymapEntry { action: "RightBack", keystroke: "cmd-[", context: Some("RightPane"), category: "pane", label: "Back in the right pane" },
@@ -313,6 +314,7 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "ConfirmRename" => Some(gpui::KeyBinding::new(keystroke, crate::app::ConfirmRename, context)),
         "CopySelection" => Some(gpui::KeyBinding::new(keystroke, crate::app::CopySelection, context)),
         "ToggleTerminal" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleTerminal, context)),
+        "JumpNextWaiting" => Some(gpui::KeyBinding::new(keystroke, crate::app::JumpNextWaiting, context)),
         "ToggleRightPane" => Some(gpui::KeyBinding::new(
             keystroke,
             crate::app::ToggleRightPane,

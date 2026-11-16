@@ -926,6 +926,7 @@ impl SessionView {
             | Command::RightFiles
             | Command::Terminal
             | Command::Skills
+            | Command::NextWaiting
             | Command::NewTerminalCmd => cx.emit(SessionEvent::WindowCommand(command)),
         }
     }
