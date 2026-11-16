@@ -1554,6 +1554,17 @@ impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, capture: CaptureToken, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::log::boot_mark("harness-new-start");
+        // Task 3.3: a click on a notification opens its session, and the
+        // first attention look (the Dock badge) runs once construction is
+        // over — whichever of the boot paths below returns, scripted
+        // fixture and replay windows included, which raise no event.
+        Self::on_notification_click(cx);
+        let first_look = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            if let Some(harness) = first_look.upgrade() {
+                harness.update(cx, |harness, cx| harness.check_attention(cx));
+            }
+        });
         // The rename field is one visual line: soft wrap off, so a long name
         // scrolls under the caret instead of spilling a second line.
         let rename = cx.new(|cx| {
@@ -2154,8 +2165,6 @@ impl Harness {
                 harness.maybe_offer_session_migration(cx);
             });
         });
-        // A click on a notification opens its session (task 3.3).
-        Self::on_notification_click(cx);
         crate::log::boot_mark("harness-new-done");
         this
     }

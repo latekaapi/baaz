@@ -810,6 +810,9 @@ impl Harness {
             // to notice the new key adds a whole frame hop — one a quiescent
             // window may not take for a long while — before the first rows paint.
             let _ = this.sync_sidebar_pane(cx);
+            // The rows' states may have moved with the list (the first
+            // reply is the first look): notifications and the Dock badge.
+            this.check_attention(cx);
             cx.notify();
             if this.sessions_list_stale {
                 // A refresh asked while this fetch was running: one
