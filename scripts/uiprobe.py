@@ -826,7 +826,10 @@ ENTRIES.update({
     "jump-pill":               _jump_entry("--tier", "subscription"),
     "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),
     "jump-pill-signed-out":    _jump_entry("--tier", "subscription",
-                                           steps="wait:1500;signed-out;wait:600;wheel:30;wait:300;wheel:30;wait:800"),
+                                           # One wheel once the banner has settled: two
+                                           # wheels while it was still growing landed ~10 px
+                                           # apart run to run.
+                                           steps="wait:1500;signed-out;wait:1500;wheel:60;wait:800"),
 })
 
 
