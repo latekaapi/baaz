@@ -449,7 +449,7 @@ impl SidebarKey {
         let visible = baaz.visible_sessions(cx);
         let grouping = baaz.sidebar_grouping(cx);
         let selected = baaz
-            .pending_id
+            .open_state.pending_id
             .clone()
             .or_else(|| baaz.active.as_ref().map(|a| a.read(cx).session_id.clone()))
             .map(|id| baaz.chain_head(&id));
@@ -880,7 +880,7 @@ impl Harness {
         let row_menu = self.open_row_menu(cx);
         // One identity per chain: the selected row is the head (Y2a).
         let selected = self
-            .pending_id
+            .open_state.pending_id
             .clone()
             .or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()))
             .map(|id| self.chain_head(&id));
@@ -3310,7 +3310,7 @@ mod tests {
                 h.sessions.push(empty_entry("s-fresh"));
                 // A new session is a draft until a turn starts: what keeps
                 // the open session's own exemption off it.
-                h.drafts.insert("p-fresh".into(), "s-fresh".into());
+                h.open_state.drafts.insert("p-fresh".into(), "s-fresh".into());
                 let host = crate::session::SessionHost {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
@@ -3345,7 +3345,7 @@ mod tests {
                     "the first send touches a zero-turn row"
                 );
                 // The turn started: the session is no draft any more.
-                h.drafts.retain(|_, id| id != "s-fresh");
+                h.open_state.drafts.retain(|_, id| id != "s-fresh");
                 h.invalidate_list();
             });
         });
@@ -3363,7 +3363,7 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.sessions.push(empty_entry("s-root"));
-                h.unsent.insert("s-root".into());
+                h.open_state.unsent.insert("s-root".into());
                 let host = crate::session::SessionHost {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
@@ -3385,7 +3385,7 @@ mod tests {
             baaz.update(cx, |h, _cx| {
                 let row = h.sessions.iter_mut().find(|entry| entry.id == "s-root").expect("root row");
                 crate::sidebar::first_send_update(row, Some("Map the folder"), chrono::Local::now(), false);
-                h.unsent.remove("s-root");
+                h.open_state.unsent.remove("s-root");
                 h.invalidate_list();
             });
         });

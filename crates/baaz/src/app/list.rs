@@ -63,7 +63,7 @@ impl Harness {
             && !self.index.contains_key(session_id)
             && !crate::sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides);
         if inert {
-            sessions::save(&self.overrides);
+            crate::sessions::save(&self.overrides);
             cx.notify();
             return;
         }
@@ -110,7 +110,7 @@ impl Harness {
     /// every row): the rejoin and the search sync are scoped alike.
     fn settle_overrides_scoped(&mut self, only: Option<&std::collections::HashSet<String>>, cx: &mut Context<Self>) {
         self.rejoin_scoped(only);
-        sessions::save(&self.overrides);
+        crate::sessions::save(&self.overrides);
         match only {
             Some(ids) => self.rebuild_search_index_for(ids, cx),
             None => self.rebuild_search_index(cx),
@@ -663,7 +663,7 @@ impl Harness {
         // The click's target rides the key: the grouping rescues it past the
         // fold, so a click (or an `open:` step) that names a held-back row
         // must rebuild the grouping on its own frame.
-        let pending = self.pending_id.clone();
+        let pending = self.open_state.pending_id.clone();
         // Whose tabs hold a running block (D52): what stamps the sidebar
         // hint below. Part of the key, so a block starting or ending
         // rebuilds the rows without waiting for a list invalidation.
@@ -708,7 +708,7 @@ impl Harness {
         // starts.
         let exempt = |id: &str| {
             let head = index.head(id);
-            let unsent = self.unsent.contains(id) || self.drafts.values().any(|draft| draft == id);
+            let unsent = self.open_state.is_unsent(id);
             (index.members(&head).len() >= 2 || !unsent).then_some(head)
         };
         let active_head = active.as_deref().and_then(exempt);
@@ -806,7 +806,7 @@ impl Harness {
                     expanded: &expanded,
                     active: active.as_deref(),
                     active_project: active_project.as_deref(),
-                    pending: self.pending_id.as_deref(),
+                    pending: self.open_state.pending_id.as_deref(),
                 };
                 sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, crate::layout::Layout::get(cx), now)
             }

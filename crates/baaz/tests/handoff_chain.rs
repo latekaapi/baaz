@@ -28,17 +28,17 @@ fn source(name: &str) -> String {
 /// real calls in the unit and `gpui::test` suites named above.
 #[test]
 fn activation_and_reopen_wiring_stays_app_side() {
-    let lifecycle = source("app/lifecycle.rs");
+    let handoff = source("app/sessions/handoff.rs");
     assert!(
-        lifecycle.contains("handoff_snapshot::write_snapshot"),
+        handoff.contains("handoff_snapshot::write_snapshot"),
         "activation must snapshot the source transcript for the destination"
     );
     assert!(
-        lifecycle.contains("show_handoff_prefix"),
+        handoff.contains("show_handoff_prefix"),
         "activation must show the prefix on the destination view"
     );
     assert!(
-        lifecycle.contains("attach_handoff_prefix") && lifecycle.contains("read_snapshot"),
+        handoff.contains("attach_handoff_prefix") && handoff.contains("read_snapshot"),
         "reopening must reattach the prefix from the snapshot"
     );
     let module = source("handoff_snapshot.rs");
@@ -168,28 +168,30 @@ fn a_snapshot_round_trips_prefix_divider_and_own_turns() {
 /// sidebar half). The behaviour lives in `sidebar.rs` unit tests (2-hop
 /// mixed fixtures: one row, original title, summed turns, member resolve,
 /// archive expansion, dangling links — all real calls, no window) and in
-/// `app/lifecycle.rs` `gpui::test`s (member-id open lands on the head, the
+/// `app/sessions/tests/handoff.rs` `gpui::test`s (member-id open lands on the head, the
 /// fallback source link bypasses, archiving the head flags all members —
 /// through the real `Harness`). Pinned here the way the transcript half is
 /// pinned above: the row-collapse entry points, the open-path redirect and
 /// its one bypass, and the chain-wide archive.
 #[test]
 fn sidebar_half_wiring_one_row_per_chain() {
-    let lifecycle = source("app/lifecycle.rs");
+    let list = source("app/sessions/list.rs");
+    let open = source("app/sessions/open.rs");
+    let events = source("app/sessions/events.rs");
     assert!(
-        lifecycle.contains("collapse_handoff_chains"),
+        list.contains("collapse_handoff_chains"),
         "list builds must collapse member rows to the head row"
     );
     assert!(
-        lifecycle.contains("chain_head(&session_id)"),
+        open.contains("chain_head(&session_id)"),
         "opening any id must resolve to the chain head first"
     );
     assert!(
-        lifecycle.contains("resume_source_read_only"),
+        open.contains("fn resume_source_read_only") && events.contains("resume_source_read_only"),
         "the fallback divider's source link needs the explicit bypass path"
     );
     assert!(
-        lifecycle.contains("HandoffOpenSource"),
+        events.contains("HandoffOpenSource"),
         "the bypass needs its own event, not the card's open-session one"
     );
     let sidebar = source("sidebar.rs");

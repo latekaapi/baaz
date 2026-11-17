@@ -127,8 +127,15 @@ fn no_view_forks_on_the_lane_it_rides() {
 /// these files compares a provider against Muse by name. What Muse does
 /// differently is a registry property on [`ProviderId`]; constructing the
 /// value (`ProviderId::Muse.as_str()`, a fixture row) is not a fork.
-const OPEN_ROW_PATHS: [&str; 6] = [
-    "app/lifecycle.rs",
+const OPEN_ROW_PATHS: [&str; 13] = [
+    "app/sessions/list.rs",
+    "app/sessions/open.rs",
+    "app/sessions/provider_open.rs",
+    "app/sessions/switch.rs",
+    "app/sessions/events.rs",
+    "app/sessions/handoff.rs",
+    "app/sessions/steps.rs",
+    "app/sessions/state.rs",
     "app.rs",
     "app/titles.rs",
     "right_changes.rs",

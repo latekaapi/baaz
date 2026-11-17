@@ -64,7 +64,7 @@ impl Harness {
         }
         view.update(cx, |view, cx| view.send_or_queue(ask, cx));
         self.set_browser_chat(view, cx);
-        self.starts_in_flight.insert(request_id.clone());
+        self.open_state.starts_in_flight.insert(request_id.clone());
         self.spawn_provider_open(choice.provider, None, workspace, request_id.clone(), mode, cx);
         cx.notify();
         Some(request_id)

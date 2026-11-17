@@ -77,8 +77,8 @@ fn enabled_switch_gates_menu_probes_and_child_start() {
     pin(&status, "filter(|id| self.status(*id).enabled)", "probes skip disabled");
     let composer = read_repo("crates/baaz/src/session/composer.rs");
     pin(&composer, "live_visible_provider_ids", "menu hides disabled");
-    let lifecycle = read_repo("crates/baaz/src/app/lifecycle.rs");
-    pin(&lifecycle, "pending_disabled_notice", "no child on disabled open");
+    let provider_open = read_repo("crates/baaz/src/app/sessions/provider_open.rs");
+    pin(&provider_open, "pending_disabled_notice", "no child on disabled open");
 }
 
 /// Sign-out confirms with the real command, then runs it: `claude auth

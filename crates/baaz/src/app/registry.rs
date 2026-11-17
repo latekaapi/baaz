@@ -104,7 +104,7 @@ impl SessionRegistry {
         kept.extend(
             self.parked.iter().filter(|(_, view)| view.read(cx).must_stay_alive()).map(|(id, _)| id.clone()),
         );
-        let surviving = super::lifecycle::evict_parked(&self.parked_ids(), &kept, limit);
+        let surviving = super::sessions::evict_parked(&self.parked_ids(), &kept, limit);
         let (stay, evicted): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.parked).into_iter().partition(|(id, _)| surviving.contains(id));
         self.parked = stay;

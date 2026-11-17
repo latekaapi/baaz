@@ -148,7 +148,7 @@ impl Harness {
         if let Some(active) = self.active_id(cx) {
             // Only a registered draft moves: a session with a turn in
             // flight already left, and a replayed capture is not ours.
-            let registered = self.drafts.values().any(|named| named == &active);
+            let registered = self.open_state.names_draft(&active);
             let sending =
                 self.active.as_ref().is_some_and(|view| view.read(cx).session_id == active && view.read(cx).is_sending());
             let project_of = self
@@ -163,13 +163,13 @@ impl Harness {
                     .clone()
                     .filter(|view| view.read(cx).session_id == active)
                     .map(|view| view.update(cx, |view, vc| view.take_draft(window, vc)));
-                self.drafts.retain(|_, named| named != &active);
+                self.open_state.forget_draft(&active);
                 // A rowless draft has no row to hide; a rowed one keeps the
                 // old rule so it never strands a visible empty row.
                 if self.sessions.iter().any(|e| e.id == active) {
                     self.set_override(&active, |meta| meta.hidden = true, cx);
                 }
-                self.pending_draft = moving;
+                self.open_state.pending_draft = moving;
             }
         }
         self.new_session_in(Some(id), window, cx);
@@ -235,7 +235,7 @@ impl Harness {
         self.branches.remove(&id);
         // A removed project takes its unsent draft with it: the parked view
         // stays cached but becomes evictable, and ⌘N can never reopen it.
-        self.drafts.remove(&id);
+        self.open_state.drafts.remove(&id);
         // The current project is gone: the most recently opened remaining
         // adoption takes it, or nothing does.
         if self.current_project.as_deref() == Some(id.as_str()) {

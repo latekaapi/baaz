@@ -241,14 +241,14 @@ fn ask_draft_lands_on_arrival_never_sent() {
     let app = source("app.rs");
     let input = fn_body(&app, "browse_address_input");
     assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
-    let lifecycle = source("app/lifecycle.rs");
-    let new = fn_body(&lifecycle, "new_session_in");
+    let open = source("app/sessions/open.rs");
+    let new = fn_body(&open, "new_session_in");
     assert!(new.contains("self.drop_pending_ask()"), "an early return drops the draft");
     assert!(
-        lifecycle.contains("self.key_pending_ask("),
+        open.contains("self.key_pending_ask("),
         "every open path keys the draft to its session"
     );
-    let activate = fn_body(&lifecycle, "activate");
+    let activate = fn_body(&open, "activate");
     assert!(
         activate.contains("ask.target.as_deref() == Some(session_id.as_str())"),
         "only the keyed session's landing takes the question"
@@ -273,9 +273,9 @@ fn held_session_tab_clears_everywhere() {
     let row = fn_body(&browser, "activate_omnibox_target");
     assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and clears)");
     assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
-    let lifecycle = source("app/lifecycle.rs");
+    let open = source("app/sessions/open.rs");
     assert!(
-        fn_body(&lifecycle, "new_session_in").contains("browse_session_tab = None"),
+        fn_body(&open, "new_session_in").contains("browse_session_tab = None"),
         "a new session clears it even without a mode switch"
     );
     let projects = source("project_menu.rs");

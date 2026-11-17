@@ -90,7 +90,7 @@ use crate::right;
 use crate::shot::CaptureToken;
 use crate::session::{self, Draft, SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
-use crate::sessions::{self, SessionMeta};
+use crate::sessions::SessionMeta;
 use crate::projects::{self, Project, Projects};
 use crate::app::list::ListCache;
 use aui::nav::{sidebar_list_state, SidebarRow};
@@ -566,7 +566,7 @@ mod browser_chat;
 mod registry;
 mod browser_handoff;
 mod find;
-pub(crate) mod lifecycle;
+pub(crate) mod sessions;
 mod list;
 mod peek_split;
 mod titles;
@@ -776,11 +776,12 @@ pub struct Harness {
     /// refcount instead of a 2,600-row clone on the UI thread (speed S4).
     pub(crate) index: std::sync::Arc<HashMap<String, IndexEntry>>,
     pub(crate) active: Option<Entity<SessionView>>,
-    /// The session the UI is pointed at: the sidebar click's target, set the
-    /// moment `resume` runs. The centre swaps synchronously, so this usually
-    /// names the active view — but the row highlights and the header label
-    /// read it, never the view, so the click is acknowledged on its own frame.
-    pub(crate) pending_id: Option<String>,
+    /// Opening, switching to and replacing sessions, and the drafts
+    /// with no row yet: the state machine [`sessions`] drives.
+    pub(crate) open_state: sessions::OpenState,
+    /// The handoff runs, the destination open in flight and the
+    /// confirm dialog (H2).
+    pub(crate) handoff_state: sessions::HandoffState,
     /// The pending "ensure visible" row id (`scrollIntoView({ block:
     /// "nearest" })` semantics). Set only by
     /// outside-the-sidebar activations — the palette, New session / `+`,
@@ -852,33 +853,6 @@ pub struct Harness {
     /// Provider prompts a browser chat already accepted for its own
     /// browser tools (each once).
     pub(crate) auto_accepted: std::collections::HashSet<String>,
-    /// One unsent draft session per project, by project id: what ⌘N returns
-    /// to while nothing has been sent. A draft has no sidebar row; the entry
-    /// leaves the map the moment its first turn is accepted (`turn/started`).
-    pub(crate) drafts: HashMap<String, String>,
-    /// New sessions with no project to name them in `drafts` (an unadopted
-    /// root, a provider open with nowhere current): unsent all the same,
-    /// so no row until their first turn starts, which forgets them here.
-    pub(crate) unsent: HashSet<String>,
-    /// Sessions whose turn this window admitted (a send landed as
-    /// `ProviderTurnAccepted`) since launch. Only their settles are live
-    /// activity that moves a row's time: every other settle is a reopen
-    /// replaying history, and opening a session never moves its row.
-    pub(crate) turns_admitted: HashSet<String>,
-    /// A draft taken from another project's session, waiting for the picked
-    /// project's draft session to exist so it can be moved in. Set by the
-    /// project menu's retarget, consumed by `new_session_in`.
-    pub(crate) pending_draft: Option<Draft>,
-    /// `(session id, root)` for a session started outside any project, held
-    /// from `session/start` until the sessions list carries its row.
-    ///
-    /// A session with no project is the one case where nothing else knows
-    /// where it lives: `current_project` is deliberately not set, so
-    /// `session_workspace` would fall back to the launch directory for a row
-    /// it cannot find yet — which on a bundle opened from Finder is `/`.
-    /// The header would name the wrong place and the `@` picker would walk
-    /// the whole disk to fill itself.
-    pub(crate) starting_root: Option<(String, String)>,
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
@@ -1172,7 +1146,7 @@ pub struct Harness {
     pub(crate) tier_retry_timer: Option<gpui::Task<()>>,
     /// Baaz's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
-    pub(crate) overrides: sessions::Overrides,
+    pub(crate) overrides: crate::sessions::Overrides,
     /// The local record of provider-lane sessions: which provider serves
     /// each, where it ran, and when it last moved. `session/list` never
     /// names these sessions, so without this the sidebar forgets them on
@@ -1362,93 +1336,6 @@ pub struct Harness {
     /// "Ask Muse to write one" (A5) arms this: the next activated session
     /// opens with the `/create-skill ` draft, never sent.
     pub(crate) pending_create_skill: bool,
-    /// A `new:` step's session is still opening: its `session/start`
-    /// round-trip lands after the following steps would run. Session verbs
-    /// wait for the switch (bounded) instead of acting on the session that
-    /// is still open; any activation clears it.
-    pub(crate) session_switch_pending: bool,
-    /// New muse sessions whose view opened on the click while their
-    /// `session/start` is still on the wire. Not a switch — nothing waits
-    /// on them but the scripted session verbs (see
-    /// [`Self::session_opening`]), so a second "New session" elsewhere is
-    /// never swallowed behind a slow start.
-    pub(crate) starts_in_flight: HashSet<String>,
-    /// Which provider open the app asked for last: every `open_on_provider`
-    /// / reopen / fork call bumps this and carries its value into the
-    /// background work, and `finish_provider_open` lands only the current
-    /// one — a late-finishing earlier open never steals focus or the send.
-    /// Scripted (synchronous) opens bump it too, so the count also tells
-    /// how many children one action spawned.
-    /// Z4: a provider open that failed after the click already moved. The
-    /// window sits on the failed session with an inline failure instead of
-    /// another session's transcript: `active` is None while this stands —
-    /// the previous view parks in the registry like any switch away —
-    /// and the next successful activation clears it. `session_id` is the
-    /// clicked session for a reopen, `None` for a fresh open that never
-    /// earned an id.
-    pub(crate) provider_open_error: Option<LaunchFailure>,
-    pub(crate) provider_open_epoch: u64,
-    /// Set by quit ([`Self::shutdown_provider_views`]): a provider draft's
-    /// open still on the background executor hangs its child up the
-    /// moment it answers, instead of handing it to a window that is going
-    /// away.
-    pub(crate) provider_opens_cancelled: Arc<std::sync::atomic::AtomicBool>,
-    /// A one-shot: the next `finish_provider_open` lands its view with the
-    /// disabled-provider banner instead of a live child start having
-    /// happened (set when opening on a disabled provider, which routes
-    /// through the scripted lane).
-    pub(crate) pending_disabled_notice: Option<ProviderId>,
-    /// The one `new_session` a provider switch is allowed to start while a
-    /// switch is still pending: `SwitchProvider`
-    /// close the old view synchronously but start its replacement on a
-    /// task, so they claim the next start up front — any other `new` while
-    /// a switch is in flight is a duplicate and starts nothing. The claim
-    /// carries the switch epoch that stamped it, so a superseded switch's
-    /// still-queued task cannot steal its replacement's claim.
-    pub(crate) switch_claim: Option<(String, u64)>,
-    /// Switch generation (Y2b2): bumped on every `SwitchProvider` start
-    /// and on every cancellation. The switch's open carries the value, and
-    /// only an open whose epoch is still current may `close_replaced` and
-    /// activate as the switch result — anything the person does meanwhile
-    /// cancels the switch (bumping this) and the stale open is discarded.
-    pub(crate) switch_epoch: u64,
-    /// The view a provider switch is replacing (Y2b): the old session id,
-    /// kept active and drawn — composer locked, chip already on the pick —
-    /// until the replacement activates in the same update. `None` outside
-    /// a switch.
-    pub(crate) replacing: Option<String>,
-    /// The old view's provider, to restore the chip when the open fails.
-    pub(crate) replacing_provider: Option<String>,
-    /// The drafts-map project that named the replaced view, to restore it
-    /// when the open fails.
-    pub(crate) replacing_draft_project: Option<String>,
-    /// The switch epoch stamped when `replacing` was set: `activate` only
-    /// honours the marker while it still matches `switch_epoch`, so a view
-    /// that lands after a cancel or a superseding switch never closes a
-    /// view it did not replace. `None` outside a switch, like `replacing`.
-    pub(crate) replacing_epoch: Option<u64>,
-    /// The replaced draft's approval mode and effort, which the switch's
-    /// replacement draft takes when it is drawn. `None` outside a switch.
-    pub(crate) switch_carry: Option<(aui_protocol::PermissionMode, Option<aui_protocol::ReasoningEffort>)>,
-    /// One handoff run per source session: the machine in
-    /// [`crate::handoff`]. The source view mirrors the run's card; this
-    /// map is the authority the ack and cancel paths advance.
-    pub(crate) handoffs: HashMap<String, crate::handoff::HandoffRun>,
-    /// Owner-epoch counter for handoffs: every request bumps it and
-    /// carries the value, so an event from a superseded epoch is ignored
-    /// rather than applied to a newer run.
-    pub(crate) handoff_epoch: u64,
-    /// The destination open in flight for a handoff: consumed when the
-    /// fresh session lands, then the pack submits onto it.
-    pub(crate) pending_handoff: Option<crate::handoff::PendingHandoff>,
-    /// The confirm dialog's frozen facts, held while it is open.
-    pub(crate) handoff_confirm: Option<crate::handoff::HandoffConfirmState>,
-    /// Whether the boot session has been attempted: [`Harness::ensure_boot_session`]
-    /// opens `--session`/`--send`/`--steps`' first session without waiting
-    /// for `session/list`, at most once — a failed attempt must not retry on
-    /// every frame, and a later list reply must not open a second session
-    /// beside it (see [`Harness::open_boot_session`]'s own guard).
-    pub(crate) boot_session_attempted: bool,
     /// The project being renamed through the header's rename field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
@@ -1667,7 +1554,8 @@ impl Harness {
             chain_index_builds: std::cell::Cell::new(0),
             index: std::sync::Arc::new(HashMap::new()),
             active: None,
-            pending_id: None,
+            open_state: sessions::OpenState::default(),
+            handoff_state: sessions::HandoffState::default(),
             reveal: None,
             reveal_unknown: None,
             sidebar_pane,
@@ -1690,11 +1578,6 @@ impl Harness {
             task_done_at: std::collections::HashMap::new(),
             task_done_timer: None,
             auto_accepted: std::collections::HashSet::new(),
-            drafts: HashMap::new(),
-            unsent: HashSet::new(),
-            turns_admitted: HashSet::new(),
-            pending_draft: None,
-            starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
             resize: ResizeDrag::restored(restored),
@@ -1769,7 +1652,7 @@ impl Harness {
             tier_probing: false,
             tier_retry: Default::default(),
             tier_retry_timer: None,
-            overrides: sessions::Overrides::new(),
+            overrides: crate::sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
             migration_paths_expanded: false,
             migration_cache: None,
@@ -1812,24 +1695,6 @@ impl Harness {
             skills_new_name: skills_new_name.clone(),
             skills_new_desc: skills_new_desc.clone(),
             pending_create_skill: false,
-            session_switch_pending: false,
-            starts_in_flight: HashSet::new(),
-            provider_open_error: None,
-            provider_open_epoch: 0,
-            provider_opens_cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            pending_disabled_notice: None,
-            switch_claim: None,
-            switch_epoch: 0,
-            replacing: None,
-            replacing_provider: None,
-            replacing_draft_project: None,
-            replacing_epoch: None,
-            switch_carry: None,
-            handoffs: HashMap::new(),
-            handoff_epoch: 0,
-            pending_handoff: None,
-            handoff_confirm: None,
-            boot_session_attempted: false,
             renaming_project: None,
             project_colour_open: false,
             overflow_bounds: None,
@@ -2040,7 +1905,7 @@ impl Harness {
                 _ => {}
             }
         }));
-        this.overrides = sessions::read();
+        this.overrides = crate::sessions::read();
         // A damaged store was set aside while booting, or a background write
         // fails later: one toast each (docs/81 A F8, F9). The wake channel
         // is closed in tests, like the status wake: those call
@@ -4511,7 +4376,7 @@ impl Harness {
         // The click's target, from the list entry — never the view, so the
         // header answers on the click's own frame, before any page arrives.
         let target =
-            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+            self.open_state.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
         // One identity per chain: header, window and selection all resolve
         // the raw id to its head, and the collapsed view row names it —
         // the same label the sidebar's one row wears (Y2a, Y2a3).
@@ -4524,7 +4389,7 @@ impl Harness {
             // starts, before any list) still names itself, as its row will.
             target.as_deref().and_then(|id| {
                 self.collapsed_head_label(id, cx)
-                    .or_else(|| self.drafts.values().any(|d| d == id).then(|| sidebar::UNNAMED.to_owned()))
+                    .or_else(|| self.open_state.names_draft(id).then(|| sidebar::UNNAMED.to_owned()))
             })
         }
     }
@@ -4743,19 +4608,19 @@ impl Harness {
     /// destination's loading state — never the previous session's transcript
     /// or composer draft. Muse opens already swap synchronously with
     /// `mark_history_loading`, so this only ever names a provider reopen
-    /// whose child is still resuming; `replacing` (in-place provider
+    /// whose child is still resuming; a marked replace (in-place provider
     /// switch) and the inline failure keep their own views.
     pub(crate) fn pending_switch_dest(&self, cx: &gpui::App) -> Option<String> {
-        if !self.session_switch_pending {
+        if !self.open_state.switch_pending {
             return None;
         }
-        if self.replacing.is_some() {
+        if self.open_state.is_replacing() {
             return None;
         }
-        if self.provider_open_error.is_some() {
+        if self.open_state.provider_open_error.is_some() {
             return None;
         }
-        let dest = self.pending_id.clone()?;
+        let dest = self.open_state.pending_id.clone()?;
         if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == dest) {
             return None;
         }
@@ -5505,7 +5370,7 @@ impl Harness {
                     }))
                     .into_any_element()
             }
-            None => match self.provider_open_error.clone() {
+            None => match self.open_state.provider_open_error.clone() {
                 // Z4: the failed session's own place — never another
                 // session's transcript behind a dialog.
                 Some(failure) => self.render_provider_open_error(window, cx, &failure),
@@ -5799,7 +5664,7 @@ impl Harness {
     /// open (`provider_open_work`) is told to hang the child up as soon as
     /// it answers, on the background thread, so no window is needed.
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
-        self.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.open_state.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
         self.registry.shutdown_all(self.active.as_ref(), cx);
     }
@@ -8161,7 +8026,7 @@ mod tests {
         // A `new` refused by a switch already in flight drops the draft:
         // no session gets it.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| h.session_switch_pending = true);
+            baaz.update(cx, |h, _| h.open_state.switch_pending = true);
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("a second question", window, cx)));
         vc.update(|_, cx| {

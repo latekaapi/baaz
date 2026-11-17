@@ -96,10 +96,10 @@ fn switch_project_palette_route_stays() {
         composer.contains("Command::Project => cx.emit(SessionEvent::Projects)"),
         "the command still emits its event"
     );
-    let lifecycle = source("app/lifecycle.rs");
-    assert!(lifecycle.contains("SessionEvent::Projects"), "the event is still handled");
+    let events = source("app/sessions/events.rs");
+    assert!(events.contains("SessionEvent::Projects"), "the event is still handled");
     assert!(
-        lifecycle.contains("this.open_projects(false, window, cx)"),
+        events.contains("this.open_projects(false, window, cx)"),
         "the event still opens the Projects palette"
     );
     let dialogs = source("dialogs.rs");

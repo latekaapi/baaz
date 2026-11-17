@@ -608,7 +608,7 @@ impl Harness {
             other => return Err(format!("no failure kind `{other}`")),
         };
         self.active = None;
-        self.provider_open_error = Some(crate::app::LaunchFailure {
+        self.open_state.provider_open_error = Some(crate::app::LaunchFailure {
             session_id: None,
             provider,
             kind,
@@ -1133,7 +1133,7 @@ pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Wind
 /// open session. `wait:` counts as window-only: it touches nothing.
 ///
 /// This is what lets an offline capture script the window with no session
-/// open. See [`crate::app::lifecycle::steps_ready_for`].
+/// open. See [`crate::app::sessions::steps_ready_for`].
 pub(crate) fn all_window_steps(steps: &[String]) -> bool {
     !steps.is_empty()
         && steps.iter().all(|step| {
@@ -1164,7 +1164,7 @@ fn is_session_step(step: &str) -> bool {
 /// `new` (bare or `new:<project>`). The boot session must not start one
 /// eagerly ahead of it — boot plus the head's own `new` opened two sessions
 /// (two `provider lane open` lines, two sidebar rows) for one action.
-/// See [`crate::app::lifecycle::boot_decision`].
+/// See [`crate::app::sessions::boot_decision`].
 pub(crate) fn steps_begin_with_new(steps: &[String]) -> bool {
     match steps.first() {
         None => false,

@@ -134,7 +134,7 @@ impl Harness {
     pub(crate) fn close_dialog(&mut self, cx: &mut Context<Self>) {
         // The handoff confirm's facts leave with it: dismissing any other
         // way confirms nothing afterwards.
-        self.handoff_confirm = None;
+        self.handoff_state.confirm = None;
         self.overlays.update(cx, |overlays, _| overlays.dialog = None);
         cx.notify();
     }
@@ -1181,7 +1181,7 @@ impl Harness {
     /// other dialog uses. Cancel closes it (the frozen facts leave with
     /// it); Hand off starts the run.
     fn render_handoff_confirm(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.handoff_confirm.clone()?;
+        let state = self.handoff_state.confirm.clone()?;
         let confirm = self.main_listener(cx, |this: &mut Self, _: &(), window, cx| this.confirm_handoff(window, cx));
         let close = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
@@ -1884,7 +1884,7 @@ mod tests {
         let (pending, drafts, header, row) = vc.update(|_, cx| {
             let b = baaz.read(cx);
             let id = b.active.as_ref().map(|v| v.read(cx).session_id.clone()).expect("the replay is open");
-            (b.pending_id.clone(), b.drafts.len(), b.collapsed_head_label(&b.chain_head(&id), cx), b.sessions.first().map(|r| r.label.clone()))
+            (b.open_state.pending_id.clone(), b.open_state.drafts.len(), b.collapsed_head_label(&b.chain_head(&id), cx), b.sessions.first().map(|r| r.label.clone()))
         });
         assert_eq!(pending, None, "nothing is opening over the replay");
         assert_eq!(drafts, 0, "no draft was made for the steps");

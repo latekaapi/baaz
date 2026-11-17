@@ -401,7 +401,7 @@ impl Harness {
     /// down, so in practice this only ever holds while Checkpointed —
     /// but the flag, not the state, is the guard.
     pub(crate) fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
-        self.handoffs.get(source).is_some_and(|run| {
+        self.handoff_state.runs.get(source).is_some_and(|run| {
             run.epoch == epoch
                 && run.summarising
                 && matches!(
@@ -428,7 +428,7 @@ impl Harness {
         harvested: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
+        let Some(mut run) = self.handoff_state.runs.get(&source).cloned() else { return };
         if run.epoch != epoch || !run.summarising {
             return;
         }
@@ -436,7 +436,7 @@ impl Harness {
             Some(text) => run.apply_model_summary(text),
             None => run.note_summary_fallback(),
         }
-        self.handoffs.insert(source.clone(), run);
+        self.handoff_state.runs.insert(source.clone(), run);
         self.refresh_handoff_card(&source, cx);
         cx.notify();
     }
@@ -472,7 +472,7 @@ impl Harness {
     /// is: the destination opens beside the summary wait, so the source
     /// is usually parked (or retired) when the wait settles.
     fn refresh_handoff_card(&mut self, source: &str, cx: &mut Context<Self>) {
-        let Some(run) = self.handoffs.get(source) else { return };
+        let Some(run) = self.handoff_state.runs.get(source) else { return };
         let card = run.card();
         let card_id = run.card_id.clone();
         if let Some(view) = self.find_view(source, cx) {
@@ -499,7 +499,7 @@ impl Harness {
     /// means the chain ends here with no timer left behind.
     fn handoff_tick(&mut self, source: &str, epoch: u64, cx: &mut Context<Self>) {
         let live =
-            self.handoffs.get(source).is_some_and(|run| run.epoch == epoch && run.is_live());
+            self.handoff_state.runs.get(source).is_some_and(|run| run.epoch == epoch && run.is_live());
         if !live {
             return;
         }

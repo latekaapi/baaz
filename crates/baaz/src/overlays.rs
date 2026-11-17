@@ -57,7 +57,7 @@ pub enum DialogAction {
     /// its still-running command (D52).
     CloseTerminalTab,
     /// Start the handoff the dialog previews: the facts ride on the
-    /// application (`Harness::handoff_confirm`), not on this action, so
+    /// application (`HandoffState::confirm`), not on this action, so
     /// dismissing any other way confirms nothing.
     HandoffConfirm,
     /// Sign out of the provider in `archive_target` (its wire id): a

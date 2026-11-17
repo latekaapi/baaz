@@ -620,10 +620,10 @@ impl Harness {
 
     /// `--login-steps` and `--steps`, taken out of the arguments so a later
     /// re-probe or refresh cannot replay them. Drains through the same
-    /// [`crate::app::lifecycle::drain_steps`] as `--steps`: the first caller
+    /// [`crate::app::sessions::drain_steps`] as `--steps`: the first caller
     /// gets the script, every later caller gets nothing.
     pub(crate) fn take_login_steps(&mut self) -> Vec<String> {
-        crate::app::lifecycle::drain_steps(&mut self.args.login_steps)
+        crate::app::sessions::drain_steps(&mut self.args.login_steps)
     }
 
     /// `key-from-env:<VAR>`: put the value of an environment variable into
