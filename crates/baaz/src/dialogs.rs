@@ -843,7 +843,7 @@ impl Harness {
         });
         // No `＋` bounds yet: no menu this frame (the button is drawn
         // whenever the pane is, so the notify lands next frame).
-        let Some(trigger) = self.right_cache.views_menu_seat else {
+        let Some(trigger) = self.right_pane.read(cx).cache.views_menu_seat else {
             cx.notify();
             return None;
         };

@@ -12,6 +12,7 @@ use aui_icons::IconName;
 use gpui::{div, prelude::*, AnyElement, ClipboardItem, Context, IntoElement, SharedString, Window};
 
 use crate::app::Harness;
+use crate::right_pane::RightPane;
 
 /// Where a full output's lines come from.
 #[derive(Clone, Debug)]
@@ -101,23 +102,11 @@ impl Harness {
     /// Push `view` on the screen the pane shows (opening the pane on its
     /// last screen when closed).
     pub(crate) fn push_right_view(&mut self, view: Pushed, cx: &mut Context<Self>) {
-        let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
         if !crate::layout::Layout::get(cx).right_open {
+            let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
             self.select_right(kind, cx);
         }
-        let screen = crate::right::screen_index(kind);
-        self.right_cache.pushed.insert(screen, view);
-        self.right_cache.pushed_at.insert(screen, Instant::now());
-        cx.notify();
-    }
-
-    /// Pop the view pushed on `screen`; true when one was there.
-    pub(crate) fn pop_right_view(&mut self, screen: usize, cx: &mut Context<Self>) -> bool {
-        let popped = self.right_cache.pushed.remove(&screen).is_some();
-        if popped {
-            cx.notify();
-        }
-        popped
+        self.with_right_pane(cx, |pane, cx| pane.push_view(view, cx));
     }
 
     /// A shell card's full output (docs/43 §2.9): the card's lines at once,
@@ -138,12 +127,44 @@ impl Harness {
         );
     }
 
+    /// An image file or attachment in the image view.
+    pub(crate) fn show_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let facts = std::fs::metadata(&path).ok().and_then(|meta| {
+            let (w, h) = image_size(&path)?;
+            let kind = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            Some((w, h, kind, meta.len()))
+        });
+        self.push_right_view(Pushed::Image(ImagePush { name, path, facts, actual: false }), cx);
+    }
+}
+
+impl RightPane {
+    /// Push `view` on the screen the pane shows.
+    pub(crate) fn push_view(&mut self, view: Pushed, cx: &mut Context<Self>) {
+        let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
+        let screen = crate::right::screen_index(kind);
+        self.cache.pushed.insert(screen, view);
+        self.cache.pushed_at.insert(screen, Instant::now());
+        cx.notify();
+    }
+
+    /// Pop the view pushed on `screen`; true when one was there.
+    pub(crate) fn pop_right_view(&mut self, screen: usize, cx: &mut Context<Self>) -> bool {
+        let popped = self.cache.pushed.remove(&screen).is_some();
+        if popped {
+            cx.notify();
+        }
+        popped
+    }
+
     /// Keep pushed output views current: a fetch that landed, a command
-    /// still printing. Reads the active session view; called before render.
+    /// still printing. Reads the active session view; called from the
+    /// pane's render.
     pub(crate) fn sync_pushed_outputs(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
+        let Some(view) = self.facts.session.clone() else { return };
         let session = view.read(cx).session_id.clone();
-        for pushed in self.right_cache.pushed.values_mut() {
+        for pushed in self.cache.pushed.values_mut() {
             let Pushed::Output(out) = pushed else { continue };
             let Some((sid, block)) = out.source.clone() else { continue };
             if sid != session {
@@ -169,7 +190,7 @@ impl Harness {
 
     /// The pre-commit hook's output as a full-output view on Changes.
     pub(crate) fn show_hook_output(&mut self, _root: &std::path::Path, lines: Vec<String>, cx: &mut Context<Self>) {
-        self.push_right_view(
+        self.push_view(
             Pushed::Output(OutputPush {
                 command: "git commit".into(),
                 exit: Some(1),
@@ -181,22 +202,11 @@ impl Harness {
             cx,
         );
     }
-
-    /// An image file or attachment in the image view.
-    pub(crate) fn show_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let facts = std::fs::metadata(&path).ok().and_then(|meta| {
-            let (w, h) = image_size(&path)?;
-            let kind = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-            Some((w, h, kind, meta.len()))
-        });
-        self.push_right_view(Pushed::Image(ImagePush { name, path, facts, actual: false }), cx);
-    }
 }
 
 /// The pushed view's row and body for `screen`, when one is pushed.
-pub(crate) fn pushed_screen(screen: usize, view: &Pushed, window: &mut Window, cx: &mut Context<Harness>) -> (AnyElement, AnyElement) {
-    let back = cx.listener(move |this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
+pub(crate) fn pushed_screen(screen: usize, view: &Pushed, window: &mut Window, cx: &mut Context<RightPane>) -> (AnyElement, AnyElement) {
+    let back = cx.listener(move |this: &mut RightPane, _: &gpui::ClickEvent, _, cx| {
         this.pop_right_view(screen, cx);
     });
     match view {
@@ -242,8 +252,8 @@ pub(crate) fn pushed_screen(screen: usize, view: &Pushed, window: &mut Window, c
             let body = match image.facts.clone() {
                 Some((w, h, kind, bytes)) => {
                     let facts = image_facts(w, h, &kind, bytes);
-                    let toggle = cx.listener(move |this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
-                        if let Some(Pushed::Image(i)) = this.right_cache.pushed.get_mut(&screen) {
+                    let toggle = cx.listener(move |this: &mut RightPane, _: &gpui::ClickEvent, _, cx| {
+                        if let Some(Pushed::Image(i)) = this.cache.pushed.get_mut(&screen) {
                             i.actual = !i.actual;
                         }
                         cx.notify();

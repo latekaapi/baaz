@@ -663,44 +663,25 @@ impl Harness {
 /// route, so the wire stays behind this seam.
 impl Harness {
     /// Draft on Muse: one completion in a hidden side session; the answer
-    /// lands where the person has not typed.
+    /// lands in the right pane ([`crate::right_pane::RightPane::land_draft`])
+    /// where the person has not typed.
     pub(crate) fn draft_on_muse(&mut self, root: &std::path::Path, kind: crate::right_changes::DraftKind, prompt: String, cx: &mut Context<Self>) {
         let muse_id = crate::providers::ProviderId::Muse;
         let Some(muse) = self.muse_side(muse_id, "baaz draft", cx) else {
-            self.draft_failed(root, kind, cx);
+            self.right_pane.update(cx, |pane, cx| pane.land_draft(root, kind, None, cx));
             return;
         };
         let root = root.to_path_buf();
         let work = move || crate::utility::complete(muse_id, None, &prompt, Some(muse));
         self.wire_call(cx, work, move |this, reply, cx| {
-            this.draft_failed(&root, kind, cx);
             let text = match reply {
-                Ok(text) => crate::right_changes::clean_draft(&text),
+                Ok(text) => Some(text),
                 Err(reason) => {
                     crate::baaz_log!("draft on Muse failed: {reason}");
-                    return;
+                    None
                 }
             };
-            if text.is_empty() {
-                return;
-            }
-            match kind {
-                crate::right_changes::DraftKind::Commit => {
-                    let ui = this.changes_ui(&root);
-                    if !ui.message_edited && ui.message.trim().is_empty() {
-                        ui.message = text;
-                    }
-                }
-                crate::right_changes::DraftKind::PrBody => {
-                    if let Some(form) = this.changes_ui(&root).form.as_ref() {
-                        let body = form.body.clone();
-                        if body.read(cx).value().is_empty() {
-                            this.pending_pr_body = Some((body, text));
-                        }
-                    }
-                }
-            }
-            cx.notify();
+            this.right_pane.update(cx, |pane, cx| pane.land_draft(&root, kind, text, cx));
         });
     }
 

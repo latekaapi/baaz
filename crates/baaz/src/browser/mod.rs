@@ -750,7 +750,7 @@ impl Harness {
             gpui::px(0.0)
         };
         let right = if crate::layout::Layout::get(cx).right_open {
-            gpui::px(self.right_resize.width)
+            gpui::px(self.right_width(cx))
         } else {
             gpui::px(0.0)
         };
@@ -804,7 +804,7 @@ impl Harness {
         // it inside the column.
         if !self.settings_open() {
             let sidebar = if crate::layout::Layout::get(cx).sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
-            let mut right = if crate::layout::Layout::get(cx).right_open { gpui::px(self.right_resize.width) } else { gpui::px(0.0) };
+            let mut right = if crate::layout::Layout::get(cx).right_open { gpui::px(self.right_width(cx)) } else { gpui::px(0.0) };
             // The docked agent column takes its strip beside the page (R3):
             // the page gives it up rather than sitting under it (the card
             // window puts the column 6 past the page's right edge).
@@ -2314,9 +2314,10 @@ impl Harness {
         let frame_live = browser_visible(BrowserVisibility {
             session_active: true,
             ..base
-        }) && !self.right_strip_moving
-            // D6: no page yet / couldn't load draw Baaz's own state there.
-            && !self.pane_page_covered(cx);
+        // D6: while the strip slides, and where the Page screen draws
+        // Baaz's own state (no page yet, couldn't load, a pushed view), the
+        // pane covers its page (the region contract's `covers_page`).
+        }) && !crate::region::Region::covers_page(self.right_pane.read(cx), cx);
         // B2a-H2b: in Browse the pane never shows a page — one tab, one
         // page — so the session page can neither share the centre's tab
         // nor paint behind the mode. The render path shows the Changes
@@ -2548,7 +2549,7 @@ impl Harness {
         let content = window_content_bounds(window);
         // The live page sits under the pane's tab row and nav row: a press
         // on either is outside the page and takes the keyboard back too.
-        let page = browser_page_bounds(content, gpui::px(self.right_resize.width));
+        let page = browser_page_bounds(content, gpui::px(self.right_width(cx)));
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
             event.position,

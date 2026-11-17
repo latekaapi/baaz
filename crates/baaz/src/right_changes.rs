@@ -25,6 +25,7 @@ use gpui_kit::base::input::{InputState, TextareaState};
 use gpui_kit::component::input::Textarea;
 
 use crate::app::Harness;
+use crate::right_pane::{RightPane, RightPaneEvent};
 use crate::git_ops::{self, CommitOutcome, GitTree, PullRequest};
 
 /// The clean state's lift above centre, clear of the commit foot.
@@ -174,20 +175,20 @@ fn default_of(ui: &ChangesUi) -> &str {
     ui.default_branch.as_deref().unwrap_or("main")
 }
 
-impl Harness {
+impl RightPane {
     /// The Changes state for `root`, reset when the root moved.
     pub(crate) fn changes_ui(&mut self, root: &Path) -> &mut ChangesUi {
-        if self.right_cache.changes.root.as_deref() != Some(root) {
-            self.right_cache.changes = ChangesUi { root: Some(root.to_path_buf()), ..ChangesUi::default() };
+        if self.cache.changes.root.as_deref() != Some(root) {
+            self.cache.changes = ChangesUi { root: Some(root.to_path_buf()), ..ChangesUi::default() };
         }
-        &mut self.right_cache.changes
+        &mut self.cache.changes
     }
 
     /// After a snapshot lands for `root`: keep the box's facts fresh — the
     /// default branch once, the unpushed count, the PR on its poll, a draft
     /// for a new change set. Every read runs in the background.
     pub(crate) fn changes_after_snapshot(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(Some(tree)) = self.right_cache.git_for(root) else { return };
+        let Some(Some(tree)) = self.cache.git_for(root) else { return };
         let root_buf = root.to_path_buf();
         let ui = self.changes_ui(root);
         let need_default = ui.default_branch.is_none();
@@ -230,14 +231,17 @@ impl Harness {
     }
 
     /// Draft the commit message once per change set on the session's own
-    /// utility model (owner 2026-10-17), never over the person's words.
+    /// utility model (owner 2026-10-17), never over the person's words. The
+    /// pane marks the set and asks the root
+    /// ([`RightPaneEvent::CommitDraftWanted`]), which holds the session's
+    /// title and model and runs the completion
+    /// ([`Harness::draft_commit_for_pane`]).
     fn maybe_draft_commit(&mut self, root: &Path, tree: &GitTree, cx: &mut Context<Self>) {
         if tree.files.is_empty() {
             return;
         }
         let key = change_set_key(&tree.files);
-        let provider = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
-        let title = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
+        let provider = self.facts.provider;
         let ui = self.changes_ui(root);
         // A draft that the person never touched follows the change set: a
         // new set re-drafts over it (live 2026-10-19: "Commit 3 files" under
@@ -260,44 +264,36 @@ impl Harness {
         let Some(provider) = provider else { return };
         ui.message.clear();
         ui.drafted_for = Some(key);
-        let prompt = commit_prompt(title.as_deref(), &tree.files);
-        if !crate::utility::supports(provider) {
-            if provider.completes_in_side_session() {
-                self.changes_ui(root).drafting = true;
-                self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
-            }
+        if !crate::utility::supports(provider) && !provider.completes_in_side_session() {
             return;
         }
-        let ui = self.changes_ui(root);
         ui.drafting = true;
-        let root = root.to_path_buf();
-        let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
-        cx.spawn(async move |this, cx| {
-            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt, None) }).await;
-            if std::env::var("BAAZ_DRAFT_TRACE").as_deref() == Ok("1") {
-                eprintln!("baaz: draft reply {:?}", reply.as_ref().map(|t| t.chars().take(120).collect::<String>()));
-            }
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                let ui = this.changes_ui(&root);
+        cx.emit(RightPaneEvent::CommitDraftWanted { root: root.to_path_buf(), files: tree.files.clone() });
+    }
+
+    /// A commit or PR draft came back (or failed, `None`): the box stops
+    /// drafting, and the text lands where the person has not typed.
+    pub(crate) fn land_draft(&mut self, root: &Path, kind: DraftKind, text: Option<String>, cx: &mut Context<Self>) {
+        let text = text.map(|text| clean_draft(&text)).filter(|text| !text.is_empty());
+        match kind {
+            DraftKind::Commit => {
+                let ui = self.changes_ui(root);
                 ui.drafting = false;
-                if let Ok(text) = reply {
-                    let text = clean_draft(&text);
-                    if !ui.message_edited && ui.message.trim().is_empty() && !text.is_empty() {
+                if let Some(text) = text {
+                    if !ui.message_edited && ui.message.trim().is_empty() {
                         ui.message = text;
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn draft_failed(&mut self, root: &Path, kind: DraftKind, cx: &mut Context<Self>) {
-        match kind {
-            DraftKind::Commit => self.changes_ui(root).drafting = false,
+            }
             DraftKind::PrBody => {
                 if let Some(form) = self.changes_ui(root).form.as_mut() {
                     form.drafting = false;
+                    if let Some(text) = text {
+                        let body = form.body.clone();
+                        if body.read(cx).value().is_empty() {
+                            self.pending_pr_body = Some((body, text));
+                        }
+                    }
                 }
             }
         }
@@ -306,15 +302,15 @@ impl Harness {
 
     /// Toggle one row's diff, reading it the first time it opens.
     pub(crate) fn toggle_change_row(&mut self, root: &Path, change: &FileChange, cx: &mut Context<Self>) {
-        let open = self.right_cache.flip_changes_file(root, &change.path);
-        if open && !self.right_cache.file_diffs.contains_key(&change.path) {
+        let open = self.cache.flip_changes_file(root, &change.path);
+        if open && !self.cache.file_diffs.contains_key(&change.path) {
             self.load_file_diff(root, change.clone(), cx);
         }
         cx.notify();
     }
 
     fn load_file_diff(&mut self, root: &Path, change: FileChange, cx: &mut Context<Self>) {
-        self.right_cache.file_diffs.insert(change.path.clone(), None);
+        self.cache.file_diffs.insert(change.path.clone(), None);
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let path = change.path.clone();
@@ -326,9 +322,9 @@ impl Harness {
             };
             let _ = this.update(cx, |this: &mut Self, cx| {
                 if let Some(diff) = diff {
-                    this.right_cache.file_diffs.insert(path, Some(Arc::new(diff)));
+                    this.cache.file_diffs.insert(path, Some(Arc::new(diff)));
                 } else {
-                    this.right_cache.file_diffs.remove(&path);
+                    this.cache.file_diffs.remove(&path);
                 }
                 cx.notify();
             });
@@ -339,9 +335,9 @@ impl Harness {
     /// Diffs for rows already open when the tree re-read (their reads were
     /// dropped as stale).
     pub(crate) fn reload_open_diffs(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(Some(tree)) = self.right_cache.git_for(root) else { return };
-        for path in self.right_cache.changes_expanded_for(root) {
-            if !self.right_cache.file_diffs.contains_key(&path) {
+        let Some(Some(tree)) = self.cache.git_for(root) else { return };
+        for path in self.cache.changes_expanded_for(root) {
+            if !self.cache.file_diffs.contains_key(&path) {
                 if let Some(change) = tree.change(&path).cloned() {
                     self.load_file_diff(root, change, cx);
                 }
@@ -360,7 +356,7 @@ impl Harness {
                 cx.background_executor().spawn(async move { git_ops::read_lines(&root, &p, range) }).await
             };
             let _ = this.update(cx, |this: &mut Self, cx| {
-                this.right_cache.gap_lines.insert((path, i), Arc::new(lines));
+                this.cache.gap_lines.insert((path, i), Arc::new(lines));
                 cx.notify();
             });
         })
@@ -400,12 +396,8 @@ impl Harness {
     /// ([`commit_set`]) with the message — never the rest of the tree.
     pub(crate) fn commit_changes(&mut self, root: &Path, cx: &mut Context<Self>) {
         self.settle_commit_message(root, cx);
-        let session_edits: Vec<String> = self
-            .active
-            .clone()
-            .map(|view| view.update(cx, |view, _| view.fresh_session_edits().unwrap_or_else(|| view.refresh_session_edits())))
-            .unwrap_or_default();
-        let paths = match self.right_cache.git_for(root) {
+        let session_edits = self.session_edits(cx);
+        let paths = match self.cache.git_for(root) {
             Some(Some(tree)) => commit_set(&tree.files, &session_edits, root).1,
             _ => Vec::new(),
         };
@@ -433,13 +425,9 @@ impl Harness {
                         ui.unpushed_without_upstream = None;
                     }
                     CommitOutcome::HookFailed(lines) => ui.hook_failure = Some(lines),
-                    CommitOutcome::Failed(reason) => {
-                        this.overlays.update(cx, |o, _| {
-                            o.toast("Commit", reason);
-                        });
-                    }
+                    CommitOutcome::Failed(reason) => this.toast("Commit", reason, cx),
                 }
-                this.refresh_right_now(cx);
+                this.refresh_now(cx);
                 cx.notify();
             });
         })
@@ -448,7 +436,7 @@ impl Harness {
 
     /// Push the branch (setting its upstream the first time).
     pub(crate) fn push_branch(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(Some(tree)) = self.right_cache.git_for(root) else { return };
+        let Some(Some(tree)) = self.cache.git_for(root) else { return };
         let ui = self.changes_ui(root);
         if ui.busy.is_some() {
             return;
@@ -465,11 +453,9 @@ impl Harness {
                 ui.unpushed_without_upstream = None;
                 ui.pr_read_at = None;
                 if let Err(reason) = result {
-                    this.overlays.update(cx, |o, _| {
-                        o.toast("Push", reason);
-                    });
+                    this.toast("Push", reason, cx);
                 }
-                this.refresh_right_now(cx);
+                this.refresh_now(cx);
                 cx.notify();
             });
         })
@@ -477,20 +463,19 @@ impl Harness {
     }
 
     /// "Ask … to fix it": the hook's output goes into the composer as a
-    /// quote (docs/43 §2.6.3, §4), with no draft text.
-    pub(crate) fn ask_to_fix_hook(&mut self, _root: &Path, lines: &[String], window: &mut Window, cx: &mut Context<Self>) {
-        let text = lines.join("\n");
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.add_quote(text, None, Some(("text".into(), lines.len())), window, cx));
-        }
-        cx.notify();
+    /// quote (docs/43 §2.6.3, §4), with no draft text — through the root,
+    /// which holds the composer.
+    pub(crate) fn ask_to_fix_hook(&mut self, lines: &[String], cx: &mut Context<Self>) {
+        cx.emit(RightPaneEvent::Quote { text: lines.join("\n"), lines: lines.len() });
     }
 
     /// Open the Create PR form: base = the default branch, the title and
-    /// description drafted from the session once (owner 2026-10-17).
-    pub(crate) fn open_pr_form(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    /// description drafted from the session once (owner 2026-10-17). The
+    /// root supplies what the session knows (its title, provider and model)
+    /// through [`Harness::open_pr_form`].
+    pub(crate) fn open_pr_form_with(&mut self, root: &Path, draft: PrDraftFacts, window: &mut Window, cx: &mut Context<Self>) {
+        let PrDraftFacts { label, provider, model } = draft;
         let base = self.changes_ui(root).default_branch.clone().unwrap_or_else(|| "main".into());
-        let label = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
         let title = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
             if let Some(label) = &label {
@@ -503,13 +488,11 @@ impl Harness {
         ui.form = Some(PrForm { base, bases: Vec::new(), title, body: body.clone(), draft: false, base_menu: false, drafting: false });
         cx.notify();
         let root_buf = root.to_path_buf();
-        let provider = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
-        let files = self.right_cache.git_for(root).flatten().map(|t| t.files).unwrap_or_default();
+        let files = self.cache.git_for(root).flatten().map(|t| t.files).unwrap_or_default();
         let base_for_summary = self.changes_ui(root).form.as_ref().map(|f| f.base.clone()).unwrap_or_else(|| "main".into());
         if let Some(form) = self.changes_ui(root).form.as_mut() {
             form.drafting = provider.is_some();
         }
-        let model = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).and_then(|id| self.utility_model(&id, cx));
         cx.spawn(async move |this, cx| {
             let r = root_buf.clone();
             let bases = cx.background_executor().spawn(async move { git_ops::remote_branches(&r) }).await;
@@ -517,8 +500,8 @@ impl Harness {
             let (commits, stat) = cx.background_executor().spawn(async move { git_ops::branch_summary(&r, &base_for_summary) }).await;
             let prompt = pr_prompt(label.as_deref(), &commits, &stat, &files);
             if provider.is_some_and(|provider| provider.completes_in_side_session()) {
-                let (r, muse_prompt) = (root_buf.clone(), prompt.clone());
-                let _ = this.update(cx, |this: &mut Self, cx| this.draft_on_muse(&r, DraftKind::PrBody, muse_prompt, cx));
+                let (root, prompt) = (root_buf.clone(), prompt.clone());
+                let _ = this.update(cx, |_, cx| cx.emit(RightPaneEvent::DraftOnSide { root, kind: DraftKind::PrBody, prompt }));
             }
             let draft = match provider.filter(|p| crate::utility::supports(*p)) {
                 Some(p) => cx.background_executor().spawn(async move { crate::utility::complete(p, model.as_deref(), &prompt, None).ok() }).await,
@@ -544,7 +527,7 @@ impl Harness {
 
     /// `gh pr create` from the form.
     pub(crate) fn create_pull_request(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(Some(tree)) = self.right_cache.git_for(root) else { return };
+        let Some(Some(tree)) = self.cache.git_for(root) else { return };
         let ui = self.changes_ui(root);
         let Some(form) = ui.form.as_ref() else { return };
         let title = form.title.read(cx).value().to_string();
@@ -569,11 +552,7 @@ impl Harness {
                         ui.pr_read_at = Some(Instant::now());
                         ui.form = None;
                     }
-                    Err(reason) => {
-                        this.overlays.update(cx, |o, _| {
-                            o.toast("Create PR", reason);
-                        });
-                    }
+                    Err(reason) => this.toast("Create PR", reason, cx),
                 }
                 cx.notify();
             });
@@ -581,6 +560,61 @@ impl Harness {
         .detach();
     }
 
+    /// The transcript's `+N −M` chip, the pane half: that turn's `files`
+    /// (absolute or relative to `root`) that are changed rows open, the list
+    /// scrolled to the first, the rows flashing once (docs/43 §4).
+    pub(crate) fn open_turn_files(&mut self, root: &Path, files: &[String], cx: &mut Context<Self>) {
+        let tree = self.cache.git_for(root).flatten();
+        let mut matched = Vec::new();
+        for f in files {
+            let rel = Path::new(f).strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| f.clone());
+            if tree.as_ref().is_some_and(|t| t.change(&rel).is_some()) {
+                matched.push(rel);
+            }
+        }
+        for rel in &matched {
+            if !self.cache.changes_expanded_for(root).contains(rel) {
+                if let Some(change) = tree.as_ref().and_then(|t| t.change(rel)).cloned() {
+                    self.toggle_change_row(root, &change, cx);
+                }
+            }
+        }
+        let ui = self.changes_ui(root);
+        ui.flash = Some((Instant::now(), matched.clone()));
+        ui.scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    /// `changes-open`'s pane half: open the changed row `path` (idempotent).
+    /// Not a changed row is an `Err`; a row already open succeeds.
+    pub(crate) fn open_change_row(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let change = self
+            .cache
+            .git_for(root)
+            .flatten()
+            .and_then(|t| t.change(path).cloned())
+            .ok_or_else(|| format!("no changed row `{path}`"))?;
+        if !self.cache.changes_expanded_for(root).contains(path) {
+            self.toggle_change_row(root, &change, cx);
+        }
+        Ok(())
+    }
+}
+
+/// What a PR form's drafts need from the session (see
+/// [`RightPane::open_pr_form_with`]).
+pub(crate) struct PrDraftFacts {
+    /// The session's title: the form's title and the prompt's subject.
+    pub label: Option<String>,
+    /// The session's lane provider (`None`: no session, no draft).
+    pub provider: Option<crate::providers::ProviderId>,
+    /// The utility model a one-shot completion runs on.
+    pub model: Option<String>,
+}
+
+/// The Changes screen's host half: what needs the session, the layout, the
+/// browser or the side-session wire.
+impl Harness {
     /// The PR card's View: the PR in Browse (owner 2026-10-17).
     pub(crate) fn view_pull_request(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         if url.is_empty() {
@@ -592,34 +626,56 @@ impl Harness {
         }
     }
 
+    /// Create PR (the pane's [`RightPaneEvent::OpenPrForm`]): the form opens
+    /// with the session's title, and drafts on its provider.
+    pub(crate) fn open_pr_form(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let draft = PrDraftFacts {
+            label: session.as_ref().and_then(|id| self.collapsed_head_label(&self.chain_head(id), cx)),
+            provider: session.as_ref().map(|id| self.session_lane_provider(id)),
+            model: session.as_ref().and_then(|id| self.utility_model(id, cx)),
+        };
+        self.with_right_pane(cx, |pane, cx| pane.open_pr_form_with(root, draft, window, cx));
+    }
+
+    /// A change set the pane marked for a commit draft
+    /// ([`RightPaneEvent::CommitDraftWanted`]): the prompt from the session's
+    /// title and the files, run on the session's utility model — or through
+    /// a hidden side session for a provider that completes there — landing
+    /// in the pane ([`RightPane::land_draft`]).
+    pub(crate) fn draft_commit_for_pane(&mut self, root: &Path, files: &[FileChange], cx: &mut Context<Self>) {
+        let Some(session) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else {
+            self.right_pane.update(cx, |pane, cx| pane.land_draft(root, DraftKind::Commit, None, cx));
+            return;
+        };
+        let provider = self.session_lane_provider(&session);
+        let title = self.collapsed_head_label(&self.chain_head(&session), cx);
+        let prompt = commit_prompt(title.as_deref(), files);
+        if !crate::utility::supports(provider) {
+            self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
+            return;
+        }
+        let root = root.to_path_buf();
+        let model = self.utility_model(&session, cx);
+        let pane = self.right_pane.downgrade();
+        cx.spawn(async move |_, cx| {
+            let reply = cx.background_executor().spawn(async move { crate::utility::complete(provider, model.as_deref(), &prompt, None) }).await;
+            if std::env::var("BAAZ_DRAFT_TRACE").as_deref() == Ok("1") {
+                eprintln!("baaz: draft reply {:?}", reply.as_ref().map(|t| t.chars().take(120).collect::<String>()));
+            }
+            let _ = pane.update(cx, |pane, cx| pane.land_draft(&root, DraftKind::Commit, reply.ok(), cx));
+        })
+        .detach();
+    }
+
     /// The transcript's `+N −M` chip: Changes, that turn's files opened, the
     /// list scrolled to the first, the rows flashing once (docs/43 §4).
     pub(crate) fn open_turn_changes(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
         self.select_right(crate::layout::RightKind::Changes, cx);
         let Some((root, _)) = self.right_project() else { return };
-        let tree = self.right_cache.git_for(&root).flatten();
-        let mut matched = Vec::new();
-        for f in &files {
-            let rel = Path::new(f).strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| f.clone());
-            if tree.as_ref().is_some_and(|t| t.change(&rel).is_some()) {
-                matched.push(rel);
-            }
-        }
-        for rel in &matched {
-            if !self.right_cache.changes_expanded_for(&root).contains(rel) {
-                if let Some(change) = tree.as_ref().and_then(|t| t.change(rel)).cloned() {
-                    self.toggle_change_row(&root, &change, cx);
-                }
-            }
-        }
-        let ui = self.changes_ui(&root);
-        ui.flash = Some((Instant::now(), matched.clone()));
-        ui.scroll.set_offset(gpui::Point::default());
-        cx.notify();
+        self.with_right_pane(cx, |pane, cx| pane.open_turn_files(&root, &files, cx));
     }
-}
 
-impl Harness {
     /// `changes-open:<path>`: open that row's diff (idempotent), refreshing
     /// first so the tree is there. No project for the pane, or a path that
     /// is not a changed row, is an `Err`; a row already open succeeds.
@@ -627,16 +683,7 @@ impl Harness {
         let path = rest.trim();
         let (root, _) = self.right_project().ok_or("no project for the right pane")?;
         self.select_right(crate::layout::RightKind::Changes, cx);
-        let change = self
-            .right_cache
-            .git_for(&root)
-            .flatten()
-            .and_then(|t| t.change(path).cloned())
-            .ok_or_else(|| format!("no changed row `{path}`"))?;
-        if !self.right_cache.changes_expanded_for(&root).contains(path) {
-            self.toggle_change_row(&root, &change, cx);
-        }
-        Ok(())
+        self.with_right_pane(cx, |pane, cx| pane.open_change_row(&root, path, cx))
     }
 }
 
@@ -717,7 +764,7 @@ pub(crate) fn changes_screen(
     width: f32,
     agent: &str,
     window: &mut Window,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> (Option<AnyElement>, AnyElement) {
     let Some(tree) = tree else {
         return (None, loading_body(cx).into_any_element());
@@ -769,14 +816,14 @@ pub(crate) fn changes_screen(
             let toggle_change = change.clone();
             let open_root = root_buf.clone();
             let open_abs = root.join(&change.path);
-            let row_el = |id: SharedString, cx: &mut Context<Harness>| {
+            let row_el = |id: SharedString, cx: &mut Context<RightPane>| {
                 let (r1, c1, r2, a2) = (toggle_root.clone(), toggle_change.clone(), open_root.clone(), open_abs.clone());
                 let mut row = change_row(id, change.clone(), open).width(px(width)).flash(flash_amount).on_toggle(cx.listener(move |this, _, _, cx| {
                     this.toggle_change_row(&r1, &c1, cx);
                 }));
                 if change.change != ChangeKind::Deleted {
-                    row = row.on_open_file(cx.listener(move |this, _, _, cx| {
-                        this.reveal_link_path(&r2, &a2, Some(false), None, cx);
+                    row = row.on_open_file(cx.listener(move |_, _, _, cx| {
+                        cx.emit(RightPaneEvent::Reveal { root: r2.clone(), abs: a2.clone() });
                     }));
                 }
                 row
@@ -867,7 +914,7 @@ pub(crate) fn changes_screen(
             .track_scroll(&scroll)
             // The sticky row is decided in render: a scroll re-renders, after
             // the wheel has moved the offset (live 2026-10-19: it never stuck).
-            .on_scroll(cx.listener(|_: &mut Harness, _: &gpui::ScrollEvent, _, cx| cx.notify()))
+            .on_scroll(cx.listener(|_: &mut RightPane, _: &gpui::ScrollEvent, _, cx| cx.notify()))
             .pt(px(scale::SP_2))
             .px(px(LIST_INSET))
             .pb(px(FOOT_CLEARANCE))
@@ -897,7 +944,7 @@ pub(crate) fn changes_screen(
     (None, screen.child(commit_foot(foot_el, cx)).into_any_element())
 }
 
-fn loading_body(cx: &Context<Harness>) -> gpui::Div {
+fn loading_body(cx: &Context<RightPane>) -> gpui::Div {
     v_flex().pt(px(scale::SP_2)).px(px(LIST_INSET)).child(changes_caption("right-changes-loading-cap", "This session", None, true, cx)).children(SKELETON_WIDTHS.iter().map(|w| {
         h_flex()
             .h(aui_tokens::Metrics::active().control)
@@ -914,7 +961,7 @@ fn loading_body(cx: &Context<Harness>) -> gpui::Div {
 
 /// The commit box (or the hook note over it, or the PR card).
 #[allow(clippy::too_many_arguments)]
-fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[String], foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<Harness>) -> AnyElement {
+fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[String], foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
     let busy = ui.busy;
     let hook = ui.hook_failure.clone();
     let editor = ui.editor.clone();
@@ -965,7 +1012,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
             match hook {
                 Some(lines) => {
                     let who = agent;
-                    let (r1, r2) = (root_buf.clone(), root_buf.clone());
+                    let r1 = root_buf.clone();
                     let l1 = lines.clone();
                     let l2 = lines.clone();
                     let actions = vec![
@@ -973,7 +1020,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                             .on_click(cx.listener(move |this, _, _, cx| this.show_hook_output(&r1, l1.clone(), cx)))
                             .into_any_element(),
                         text_action("right-hook-ask", format!("Ask {who} to fix it"), None, 24.0, cx)
-                            .on_click(cx.listener(move |this, _, window, cx| this.ask_to_fix_hook(&r2, &l2, window, cx)))
+                            .on_click(cx.listener(move |this, _, _, cx| this.ask_to_fix_hook(&l2, cx)))
                             .into_any_element(),
                     ];
                     v_flex().child(hook_failed_note("right-hook", "pre-commit hook failed", &lines, actions, cx)).child(box_el).into_any_element()
@@ -1004,7 +1051,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                         .items_center()
                         .child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx))
                         .child(div().flex_1())
-                        .child(primary_action("right-create-pr", "Create PR", Some(IconName::PullRequest), false, busy.is_some(), cx).on_click(cx.listener(move |this, _, window, cx| this.open_pr_form(&r, window, cx)))),
+                        .child(primary_action("right-create-pr", "Create PR", Some(IconName::PullRequest), false, busy.is_some(), cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::OpenPrForm(r.clone()))))),
                 )
                 .into_any_element()
         }
@@ -1013,14 +1060,14 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
             .into_any_element(),
         Foot::Pr(pr) => {
             let url = pr.url.clone();
-            let view = text_action("right-pr-view", "View", Some(IconName::External), 24.0, cx).on_click(cx.listener(move |this, _, window, cx| this.view_pull_request(url.clone(), window, cx)));
+            let view = text_action("right-pr-view", "View", Some(IconName::External), 24.0, cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::ViewPullRequest(url.clone()))));
             pr_card("right-pr", pr.title.clone(), pr.number, pr.state, pr.checks, view, cx).into_any_element()
         }
     }
 }
 
 /// The Create PR pushed view: its row and its body (docs/43 §2.6).
-fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window, cx: &mut Context<Harness>) -> (Option<AnyElement>, AnyElement) {
+fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window, cx: &mut Context<RightPane>) -> (Option<AnyElement>, AnyElement) {
     let busy = ui.busy;
     let form = ui.form.as_ref().expect("the form stands open");
     let (base, bases, title, body, draft, menu, drafting) = (form.base.clone(), form.bases.clone(), form.title.clone(), form.body.clone(), form.draft, form.base_menu, form.drafting);

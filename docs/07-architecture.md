@@ -136,15 +136,18 @@ bench-only. All paths in this section are under `crates/baaz/src/`.
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
 | sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal/rename fields, `sidebar_wheel` |
-| right pane | `right_cache`, `right_resize`, `right_watch`, `right_files_focus` |
+| right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
 | browser and Browse mode | `browser` (`BrowserRegistry`), `browse_*` fields, the agent line and card (`line_ui`, `card_ui`), the four overlay windows (`overlay`, `corner`, `page_float`, `card_float`) |
 | settings, skills, palettes, shortcuts | `settings_page`, `skills`, `import`, `chrome_import`, `shortcuts_cache`, several `TextareaState` query fields |
 | terminal | `terminal_host`, `terminal_service`, `terminal_focus` |
 | focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
 
 `Harness::render` is not cached. It first runs `on_frame` (window title,
-overlay windows, provider status, right-pane cache, boot session, scripted
-steps) and later `sync_browser` (`browser/mod.rs`), then composes the shell.
+overlay windows, provider status, boot session, scripted steps) and later
+`sync_browser` (`browser/mod.rs`), then composes the shell. The right pane
+is a region entity ([`region.rs`](../crates/baaz/src/region.rs)): the root
+pushes it this frame's facts and composes its view, and the pane reconciles
+its own reads in its own render.
 The sidebar and the transcript are `.cached()` subtrees, so they skip work
 while clean (except while assistive tech is on).
 

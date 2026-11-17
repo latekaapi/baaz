@@ -85,7 +85,8 @@ use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
 use crate::providers::ProviderId;
-use crate::resize::{ResizeDrag, RightResizeDrag};
+use crate::region::Region as _;
+use crate::resize::ResizeDrag;
 use crate::right;
 use crate::shot::CaptureToken;
 use crate::session::{self, Draft, SessionEvent, SessionHost, SessionView};
@@ -862,55 +863,16 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
-    /// The right pane divider's width and whatever drag is in flight over
-    /// it. Never active while [`Self::resize`] is: the two dividers cannot
-    /// both be under the pointer, so one capture overlay covers both drags.
-    pub(crate) right_resize: RightResizeDrag,
-    /// The right pane's last git/diff/filesystem reads, with the roots and
-    /// instants they were read for. [`right::render`](crate::right::render)
-    /// draws from this and never touches a subprocess or the filesystem
-    /// itself.
-    pub(crate) right_cache: crate::right::RightCache,
-    /// A right-pane re-read is in flight on the background executor; a second
-    /// one is not started on top of it.
-    right_refresh_in_flight: bool,
-    /// What the pane showed the last time the refresh state was reconciled:
-    /// open, kind, and project root. Any change re-reads at once.
-    right_last_key: Option<(bool, layout::RightKind, Option<std::path::PathBuf>)>,
-    /// A session-switch restore just moved the pane: the next frame renders
-    /// it at its target with no open/close animation (Z2). Set by the
-    /// restore when it flips open/closed, consumed once by `render` through
-    /// the shell's `resizing` bypass. User toggles never set it, so they
-    /// keep animating exactly as today.
-    pub(crate) right_snap: bool,
-    /// D6: the right pane's strip is between screens this frame (the Page
-    /// screen's native view hides behind its still picture while it moves).
-    pub(crate) right_strip_moving: bool,
-    /// D6: the Files screen's keyboard focus (↑ ↓ ← → ⏎, ⌘F, /, Esc).
-    pub(crate) right_files_focus: gpui::FocusHandle,
-    /// D6: a drafted PR description waiting for a frame with the window to
-    /// land in its editor.
-    pub(crate) pending_pr_body: Option<(gpui::Entity<gpui_kit::base::input::TextareaState>, String)>,
+    /// The right pane (task 4.3): its cache, refresh, watch, divider,
+    /// focus, menus and drafts live on the entity; the root composes its
+    /// view, seats its tab row, and maps its events
+    /// ([`crate::right_pane::RightPaneEvent`]).
+    pub(crate) right_pane: Entity<crate::right_pane::RightPane>,
     /// The `peek` step's hold: the v3 peek open with no hover (captures).
     pub(crate) peek_pinned: bool,
     /// Whether the window's traffic lights are hidden now (closed sidebar,
     /// no peek), so the native call runs only on a change.
     pub(crate) lights_hidden: bool,
-    /// The last right-pane snapshot landed, hashed: an identical refresh
-    /// skips the redraw.
-    pub(crate) right_snapshot_print: Option<u64>,
-    /// The file watch on the right pane's project root, and the task that
-    /// turns its events into refreshes; both dropped when the pane closes.
-    right_watch: Option<(crate::right_watch::RightWatch, Task<()>)>,
-    /// A refresh asked for while one was in flight: run once it lands.
-    right_refresh_again: bool,
-    /// Sessions whose in-memory pane state still uses a pre-merge
-    /// `diff`/`git` kind and whose disk copy must migrate onto the merged
-    /// `changes` view (B8fix): marked by [`Self::save_right_for_active`],
-    /// honoured by the two `sessions.json` writes. Memory keeps the stored
-    /// spelling, so the per-session round-trip restores exactly what the
-    /// pane showed; a verbatim handoff carry never marks, so it persists
-    /// verbatim. Never persists.
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1354,8 +1316,6 @@ pub struct Harness {
     /// The open project menu's own rect: the Colour submenu's anchor is
     /// computed off its right edge at the Colour row's height.
     pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
-    /// The Files pane's open context menu (owner 2026-10-21).
-    pub(crate) files_menu: Option<crate::right_files::FilesMenu>,
     /// Every rendered project group row's tray `…` button bounds, keyed by
     /// group id, from `SidebarView::on_group_menu_prepainted` — what a group
     /// row's project menu seats at. Entries are refreshed while their row is
@@ -1420,8 +1380,9 @@ pub struct Harness {
     /// change.
     pub(crate) hover_trace_last_shown: Option<bool>,
     pub(crate) tasks: Vec<Task<()>>,
-    /// The boot-time text-field subscriptions (rename, search, Projects and
-    /// Commands queries, API key). Made once in `new`, never cleared.
+    /// The boot-time subscriptions: the right pane's events and the text
+    /// fields (rename, search, Projects and Commands queries, API key). Made
+    /// once in `new`, never cleared.
     field_subscriptions: Vec<Subscription>,
 }
 
@@ -1472,8 +1433,11 @@ impl Harness {
         // once here when `main` has not already: a test window boots it.
         layout::Layout::init(cx);
         let restored = layout::sidebar_width(layout::Layout::get(cx));
-        // The right divider's last settled width, or the default.
+        // The right divider's last settled width, or the default: the pane
+        // starts there, sharing the window's floating layer for its toasts.
+        let overlays = cx.new(|_| Overlays::default());
         let right_restored = layout::right_width(layout::Layout::get(cx));
+        let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), cx));
         // The backend new sessions start on: an explicit `--provider` or
         // `BAAZ_PROVIDER` names this run; otherwise the last pick the
         // person made, kept in the store across relaunches; otherwise the
@@ -1578,11 +1542,10 @@ impl Harness {
             task_done_at: std::collections::HashMap::new(),
             task_done_timer: None,
             auto_accepted: std::collections::HashSet::new(),
-            overlays: cx.new(|_| Overlays::default()),
+            overlays,
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
             resize: ResizeDrag::restored(restored),
-            right_resize: RightResizeDrag::restored(right_restored),
-            right_cache: crate::right::RightCache::default(),
+            right_pane,
             browser: crate::browser::BrowserRegistry::new(browser_fake),
             browser_builds: 0,
             browser_idle_warmed: false,
@@ -1611,17 +1574,8 @@ impl Harness {
             default_browser_cache: None,
             default_browser_confirm_pending: false,
             default_browser_recheck_at: None,
-            right_refresh_in_flight: false,
-            right_last_key: None,
-            right_snap: false,
-            right_strip_moving: false,
-            right_files_focus: cx.focus_handle(),
-            pending_pr_body: None,
             peek_pinned: false,
             lights_hidden: false,
-            right_snapshot_print: None,
-            right_watch: None,
-            right_refresh_again: false,
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -1699,7 +1653,6 @@ impl Harness {
             project_colour_open: false,
             overflow_bounds: None,
             project_menu_bounds: None,
-            files_menu: None,
             group_menu_bounds: HashMap::new(),
             projects_query: projects_query.clone(),
             commands_query: commands_query.clone(),
@@ -1865,6 +1818,9 @@ impl Harness {
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
         // header title that shares the field.
+        // The right pane's asks (persist, open on a kind, a URL, a draft…).
+        let pane = this.right_pane.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&pane, window, Self::on_right_pane_event));
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
@@ -2545,8 +2501,10 @@ impl Harness {
         }
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
-        self.right_snap = false;
-        self.right_cache.page_menu = false;
+        self.right_pane.update(cx, |pane, _| {
+            pane.snap = false;
+            pane.cache.page_menu = false;
+        });
         crate::layout::Layout::stage(cx, |layout| layout.right_open = !layout.right_open);
         crate::baaz_log!("toggle right pane: open={}", crate::layout::Layout::get(cx).right_open);
         self.arm_browser_url_focus(cx);
@@ -2641,7 +2599,7 @@ impl Harness {
             return;
         }
         // A user pick always animates (see `toggle_right`).
-        self.right_snap = false;
+        self.right_pane.update(cx, |pane, _| pane.snap = false);
         if crate::layout::Layout::get(cx).right_open && crate::layout::Layout::get(cx).right_kind == Some(kind) {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = false);
         } else {
@@ -2672,8 +2630,10 @@ impl Harness {
     /// open and never touches [`Self::active`].
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
-        self.right_snap = false;
-        self.right_cache.page_menu = false;
+        self.right_pane.update(cx, |pane, _| {
+            pane.snap = false;
+            pane.cache.page_menu = false;
+        });
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus(cx);
     }
@@ -2851,14 +2811,7 @@ impl Harness {
             return;
         };
         let (files_preview, files_selected, files_expanded) = match self.right_project() {
-            Some((root, _)) => {
-                let preview = self.right_cache.preview_for(&root).map(|preview| preview.path.clone());
-                let selected = self.right_cache.selected_for(&root);
-                let mut expanded: Vec<String> =
-                    self.right_cache.expanded_for(&root).into_iter().collect();
-                expanded.sort();
-                (preview, selected, expanded)
-            }
+            Some((root, _)) => self.right_pane.read(cx).files_state(&root),
             None => (None, None, Vec::new()),
         };
         // Z7a: the session's last browser URL rides along untouched — the
@@ -2886,8 +2839,9 @@ impl Harness {
     /// stored state shows the pane closed, as does a brand-new session. The
     /// Files preview/selection/expansion restore onto the current project
     /// root (the tree listing/diff/git caches stay per root), and the pane's
-    /// data refreshes. Flipping open/closed arms [`Self::right_snap`] so the
-    /// next frame lands with no animation; user toggles never arm it.
+    /// data refreshes. Flipping open/closed arms the pane's snap
+    /// ([`crate::right_pane::RightPane::snap`]) so the next frame lands with
+    /// no animation; user toggles never arm it.
     pub(crate) fn restore_right_for_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         // B7fix: the outgoing session's debounced pane state lands on disk
         // before the incoming session's loads — a switch is the durability
@@ -2897,45 +2851,13 @@ impl Harness {
         let open = stored.as_ref().is_some_and(|state| state.open);
         if crate::layout::Layout::get(cx).right_open != open {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = open);
-            self.right_snap = true;
+            self.right_pane.update(cx, |pane, _| pane.snap = true);
         }
         if let Some(state) = &stored {
             crate::layout::Layout::stage(cx, |layout| layout.right_kind = Some(state.kind));
         }
         if let Some((root, _)) = self.right_project() {
-            match &stored {
-                Some(state) => {
-                    let expanded: std::collections::HashSet<String> =
-                        state.files_expanded.iter().cloned().collect();
-                    if expanded.is_empty() {
-                        self.right_cache.expanded.remove(&root);
-                    } else {
-                        self.right_cache.expanded.insert(root.clone(), expanded);
-                    }
-                    match &state.files_selected {
-                        Some(selected) => {
-                            self.right_cache.selected.insert(root.clone(), selected.clone());
-                        }
-                        None => {
-                            self.right_cache.selected.remove(&root);
-                        }
-                    }
-                    match &state.files_preview {
-                        Some(preview) => {
-                            let preview = preview.clone();
-                            self.begin_file_preview_for(&root, &preview, cx);
-                        }
-                        None => {
-                            crate::right::close_file_preview(&mut self.right_cache, &root);
-                        }
-                    }
-                }
-                None => {
-                    self.right_cache.expanded.remove(&root);
-                    self.right_cache.selected.remove(&root);
-                    crate::right::close_file_preview(&mut self.right_cache, &root);
-                }
-            }
+            self.with_right_pane(cx, |pane, cx| pane.restore_files(&root, stored.as_ref(), cx));
         }
         // B7fix2: a switch that lands open on Browser builds the webview on
         // a deferred task with the window — never as a render side effect.
@@ -2943,186 +2865,11 @@ impl Harness {
         self.refresh_right_now(cx);
     }
 
-    /// How often the open pane re-reads git and the filesystem while it sits
-    /// open on a kind that reads them: at most once per interval.
-    const RIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-    /// The fallback poll while a file watch follows the root.
-    const RIGHT_WATCHED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-    /// How long a burst of file events settles before one refresh.
-    const RIGHT_WATCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
-
-    /// Keep a file watch on `root` while the right pane shows it: a change
-    /// on disk refreshes the pane within [`Self::RIGHT_WATCH_SETTLE`].
-    fn ensure_right_watch(&mut self, root: Option<&std::path::Path>, cx: &mut Context<Self>) {
-        let Some(root) = root else {
-            self.right_watch = None;
-            return;
-        };
-        if crate::clock::deterministic() {
-            return;
-        }
-        if self.right_watch.as_ref().is_some_and(|(watch, _)| watch.root() == root) {
-            return;
-        }
-        let Some((watch, mut events)) = crate::right_watch::RightWatch::start(root) else {
-            self.right_watch = None;
-            return;
-        };
-        let task = cx.spawn(async move |this, cx| {
-            use futures::StreamExt as _;
-            while events.next().await.is_some() {
-                cx.background_executor().timer(Self::RIGHT_WATCH_SETTLE).await;
-                while events.try_recv().is_ok() {}
-                if this.update(cx, |this, cx| this.refresh_right_now(cx)).is_err() {
-                    return;
-                }
-            }
-        });
-        self.right_watch = Some((watch, task));
-    }
-
-    /// Whether `kind` shows data read from git or the filesystem: everything
-    /// but the Browser.
-    fn right_needs_data(kind: layout::RightKind) -> bool {
-        !matches!(kind, layout::RightKind::Browser)
-    }
-
     /// The project the right pane reads for: root plus display name, from the
     /// in-memory current project — never the projects store on disk, which the
     /// old render path re-read on every frame.
     pub(crate) fn right_project(&self) -> Option<(std::path::PathBuf, String)> {
         self.current_project().map(|project| (project.root.clone(), project.name.clone()))
-    }
-
-    /// Re-read git and the filesystem for the open pane, off the render path.
-    /// No-op while the pane is closed, on Browser, or with no project. At most
-    /// one re-read is ever in flight: an explicit request (opening, a kind
-    /// switch, the file tree's Refresh) while one runs is coalesced, and the
-    /// interval in [`Self::sync_right_cache`] paces the steady state. Under
-    /// `BAAZ_DETERMINISTIC` the read is fixtures plus a capped walk and runs
-    /// inline, so captures settle on their first frame; otherwise it runs on
-    /// the background executor and lands with an update + notify. Nothing here
-    /// blocks the UI thread.
-    pub(crate) fn refresh_right_now(&mut self, cx: &mut Context<Self>) {
-        let kind = layout::right_kind(crate::layout::Layout::get(cx));
-        if !crate::layout::Layout::get(cx).right_open || !Self::right_needs_data(kind) {
-            return;
-        }
-        let Some((root, _)) = self.right_project() else { return };
-        // The walk draws around this: a re-read never collapses a toggled
-        // directory or drops the preview's tree.
-        let expanded = self.right_cache.expanded_for(&root);
-        if crate::clock::deterministic() {
-            let at = std::time::Instant::now();
-            let snapshot = {
-                let dir_cache = self.right_cache.dir_cache_for_root(&root);
-                crate::right::read_snapshot_for_cached(&root, &expanded, dir_cache)
-            };
-            let reload = self
-                .right_cache
-                .preview_for(&root)
-                .and_then(|preview| crate::right::preview_reload_for(&root, &preview));
-            self.right_cache.apply_snapshot(snapshot, at);
-            if let Some(reload) = reload {
-                crate::right::apply_preview_reload(&mut self.right_cache, &root, reload);
-            }
-            self.changes_after_snapshot(&root, cx);
-            self.reload_open_diffs(&root, cx);
-            self.right_last_key = Some((true, kind, Some(root)));
-            cx.notify();
-            return;
-        }
-        if self.right_refresh_in_flight {
-            self.right_refresh_again = true;
-            return;
-        }
-        self.right_refresh_in_flight = true;
-        // The listing cache and the open preview travel into the background
-        // task: unchanged directories are replayed there, and a preview whose
-        // file changed on disk is re-read there — never on the render path.
-        let dir_cache = self.right_cache.take_dir_cache();
-        let preview = self.right_cache.preview_for(&root);
-        cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut dir_cache = dir_cache;
-                    let snapshot =
-                        crate::right::read_snapshot_for_cached(&root, &expanded, &mut dir_cache);
-                    let reload = preview
-                        .as_ref()
-                        .and_then(|preview| crate::right::preview_reload_for(&root, preview));
-                    // What the pane would draw, hashed here off the UI
-                    // thread: an unchanged refresh lands without a redraw.
-                    let print = {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        format!("{snapshot:?}").hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    (snapshot, dir_cache, reload, print)
-                })
-                .await;
-            let (snapshot, dir_cache, reload, print) = (snapshot.0, snapshot.1, snapshot.2, snapshot.3);
-            let _ = this.update(cx, |this, cx| {
-                this.right_refresh_in_flight = false;
-                this.right_cache.restore_dir_cache(dir_cache);
-                let root = snapshot.root.clone();
-                this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
-                let reloaded = reload.is_some();
-                if let Some(reload) = reload {
-                    crate::right::apply_preview_reload(&mut this.right_cache, &root, reload);
-                }
-                this.changes_after_snapshot(&root, cx);
-                this.reload_open_diffs(&root, cx);
-                // The 2 s refresh used to redraw the window even when git and
-                // the tree were exactly as before (perf audit 2026-10-16).
-                if reloaded || this.right_snapshot_print != Some(print) {
-                    this.right_snapshot_print = Some(print);
-                    cx.notify();
-                }
-                if std::mem::take(&mut this.right_refresh_again) {
-                    this.refresh_right_now(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Reconcile the refresh state every frame: re-read at once when the pane
-    /// opened, its kind changed, or its project changed; re-read on the
-    /// interval while it sits open on a data kind; never while closed or on
-    /// Browser. The `right:` step verb writes the layout directly, so it is
-    /// covered here rather than at a call site.
-    fn sync_right_cache(&mut self, cx: &mut Context<Self>) {
-        let kind = layout::right_kind(crate::layout::Layout::get(cx));
-        let open = crate::layout::Layout::get(cx).right_open;
-        let root = self.right_project().map(|(root, _)| root);
-        if !open || !Self::right_needs_data(kind) {
-            self.right_last_key = Some((open, kind, root));
-            self.right_watch = None;
-            return;
-        }
-        self.ensure_right_watch(root.as_deref(), cx);
-        if self.right_last_key != Some((open, kind, root.clone())) {
-            self.right_last_key = Some((open, kind, root));
-            self.refresh_right_now(cx);
-            return;
-        }
-        // The steady state, paced off when the slot for this kind last
-        // landed: never fetched re-reads at once, a fresh landing waits out
-        // the interval, and a hung in-flight read is never doubled.
-        let Some(root) = root else { return };
-        // With a live watch the poll is only a fallback.
-        let interval = if self.right_watch.is_some() {
-            Self::RIGHT_WATCHED_INTERVAL
-        } else {
-            Self::RIGHT_REFRESH_INTERVAL
-        };
-        let due = self.right_cache.fetched_at(kind, &root).is_none_or(|at| at.elapsed() >= interval);
-        if due && !self.right_refresh_in_flight {
-            self.refresh_right_now(cx);
-        }
     }
 
     /// A new terminal tab on the current project, opening the dock for it.
@@ -3559,15 +3306,6 @@ impl Harness {
             row = row.child(aui::workbench::pane_toggle(id, glyph, label, lit).on_click(click));
         }
         row.into_any_element()
-    }
-
-    /// A two-finger sideways swipe in the pane: one screen along the strip
-    /// (Changes · Files · Page), stopping at either end.
-    pub(crate) fn swipe_right_screen(&mut self, dir: i32, cx: &mut Context<Self>) {
-        let at = right::screen_index(layout::right_kind(crate::layout::Layout::get(cx))) as i32 + dir;
-        if let Some(kind) = usize::try_from(at).ok().and_then(|i| layout::RightKind::ALL.get(i).copied()) {
-            self.select_right(kind, cx);
-        }
     }
 
     /// A pane toggle's click: the lit one closes the pane; any other opens
@@ -4569,7 +4307,7 @@ impl Harness {
         self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
-        self.right_cache.page_menu = false;
+        self.right_pane.update(cx, |pane, _| pane.cache.page_menu = false);
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
@@ -6027,13 +5765,6 @@ impl Harness {
             self.resize.active = false;
             self.resize.persist(cx);
         }
-        // The right drag's twin: a release outside the window never reaches
-        // the overlay either, so an armed right drag settles where it stands
-        // when the window goes inactive.
-        if self.right_resize.active && !self.right_resize.scripted && !window.is_window_active() {
-            self.right_resize.active = false;
-            self.right_resize.persist(cx);
-        }
         // A frame-paced width sweep marches the divider one step per
         // rendered frame (scripting only): each tick logs
         // its width plus the renders and re-hints it cost, so per-tick
@@ -6185,10 +5916,6 @@ impl Harness {
             return;
         }
         self.sync_provider_state(cx);
-        // The right pane's git and filesystem reads, reconciled off the render
-        // path: at once on open, kind or project change, on the 2 s interval
-        // while open on a data kind, never while closed or on Browser.
-        self.sync_right_cache(cx);
         // The scripted boot, every frame until it fires: the first session
         // for `--session`/`--send`/`--steps` opens without waiting for
         // `session/list`, then the script runs once the session is open.
@@ -6269,186 +5996,17 @@ impl Render for Harness {
             } else {
                 self.render_centre(window, cx)
             };
-            // Painted lights off: the window owns real, glossy ones, and
-            // the painted set only ever stacked underneath them.
-            let kind = layout::right_kind(crate::layout::Layout::get(cx));
-            // Drawn from the cache the refresh path maintains: building this
-            // element performs no subprocess or filesystem I/O of its own.
-            // Deliberately not `.cached(...)` like the sidebar and transcript
-            // columns (see the report): the pane's rows carry live actions and
-            // hover state, and a retained subtree would need its own
-            // key/invalidation to avoid going stale — while the subtree
-            // rebuild itself is cheap once the reads are gone.
-            let right_project = self.right_project();
-            // Q4c: while a provider switch is pending the pane is neutral
-            // (see `pending_right_neutral`): no webview is created or
-            // shown for the still-active session, so its page can neither
-            // draw nor hit-test under the loading centre.
-            let pending_neutral = self.pending_right_neutral(cx);
-            let browse_mode = crate::layout::Layout::get(cx).mode == layout::Mode::Browse;
-            // B2a-H2b: in Browse the pane never drives a native page —
-            // one tab, one page. The Browser kind falls back to Changes
-            // until B3 puts the agent there: a session page behind
-            // Browse would share the centre's tab (flicker) or show a
-            // session the mode hides. The header keeps the stored kind;
-            // only the body falls back.
-            let body_kind = if crate::layout::Layout::get(cx).mode == layout::Mode::Browse && kind == layout::RightKind::Browser
-            {
-                layout::RightKind::Changes
-            } else {
-                kind
-            };
-            // Z7a2: the Browser kind draws the active session's live
-            // webview (created lazily here, where the window is at
-            // hand), every other kind draws from the read cache as
-            // before. Gated on pane-open-on-Browser: activation, boot
-            // and every other kind never create a webview as a render
-            // side effect — creation happens only where the pane shows.
-            // B7: the toggle prewarms the webview ahead of the animation;
-            // while closing (or while Settings hides the pane) the existing
-            // webview passes through without creating, so the last page
-            // snapshot slides out instead of the "Opening the page" placeholder.
-            let browser = if pending_neutral || !browse_mode {
-                None
-            } else if body_kind == layout::RightKind::Browser {
-                if right_open {
-                    Some(self.ensure_browser_person(window, cx))
-                } else {
-                    self.existing_browser(cx)
-                }
-            } else {
-                None
-            };
-            // B8c: the files the active session's folded transcript shows it
-            // edited, oldest first — the Changes pane's "This session"
-            // section. Computed only while the pane shows Changes (the walk
-            // is O(all blocks), so every other kind skips it) and cached on
-            // the session view keyed by (turn count, last turn's block
-            // count): a steady frame reuses the stored list with two reads
-            // and no scan, and the view is only updated when the key moved
-            // (so a steady frame never dirties it either). Empty when no
-            // session is open.
-            let shows_changes = right_open
-                && browse_mode
-                && !pending_neutral
-                && matches!(
-                    body_kind,
-                    layout::RightKind::Changes
-                );
-            let session_edits: Vec<String> = if shows_changes {
-                self.active
-                    .as_ref()
-                    .map(|view| {
-                        if let Some(fresh) = view.read(cx).fresh_session_edits() {
-                            fresh
-                        } else {
-                            view.update(cx, |view, _| view.refresh_session_edits())
-                        }
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            // Q4c: the neutral body — an empty pane that keeps its width,
-            // so the centre never resizes mid-switch. `right_open` still
-            // rides the live layout into the shell, which is what holds
-            // the width steady.
-            // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
-            // three screens on a strip — Changes · Files · Page — under the
-            // pane's tab row (docs/83 §6), each with its own sub-header if
-            // any; a tab or toggle slides the strip (240 ms ease-out), a
-            // two-finger sideways swipe moves one screen. Browse keeps its
-            // pane's body as it was (out of D6's scope): one body under the
-            // same tab row.
-            let strip_mode = !browse_mode && !pending_neutral;
-            if !self.right_cache.pushed.is_empty() {
-                self.sync_pushed_outputs(cx);
-            }
-            // A drafted PR description lands in its editor here, where the
-            // window is at hand (the draft came back on a background task).
-            if let Some((body, text)) = self.pending_pr_body.take() {
-                body.update(cx, |state, cx| state.set_value(&text, window, cx));
-            }
-            // The file Files previews gets its own tab (docs/83 §6).
-            let open_file = if strip_mode && !pending_neutral {
-                right_project.as_ref().and_then(|(root, _)| self.right_cache.preview_for(root).map(|preview| (root.clone(), SharedString::from(preview.name))))
-            } else {
-                None
-            };
-            let right = if pending_neutral {
-                v_flex().size_full().into_any_element()
-            } else if strip_mode {
-                let index = right::screen_index(kind);
-                let pos = aui::workbench::strip_position("right-strip", index, window, cx);
-                let moving = aui::workbench::strip_moving(pos, index);
-                if moving != self.right_strip_moving {
-                    self.right_strip_moving = moving;
-                }
-                let visible = aui::workbench::strip_visible(pos, 3);
-                if visible(2) && self.right_cache.page_address.is_none() {
-                    self.ensure_page_address(window, cx);
-                }
-                let agent = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id).label()).unwrap_or("Muse");
-                let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
-                for (i, screen_kind) in layout::RightKind::ALL.into_iter().enumerate() {
-                    if !visible(i) {
-                        screens.push(None);
-                        continue;
-                    }
-                    let page = if screen_kind == layout::RightKind::Browser {
-                        if right_open { Some(self.ensure_browser_person(window, cx)) } else { self.existing_browser(cx) }
-                    } else {
-                        None
-                    };
-                    let edits = if screen_kind == layout::RightKind::Changes && !session_edits.is_empty() {
-                        session_edits.clone()
-                    } else if screen_kind == layout::RightKind::Changes {
-                        self.active
-                            .as_ref()
-                            .map(|view| match view.read(cx).fresh_session_edits() {
-                                Some(fresh) => fresh,
-                                None => view.update(cx, |view, _| view.refresh_session_edits()),
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    screens.push(Some(right::render_screen(
-                        screen_kind,
-                        &self.right_cache,
-                        right_project.clone(),
-                        &edits,
-                        crate::right::BrowserPane { state: page.as_ref(), window: &mut *window },
-                        right_open,
-                        self.right_resize.width,
-                        agent,
-                        &self.right_files_focus,
-                        cx,
-                    )));
-                }
-                let swipe = cx.weak_entity();
-                aui::workbench::pane_strip("right-strip", pos, px(self.right_resize.width), screens)
-                    .on_swipe(move |dir, _, cx| {
-                        let _ = swipe.update(cx, |this, cx| this.swipe_right_screen(dir, cx));
-                    })
-                    .into_any_element()
-            } else {
-                right::render(
-                    body_kind,
-                    &self.right_cache,
-                    right_project,
-                    &session_edits,
-                    crate::right::BrowserPane { state: browser.as_ref(), window: &mut *window },
-                    right_open,
-                    self.right_resize.width,
-                    "Muse",
-                    cx,
-                )
-            };
-            // The pane's tab row (docs/83 §6), in its 44 px header in both
-            // modes: Changes · Files · Page, the open file's tab, ＋,
-            // maximise, ✕. The screens below carry only their sub-headers.
-            let header_right_el = self.render_right_tabs(kind, open_file, cx);
+            // The right pane is its own entity (task 4.3): this frame's facts
+            // go in (the project, the active session, the pending switch, the
+            // session's page — built here, where the window is at hand, while
+            // the pane stands open on it), and the view comes back. It draws
+            // from its own read cache — no subprocess or filesystem I/O of its
+            // own — and is deliberately not `.cached(...)` like the sidebar
+            // and transcript columns: the facts arrive during this render, so
+            // a retained subtree would draw last frame's. Its tab row goes in
+            // the column's 44 px header (docs/83 §6).
+            let right = self.compose_right_pane(window, cx);
+            let header_right_el = self.right_pane.update(cx, |pane, cx| pane.actions(window, cx));
             // One shell for every page (docs/83 §3, flat): the sidebar column
             // full height with the chrome row at its top; the centre and the
             // right pane plain columns, each with its 44 px header and line;
@@ -6466,13 +6024,17 @@ impl Render for Harness {
                 self.render_bar_chrome(window, cx)
             };
             let holes = cx.entity().downgrade();
+            let (right_width, right_resizing) = (self.right_width(cx), self.right_pane.read(cx).resize.active);
+            let right_snap = self.right_pane.update(cx, |pane, _| pane.take_snap());
+            // Painted lights off: the window owns real, glossy ones, and
+            // the painted set only ever stacked underneath them.
             let mut shell = app_shell("shell")
                 .native_lights(true)
                 .animate(!browse)
                 .page_sheet(browse)
                 .sidebar_width(px(self.resize.width))
-                .right_width(px(self.right_resize.width))
-                .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
+                .right_width(px(right_width))
+                .resizing(self.resize.active || right_resizing || right_snap)
                 .sidebar_open(crate::layout::Layout::get(cx).sidebar_open)
                 .right_open(right_open)
                 .sidebar(sidebar)
@@ -6498,7 +6060,9 @@ impl Render for Harness {
                 })
                 .right(right)
                 .centre(centre);
-            shell = shell.header_right(header_right_el);
+            if let Some(header_right) = header_right_el {
+                shell = shell.header_right(header_right);
+            }
             if let Some(switch) = chrome.switch {
                 shell = shell.chrome_switch(switch);
             }
@@ -6558,7 +6122,7 @@ impl Render for Harness {
                         // the window's right edge; the handle straddles its
                         // left divider (live 2026-10-19: a handle 9 px inside
                         // the pane was where nobody aims).
-                        .right(px(self.right_resize.width - RESIZE_HANDLE_W / 2.0))
+                        .right(px(right_width - RESIZE_HANDLE_W / 2.0))
                         .id("right-resize-area")
                         .role(gpui::Role::Splitter)
                         .aria_label("Resize right pane")
@@ -6612,7 +6176,7 @@ impl Render for Harness {
         // One overlay, not two: the two drags never run together, so it
         // routes every move to whichever one is in flight.
         let capture: Option<AnyElement> =
-            (self.resize.active || self.right_resize.active).then(|| {
+            (self.resize.active || self.right_pane.read(cx).resize.active).then(|| {
                 let travel = cx.entity().downgrade();
                 let release = cx.entity().downgrade();
                 drag_capture_overlay("resize-capture")
@@ -6645,7 +6209,7 @@ impl Render for Harness {
         let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
         let project_menu = self.render_project_menu(cx);
-        let files_menu = self.render_files_menu(cx);
+        let files_menu = self.right_pane.update(cx, |pane, cx| pane.render_files_menu(cx));
         // Z7a, the native-overlay rule: persist real navigations, resolve
         // pending screenshot attaches, and hide every native webview this
         // frame covers (the page is composited above gpui, so gpui cannot
@@ -7140,7 +6704,7 @@ impl Harness {
             cx.notify();
             return;
         }
-        if self.close_files_menu(cx) {
+        if self.right_pane.update(cx, |pane, cx| pane.close_files_menu(cx)) {
             return;
         }
         // The Browse tab menu is pane state, never the overlay stack:
@@ -7191,15 +6755,16 @@ impl Harness {
             }
         }
         // The Page row's Recent pages menu closes first (D6, 2026-10-18).
-        if self.right_cache.page_menu {
-            self.set_page_menu(false, cx);
+        if self.right_pane.read(cx).cache.page_menu {
+            self.right_pane.update(cx, |pane, cx| pane.set_page_menu(false, cx));
             return;
         }
         // An open file preview is the next thing Escape takes back: back
         // to the tree, keeping the selected marker and the scroll offset.
         if let Some((root, _)) = self.right_project() {
-            if self.close_file_preview_for(&root, cx) {
-                window.focus(&self.right_files_focus.clone(), cx);
+            if self.with_right_pane(cx, |pane, cx| pane.close_file_preview_for(&root, cx)) {
+                let focus = self.right_pane.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
                 return;
             }
         }
@@ -7207,7 +6772,7 @@ impl Harness {
         // (docs/43 §2.9–2.10: ←, Esc and ⌘[ go back).
         if crate::layout::Layout::get(cx).right_open {
             let screen = crate::right::screen_index(crate::layout::right_kind(crate::layout::Layout::get(cx)));
-            if self.pop_right_view(screen, cx) {
+            if self.right_pane.update(cx, |pane, cx| pane.pop_right_view(screen, cx)) {
                 return;
             }
         }
@@ -9263,7 +8828,7 @@ mod tests {
     /// without animating. A shows the legacy Diff kind (saved and restored
     /// as Changes) while B shows Browser; every switch restores the shown
     /// session's pane (B first shows it closed); a restart restores from
-    /// the store; the restore arms `right_snap` for exactly one frame while
+    /// the store; the restore arms the pane's `snap` for exactly one frame while
     /// user toggles never arm it; a new session starts closed; Files
     /// previews are per session too.
     #[gpui::test]
@@ -9300,7 +8865,7 @@ mod tests {
             () => {
                 vc.update(|_, cx| {
                     let h = baaz.read(cx);
-                    (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).right_kind, h.right_snap)
+                    (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).right_kind, h.right_pane.read(cx).snap)
                 })
             };
         }
@@ -9322,7 +8887,7 @@ mod tests {
         open_session!("sess-b");
         assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Changes), true));
         draw!();
-        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).snap), "one frame consumes the snap");
         // Browser in B; a user change still does not snap.
         show!(crate::layout::RightKind::Browser);
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
@@ -9339,10 +8904,10 @@ mod tests {
         open_session!("sess-a");
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), true));
         draw!();
-        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).snap), "one frame consumes the snap");
         // A user toggle after the snap is consumed never re-arms it.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).snap), "a user toggle must still animate");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // A restore arms the snap; a user toggle BEFORE any frame consumes it
@@ -9350,7 +8915,7 @@ mod tests {
         open_session!("sess-b");
         assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), true));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a toggle before the frame still animates");
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).snap), "a toggle before the frame still animates");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         open_session!("sess-a");
         draw!();
@@ -9385,11 +8950,11 @@ mod tests {
         show!(crate::layout::RightKind::Files);
         let root =
             vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root).expect("a project"));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.begin_file_preview_for(&root, "Cargo.toml", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, "Cargo.toml", cx))));
         macro_rules! previewed {
             () => {
                 vc.update(|_, cx| {
-                    baaz.read(cx).right_cache.preview_for(&root).map(|preview| preview.path.clone())
+                    baaz.read(cx).right_pane.read(cx).cache.preview_for(&root).map(|preview| preview.path.clone())
                 })
             };
         }
@@ -9424,10 +8989,11 @@ mod tests {
         for kind in crate::layout::RightKind::ALL {
             for _ in 0..2 {
                 vc.update(|window, cx| {
-                    baaz.update(cx, |harness, cx| {
+                    let pane = baaz.read(cx).right_pane.clone();
+                    pane.update(cx, |pane, cx| {
                         let _ = crate::right::render(
                             kind,
-                            &harness.right_cache,
+                            &pane.cache,
                             project.clone(),
                             &[],
                             crate::right::BrowserPane { state: None, window: &mut *window },
@@ -9474,7 +9040,7 @@ mod tests {
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
-        let files = vc.update(|_, cx| baaz.read(cx).right_cache.files_for(&root));
+        let files = vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.files_for(&root));
         assert!(files.is_some(), "the background re-read lands the file listing in the cache");
         crate::right::reset_io_count();
         // Outside any `Harness` update, exactly like the pane's own action
@@ -9488,7 +9054,7 @@ mod tests {
             "Refresh re-reads the filesystem instead of toasting that it is not wired"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).right_cache.files_for(&root)).is_some(),
+            vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.files_for(&root)).is_some(),
             "the Refresh re-read lands in the cache too"
         );
         restore_state(state);
@@ -9513,12 +9079,14 @@ mod tests {
             .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::write(root.join("note.txt"), "version one\n").unwrap();
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.begin_file_preview_for(&root, "note.txt", cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, "note.txt", cx))));
         vc.run_until_parked();
         let shows = |vc: &mut gpui::VisualTestContext, baaz: &gpui::Entity<Harness>| {
             vc.update(|_, cx| {
                 baaz.read(cx)
-                    .right_cache
+                    .right_pane
+                    .read(cx)
+                    .cache
                     .preview_for(&root)
                     .and_then(|preview| crate::right::preview_text_shown(&preview).map(str::to_string))
             })
@@ -9633,18 +9201,18 @@ mod tests {
                 crate::layout::RightKind::Files,
                 "a folder link opens the pane on Files"
             );
-            let open = harness.right_cache.expanded_for(&root);
+            let open = harness.right_pane.read(cx).cache.expanded_for(&root);
             assert!(
                 open.contains("crates") && open.contains("crates/baaz") && open.contains("crates/baaz/src"),
                 "every ancestor stands open, got: {open:?}"
             );
             assert_eq!(
-                harness.right_cache.selected_for(&root).as_deref(),
+                harness.right_pane.read(cx).cache.selected_for(&root).as_deref(),
                 Some("crates/baaz/src"),
                 "the folder is selected"
             );
             assert!(
-                harness.right_cache.preview_for(&root).is_none(),
+                harness.right_pane.read(cx).cache.preview_for(&root).is_none(),
                 "a folder reveal previews nothing"
             );
         });
@@ -9703,11 +9271,11 @@ mod tests {
                 crate::layout::RightKind::Files,
                 "a file link opens the pane on Files"
             );
-            let preview = harness.right_cache.preview_for(&root).expect("a preview");
+            let preview = harness.right_pane.read(cx).cache.preview_for(&root).expect("a preview");
             assert_eq!(preview.path, "src/main.rs");
             assert_eq!(preview.highlight, Some(2..3), "the preview bands the linked lines");
             assert!(
-                harness.right_cache.expanded_for(&root).contains("src"),
+                harness.right_pane.read(cx).cache.expanded_for(&root).contains("src"),
                 "the file's parent stands open"
             );
         });
@@ -9763,7 +9331,7 @@ mod tests {
             assert_eq!(crate::layout::right_kind(crate::layout::Layout::get(cx)), crate::layout::RightKind::Browser, "an HTML link opens the Page");
         });
         assert!(page_shows(vc, &url), "the Page navigates to the file");
-        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root).is_none()), "no code preview opened");
+        assert!(vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.preview_for(&root).is_none()), "no code preview opened");
         restore_state(state);
     }
 
@@ -9784,23 +9352,23 @@ mod tests {
         std::fs::write(root.join("index.html"), "<h1>hi</h1>").unwrap();
         std::fs::write(root.join("notes.md"), "# Notes\n").unwrap();
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.select_right(crate::layout::RightKind::Files, cx)));
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_file_entry(&root, "index.html", cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.with_right_pane(cx, |pane, cx| pane.open_file_entry(&root, "index.html", cx))));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(crate::layout::right_kind(crate::layout::Layout::get(cx)), crate::layout::RightKind::Browser, "a Files click on HTML opens the Page");
-            assert!(harness.right_cache.preview_for(&root).is_none(), "no code preview");
+            assert!(harness.right_pane.read(cx).cache.preview_for(&root).is_none(), "no code preview");
         });
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.begin_file_source_for(&root, "notes.md", cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.with_right_pane(cx, |pane, cx| pane.begin_file_source_for(&root, "notes.md", cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
-            let preview = baaz.read(cx).right_cache.preview_for(&root).expect("a source preview");
+            let preview = baaz.read(cx).right_pane.read(cx).cache.preview_for(&root).expect("a source preview");
             assert!(matches!(preview.content, crate::right::PreviewContent::Text { .. }), "View source shows text, drew {:?}", preview.content);
         });
         // Without "View source" the same file renders.
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_file_entry(&root, "notes.md", cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.with_right_pane(cx, |pane, cx| pane.open_file_entry(&root, "notes.md", cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
-            let preview = baaz.read(cx).right_cache.preview_for(&root).expect("a preview");
+            let preview = baaz.read(cx).right_pane.read(cx).cache.preview_for(&root).expect("a preview");
             assert!(matches!(preview.content, crate::right::PreviewContent::Markdown { .. }), "a plain open renders, drew {:?}", preview.content);
         });
         restore_state(state);
@@ -9821,15 +9389,15 @@ mod tests {
                 h.begin_resize(100.0, cx);
                 assert!(h.resize.active);
                 h.begin_right_resize(100.0, cx);
-                assert!(!h.right_resize.active, "a right press mid-sidebar-drag is a no-op");
+                assert!(!h.right_pane.read(cx).resize.active, "a right press mid-sidebar-drag is a no-op");
                 h.end_resize(cx);
                 assert!(!h.resize.active);
                 h.begin_right_resize(100.0, cx);
-                assert!(h.right_resize.active);
+                assert!(h.right_pane.read(cx).resize.active);
                 h.begin_resize(100.0, cx);
                 assert!(!h.resize.active, "a sidebar press mid-right-drag is a no-op");
                 h.end_right_resize(cx);
-                assert!(!h.right_resize.active);
+                assert!(!h.right_pane.read(cx).resize.active);
             })
         });
         restore_state(state);

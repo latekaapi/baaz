@@ -162,7 +162,9 @@ impl ResizeDrag {
 /// to different defaults, and run the drag math with opposite signs, so
 /// sharing one struct would thread a discriminant through all of that for
 /// no gain. The two are never active at once: each `begin_*` refuses while
-/// the other runs, which is also why one capture overlay covers both.
+/// the other runs, which is also why one capture overlay covers both. The
+/// right pane entity owns this one ([`crate::right_pane::RightPane::resize`]);
+/// the root's handlers below drive it there.
 pub(crate) struct RightResizeDrag {
     /// The right divider's current width, in window pixels. Local state
     /// until the drag settles, then `layout.json`'s `rightWidth`.
@@ -206,6 +208,46 @@ impl RightResizeDrag {
         let width = self.width;
         layout::Layout::update(cx, |layout| layout.right_width = Some(width));
     }
+
+    /// Arm the drag from the grab point `x`.
+    fn begin(&mut self, x: f32) {
+        self.active = true;
+        self.grab_x = x;
+        self.start_w = self.width;
+        self.moved = 0.0;
+    }
+
+    /// One move to `x`: the divider follows from where the drag started —
+    /// narrowing as the pointer moves right — clamped. False while no drag
+    /// is armed.
+    fn drag_to(&mut self, x: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        let width = layout::right_drag_width(self.start_w, self.grab_x, x);
+        self.moved = self.moved.max((width - self.start_w).abs());
+        self.width = width;
+        true
+    }
+
+    /// The release: disarm and settle — a release with no travel shortly
+    /// after the previous one is the double-click, which resets to the
+    /// default width. False while no drag is armed; the caller persists.
+    fn end(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        self.scripted = false;
+        let now = std::time::Instant::now();
+        if self.moved < 2.0 && self.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW) {
+            self.width = RIGHT_WIDTH;
+            self.last_release = None;
+        } else {
+            self.last_release = Some(now);
+        }
+        true
+    }
 }
 
 impl Harness {
@@ -216,7 +258,7 @@ impl Harness {
     /// starting within a few frames of an outside open must not scroll the
     /// sessions list itself — and no reveal installs while it is in flight.
     pub(crate) fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        if self.right_resize.active {
+        if self.right_pane.read(cx).resize.active {
             return;
         }
         self.reveal = None;
@@ -267,8 +309,8 @@ impl Harness {
         cx.notify();
     }
 
-    /// The press on the right pane's strip: arm the drag from the grab
-    /// point, exactly like [`Harness::begin_resize`]. Refuses while the
+    /// The press on the right pane's strip: arm the pane's drag from the
+    /// grab point, exactly like [`Harness::begin_resize`]. Refuses while the
     /// sidebar drag runs: both dividers can never be under the pointer at
     /// once, so the second press is a no-op rather than a second drag.
     pub(crate) fn begin_right_resize(&mut self, x: f32, cx: &mut Context<Self>) {
@@ -278,11 +320,7 @@ impl Harness {
         self.reveal = None;
         self.reveal_unknown = None;
         self.sidebar_user_scrolled = true;
-        let drag = &mut self.right_resize;
-        drag.active = true;
-        drag.grab_x = x;
-        drag.start_w = drag.width;
-        drag.moved = 0.0;
+        self.right_pane.update(cx, |pane, _| pane.resize.begin(x));
         cx.notify();
     }
 
@@ -290,14 +328,9 @@ impl Harness {
     /// from where the drag started — narrowing as the pointer moves right —
     /// clamped, with no spring between it and the pointer.
     pub(crate) fn drag_right_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        let drag = &mut self.right_resize;
-        if !drag.active {
-            return;
+        if self.right_pane.update(cx, |pane, _| pane.resize.drag_to(x)) {
+            cx.notify();
         }
-        let width = layout::right_drag_width(drag.start_w, drag.grab_x, x);
-        drag.moved = drag.moved.max((width - drag.start_w).abs());
-        drag.width = width;
-        cx.notify();
     }
 
     /// The release, wherever it lands: disarm, settle, persist to
@@ -305,23 +338,16 @@ impl Harness {
     /// one is the handle's double-click, which resets to the default right
     /// width instead of keeping a tap that moved nothing.
     pub(crate) fn end_right_resize(&mut self, cx: &mut Context<Self>) {
-        let drag = &mut self.right_resize;
-        if !drag.active {
-            return;
+        let settled = self.right_pane.update(cx, |pane, cx| {
+            let settled = pane.resize.end();
+            if settled {
+                pane.resize.persist(cx);
+            }
+            settled
+        });
+        if settled {
+            cx.notify();
         }
-        drag.active = false;
-        drag.scripted = false;
-        let now = std::time::Instant::now();
-        if drag.moved < 2.0
-            && drag.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW)
-        {
-            drag.width = RIGHT_WIDTH;
-            drag.last_release = None;
-        } else {
-            drag.last_release = Some(now);
-        }
-        drag.persist(cx);
-        cx.notify();
     }
 }
 

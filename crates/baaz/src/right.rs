@@ -5,7 +5,7 @@
 //! whatever [`RightCache`] holds, and an empty cache draws the pane's loading
 //! state. The reads — an expansion-aware directory walk, a handful of
 //! read-only `git` invocations each with a timeout — happen in
-//! [`read_snapshot`], which the [`Harness`](crate::app::Harness) refresh path
+//! [`read_snapshot`], which the [`RightPane`](crate::right_pane::RightPane) refresh path
 //! runs on a background task and applies with an update + notify. The file
 //! tree's Refresh, Toggle and Select are wired (re-read, expand, preview);
 //! a previewed text file's bytes arrive on a second background task through
@@ -35,6 +35,7 @@ use gpui::{
 use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
+use crate::right_pane::RightPane;
 use crate::layout::RightKind;
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
@@ -140,7 +141,7 @@ pub(crate) struct Stamped<T> {
 /// fetched), the last parsed working-tree diff, and the last file-tree listing
 /// with its cap flag — each stamped with the root it was read for and the
 /// instant it was read. [`render`] only reads this; the
-/// [`Harness`](crate::app::Harness) refresh path writes it from a background
+/// [`RightPane`](crate::right_pane::RightPane) refresh path writes it from a background
 /// task.
 /// What the Files pane previews, and how.
 #[derive(Clone, Debug, PartialEq)]
@@ -454,7 +455,7 @@ pub(crate) struct RightSnapshot {
 
 /// Re-read everything for `root`: up to six read-only git subprocesses plus a
 /// capped one-level walk. Blocking — the
-/// [`Harness`](crate::app::Harness) refresh path runs it on the background
+/// [`RightPane`](crate::right_pane::RightPane) refresh path runs it on the background
 /// executor (inline under `BAAZ_DETERMINISTIC`, where the git reads are
 /// fixtures and the walk is the only real I/O).
 #[cfg(test)]
@@ -506,8 +507,8 @@ pub(crate) fn read_snapshot_for_cached(
 
 /// Render the right pane for `kind` from the already-read [`RightCache`].
 ///
-/// This function never reads the `Harness` entity itself — `render` runs while
-/// `Harness` is borrowed for update, so `cx.entity().read(cx)` would panic —
+/// This function never reads the pane entity itself — `render` runs while
+/// the pane is borrowed for update, so `cx.entity().read(cx)` would panic —
 /// and never touches a subprocess or the filesystem either. The project and
 /// the cache arrive as arguments (the project from the in-memory current
 /// project, which the old path re-resolved from the projects store on disk
@@ -558,9 +559,9 @@ pub(crate) fn render(
     pane_open: bool,
     width: f32,
     agent: &str,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> AnyElement {
-    let harness = cx.weak_entity();
+    let pane = cx.weak_entity();
     match kind {
         RightKind::Browser => match browser_placeholder_for(pane_open, browser.state.is_some()) {
             BrowserPlaceholder::Page => browser_pane(
@@ -591,7 +592,7 @@ pub(crate) fn render(
                     Some((nodes, truncated)) => {
                         let selected = cache.selected_for(&root);
                         let nodes = decorate_nodes(mark_selected(nodes, selected.as_deref()), cache.git_for(&root).flatten().as_ref());
-                        files_pane_from(&nodes, truncated, &name, &root, cache, harness)
+                        files_pane_from(&nodes, truncated, &name, &root, cache, pane)
                     }
                 },
                 None => empty_state(
@@ -662,7 +663,7 @@ pub(crate) fn render_screen(
     width: f32,
     agent: &str,
     files_focus: &gpui::FocusHandle,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> AnyElement {
     let slug = kind.slug();
     let screen = screen_index(kind);
@@ -713,7 +714,7 @@ pub(crate) fn render_screen(
                     Some(menu) => div().relative().size_full().child(body).child(menu).into_any_element(),
                     None if merged && overlay_menu => div()
                         .size_full()
-                        .on_mouse_down_out(cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx)))
+                        .on_mouse_down_out(cx.listener(|this: &mut RightPane, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx)))
                         .child(body)
                         .into_any_element(),
                     None => body,
@@ -751,7 +752,7 @@ pub(crate) fn render_screen(
         .role(gpui::Role::Complementary)
         .aria_label(format!("Right pane: {}", kind.label()))
         .key_context("RightPane")
-        .on_action(cx.listener(move |this: &mut Harness, _: &crate::app::RightBack, _, cx| {
+        .on_action(cx.listener(move |this: &mut RightPane, _: &crate::app::RightBack, _, cx| {
             this.pop_right_view(screen, cx);
         }))
         .children(row)
@@ -759,38 +760,46 @@ pub(crate) fn render_screen(
         .into_any_element()
 }
 
-impl Harness {
-    /// The pane's tab row (docs/83 §6), for the shell to seat in the right
-    /// column's 44 px header in both modes: the tabs ([`pane_tab_list`]),
-    /// `＋` (the view menu), maximise and ✕. `open_file` is the project root
-    /// and name of the file Files previews, when the strip shows one.
-    pub(crate) fn render_right_tabs(&self, kind: RightKind, open_file: Option<(PathBuf, SharedString)>, cx: &mut Context<Self>) -> AnyElement {
+impl RightPane {
+    /// The pane's tab row (docs/83 §6): the tabs ([`pane_tab_list`]), `＋`
+    /// (the view menu), maximise and ✕. `open_file` is the project root and
+    /// name of the file Files previews, when the strip shows one. What
+    /// [`Region::actions`](crate::region::Region::actions) hands the shell.
+    pub(crate) fn render_tabs(&self, kind: RightKind, open_file: Option<(PathBuf, SharedString)>, cx: &mut Context<Self>) -> AnyElement {
         let tabs = pane_tab_list(kind, open_file.as_ref().map(|(_, name)| name.clone()));
         let preview_root = open_file.map(|(root, _)| root);
         let close_root = preview_root.clone();
         let (select, seat) = (cx.weak_entity(), cx.weak_entity());
-        let maximised = right_maximised(self.right_resize.width);
+        let maximised = right_maximised(self.resize.width);
         let menu_open = self.overlays.read(cx).is_open(crate::overlays::MenuKind::RightViews);
         aui::workbench::pane_tabs("right-tabs", tabs)
             .on_select(move |id, window, cx| {
                 let _ = select.update(cx, |this, cx| this.pane_tab_click(id, preview_root.as_deref(), window, cx));
             })
-            .on_close_tab(cx.listener(move |this: &mut Harness, _: &SharedString, window, cx| {
+            .on_close_tab(cx.listener(move |this: &mut RightPane, _: &SharedString, window, cx| {
                 if let Some(root) = close_root.as_deref() {
                     this.close_file_preview_for(root, cx);
                     // The tree takes the keyboard back, so ↑ ↓ go on from
                     // the row that was open (live 2026-10-19).
-                    window.focus(&this.right_files_focus.clone(), cx);
+                    window.focus(&this.focus.clone(), cx);
                 }
             }))
-            .on_add(menu_open, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
-                this.open_menu(crate::overlays::MenuKind::RightViews, cx);
+            .on_add(menu_open, cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(crate::right_pane::RightPaneEvent::OpenViewsMenu);
             }))
             .on_add_bounds(move |bounds, _, cx| {
-                let _ = seat.update(cx, |this, cx| Harness::note_trigger_bounds(&mut this.right_cache.views_menu_seat, bounds, cx));
+                let _ = seat.update(cx, |this, cx| {
+                    // Notify only when the seat first arrives: a menu opened
+                    // before the first prepaint appears on the next frame.
+                    let had = this.cache.views_menu_seat.is_some();
+                    this.cache.views_menu_seat = Some(bounds);
+                    if !had {
+                        cx.notify();
+                    }
+                });
             })
-            .on_maximise(maximised, cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right_maximised(cx)))
-            .on_close(cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| this.toggle_right(cx)))
+            .on_maximise(maximised, cx.listener(|this: &mut RightPane, _: &gpui::ClickEvent, _, cx| this.toggle_right_maximised(cx)))
+            .on_close(cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| cx.emit(crate::right_pane::RightPaneEvent::Toggle)))
             .into_any_element()
     }
 
@@ -800,34 +809,34 @@ impl Harness {
     /// opens the pane on its view (never closing it).
     pub(crate) fn pane_tab_click(&mut self, id: &str, preview_root: Option<&Path>, window: &mut Window, cx: &mut Context<Self>) {
         if id == FILE_TAB {
-            self.select_right(RightKind::Files, cx);
+            cx.emit(crate::right_pane::RightPaneEvent::Select(RightKind::Files));
             return;
         }
         let Some(kind) = RightKind::parse(id) else { return };
         let on_files = crate::layout::Layout::get(cx).right_open && crate::layout::right_kind(crate::layout::Layout::get(cx)) == RightKind::Files;
         if let (RightKind::Files, true, Some(root)) = (kind, on_files, preview_root) {
             self.close_file_preview_for(root, cx);
-            window.focus(&self.right_files_focus.clone(), cx);
+            window.focus(&self.focus.clone(), cx);
             return;
         }
-        self.select_right(kind, cx);
+        cx.emit(crate::right_pane::RightPaneEvent::Select(kind));
     }
 
     /// Maximise (docs/83 §6): the pane to the widest the divider allows, or
     /// back to the default width when it is there already. Persists like a
     /// drag does.
     pub(crate) fn toggle_right_maximised(&mut self, cx: &mut Context<Self>) {
-        self.right_resize.width = if right_maximised(self.right_resize.width) { aui::shell::RIGHT_WIDTH } else { aui::shell::RIGHT_MAX_WIDTH };
-        self.right_resize.persist(cx);
+        self.resize.width = if right_maximised(self.resize.width) { aui::shell::RIGHT_WIDTH } else { aui::shell::RIGHT_MAX_WIDTH };
+        self.resize.persist(cx);
         cx.notify();
     }
 
     /// Flip the directory `id` open or closed for `root` and re-read, so
     /// the toggle draws its children (or hides them) on the next frame.
     pub(crate) fn toggle_files_dir(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
-        toggle_expanded(&mut self.right_cache, root, id);
-        self.save_right_for_active(cx);
-        self.refresh_right_now(cx);
+        toggle_expanded(&mut self.cache, root, id);
+        cx.emit(crate::right_pane::RightPaneEvent::Persist);
+        self.refresh_now(cx);
         cx.notify();
     }
 
@@ -867,8 +876,8 @@ impl Harness {
         source: bool,
         cx: &mut Context<Self>,
     ) {
-        mark_file_preview_loading(&mut self.right_cache, root, id, highlight, source);
-        self.save_right_for_active(cx);
+        mark_file_preview_loading(&mut self.cache, root, id, highlight, source);
+        cx.emit(crate::right_pane::RightPaneEvent::Persist);
         cx.notify();
         let root = root.to_path_buf();
         let id = id.to_string();
@@ -876,8 +885,8 @@ impl Harness {
             let path = root.join(&id);
             let probe = cx.background_executor().spawn(async move { probe_file_preview(&path) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if land_file_preview(&mut this.right_cache, &root, &id, probe) {
-                    this.save_right_for_active(cx);
+                if land_file_preview(&mut this.cache, &root, &id, probe) {
+                    cx.emit(crate::right_pane::RightPaneEvent::Persist);
                 }
                 cx.notify();
             });
@@ -885,6 +894,40 @@ impl Harness {
         .detach();
     }
 
+    /// Mark `rel` (relative to `root`) for a reveal in the tree (B9): a
+    /// folder selects with no preview; a file has its ancestors expanded.
+    /// Either way the tree scrolls to the row once per reveal. The pane half
+    /// of [`Harness::reveal_link_path`], which opens the pane on Files and
+    /// then starts a file's preview.
+    pub(crate) fn mark_reveal(&mut self, root: &Path, rel: &str, is_dir: bool, cx: &mut Context<Self>) {
+        if is_dir {
+            select_dir(&mut self.cache, root, rel);
+        } else if let Some(parent) = rel.rsplit_once('/').map(|(parent, _)| parent) {
+            expand_to(&mut self.cache, root, parent);
+        }
+        self.cache.note_reveal(root, rel);
+        cx.notify();
+    }
+
+    /// Close the open preview for `root`, returning to the tree with the
+    /// selected marker kept. What the preview's back control and Escape
+    /// call. Returns whether one was open.
+    pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        // The keyboard goes on from the file that was open (live 2026-10-19:
+        // ↓ after Back started at the top).
+        if let Some(path) = self.cache.preview_for(root).map(|p| p.path.clone()) {
+            self.cache.files_ui.cursor = Some(path);
+        }
+        let closed = close_file_preview(&mut self.cache, root);
+        if closed {
+            cx.emit(crate::right_pane::RightPaneEvent::Persist);
+            cx.notify();
+        }
+        closed
+    }
+}
+
+impl Harness {
     /// Reveal an absolute link path in the Files pane (B9): the landing
     /// behind [`SessionEvent::RevealPath`](crate::session::SessionEvent),
     /// after the lifecycle's background task settled existence. `is_dir`
@@ -931,37 +974,14 @@ impl Harness {
             self.select_right(RightKind::Files, cx);
             return;
         }
-        if is_dir {
-            select_dir(&mut self.right_cache, root, &rel);
-            self.right_cache.note_reveal(root, &rel);
-            self.select_right(RightKind::Files, cx);
-            return;
-        }
-        if let Some(parent) = rel.rsplit_once('/').map(|(parent, _)| parent) {
-            expand_to(&mut self.right_cache, root, parent);
-        }
-        self.right_cache.note_reveal(root, &rel);
+        // The tree is marked first, so the open's re-read walks the
+        // expanded ancestors; a file's preview starts once the pane is open.
+        self.with_right_pane(cx, |pane, cx| pane.mark_reveal(root, &rel, is_dir, cx));
         self.select_right(RightKind::Files, cx);
-        self.begin_file_preview_for_line(root, &rel, highlight, cx);
-    }
-
-    /// Close the open preview for `root`, returning to the tree with the
-    /// selected marker kept. What the preview's back control and Escape
-    /// call. Returns whether one was open.
-    pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
-        // The keyboard goes on from the file that was open (live 2026-10-19:
-        // ↓ after Back started at the top).
-        if let Some(path) = self.right_cache.preview_for(root).map(|p| p.path.clone()) {
-            self.right_cache.files_ui.cursor = Some(path);
+        if !is_dir {
+            self.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for_line(root, &rel, highlight, cx));
         }
-        let closed = close_file_preview(&mut self.right_cache, root);
-        if closed {
-            self.save_right_for_active(cx);
-            cx.notify();
-        }
-        closed
     }
-
 
     /// Open the right pane on the Browser kind because the agent navigated
     /// `session_id` there (Z7b): like a person's click would — the pane
@@ -1013,15 +1033,15 @@ pub(crate) fn agent_open_flips_visible_pane(active: Option<&str>, session_id: &s
 }
 
 /// Select `id` for `root` from the tree's action closure, which only holds
-/// `&mut App`: upgrade the weak [`Harness`] and run the preview through it.
+/// `&mut App`: upgrade the weak [`RightPane`] and run the preview through it.
 /// Silent when the window is already gone.
 pub(crate) fn select_file_preview(
-    harness: WeakEntity<Harness>,
+    pane: WeakEntity<RightPane>,
     root: PathBuf,
     id: String,
     cx: &mut App,
 ) {
-    let _ = harness.update(cx, |this, cx| this.begin_file_preview_for(&root, &id, cx));
+    let _ = pane.update(cx, |this, cx| this.begin_file_preview_for(&root, &id, cx));
 }
 
 /// Open `path` in its default app: a file in its editor or viewer, a
@@ -1160,17 +1180,17 @@ pub(crate) fn partition_session_files(
 /// than inline closures) so tests can invoke the exact handler the pane
 /// wires up.
 fn files_handler(
-    harness: WeakEntity<Harness>,
+    pane: WeakEntity<RightPane>,
     root: PathBuf,
 ) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
     move |action, _window, cx| match action {
         FileTreeAction::Toggle(id) => {
             let id = id.to_string();
             let root = root.clone();
-            let _ = harness.update(cx, |this, cx| this.toggle_files_dir(&root, &id, cx));
+            let _ = pane.update(cx, |this, cx| this.toggle_files_dir(&root, &id, cx));
         }
         FileTreeAction::Select(id) => {
-            select_file_preview(harness.clone(), root.clone(), id.to_string(), cx);
+            select_file_preview(pane.clone(), root.clone(), id.to_string(), cx);
         }
     }
 }
@@ -2083,10 +2103,10 @@ fn files_pane_from(
     name: &str,
     root: &Path,
     cache: &RightCache,
-    harness: WeakEntity<Harness>,
+    pane: WeakEntity<RightPane>,
 ) -> AnyElement {
     if let Some(preview) = cache.preview_for(root) {
-        return file_preview_pane(&preview, root, cache, harness);
+        return file_preview_pane(&preview, root, cache, pane);
     }
     let count = nodes.len();
     let footer = if truncated {
@@ -2096,7 +2116,7 @@ fn files_pane_from(
     } else {
         format!("{count} files and folders")
     };
-    let handler = files_handler(harness, root.to_path_buf());
+    let handler = files_handler(pane, root.to_path_buf());
     // Flush: these are panes and stacked panels, not cards floating on a
     // surface. Their own rounded border inside a column that already has
     // edges is what the owner saw as "extra borders and rounded corners".
@@ -2130,16 +2150,16 @@ fn file_preview_pane(
     preview: &FilePreview,
     root: &Path,
     cache: &RightCache,
-    harness: WeakEntity<Harness>,
+    pane: WeakEntity<RightPane>,
 ) -> AnyElement {
     let path = root.join(&preview.path);
-    let back_harness = harness.clone();
+    let back_pane = pane.clone();
     let back_root = root.to_path_buf();
     let open_target = path.clone();
     let back = button("right-file-back", "Back")
         .accessibility_label("Back to files")
         .on_click(move |_, _, cx| {
-            let _ = back_harness.update(cx, |this, cx| {
+            let _ = back_pane.update(cx, |this, cx| {
                 this.close_file_preview_for(&back_root, cx);
             });
         });
@@ -2243,21 +2263,18 @@ fn file_preview_pane(
 /// The browser pane (Z7a): the library's `webview_pane` for the active
 /// session's [`WebviewState`](aui_webview::WebviewState) — nav row, page and
 /// annotations panel — over role Group labelled "Browser". The nav controls
-/// come labelled from the library. Intents forward to the harness:
-/// screenshots and annotations land in the active session's composer draft,
-/// Console toasts.
+/// come labelled from the library. Intents forward to the harness: out as
+/// [`RightPaneEvent::BrowserIntent`](crate::right_pane::RightPaneEvent), into
+/// [`Harness::handle_browser_intent`] — screenshots and annotations land in
+/// the active session's composer draft, Console toasts.
 fn browser_pane(
     state: &Entity<aui_webview::WebviewState>,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> AnyElement {
-    let harness = cx.weak_entity();
+    let weak = cx.weak_entity();
     let pane =
-        aui_webview::webview_pane("right-browser", state).on_intent(move |intent, window, cx| {
-            if let Some(harness) = harness.upgrade() {
-                harness.update(cx, |harness, cx| {
-                    harness.handle_browser_intent(intent, window, cx);
-                });
-            }
+        aui_webview::webview_pane("right-browser", state).on_intent(move |intent, _window, cx| {
+            let _ = weak.update(cx, |_, cx| cx.emit(crate::right_pane::RightPaneEvent::BrowserIntent(intent)));
         });
     let column = v_flex()
         .id("right-browser-pane")
@@ -2910,7 +2927,7 @@ mod tests {
             .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         vc.update(|window, cx| {
-            let handle = files_handler(baaz.downgrade(), root.clone());
+            let handle = files_handler(baaz.read(cx).right_pane.downgrade(), root.clone());
             handle(
                 &FileTreeAction::Select(SharedString::from("note.md")),
                 window,
@@ -2925,7 +2942,7 @@ mod tests {
         vc.run_until_parked();
         // Select opened the markdown preview (bytes land off the click),
         // Toggle expanded the directory — neither toasted.
-        let preview = vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root));
+        let preview = vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.preview_for(&root));
         let Some(preview) = preview else {
             panic!("selecting note.md must open a preview");
         };
@@ -2938,14 +2955,16 @@ mod tests {
         assert!(
             vc.update(|_, cx| baaz
                 .read(cx)
-                .right_cache
+                .right_pane
+                .read(cx)
+                .cache
                 .expanded_for(&root)
                 .contains("sub")),
             "toggling sub must expand it"
         );
         // The re-read the toggle requested draws the child row.
         let nodes = vc
-            .update(|_, cx| baaz.read(cx).right_cache.files_for(&root))
+            .update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.files_for(&root))
             .expect("the refresh lands the listing")
             .0;
         assert!(
@@ -2958,6 +2977,102 @@ mod tests {
                 .map(|node| node.id.to_string())
                 .collect::<Vec<_>>()
         );
+        restore_harness_dir(state);
+    }
+
+    /// Task 4.3: the pane is its own entity. A refresh of a real git
+    /// repository — the pane's own, as its file watch runs it — lands on the
+    /// pane and notifies the pane alone: the root is never notified. The
+    /// next frame draws the new row, so the pane's notify reaches the screen
+    /// (the root composes it uncached).
+    #[gpui::test]
+    fn a_refresh_lands_on_the_pane_without_notifying_the_root(cx: &mut TestAppContext) {
+        use gpui::{AppContext as _, IntoElement as _};
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let state = hermetic_harness_dir("pane-entity");
+        let repo = state.2.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // The window boots with the pane standing open on Changes, so the
+        // first frame lays it out at its width (an open by hand animates).
+        cx.update(|cx| {
+            crate::layout::Layout::init(cx);
+            crate::layout::Layout::stage(cx, |layout| {
+                layout.right_open = true;
+                layout.right_kind = Some(RightKind::Changes);
+            });
+        });
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(harness_args(&repo), crate::shot::CaptureToken::default(), window, cx))
+        });
+        macro_rules! draw {
+            () => {
+                vc.draw(gpui::point(gpui::px(0.), gpui::px(0.)), gpui::size(gpui::px(1440.), gpui::px(900.)), |_, _| {
+                    baaz.clone().into_any_element()
+                })
+            };
+        }
+        // Signed in, so the shell (and the pane in it) draws.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.refresh_right_now(cx)));
+        vc.run_until_parked();
+        let pane = vc.update(|_, cx| baaz.read(cx).right_pane.clone());
+        let root = vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root)).expect("the repo is the project");
+        let rows = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                pane.read(cx)
+                    .cache
+                    .git_for(&root)
+                    .flatten()
+                    .map(|tree| tree.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+        };
+        assert!(rows(vc).iter().any(|path| path == "b.txt"), "the open read the repo: {:?}", rows(vc));
+        draw!();
+        assert_eq!(crate::right_pane::drawn_changes(), Some(1), "the pane draws the one change (b.txt)");
+        // Whatever the signed-in frame set going settles first.
+        vc.run_until_parked();
+        let (pane_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (p, r) = (pane_notes.clone(), root_notes.clone());
+            (
+                cx.observe(&pane, move |_, _| p.set(p.get() + 1)),
+                cx.observe(&baaz, move |_, _| r.set(r.get() + 1)),
+            )
+        });
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        vc.update(|_, cx| pane.update(cx, |pane, cx| pane.refresh_now(cx)));
+        vc.run_until_parked();
+        assert!(rows(vc).iter().any(|path| path == "c.txt"), "the refresh landed the new file: {:?}", rows(vc));
+        assert!(pane_notes.get() > 0, "the landing notifies the pane");
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the pane's own data");
+        draw!();
+        assert_eq!(crate::right_pane::drawn_changes(), Some(2), "the next frame draws the new row too");
         restore_harness_dir(state);
     }
 
@@ -2975,19 +3090,19 @@ mod tests {
         vc.run_until_parked();
         let root = vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root)).expect("the hermetic workspace is adopted at boot");
         vc.update(|window, cx| {
-            files_handler(baaz.downgrade(), root.clone())(&FileTreeAction::Select(SharedString::from("long.py")), window, cx);
+            files_handler(baaz.read(cx).right_pane.downgrade(), root.clone())(&FileTreeAction::Select(SharedString::from("long.py")), window, cx);
         });
         vc.run_until_parked();
-        assert!(vc.update(|_, cx| baaz.read(cx).code_preview_open()), "a .py file previews as code");
+        assert!(vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).code_preview_open()), "a .py file previews as code");
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "wrapping is on by default");
         // ⌥Z is the preview body's key (VS Code's Toggle Word Wrap); the
         // Wrap button and the key both land in `toggle_code_wrap`.
         assert!(crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("alt-z").unwrap()));
         assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("cmd-alt-z").unwrap()));
         assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("z").unwrap()));
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.right_pane.update(cx, |pane, cx| pane.toggle_code_wrap(cx))));
         assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "the toggle turns wrapping off, in the layout");
-        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.right_pane.update(cx, |pane, cx| pane.toggle_code_wrap(cx))));
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "the Wrap button turns it back on");
         restore_harness_dir(state);
     }

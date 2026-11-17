@@ -1043,7 +1043,7 @@ impl Harness {
         // `set` without `notify`: a parked view reuses its retained subtree
         // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
-        self.right_cache.page_menu = false;
+        self.right_pane.update(cx, |pane, _| pane.cache.page_menu = false);
         self.active = Some(view.clone());
         // Reopening a session that stands at its end reads it (task 3.1);
         // one still loading reads on its `HistoryReady`.

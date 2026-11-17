@@ -362,8 +362,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb {
         verb: "page-menu",
         run: |this, rest, _, cx| match rest.trim() {
-            "" | "on" => { this.set_page_menu(true, cx); Ok(()) }
-            "off" => { this.set_page_menu(false, cx); Ok(()) }
+            "" | "on" => { this.right_pane.update(cx, |pane, cx| pane.set_page_menu(true, cx)); Ok(()) }
+            "off" => { this.right_pane.update(cx, |pane, cx| pane.set_page_menu(false, cx)); Ok(()) }
             other => Err(format!("`{other}` is not on or off")),
         },
     },
@@ -747,7 +747,7 @@ impl Harness {
             layout.right_open = true;
         });
         self.refresh_right_now(cx);
-        self.begin_file_preview_for(&root, id, cx);
+        self.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, id, cx));
         Ok(())
     }
 
@@ -761,13 +761,13 @@ impl Harness {
         {
             let width = aui::shell::clamp_right_width(width);
             // BOTH, and the second one is the one that renders. The shell is
-            // given `self.right_resize.width`; `layout.right_width` is only
+            // given the pane's `resize.width`; `layout.right_width` is only
             // what boot reads to seed it. Setting the layout field alone left
             // the verb inert for the capture, so every right-pane entry drew
             // at whatever width the person had last dragged to and persisted —
             // the baselines were pinned to user state without anyone noticing.
             crate::layout::Layout::stage(cx, |layout| layout.right_width = Some(width));
-            self.right_resize.width = width;
+            self.right_pane.update(cx, |pane, _| pane.resize.width = width);
         }
         cx.notify();
         Ok(())
@@ -1658,14 +1658,14 @@ mod tests {
         // Start somewhere the default is NOT, or the assertion below passes
         // whether or not the verb touches the field — the hermetic state opens
         // at RIGHT_WIDTH, which is the very value most captures ask for.
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.right_resize.width = 615.0));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.right_pane.update(cx, |pane, _| pane.resize.width = 615.0)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx))).expect("a width");
         assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_width), Some(400.0));
         // The field the shell actually renders (`app.rs` hands the shell
-        // `self.right_resize.width`). Asserting only the layout field above is
+        // the pane's `resize.width`). Asserting only the layout field above is
         // what let this verb ship inert: the captures drew at whatever width
         // the person had last dragged to.
-        assert_eq!(vc.update(|_, cx| baaz.read(cx).right_resize.width), 400.0);
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).right_width(cx)), 400.0);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx))).expect("a width");
         assert_eq!(
             vc.update(|_, cx| crate::layout::Layout::get(cx).right_width),

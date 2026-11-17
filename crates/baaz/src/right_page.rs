@@ -12,6 +12,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, Shared
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 
 use crate::app::Harness;
+use crate::right_pane::RightPane;
 use crate::right::BrowserPane;
 
 /// A page with nothing in it yet.
@@ -38,15 +39,15 @@ fn host_of(url: &str) -> String {
     aui::workbench::split_url(url).0.to_string()
 }
 
-impl Harness {
+impl RightPane {
     /// The no-page address field: made once, Enter opens what was typed (an
     /// address, or a search with the person's engine) as the session's page.
     pub(crate) fn ensure_page_address(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
-        if let Some(input) = &self.right_cache.page_address {
+        if let Some(input) = &self.cache.page_address {
             return input.clone();
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter an address"));
-        cx.subscribe(&input, |this: &mut Self, input, event: &InputEvent, cx| {
+        cx.subscribe(&input, |_: &mut Self, input, event: &InputEvent, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 let text = input.read(cx).value().to_string();
                 let engine = crate::layout::Layout::get(cx).search_engine;
@@ -55,18 +56,18 @@ impl Harness {
                     crate::browser::toolbar::NavTarget::Search(q) if q.is_empty() => return,
                     crate::browser::toolbar::NavTarget::Search(q) => engine.search_url(&q),
                 };
-                this.open_url_in_browser(url, cx);
+                cx.emit(crate::right_pane::RightPaneEvent::OpenUrl(url));
             }
         })
         .detach();
-        self.right_cache.page_address = Some(input.clone());
+        self.cache.page_address = Some(input.clone());
         input
     }
 
     /// Open or close the Page row's Recent pages menu.
     pub(crate) fn set_page_menu(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.right_cache.page_menu != open {
-            self.right_cache.page_menu = open;
+        if self.cache.page_menu != open {
+            self.cache.page_menu = open;
             cx.notify();
         }
     }
@@ -74,18 +75,23 @@ impl Harness {
     /// A Recent pages row: the session's one page goes there; the menu closes.
     pub(crate) fn open_recent_page(&mut self, index: usize, cx: &mut Context<Self>) {
         self.set_page_menu(false, cx);
-        let Some(state) = self.existing_browser(cx) else { return };
+        let Some(state) = self.facts.page.clone() else { return };
         let url = state.read(cx).recent_pages().get(index).map(|p| p.url.to_string());
         if let Some(url) = url {
             state.update(cx, |s, _| s.navigate(&url));
         }
     }
 
-    /// Whether the Page screen draws its own state over the page (no page
-    /// yet, couldn't load, crashed, a pushed view) — the native view hides
-    /// under it.
+}
+
+impl Harness {
+    /// Whether the Page screen draws its own state over the session's live
+    /// page (no page yet, couldn't load, crashed, a pushed view) — the
+    /// native view hides under it. Asked of the page as it stands now, for
+    /// the Page float's window, which can draw before the main window has
+    /// pushed this frame's facts to the pane.
     pub(crate) fn pane_page_covered(&self, cx: &gpui::App) -> bool {
-        self.existing_browser(cx).is_some_and(|state| page_covered(state.read(cx), &self.right_cache))
+        self.existing_browser(cx).is_some_and(|state| self.right_pane.read(cx).page_covered(state.read(cx)))
     }
 }
 
@@ -139,7 +145,7 @@ pub(crate) fn recent_menu_room(merged: bool, width: f32) -> f32 {
 /// The menu drawn inside the window, for a page that is not a native view
 /// (the scripted page captures and tests run); a native page gets it in its
 /// overlay window ([`crate::overlay`]), since it draws above gpui.
-pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, cache: &crate::right::RightCache, width: f32, merged: bool, cx: &mut Context<Harness>) -> Option<AnyElement> {
+pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState>>, cache: &crate::right::RightCache, width: f32, merged: bool, cx: &mut Context<RightPane>) -> Option<AnyElement> {
     let state = state?;
     // In the window unless a live native page is showing (that one gets the
     // overlay window): a covered page — its error page, say — hides it.
@@ -147,23 +153,23 @@ pub(crate) fn page_menu_in_window(open: bool, state: Option<&Entity<WebviewState
     if !open || native_showing {
         return None;
     }
-    let menu = recent_menu(&recent_rows(state.read(cx)), recent_menu_room(merged, width), cx);
-    let close = cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
+    let menu = recent_menu(&recent_rows(state.read(cx)), recent_menu_room(merged, width), cx.weak_entity());
+    let close = cx.listener(|this: &mut RightPane, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
     let (left, top) = recent_menu_seat(merged, width);
     Some(div().absolute().left(px(left)).top(px(top)).on_mouse_down_out(close).child(menu).into_any_element())
 }
 
-/// The menu itself, its rows wired to the session's page.
-pub(crate) fn recent_menu(rows: &[RecentRow], width: f32, cx: &mut Context<Harness>) -> AnyElement {
-    let weak = cx.weak_entity();
+/// The menu itself, its rows wired to the session's page through the pane
+/// (in the main window or the Page float's own).
+pub(crate) fn recent_menu(rows: &[RecentRow], width: f32, pane: gpui::WeakEntity<RightPane>) -> AnyElement {
     let pick = std::rc::Rc::new(move |index: usize, _: &mut Window, cx: &mut gpui::App| {
-        let _ = weak.update(cx, |this, cx| this.open_recent_page(index, cx));
+        let _ = pane.update(cx, |this, cx| this.open_recent_page(index, cx));
     });
     recent_pages_menu("right-page-recent", rows, width, pick).into_any_element()
 }
 
 /// The Page screen's body.
-pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, address: Option<Entity<InputState>>, menu_open: bool, cx: &mut Context<Harness>) -> AnyElement {
+pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, address: Option<Entity<InputState>>, menu_open: bool, cx: &mut Context<RightPane>) -> AnyElement {
     let Some(state) = browser.state else {
         return if pane_open {
             state_block("right-browser-loading", IconName::Globe, "Opening the page").into_any_element()
@@ -187,14 +193,14 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
     let has_recent = !state.read(cx).recent_pages().is_empty();
     let mut pane = aui_webview::webview_pane("right-browser", state)
         .agent(SharedString::from(agent.to_string()))
-        .on_intent(move |intent, window, cx| {
-            let _ = weak.update(cx, |harness, cx| harness.handle_browser_intent(intent, window, cx));
+        .on_intent(move |intent, _window, cx| {
+            let _ = weak.update(cx, |_, cx| cx.emit(crate::right_pane::RightPaneEvent::BrowserIntent(intent)));
         });
     if has_recent {
         let weak = cx.weak_entity();
         pane = pane.recent_pages(menu_open, move |_, cx| {
             let _ = weak.update(cx, |this, cx| {
-                let open = !this.right_cache.page_menu;
+                let open = !this.cache.page_menu;
                 this.set_page_menu(open, cx);
             });
         });

@@ -323,7 +323,7 @@ impl Render for OverlayView {
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
         }
-        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_cache.page_menu && !baaz.pane_page_covered(cx)).unwrap_or(false) {
+        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_pane.read(cx).cache.page_menu && !baaz.pane_page_covered(cx)).unwrap_or(false) {
             return div().size_full().children(content);
         }
         // The agent window's keys work while its own float holds the
@@ -667,10 +667,11 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             return self.wanted_agent_line(self.browser.centre_page_rect?, window, cx);
         }
-        if !crate::layout::Layout::get(cx).right_open || self.right_strip_moving {
+        let pane = self.right_pane.read(cx);
+        if !crate::layout::Layout::get(cx).right_open || pane.strip_moving {
             return None;
         }
-        if crate::layout::right_kind(crate::layout::Layout::get(cx)) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
+        if crate::layout::right_kind(crate::layout::Layout::get(cx)) != crate::layout::RightKind::Browser || pane.cache.pushed.contains_key(&2) {
             return None;
         }
         let state = self.existing_browser(cx)?;
@@ -681,7 +682,7 @@ impl Harness {
         let rect = page.page_rect()?;
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
-        if self.right_cache.page_menu && !crate::right_page::page_covered(page, &self.right_cache) {
+        if pane.cache.page_menu && !pane.page_covered(page) {
             // The Recent pages menu: the window covers the nav row and the
             // page, so a click anywhere over them outside the menu closes it.
             use std::hash::{Hash, Hasher};
@@ -936,11 +937,17 @@ impl Harness {
         let page = state.read(cx);
         let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
-        if self.right_cache.page_menu && !crate::right_page::page_covered(page, &self.right_cache) {
+        let menu_open = {
+            let pane = self.right_pane.read(cx);
+            pane.cache.page_menu && !pane.page_covered(page)
+        };
+        if menu_open {
             let rows = crate::right_page::recent_rows(page);
             let width = page.page_rect().map(|r| f32::from(r.size.width)).unwrap_or(400.0);
-            let menu = crate::right_page::recent_menu(&rows, crate::right_page::recent_menu_room(true, width), cx);
-            let close = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| this.set_page_menu(false, cx));
+            let menu = crate::right_page::recent_menu(&rows, crate::right_page::recent_menu_room(true, width), self.right_pane.downgrade());
+            let close = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
+                this.right_pane.update(cx, |pane, cx| pane.set_page_menu(false, cx));
+            });
             return Some(
                 div()
                     .size_full()

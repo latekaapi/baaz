@@ -18,7 +18,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Entity, IntoElement, Shared
 use gpui_kit::base::input::InputState;
 use gpui_kit::base::v_flex;
 
-use crate::app::Harness;
+use crate::right_pane::RightPane;
 use crate::right::{FilePreview, PreviewContent, RightCache};
 
 /// A text preview's split lines: (path, text length, lines).
@@ -133,28 +133,28 @@ fn list_all_paths(root: &Path) -> Vec<String> {
     paths
 }
 
-impl Harness {
+impl RightPane {
     /// Open (or focus) Files' filter (⌘F, /, the row's search button).
     pub(crate) fn open_files_filter(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if self.right_cache.files_ui.filter.is_none() {
+        if self.cache.files_ui.filter.is_none() {
             let state = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
             cx.observe(&state, |_, _, cx| cx.notify()).detach();
-            self.right_cache.files_ui.filter = Some(state);
+            self.cache.files_ui.filter = Some(state);
         }
-        if let Some(state) = &self.right_cache.files_ui.filter {
+        if let Some(state) = &self.cache.files_ui.filter {
             let focus = gpui::Focusable::focus_handle(state.read(cx), cx);
             window.focus(&focus, cx);
         }
-        let stale = self.right_cache.files_ui.all_paths.as_ref().is_none_or(|(r, _)| r != root);
-        if stale && !self.right_cache.files_ui.all_paths_reading {
-            self.right_cache.files_ui.all_paths_reading = true;
+        let stale = self.cache.files_ui.all_paths.as_ref().is_none_or(|(r, _)| r != root);
+        if stale && !self.cache.files_ui.all_paths_reading {
+            self.cache.files_ui.all_paths_reading = true;
             let root = root.to_path_buf();
             cx.spawn(async move |this, cx| {
                 let r = root.clone();
                 let paths = cx.background_executor().spawn(async move { list_all_paths(&r) }).await;
                 let _ = this.update(cx, |this: &mut Self, cx| {
-                    this.right_cache.files_ui.all_paths = Some((root, Arc::new(paths)));
-                    this.right_cache.files_ui.all_paths_reading = false;
+                    this.cache.files_ui.all_paths = Some((root, Arc::new(paths)));
+                    this.cache.files_ui.all_paths_reading = false;
                     cx.notify();
                 });
             })
@@ -165,7 +165,7 @@ impl Harness {
 
     /// Esc in the filter: clear it and close it.
     pub(crate) fn close_files_filter(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.right_cache.files_ui.filter.take().is_some();
+        let open = self.cache.files_ui.filter.take().is_some();
         if open {
             cx.notify();
         }
@@ -187,10 +187,10 @@ impl Harness {
         if rows.is_empty() {
             return false;
         }
-        let at = self.right_cache.files_ui.cursor.as_ref().and_then(|c| rows.iter().position(|n| n.id.as_ref() == c));
+        let at = self.cache.files_ui.cursor.as_ref().and_then(|c| rows.iter().position(|n| n.id.as_ref() == c));
         let set = |this: &mut Self, ix: usize| {
-            this.right_cache.files_ui.cursor = Some(rows[ix].id.to_string());
-            this.right_cache.note_reveal(root, rows[ix].id.as_ref());
+            this.cache.files_ui.cursor = Some(rows[ix].id.to_string());
+            this.cache.note_reveal(root, rows[ix].id.as_ref());
         };
         match key {
             "down" => set(self, at.map_or(0, |i| (i + 1).min(rows.len() - 1))),
@@ -239,7 +239,7 @@ pub(crate) fn files_screen(
     width: f32,
     focus: &gpui::FocusHandle,
     window: &mut Window,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> (Option<AnyElement>, AnyElement) {
     let Some((root, name)) = project else {
         return (
@@ -254,8 +254,8 @@ pub(crate) fn files_screen(
     let filter_open = ui.filter.is_some();
     let search_root = root.clone();
     let mut row = pushed_row("right-files-head", name)
-        .action(pane_action("right-files-filter", IconName::Search, "Filter files").toggled(filter_open).on_click(cx.listener(move |this: &mut Harness, _, window, cx| {
-            if this.right_cache.files_ui.filter.is_some() {
+        .action(pane_action("right-files-filter", IconName::Search, "Filter files").toggled(filter_open).on_click(cx.listener(move |this: &mut RightPane, _, window, cx| {
+            if this.cache.files_ui.filter.is_some() {
                 this.close_files_filter(cx);
             } else {
                 this.open_files_filter(&search_root, window, cx);
@@ -296,15 +296,15 @@ pub(crate) fn files_screen(
             let _ = weak.update(cx, |this, cx| {
                 match action {
                     FileTreeAction::Toggle(id) => {
-                        this.right_cache.files_ui.cursor = Some(id.to_string());
+                        this.cache.files_ui.cursor = Some(id.to_string());
                         this.toggle_files_dir(&root, id, cx);
                     }
                     FileTreeAction::Select(id) => {
-                        this.right_cache.files_ui.cursor = Some(id.to_string());
+                        this.cache.files_ui.cursor = Some(id.to_string());
                         this.open_file_entry(&root, id, cx);
                     }
                 }
-                window.focus(&this.right_files_focus.clone(), cx);
+                window.focus(&this.focus.clone(), cx);
             });
         })
         .on_context_menu({
@@ -327,7 +327,7 @@ pub(crate) fn files_screen(
         .size_full()
         .track_focus(focus)
         .key_context("RightFiles")
-        .on_key_down(cx.listener(move |this: &mut Harness, e: &gpui::KeyDownEvent, window, cx| {
+        .on_key_down(cx.listener(move |this: &mut RightPane, e: &gpui::KeyDownEvent, window, cx| {
             let key = e.keystroke.key.as_str();
             if this.files_key(key, e.keystroke.modifiers.platform, &key_nodes, &key_root, window, cx) {
                 cx.stop_propagation();
@@ -338,11 +338,11 @@ pub(crate) fn files_screen(
     if let Some(filter) = &ui.filter {
         // The field's keys (Esc, ↑ ↓, ⏎) reach the tree's handler as they
         // did when the field sat inside the body.
-        row = filter_bar("right-files-filter-field", filter, count.map(SharedString::from), cx.listener(|this: &mut Harness, _: &gpui::ClickEvent, _, cx| {
+        row = filter_bar("right-files-filter-field", filter, count.map(SharedString::from), cx.listener(|this: &mut RightPane, _: &gpui::ClickEvent, _, cx| {
             this.close_files_filter(cx);
         }), window, cx)
         .key_context("RightFiles")
-        .on_key_down(cx.listener(move |this: &mut Harness, e: &gpui::KeyDownEvent, window, cx| {
+        .on_key_down(cx.listener(move |this: &mut RightPane, e: &gpui::KeyDownEvent, window, cx| {
             let key = e.keystroke.key.as_str();
             if this.files_key(key, e.keystroke.modifiers.platform, &bar_nodes, &bar_root, window, cx) {
                 cx.stop_propagation();
@@ -365,7 +365,7 @@ fn preview_screen(
     width: f32,
     focus: &gpui::FocusHandle,
     window: &mut Window,
-    cx: &mut Context<Harness>,
+    cx: &mut Context<RightPane>,
 ) -> (Option<AnyElement>, AnyElement) {
     let p = cx.aui().colors;
     let abs = root.join(&preview.path);
@@ -386,7 +386,7 @@ fn preview_screen(
         row = row.action(
             pane_action("right-file-wrap", IconName::Wrap, if wrap { "Don't wrap lines (⌥Z)" } else { "Wrap lines (⌥Z)" })
                 .toggled(wrap)
-                .on_click(cx.listener(|this: &mut Harness, _, _, cx| this.toggle_code_wrap(cx))),
+                .on_click(cx.listener(|this: &mut RightPane, _, _, cx| this.toggle_code_wrap(cx))),
         );
     }
     let body: AnyElement = match &preview.content {
@@ -399,8 +399,8 @@ fn preview_screen(
                 let kind = preview.name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
                 let actual = cache.files_image_actual;
                 image_view("right-file-image", abs.clone(), image_facts(w, h, &kind, preview.size), Some((w as f32, h as f32)), actual, window, cx)
-                    .on_click(cx.listener(|this: &mut Harness, _, _, cx| {
-                        this.right_cache.files_image_actual = !this.right_cache.files_image_actual;
+                    .on_click(cx.listener(|this: &mut RightPane, _, _, cx| {
+                        this.cache.files_image_actual = !this.cache.files_image_actual;
                         cx.notify();
                     }))
                     .into_any_element()
@@ -436,10 +436,10 @@ fn preview_screen(
         .track_focus(focus)
         .key_context("RightFiles")
         // A click into the code takes the keyboard, so ⌥Z works from there.
-        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this: &mut Harness, _: &gpui::MouseDownEvent, window, cx| {
-            window.focus(&this.right_files_focus.clone(), cx);
+        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this: &mut RightPane, _: &gpui::MouseDownEvent, window, cx| {
+            window.focus(&this.focus.clone(), cx);
         }))
-        .on_key_down(cx.listener(|this: &mut Harness, e: &gpui::KeyDownEvent, _, cx| {
+        .on_key_down(cx.listener(|this: &mut RightPane, e: &gpui::KeyDownEvent, _, cx| {
             if is_wrap_key(&e.keystroke) && this.code_preview_open() {
                 this.toggle_code_wrap(cx);
                 cx.stop_propagation();
@@ -456,11 +456,13 @@ pub(crate) fn is_wrap_key(keystroke: &gpui::Keystroke) -> bool {
     keystroke.key == "z" && m.alt && !m.platform && !m.control && !m.shift && !m.function
 }
 
-impl Harness {
+impl RightPane {
     /// Whether the right pane shows a text file's preview now.
     pub(crate) fn code_preview_open(&self) -> bool {
-        self.right_project()
-            .and_then(|(root, _)| self.right_cache.preview_for(&root))
+        self.facts
+            .project
+            .as_ref()
+            .and_then(|(root, _)| self.cache.preview_for(root))
             .is_some_and(|preview| matches!(preview.content, PreviewContent::Text { .. }))
     }
 
@@ -534,13 +536,13 @@ pub(crate) fn files_menu_rows(id: &str, is_dir: bool) -> Vec<(&'static str, File
     rows
 }
 
-impl Harness {
+impl RightPane {
     /// Open a file row (click or ⏎): HTML, SVG and PDF render in the Page;
     /// everything else previews here (owner 2026-10-21).
     pub(crate) fn open_file_entry(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
         if crate::right::opens_in_page(id) {
-            self.right_cache.selected.insert(root.to_path_buf(), id.to_string());
-            self.open_url_in_browser(crate::right::file_url(&root.join(id)), cx);
+            self.cache.selected.insert(root.to_path_buf(), id.to_string());
+            cx.emit(crate::right_pane::RightPaneEvent::OpenUrl(crate::right::file_url(&root.join(id))));
         } else {
             self.begin_file_preview_for(root, id, cx);
         }
@@ -562,7 +564,7 @@ impl Harness {
             FilesMenuAction::OpenDefault => cx.open_with_system(&abs),
             FilesMenuAction::Reveal => cx.reveal_path(&abs),
             FilesMenuAction::ViewSource => {
-                self.right_cache.files_ui.cursor = Some(menu.id.clone());
+                self.cache.files_ui.cursor = Some(menu.id.clone());
                 self.begin_file_source_for(&menu.root, &menu.id, cx);
             }
         }
