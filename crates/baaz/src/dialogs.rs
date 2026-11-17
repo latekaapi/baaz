@@ -215,7 +215,7 @@ impl Harness {
     /// the caller must not quit.
     pub(crate) fn maybe_confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
         let working = self.working_session_names(cx);
-        let running = self.terminal_host.read(cx).running_terminals(cx);
+        let running = self.terminal_dock.read(cx).host().read(cx).running_terminals(cx);
         let command = running.first().map(|(_, command)| (command.as_str(), running.len() - 1));
         let Some(dialog) = Self::quit_dialog(&working, command) else { return false };
         self.set_dialog(cx, dialog);
@@ -251,9 +251,8 @@ impl Harness {
         });
         self.close_dialog(cx);
         if let Some(id) = target {
-            self.terminal_host.update(cx, |host, _| host.close(&id));
+            self.terminal_dock.update(cx, |dock, cx| dock.close_tab_now(&id, cx));
         }
-        cx.notify();
     }
 
     /// The two lists the `/` and `@` menus are built from, walked per root

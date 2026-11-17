@@ -520,7 +520,7 @@ impl SidebarKey {
             browse_naming: baaz.browse_naming.clone(),
             current_space: baaz.browser.tabs.current_space.clone(),
             loading: baaz.sidebar_loading(),
-            skills_on: baaz.skills.catalog.on_count(),
+            skills_on: baaz.skills_page.read(cx).catalog.on_count(),
             plan: muse_plan_label(baaz.tier.as_ref()),
             row_menu: baaz.open_row_menu(cx),
             usage_minute: if account_menu_open { crate::account_usage::now_secs() / 60 } else { 0 },
@@ -891,7 +891,7 @@ impl Harness {
         // The Skills row wears the on-count (D54): how many skills are on;
         // the screen draws none at zero (docs/83 §4). Automations is gone
         // until the feature exists (plan stage P).
-        let on = self.skills.catalog.on_count();
+        let on = self.skills_page.read(cx).catalog.on_count();
         let mut nav = vec![
             NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false },
             NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32), active: false },

@@ -9,10 +9,10 @@ use std::path::Path;
 
 use gpui::{Context, Window};
 
+use super::dock::TerminalDock;
 use super::{Pick, TabOwner};
-use crate::app::Harness;
 
-impl Harness {
+impl TerminalDock {
     /// The shared tail of every dock run: the block rerun for its
     /// originating tab. `pick` is the caller's D43 choice; the dock open,
     /// paste, Enter and focus below are one path.
@@ -29,8 +29,8 @@ impl Harness {
             return;
         }
         crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
-        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-        let session = self.terminal_host.update(cx, |host, cx| {
+        let origin = self.facts.origin.clone();
+        let session = self.host().update(cx, |host, cx| {
             let id = match pick {
                 Pick::Existing(id) => id,
                 Pick::New => {
@@ -48,7 +48,8 @@ impl Harness {
                 }
             });
         }
-        window.focus(&self.terminal_focus, cx);
+        let focus = gpui::Focusable::focus_handle(self, cx);
+        window.focus(&focus, cx);
         crate::layout::Layout::save(cx);
         cx.notify();
     }
@@ -76,7 +77,7 @@ mod tests {
     }
 
     /// A play-button run reads tabs but never creates one: on a fresh host
-    /// the pick behind [`Harness::run_in_terminal`] is `New`, and the paste
+    /// the pick behind [`TerminalDock::run_in_picked`] is `New`, and the paste
     /// below is [`TerminalSession::paste`](aui_terminal::TerminalSession::paste)
     /// plus one `\r` — bytes to the pty, never a turn, never the wire.
     /// `deterministic_script` is the idle tab the pick reuses.

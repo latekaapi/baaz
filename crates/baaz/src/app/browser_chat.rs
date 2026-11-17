@@ -39,7 +39,7 @@ impl Harness {
         let choice = self.assistant_choice(cx)?;
         let workspace = assistant::browser_workspace_dir().to_string_lossy().into_owned();
         let request_id = provider::new_request_id();
-        self.register_terminal_session(&request_id, std::path::PathBuf::from(workspace.clone()), choice.provider.as_str());
+        self.register_terminal_session(&request_id, std::path::PathBuf::from(workspace.clone()), choice.provider.as_str(), cx);
         // Hidden before the open runs, as side sessions are: a crash between
         // the open and the record still keeps it out of the sidebar.
         self.set_override(
@@ -56,7 +56,7 @@ impl Harness {
             workspace: workspace.clone(),
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
-            terminal_host: Some(self.terminal_host.clone()),
+            terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
         if !choice.model.is_empty() {

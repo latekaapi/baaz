@@ -240,6 +240,7 @@ impl Harness {
             &request_id,
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
+            cx,
         );
         // What Retry re-runs when this fresh open fails: cloned up front,
         // because `work` below moves the originals into the background.
@@ -389,6 +390,7 @@ impl Harness {
             &session_id,
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
+            cx,
         );
         let overlays = self.overlays.clone();
         let host = SessionHost {
@@ -396,7 +398,7 @@ impl Harness {
             workspace: workspace.clone(),
             overlays,
             capture: self.capture.clone(),
-            terminal_host: Some(self.terminal_host.clone()),
+            terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
@@ -572,6 +574,7 @@ impl Harness {
             &request_id,
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
+            cx,
         );
         self.key_pending_ask(&request_id);
         let host = SessionHost {
@@ -579,7 +582,7 @@ impl Harness {
             workspace: workspace.clone(),
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
-            terminal_host: Some(self.terminal_host.clone()),
+            terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
         // A switch carries the replaced draft's mode and effort; otherwise
@@ -701,9 +704,9 @@ impl Harness {
     /// names — so ⌘N never reopens a dead view — the scripted-verb wait,
     /// the terminal provider, and any per-session override a toggle
     /// persisted meanwhile.
-    pub(super) fn forget_provisional(&mut self, provisional: &str) {
+    pub(super) fn forget_provisional(&mut self, provisional: &str, cx: &mut Context<Self>) {
         self.open_state.forget_opening(provisional);
-        self.terminal_providers.remove(provisional);
+        self.terminal_dock.update(cx, |dock, _| dock.forget_provider(provisional));
         if self.overrides.remove(provisional).is_some() {
             crate::sessions::write(&self.overrides);
             self.invalidate_list();
@@ -739,7 +742,7 @@ impl Harness {
                 provider_id.as_str()
             );
             provider.shutdown();
-            self.forget_provisional(provisional);
+            self.forget_provisional(provisional, cx);
             return;
         };
         if session_id != provisional {
@@ -749,6 +752,7 @@ impl Harness {
             &session_id,
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
+            cx,
         );
         view.update(cx, |view, cx| view.attach_provider(session_id.clone(), provider, events, cx));
         // Recorded before the queue replays, so a send's acceptance finds
@@ -831,7 +835,7 @@ impl Harness {
         // marker and claim), all under the real id.
         self.open_state.rekey(old, new);
         // The landing registers the real id; the provisional one goes.
-        self.terminal_providers.remove(old);
+        self.terminal_dock.update(cx, |dock, _| dock.forget_provider(old));
         if self.reveal.as_deref() == Some(old) {
             self.reveal = Some(new.to_owned());
         }
@@ -1125,6 +1129,7 @@ impl Harness {
                 &record.session_id,
                 std::path::PathBuf::from(workspace.clone()),
                 record.provider.as_str(),
+                cx,
             );
         }
         // What Retry re-runs when this reopen fails: cloned up front,
@@ -1394,6 +1399,7 @@ impl Harness {
             &session_id,
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
+            cx,
         );
         let registered = session_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {

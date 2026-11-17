@@ -304,8 +304,10 @@ impl Harness {
             // the selection lands on what the page already shows.
             SessionEvent::OpenSkill { name } => {
                 let name = name.clone();
-                self.open_skills(cx);
-                self.select_skill(name, cx);
+                self.with_skills_page(cx, |page, cx| {
+                    page.open_skills(cx);
+                    page.select_skill(name, cx);
+                });
             }
             // A transcript or terminal link (B9): `http(s)` opens in
             // Baaz's Browser pane (the navigation lands on the next

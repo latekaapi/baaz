@@ -554,9 +554,8 @@ impl Harness {
         self.focus_settings = true;
         // The "New sessions start in" menu never outlives its page.
         self.connect_menu_open = false;
-        if self.skills.open {
-            self.skills.open = false;
-        }
+        // Settings replaces the Skills page as it does the transcript.
+        self.leave_skills(cx);
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = None;
             overlays.palette = None;

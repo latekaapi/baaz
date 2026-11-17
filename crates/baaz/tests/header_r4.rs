@@ -75,8 +75,8 @@ fn project_menu_openers_survive_without_the_crumb() {
     );
     let skills = source("skills_page.rs");
     assert!(
-        skills.contains("this.open_project_menu(this.current_project.clone(), true, cx)"),
-        "the Skills header still opens the menu"
+        skills.contains("SkillsPageEvent::OpenProjectMenu => self.open_project_menu(self.current_project.clone(), true, cx)"),
+        "the Skills header still opens the menu (the page asks, the root opens it)"
     );
     let steps = source("steps.rs");
     assert!(steps.contains("this.step_project_menu(rest, cx)"), "the project-menu step still opens it");

@@ -61,10 +61,7 @@ use aui::shell::{
     RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
     resize_handle,
 };
-use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
-use aui_icons::{icon, IconName, Provider};
-use aui_motion::{SpringKind, spring_px};
-use aui_terminal::{terminal_grid, TerminalGridIntent};
+use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
@@ -101,7 +98,7 @@ use crate::sidebar_view::{
     SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState,
 };
 use crate::search::{FileHit, SessionHit};
-use crate::terminal::{self, TabOwner, TerminalHost, TerminalService};
+use crate::terminal::{self, TerminalHost, TerminalService};
 use crate::wire::WireCall;
 use crate::{layout, Args};
 
@@ -208,8 +205,6 @@ actions!(
         CopyLink,
         /// Open the shown Browse tab's developer tools (⌥⌘I in Browse).
         DevTools,
-        /// Open a new terminal tab on the current project.
-        NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
         TerminalSigint,
         /// Copy the transcript's held text selection (⌘C).
@@ -1130,12 +1125,6 @@ pub struct Harness {
     pub(crate) import: crate::import_ui::ImportUi,
     /// R4: the Import from Chrome sheet, while open.
     pub(crate) chrome_import: Option<crate::chrome_import_ui::ChromeImportSheet>,
-    /// Which provider each terminal bridge session answers for, by the id
-    /// the bridge names (`--session`). A Codex open mints its thread id
-    /// after the bridge is already registered under the request id, so
-    /// the durable record above never names that id — without this map
-    /// the dock cannot tell whose agent tab it draws (T3b).
-    pub(crate) terminal_providers: HashMap<String, String>,
     /// The adopted workspaces (design `docs/12-projects.md` §4).
     pub(crate) projects: Projects,
     /// The current project: the open session's project, else the last used.
@@ -1233,18 +1222,14 @@ pub struct Harness {
     /// The last refused write per Shortcuts row, by row id: shown as the
     /// row's detail until the next edit on that row.
     pub(crate) shortcut_errors: HashMap<String, String>,
-    /// The terminal tabs behind the dock, keyed by project root (D43).
-    pub(crate) terminal_host: Entity<TerminalHost>,
+    /// The terminal dock under the composer: its tabs (keyed by project
+    /// root, D43), focus, resize drag and bridge providers
+    /// ([`terminal::TerminalDock`], task 4.4).
+    pub(crate) terminal_dock: Entity<terminal::TerminalDock>,
     /// The agent's seven tools over the unix socket (D46): sessions the
     /// app registers may list, open, run, read, screen, send and close
     /// these tabs. Dropped (and its socket removed) on quit.
     pub(crate) terminal_service: TerminalService,
-    /// The dock's own focus: ⌃` focuses it on open, so keys reach the pty
-    /// through the wrapper until a click hands the keyboard to the grid.
-    pub(crate) terminal_focus: FocusHandle,
-    /// A dock resize drag in flight: the grab position and the start height,
-    /// both in window pixels.
-    pub(crate) terminal_drag: Option<(f32, f32)>,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
     pub(crate) show_hidden: bool,
     /// Real session ids with a title generation in flight: their rows read
@@ -1286,18 +1271,10 @@ pub struct Harness {
     pub(crate) settings_page: crate::settings::SettingsPageState,
     /// The Settings Shortcuts search field (⌘F on the page).
     pub(crate) settings_search: Entity<TextareaState>,
-    /// The Skills page state: open flag, catalog, filter, search and
-    /// selection (docs/15-skills.md §4).
-    pub(crate) skills: crate::skills_page::SkillsPage,
-    /// The Skills page search field (⌘F on the page; name and description).
-    pub(crate) skills_query: Entity<TextareaState>,
-    /// The New-skill dialog's name field.
-    pub(crate) skills_new_name: Entity<TextareaState>,
-    /// The New-skill dialog's description field.
-    pub(crate) skills_new_desc: Entity<TextareaState>,
-    /// "Ask Muse to write one" (A5) arms this: the next activated session
-    /// opens with the `/create-skill ` draft, never sent.
-    pub(crate) pending_create_skill: bool,
+    /// The Skills page (docs/15-skills.md §4): a region entity that owns its
+    /// open flag, catalog, filter, search, selection, dialogs and CLI calls
+    /// (`skills_page.rs`, task 4.4).
+    pub(crate) skills_page: Entity<crate::skills_page::SkillsPage>,
     /// The project being renamed through the header's rename field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
@@ -1417,9 +1394,6 @@ impl Harness {
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
         let commands_query = cx.new(|cx| composer_state_rows("Every command in this build", 1, 1, window, cx));
-        let skills_query = cx.new(|cx| composer_state_rows("Search skills", 1, 1, window, cx));
-        let skills_new_name = cx.new(|cx| composer_state_rows("Skill name", 1, 1, window, cx));
-        let skills_new_desc = cx.new(|cx| composer_state_rows("What it does and when to use it", 3, 6, window, cx));
         // The sidebar column's own view: the weak handle
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
@@ -1438,6 +1412,14 @@ impl Harness {
         let overlays = cx.new(|_| Overlays::default());
         let right_restored = layout::right_width(layout::Layout::get(cx));
         let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), cx));
+        // The Skills page, closed: it lists for the launch workspace until
+        // the root pushes the current project.
+        let skills_page = {
+            let program = args.program.clone();
+            let root = args.workspace.to_string_lossy().into_owned();
+            let overlays = overlays.clone();
+            cx.new(|cx| crate::skills_page::SkillsPage::new(program, root, overlays, window, cx))
+        };
         // The backend new sessions start on: an explicit `--provider` or
         // `BAAZ_PROVIDER` names this run; otherwise the last pick the
         // person made, kept in the store across relaunches; otherwise the
@@ -1461,6 +1443,9 @@ impl Harness {
         // pointed at exactly this path, so a second window keeping another
         // window's name shows up here rather than as a silent misroute.
         crate::baaz_log!("terminal service socket: {}", terminal_service.socket_path().display());
+        // The dock draws the same tabs the service serves, and shares the
+        // window's floating layer for its toasts.
+        let terminal_dock = cx.new(|cx| terminal::TerminalDock::new(terminal_host, overlays.clone(), cx));
         // The person's last pick while it can still start a session; else
         // the first connected provider (docs/50 P1) — never Muse by default.
         let new_provider = if args.provider_explicit {
@@ -1613,7 +1598,6 @@ impl Harness {
             migration_refresh_in_flight: false,
             import: crate::import_ui::ImportUi::boot(),
             chrome_import: None,
-            terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,
             branches: HashMap::new(),
@@ -1625,10 +1609,8 @@ impl Harness {
             shortcuts_cache: crate::keymap::effective_bindings(),
             recording_shortcut: None,
             shortcut_errors: HashMap::new(),
-            terminal_host,
+            terminal_dock,
             terminal_service,
-            terminal_focus: cx.focus_handle(),
-            terminal_drag: None,
             show_hidden: false,
             show_empty: false,
             show_archived: false,
@@ -1644,11 +1626,7 @@ impl Harness {
             rename: rename.clone(),
             settings_page: crate::settings::SettingsPageState::default(),
             settings_search: cx.new(|cx| composer_state_rows("Search shortcuts", 1, 1, window, cx)),
-            skills: crate::skills_page::SkillsPage::default(),
-            skills_query: skills_query.clone(),
-            skills_new_name: skills_new_name.clone(),
-            skills_new_desc: skills_new_desc.clone(),
-            pending_create_skill: false,
+            skills_page,
             renaming_project: None,
             project_colour_open: false,
             overflow_bounds: None,
@@ -1821,6 +1799,12 @@ impl Harness {
         // The right pane's asks (persist, open on a kind, a URL, a draft…).
         let pane = this.right_pane.clone();
         this.field_subscriptions.push(cx.subscribe_in(&pane, window, Self::on_right_pane_event));
+        // The dock's asks (a link, a busy tab's close, a block for the draft).
+        let dock = this.terminal_dock.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&dock, window, Self::on_terminal_dock_event));
+        // The Skills page's asks (the project menu, a Muse session for A5).
+        let skills = this.skills_page.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&skills, window, Self::on_skills_page_event));
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
@@ -2464,11 +2448,9 @@ impl Harness {
         }
         crate::layout::Layout::stage(cx, |layout| layout.terminal_open = !layout.terminal_open);
         if crate::layout::Layout::get(cx).terminal_open {
-            self.ensure_terminal_tab(cx);
-            window.focus(&self.terminal_focus, cx);
+            self.with_terminal_dock(cx, |dock, cx| dock.opened(window, cx));
         }
         crate::layout::Layout::save(cx);
-        cx.notify();
     }
 
     /// Trust `session_id` for the terminal service (D53): the app opened
@@ -2484,9 +2466,10 @@ impl Harness {
         session_id: &str,
         project_root: std::path::PathBuf,
         provider: &str,
+        cx: &mut Context<Self>,
     ) {
         self.terminal_service.register_session(session_id, project_root);
-        self.terminal_providers.insert(session_id.to_owned(), provider.to_owned());
+        self.terminal_dock.update(cx, |dock, _| dock.note_provider(session_id, provider));
     }
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
@@ -2872,42 +2855,21 @@ impl Harness {
         self.current_project().map(|project| (project.root.clone(), project.name.clone()))
     }
 
-    /// A new terminal tab on the current project, opening the dock for it.
-    ///
-    /// Goes through D43's [`pick`](terminal::TerminalHost::pick) with a
-    /// `"new"` route, so the rule the unit tests pin is the rule this runs.
+    /// A new terminal tab on the current project, opening the dock for it
+    /// ([`terminal::TerminalDock::new_terminal`]): the palette's "New
+    /// terminal" and the composer's `/new-terminal`. Ignored while the
+    /// Settings page stands open (B11b), like the dock toggle: opening the
+    /// dock would flip hidden state invisibly.
     pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Ignored while the Settings page stands open (B11b), like the
-        // dock toggle: opening the dock would flip hidden state invisibly.
         if self.settings_page.open {
             return;
         }
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
-        if let Some(root) = self.current_project().map(|project| project.root.clone()) {
-            let decision = self.terminal_host.read(cx).pick(cx, &root, false);
-            match decision {
-                terminal::Pick::New => {
-                    let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-                    let title = terminal::title_from_command("shell");
-                    self.terminal_host.update(cx, |host, cx| {
-                        host.open(&root, title, TabOwner::User, origin, cx);
-                    });
-                }
-                terminal::Pick::Existing(id) => {
-                    self.terminal_host.update(cx, |host, _| host.activate(&id));
-                }
-            }
-        }
-        window.focus(&self.terminal_focus, cx);
-        crate::layout::Layout::save(cx);
-        cx.notify();
+        self.with_terminal_dock(cx, |dock, cx| dock.new_terminal(window, cx));
     }
 
-    /// D51 "Open terminal" on a terminal tool card: open the dock and
-    /// focus the card's tab. A tab the host no longer holds (or none
-    /// named) opens the dock on its active tab instead of failing. Only
-    /// its test reaches it since the setup sheet took the typed commands
-    /// (D5 B2); kept for the tool card it was written for.
+    /// D51 "Open terminal" on a terminal tool card
+    /// ([`terminal::TerminalDock::open_tab`]); ignored while the Settings
+    /// page stands open (B11b), like the dock toggle.
     #[cfg(test)]
     pub(crate) fn open_terminal_tab(
         &mut self,
@@ -2915,164 +2877,10 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Ignored while the Settings page stands open (B11b), like the
-        // dock toggle.
         if self.settings_page.open {
             return;
         }
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
-        if let Some(tab) = tab {
-            if self.terminal_host.read(cx).get(&tab).is_some() {
-                self.terminal_host.update(cx, |host, _| host.activate(&tab));
-            }
-        }
-        window.focus(&self.terminal_focus, cx);
-        crate::layout::Layout::save(cx);
-        cx.notify();
-    }
-
-    /// The first open creates the project's tab; later opens keep it. Tabs
-    /// belong to the project, not the session, so this never runs twice for
-    /// one project in a window's life (D43).
-    fn ensure_terminal_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        if !self.terminal_host.read(cx).tabs_for(&root).is_empty() {
-            return;
-        }
-        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-        self.terminal_host.update(cx, |host, cx| {
-            host.open(&root, "shell".to_owned(), TabOwner::User, origin, cx);
-        });
-    }
-
-    /// ⌃C while the dock holds the keyboard: SIGINT to the project's active
-    /// tab, where ⌃C while the composer holds it stops the running turn.
-    fn terminal_sigint(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        let session = self.terminal_host.read(cx).active_for(&root).map(|tab| tab.session.clone());
-        if let Some(session) = session {
-            session.update(cx, |session, _| session.write(b"\x03"));
-        }
-    }
-
-    /// Point the project's active tab at its n-th tab, in open order.
-    fn activate_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        let id = self.terminal_host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
-        if let Some(id) = id {
-            self.terminal_host.update(cx, |host, _| host.activate(&id));
-            cx.notify();
-        }
-    }
-
-    /// Close the project's n-th tab, in open order — asking first when it
-    /// is busy (D52), naming the running command. An idle tab closes
-    /// outright.
-    fn close_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        let id = self.terminal_host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
-        if let Some(id) = id {
-            let running = self.terminal_host.read(cx).running_command(cx, &id);
-            if let Some(dialog) = Self::close_tab_dialog(&id, running.as_deref()) {
-                self.set_dialog(cx, dialog);
-            } else {
-                self.terminal_host.update(cx, |host, _| host.close(&id));
-            }
-            cx.notify();
-        }
-    }
-
-    /// One block hover action from the active tab's grid (D44). The library
-    /// performs none of these — it only reports the intent with a block
-    /// index, and the host reads the block back and decides. Nothing here
-    /// touches the wire: no turn, no send.
-    fn handle_terminal_intent(
-        &mut self,
-        tab_id: &str,
-        intent: TerminalGridIntent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match intent {
-            TerminalGridIntent::OpenUrl(url) => {
-                // A program can print any OSC 8 link it likes, so only
-                // `http`/`https` ever reach the browser — the rest are
-                // ignored (D53). Reached links open in Baaz's Browser pane
-                // (B9), like transcript links.
-                if terminal::intents::openable_url(&url) {
-                    self.open_url_in_browser(url.to_string(), cx);
-                }
-            }
-            TerminalGridIntent::Copy(block) => {
-                let text = self
-                    .terminal_host
-                    .read(cx)
-                    .get(tab_id)
-                    .and_then(|tab| tab.session.read(cx).block_text(block));
-                if let Some(text) = text {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            }
-            TerminalGridIntent::Stop(block) => {
-                // A finished (or missing) block is a no-op; a running one
-                // takes `⌃C`.
-                let running = self.terminal_host.read(cx).get(tab_id).is_some_and(|tab| {
-                    tab.session.read(cx).blocks().get(block).is_some_and(|block| block.running())
-                });
-                if running {
-                    let session =
-                        self.terminal_host.read(cx).get(tab_id).map(|tab| tab.session.clone());
-                    if let Some(session) = session {
-                        session.update(cx, |session, _| session.write(b"\x03"));
-                    }
-                }
-            }
-            TerminalGridIntent::Rerun(block) => self.rerun_block(tab_id, block, window, cx),
-            TerminalGridIntent::Ask(block) => self.ask_about_block(tab_id, block, window, cx),
-        }
-    }
-
-    /// Rerun a block's command: the same tab when it is idle, otherwise a
-    /// new one — [`terminal::host::pick_tab`]'s rule (D43) with the
-    /// originating tab as the candidate. The dock open, paste, Enter and
-    /// focus below are the play buttons' own entry point
-    /// ([`Harness::run_in_terminal`]).
-    fn rerun_block(&mut self, tab_id: &str, block: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        let command = self
-            .terminal_host
-            .read(cx)
-            .get(tab_id)
-            .and_then(|tab| tab.session.read(cx).blocks().get(block).map(|block| block.command.clone()))
-            .filter(|command| !command.trim().is_empty());
-        let Some(command) = command else { return };
-        let pick = self.terminal_host.read(cx).pick_rerun(cx, &root, tab_id);
-        self.run_in_picked(&root, pick, &command, true, window, cx);
-    }
-
-    /// Ask about a block: its command and capped ANSI-free output land in
-    /// the current session's composer draft as a quoted block — and stay
-    /// there unsent. An occupied composer is appended to, never clobbered.
-    fn ask_about_block(&mut self, tab_id: &str, block: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else {
-            self.overlays.update(cx, |overlays, _| {
-                overlays.toast("No open session", "Open a session to ask about this terminal output.");
-            });
-            cx.notify();
-            return;
-        };
-        let payload = self.terminal_host.read(cx).get(tab_id).and_then(|tab| {
-            let session = tab.session.read(cx);
-            let command = session.blocks().get(block).map(|block| block.command.clone())?;
-            let output = session.block_text(block)?;
-            Some((command, output))
-        });
-        let Some((command, output)) = payload else { return };
-        // `set_draft` only: the draft is never sent from here.
-        view.update(cx, |view, cx| {
-            let existing = view.draft_text(cx);
-            view.set_draft(terminal::intents::build_ask_draft(&command, &output, &existing), window, cx);
-        });
+        self.with_terminal_dock(cx, |dock, cx| dock.open_tab(tab, window, cx));
     }
 
     /// The `--steps` verb's route: open the dock over a FakePty-backed tab
@@ -3091,193 +2899,94 @@ impl Harness {
         if self.settings_page.open {
             return Err("the Settings page is open".into());
         }
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
-        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-        let nonce = aui_terminal::generate_nonce();
-        let script = terminal::deterministic_script(&nonce);
-        self.terminal_host.update(cx, |host, cx| {
-            let id = host.open_fake(&root, title, TabOwner::User, origin, script, &nonce, cx);
-            host.drain(&id, cx);
-        });
-        crate::layout::Layout::save(cx);
-        window.focus(&self.terminal_focus, cx);
-        cx.notify();
+        self.with_terminal_dock(cx, |dock, cx| dock.open_scripted(&root, title, window, cx));
         Ok(())
     }
 
-    /// The centre column's height: the window's — the flat shell's columns
-    /// run top to bottom with no inset (docs/83 §3).
-    fn centre_height(&self, window: &Window) -> f32 {
-        f32::from(window.bounds().size.height).max(0.0)
+    /// The terminal tab host the dock draws, shared with the session views
+    /// that run commands in it and the quit check.
+    pub(crate) fn terminal_host(&self, cx: &App) -> Entity<TerminalHost> {
+        self.terminal_dock.read(cx).host().clone()
     }
 
-    /// The dock's height now: the stored one, clamped into `[120px, 70% of
-    /// the centre column]`.
-    fn dock_height(&self, window: &Window, cx: &App) -> f32 {
-        let want = crate::layout::Layout::get(cx).terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT);
-        terminal::clamp_dock_height(want, self.centre_height(window))
-    }
-
-    /// The terminal dock under the composer (D42): the library's
-    /// `terminal_dock` frame over `terminal_tabs` and the active tab's
-    /// `terminal_grid`, or the empty state when the project has no tab.
-    ///
-    /// Opens and closes on the layout spring like the right pane: the outer
-    /// height springs between the resting height and zero while the body
-    /// inside keeps its resting height, so the grid is clipped — never
-    /// re-laid-out — and the pty sees no resize storm mid-motion. The dock
-    /// stays mounted while it collapses and leaves the tree only once the
-    /// spring has settled shut.
-    /// The agent mark for a terminal tab: the provider of the session that
-    /// opened it — Claude Code's C, Codex's O — and `None` when the
-    /// person opened it or no record names the lane (D43). The strip
-    /// still wears Muse's M for an unknown tab, which is what the
-    /// deterministic capture's baseline holds; only the dock hint goes
-    /// neutral there.
-    fn terminal_tab_provider(&self, origin: Option<&str>) -> Option<Provider> {
-        origin
-            .and_then(|session| self.provider_sessions.get(session))
-            .and_then(|record| crate::sidebar::provider_mark(&record.provider))
-            .or_else(|| {
-                origin
-                    .and_then(|session| self.terminal_providers.get(session))
-                    .and_then(|provider| crate::sidebar::provider_mark(provider))
-            })
-    }
-
-    /// The dock header's hint for the active tab's agent: whose session the
-    /// person shares the terminal with (D43). Muse keeps the exact string
-    /// the baselines hold; other lanes name their own agent; a tab no
-    /// session owns names none, rather than wearing Muse's name.
-    fn terminal_hint_name(&self, provider: Option<Provider>) -> String {
-        match provider {
-            Some(Provider::Muse) => "Muse can type here".to_owned(),
-            Some(Provider::Claude) => "Claude Code can type here".to_owned(),
-            Some(Provider::Codex) => "Codex can type here".to_owned(),
-            _ => "The agent can type here".to_owned(),
-        }
-    }
-
-    fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = crate::layout::Layout::get(cx).terminal_open;
-        let resting = self.dock_height(window, cx);
-        let target = if open { px(resting) } else { Pixels::ZERO };
-        // Mid-drag the height feeds straight through: `spring_px` would chase
-        // a moving target and the divider would lag the pointer. On release
-        // the spring re-arms from the current height, so there is no jump.
-        // `terminal_drag` is the dock's equivalent of the columns' `resizing`.
-        let shown = if self.terminal_drag.is_some() {
-            target
-        } else {
-            spring_px(("terminal-dock", "dock-height"), target, SpringKind::Layout, window, cx).max(Pixels::ZERO)
-        };
-        // Under a pixel left: the dock has closed.
-        if !open && shown < px(scale::SP_1 / 2.0) {
-            return None;
-        }
-        let root = self.current_project().map(|project| project.root.clone())?;
-        let height = resting;
-        let host = self.terminal_host.read(cx);
-        let mut tabs = Vec::new();
-        let mut active_ix = 0;
-        let mut active_tab: Option<(String, Entity<aui_terminal::TerminalSession>)> = None;
-        let mut hint_provider = None;
-        let active_id = host.active_for(&root).map(|tab| tab.id.clone());
-        for tab in host.tabs_for(&root) {
-            let provider = self.terminal_tab_provider(tab.origin_session.as_deref());
-            if Some(tab.id.as_str()) == active_id.as_deref() {
-                active_ix = tabs.len();
-                active_tab = Some((tab.id.clone(), tab.session.clone()));
-                hint_provider = provider;
-            }
-            let mut view = TermTab::new(tab.id.clone(), tab.title.clone());
-            if tab.owner == TabOwner::Agent {
-                view = view.agent(provider.unwrap_or(Provider::Muse));
-            }
-            if host.busy(cx, &tab.id) {
-                view = view.busy(true);
-            }
-            tabs.push(view);
-        }
-        let select = cx.processor(|this: &mut Self, action: TerminalTabsAction, window, cx| match action {
-            TerminalTabsAction::Select(index) => this.activate_terminal_tab(index, cx),
-            TerminalTabsAction::Close(index) => this.close_terminal_tab(index, cx),
-            TerminalTabsAction::New => this.new_terminal(window, cx),
-        });
-        let header = terminal_tabs("terminal-tabs", tabs, active_ix).on_action(select);
-        let body = active_tab.map(|(tab_id, session)| {
-            let intent = cx.processor(move |this: &mut Self, intent: TerminalGridIntent, window, cx| {
-                this.handle_terminal_intent(&tab_id, intent, window, cx);
-            });
-            // The grid draws its cursor focused — and blinks it — only while
-            // the handle it was GIVEN is focused. Hand it the dock's own
-            // handle, the one `track_focus` binds below and ⌃` focuses, or
-            // the grid falls back to a handle nothing in this app ever
-            // focuses and the cursor stays hollow and still forever.
-            terminal_grid(&session)
-                .focus_handle(self.terminal_focus.clone())
-                .on_intent(intent)
-                .into_any_element()
-        });
-        let maximised = height >= terminal::clamp_dock_height(f32::MAX, self.centre_height(window)) - 0.5;
-        let dock_action =
-            cx.processor(move |this: &mut Self, action: TerminalDockAction, window, cx| match action {
-                TerminalDockAction::Maximize => {
-                    let max = terminal::clamp_dock_height(f32::MAX, this.centre_height(window));
-                    let height = if maximised { Some(terminal::DOCK_DEFAULT_HEIGHT) } else { Some(max) };
-                    crate::layout::Layout::update(cx, |layout| layout.terminal_height = height);
+    /// What the dock needs from the root now (see [`terminal::DockFacts`]):
+    /// the current project, the active session, and the durable provider
+    /// records for the origins of the project's tabs.
+    pub(crate) fn dock_facts(&self, cx: &App) -> terminal::DockFacts {
+        let project = self.current_project().map(|project| project.root.clone());
+        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let mut records = HashMap::new();
+        if let Some(root) = &project {
+            for tab in self.terminal_dock.read(cx).host().read(cx).tabs_for(root) {
+                let record = tab.origin_session.as_ref().and_then(|session| Some((session, self.provider_sessions.get(session)?)));
+                if let Some((session, record)) = record {
+                    records.insert(session.clone(), record.provider.clone());
                 }
-                TerminalDockAction::Close => {
-                    crate::layout::Layout::update(cx, |layout| layout.terminal_open = false);
-                }
-                TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
-            });
-        let dock = terminal_dock("terminal-dock", header, body)
-            .hint(self.terminal_hint_name(hint_provider))
-            .maximized(maximised)
-            .on_action(dock_action);
-        let resize_start = cx.processor(|this: &mut Self, grab: f32, _, cx| {
-            this.terminal_drag = Some((grab, crate::layout::Layout::get(cx).terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT)));
-        });
-        let resize_move = cx.processor(|this: &mut Self, at: f32, window, cx| {
-            if let Some((grab, start)) = this.terminal_drag {
-                // Live while the drag runs; the release writes it.
-                let height = terminal::clamp_dock_height(start + (grab - at), this.centre_height(window));
-                crate::layout::Layout::stage(cx, |layout| layout.terminal_height = Some(height));
             }
-        });
-        let end_weak = cx.entity().downgrade();
-        let resize_end = move |_: &mut Window, cx: &mut App| {
-            end_weak
-                .update(cx, |this: &mut Harness, cx| {
-                    this.terminal_drag = None;
-                    crate::layout::Layout::save(cx);
-                    cx.notify();
-                })
-                .ok();
-        };
-        let dock = dock.on_resize_start(resize_start).on_resize(resize_move).on_resize_end(resize_end);
-        Some(
-            div()
-                .h(shown)
-                .w_full()
-                .flex_none()
-                .overflow_hidden()
-                .key_context(gpui::KeyContext::parse(TERMINAL_CONTEXT).unwrap_or_default())
-                // No key handler here: the grid below is given this very
-                // handle, so it IS the focus node and routes keys itself.
-                // A handler here would see every keystroke a second time
-                // as it bubbles, and the pty would receive `aa` for `a`.
-                .track_focus(&self.terminal_focus)
-                // The body keeps its resting height while the outer springs,
-                // the right pane's `right_inner`: the grid measures this box,
-                // so its bounds — and the pty size it reports — never move
-                // mid-motion. The shrinking outer clips it instead.
-                .child(div().h(px(height)).w_full().flex_none().child(dock))
-                .into_any_element(),
-        )
+        }
+        terminal::DockFacts { project, origin, records }
     }
 
+    /// Run `f` on the dock with fresh facts: every root call into the dock
+    /// goes through here, so the dock never acts on a stale project or
+    /// session.
+    pub(crate) fn with_terminal_dock<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut terminal::TerminalDock, &mut Context<terminal::TerminalDock>) -> R,
+    ) -> R {
+        let facts = self.dock_facts(cx);
+        self.terminal_dock.update(cx, |dock, cx| {
+            dock.facts = facts;
+            f(dock, cx)
+        })
+    }
+
+    /// The agent mark for a terminal tab whose origin is `origin`: the
+    /// root's durable record first, then the dock's bridge map
+    /// ([`terminal::TerminalDock::tab_provider`]).
+    #[cfg(test)]
+    pub(crate) fn terminal_tab_provider(&self, origin: Option<&str>, cx: &App) -> Option<aui_icons::Provider> {
+        let record = origin.and_then(|session| self.provider_sessions.get(session)).map(|record| record.provider.as_str());
+        self.terminal_dock.read(cx).tab_provider(origin, record)
+    }
+
+    /// The dock for this frame: push the facts, then compose its view. The
+    /// view draws nothing once the dock has settled shut. Composed
+    /// uncached: the facts are pushed during the root's render.
+    fn compose_terminal_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let facts = self.dock_facts(cx);
+        self.terminal_dock.update(cx, |dock, _| dock.facts = facts);
+        self.terminal_dock.clone().into_any_element()
+    }
+
+    /// One event from the dock, mapped to the root's own method.
+    fn on_terminal_dock_event(
+        &mut self,
+        _dock: &Entity<terminal::TerminalDock>,
+        event: &terminal::TerminalDockEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            terminal::TerminalDockEvent::OpenUrl(url) => self.open_url_in_browser(url.clone(), cx),
+            terminal::TerminalDockEvent::ConfirmClose { tab, running } => {
+                if let Some(dialog) = Self::close_tab_dialog(tab, Some(running)) {
+                    self.set_dialog(cx, dialog);
+                }
+            }
+            // `set_draft` only: the draft is never sent from here. An
+            // occupied composer is appended to, never clobbered.
+            terminal::TerminalDockEvent::Ask { command, output } => {
+                if let Some(view) = self.active.clone() {
+                    view.update(cx, |view, cx| {
+                        let existing = view.draft_text(cx);
+                        view.set_draft(terminal::intents::build_ask_draft(command, output, &existing), window, cx);
+                    });
+                }
+            }
+        }
+    }
 
     /// The transcript row's pane toggles (D6, docs/43 §2.2): Changes ·
     /// Files · Page, 28 px ghost buttons; the one the pane shows is lit and
@@ -4120,8 +3829,8 @@ impl Harness {
         // the same label the sidebar's one row wears (Y2a, Y2a3).
         let target = target.map(|id| self.chain_head(&id));
         // The Skills page names itself plainly while open: "Skills".
-        if self.skills.open {
-            Some("Skills".to_owned())
+        if self.skills_open(cx) {
+            Some(self.skills_page.read(cx).title(cx).to_string())
         } else {
             // A draft with no row yet (a Muse draft opened while Muse
             // starts, before any list) still names itself, as its row will.
@@ -4322,7 +4031,7 @@ impl Harness {
                 .current_project()
                 .map(|project| project.root.clone())
                 .unwrap_or_else(|| self.args.workspace.clone());
-            self.register_terminal_session(&session_id, root, provider.as_str());
+            self.register_terminal_session(&session_id, root, provider.as_str(), cx);
         }
         // The capture is already folded, and no wire event will ever run
         // `title_from_transcript` for it: without this the replayed row
@@ -5021,8 +4730,8 @@ impl Harness {
         // Q4: while a switch to another session is pending, the centre is
         // the destination's loading state — never the previous transcript.
         let pending_dest = self.pending_switch_dest(cx);
-        let body = if self.skills.open {
-            self.render_skills_page(window, cx)
+        let body = if self.skills_open(cx) {
+            self.compose_skills_page(cx)
         } else if pending_dest.is_some() {
             self.render_pending_switch(cx)
         } else if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
@@ -5119,7 +4828,7 @@ impl Harness {
         // A centre with no composer (no session, Skills, a pending switch)
         // holds the corner stack 12 above the column's bottom; Browse's is
         // in the corner window.
-        let in_band = !self.skills.open && pending_dest.is_none() && crate::layout::Layout::get(cx).mode != layout::Mode::Browse && self.active.is_some();
+        let in_band = !self.skills_open(cx) && pending_dest.is_none() && crate::layout::Layout::get(cx).mode != layout::Mode::Browse && self.active.is_some();
         let body = match (in_band || self.corner_in_overlay(cx)).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
             // A flex column, never a block: the Skills page's root is
             // `flex_1`, and in a block parent it took no height — feedback
@@ -5128,7 +4837,7 @@ impl Harness {
             Some(stack) => v_flex().relative().flex_1().min_h_0().w_full().child(body).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
             None => body,
         };
-        let dock = self.render_terminal_dock(window, cx);
+        let dock = self.compose_terminal_dock(cx);
         v_flex()
             .size_full()
             .key_context(gpui::KeyContext::parse(&self.composer_context(cx)).unwrap_or_default())
@@ -5198,12 +4907,6 @@ impl Harness {
                 // window — render never constructs first.
                 this.prewarm_browser_in(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
-                this.new_terminal(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &TerminalSigint, _, cx| {
-                this.terminal_sigint(cx);
-            }))
             // 1–9 on a pending approval: the n-th server-minted choice, in the
             // order the server sent them.
             .on_action(cx.listener(|this, _: &aui::keys::Cancel, window, cx| {
@@ -5224,7 +4927,7 @@ impl Harness {
             }))
             .children(banner)
             .child(body)
-            .children(dock)
+            .child(dock)
             .into_any_element()
     }
 
@@ -6319,7 +6022,7 @@ impl Render for Harness {
         .then(|| self.active.clone())
         .flatten();
         let taken_elsewhere = overlay_just_closed && self.composer_menu_was_open && !keyboard_free;
-        if !self.terminal_focus.is_focused(window) {
+        if !self.terminal_dock.focus_handle(cx).is_focused(window) {
             if let Some(view) = composer_view {
                 view.update(cx, |view, cx| view.focus_composer(window, cx));
             } else if taken_elsewhere {
@@ -6743,7 +6446,7 @@ impl Harness {
         // the same `close_skills` the page's key takes — a dialog, then the
         // menu, then the page. A text field that consumes Escape never
         // reaches here, so field editing is untouched.
-        if self.skills.open {
+        if self.skills_open(cx) {
             self.close_skills(cx);
             return;
         }
@@ -6937,7 +6640,7 @@ mod tests {
         });
         let root = state.2.clone();
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 // The durable record names a minted session …
                 h.provider_sessions.insert(
                     "minted-1".to_owned(),
@@ -6960,15 +6663,15 @@ mod tests {
                     },
                 );
                 // … while the bridge map names the pre-ack request id.
-                h.register_terminal_session("cmd-open", root.clone(), "codex");
-                h.register_terminal_session("cc-bridge", root.clone(), "claude-code");
-                h.register_terminal_session("m-bridge", root, "muse");
+                h.register_terminal_session("cmd-open", root.clone(), "codex", cx);
+                h.register_terminal_session("cc-bridge", root.clone(), "claude-code", cx);
+                h.register_terminal_session("m-bridge", root, "muse", cx);
             });
         });
         vc.update(|_, cx| {
             let hint = |h: &Harness, origin: Option<&str>| {
-                let provider = h.terminal_tab_provider(origin);
-                h.terminal_hint_name(provider)
+                let provider = h.terminal_tab_provider(origin, cx);
+                crate::terminal::TerminalDock::hint_name(provider)
             };
             let h = baaz.read(cx);
             assert_eq!(hint(h, Some("minted-1")), "Codex can type here");
@@ -7260,6 +6963,87 @@ mod tests {
             assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "the palette action flipped the dock");
             assert!(h.settings_page.open, "the ignored palette action exited Settings");
         });
+        restore_state(state);
+    }
+
+    /// Task 4.4: the terminal dock is its own region entity. Picking a tab
+    /// on its strip lands on the dock and notifies the dock alone — the
+    /// root is never notified. (No frame is drawn here: the grid's first
+    /// layout resizes its pty, which redraws inside the test draw and trips
+    /// gpui's stale-arena panic; the root composes the dock uncached, so a
+    /// notified dock re-renders on the next frame.)
+    #[gpui::test]
+    fn a_tab_pick_lands_on_the_dock_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let state = hermetic_state("dock-entity");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        // Two scripted tabs on the project (FakePty: no shell runs).
+        for title in ["one", "two"] {
+            let opened = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_dock(title, window, cx)));
+            assert!(opened.is_ok(), "the scripted dock opens: {opened:?}");
+        }
+        let dock = vc.update(|_, cx| baaz.read(cx).terminal_dock.clone());
+        let root = vc.update(|_, cx| baaz.read(cx).current_project().map(|project| project.root.clone())).expect("the hermetic workspace is the project");
+        let tabs = vc.update(|_, cx| dock.read(cx).host().read(cx).tabs_for(&root).iter().map(|tab| tab.id.clone()).collect::<Vec<_>>());
+        assert_eq!(tabs.len(), 2, "two tabs on the project");
+        let active = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| dock.read(cx).host().read(cx).active_for(&root).map(|tab| tab.id.clone()));
+        assert_eq!(active(vc).as_deref(), Some(tabs[1].as_str()), "the last open is active");
+        vc.run_until_parked();
+        let (dock_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (d, r) = (dock_notes.clone(), root_notes.clone());
+            (cx.observe(&dock, move |_, _| d.set(d.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+        });
+        vc.update(|_, cx| dock.update(cx, |dock, cx| dock.activate_tab(0, cx)));
+        vc.run_until_parked();
+        assert_eq!(active(vc).as_deref(), Some(tabs[0].as_str()), "the pick landed on the host");
+        assert!(dock_notes.get() > 0, "the pick notifies the dock");
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the dock's own state");
+        restore_state(state);
+    }
+
+    /// Task 4.4: the Skills page is its own region entity. Its own keys —
+    /// Esc peeling the Add menu, Enter moving into the detail — land on the
+    /// page and notify the page alone; the root is never notified, and the
+    /// page still stands open (the root reads it each frame). Fixture
+    /// catalog only: no `muse skills` call runs.
+    #[gpui::test]
+    fn the_skills_page_peels_its_menu_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let state = hermetic_state("skills-entity");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let opened = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_skills("add-menu", window, cx)));
+        assert!(opened.is_ok(), "the fixture page opens: {opened:?}");
+        vc.run_until_parked();
+        let page = vc.update(|_, cx| baaz.read(cx).skills_page.clone());
+        assert!(vc.update(|_, cx| page.read(cx).add_menu_open), "the fixture opens the Add menu");
+        let (page_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (p, r) = (page_notes.clone(), root_notes.clone());
+            (cx.observe(&page, move |_, _| p.set(p.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+        });
+        vc.update(|_, cx| page.update(cx, |page, cx| page.close_skills(cx)));
+        vc.update(|_, cx| page.update(cx, |page, cx| page.skills_focus_detail(cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let shown = page.read(cx);
+            assert!(!shown.add_menu_open, "Esc peeled the menu");
+            assert!(shown.detail_focused, "Enter moved into the detail");
+            assert!(baaz.read(cx).skills_open(cx), "the page itself stays open");
+            assert!(crate::region::Region::covers_page(shown, cx), "an open page covers Browse's page");
+        });
+        assert!(page_notes.get() > 0, "the page is notified");
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the page's own state");
         restore_state(state);
     }
 
@@ -8191,7 +7975,7 @@ mod tests {
                 h.apply_login_sample(window, cx);
                 h.step_skills("page", window, cx).expect("the Skills page opens");
                 // No skill picked: the list alone, in Settings' column.
-                h.skills.selected = None;
+                h.skills_page.update(cx, |page, _| page.selected = None);
             })
         });
         draw_shell(&mut *vc, &baaz);

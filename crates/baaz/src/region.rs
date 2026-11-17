@@ -23,9 +23,10 @@
 //!   drawn above everything gpui paints, so a region that covers it makes
 //!   the root hide the page (or show its still picture) instead.
 //!
-//! The right pane ([`crate::right_pane::RightPane`]) is the first region; the
-//! terminal dock, the Settings and Skills pages and the Connect screen follow
-//! (plan 4.4).
+//! The right pane ([`crate::right_pane::RightPane`]) is the first region;
+//! the terminal dock ([`crate::terminal::TerminalDock`]) and the Skills page
+//! ([`crate::skills_page::SkillsPage`]) followed (plan 4.4); the Settings
+//! page and the Connect screen are next.
 
 use gpui::{AnyElement, App, Context, Focusable, Render, SharedString, Window};
 

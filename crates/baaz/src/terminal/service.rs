@@ -2933,11 +2933,11 @@ mod tests {
         let vc = cx.add_empty_window();
         let harness = harness_with_socket(vc, &root);
         vc.update(|_, cx| {
-            harness.update(cx, |harness, _| {
-                harness.register_terminal_session("t1c", root.clone(), "muse");
+            harness.update(cx, |harness, cx| {
+                harness.register_terminal_session("t1c", root.clone(), "muse", cx);
             });
         });
-        let host = vc.update(|_, cx| harness.read(cx).terminal_host.clone());
+        let host = vc.update(|_, cx| harness.read(cx).terminal_host(cx));
         let tab = vc.update(|_, cx| {
             host.update(cx, |host, cx| {
                 host.open_fake(&root, "agent".into(), TabOwner::Agent, Some("t1c".into()), Vec::new(), "t1c-nonce", cx)

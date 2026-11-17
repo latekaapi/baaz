@@ -15,6 +15,19 @@
 //!
 //! The list, sections, meter, rows and detail pane are the K1 library
 //! components (`aui::skills`): this file owns state and intents only.
+//!
+//! The page is a [`Region`] entity (task 4.4): [`SkillsPage`] owns its open
+//! flag, catalog, filter, selection, dialogs, its three fields, the A5 arm
+//! and its background CLI calls, and renders itself; `Harness::render`
+//! composes its view in the centre while it stands open. What only the root
+//! knows (the root it lists for, the project's name, the lane it speaks
+//! for) reaches it as [`SkillsFacts`], pushed every frame and before every
+//! root call into it (`Harness::with_skills_page`). What it cannot do
+//! itself goes out as a [`SkillsPageEvent`]: the project menu, a new Muse
+//! session for "Ask Muse to write one". Its keys (↑ ↓ Space ↩ ⌘F Esc) are
+//! the page's own actions on its own element. Others read its catalog
+//! through the entity: the sidebar's Skills on-count, and the `/` menu's
+//! cache, which the page pushes into [`Overlays`] after each list.
 
 use aui::data::button;
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
@@ -28,7 +41,9 @@ use aui::skills::{
 use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use aui::transcript::{prose, ProseStyle};
-use gpui::{div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window};
+use aui::composer::composer_state_rows;
+use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Task, Window};
+use gpui_kit::base::input::TextareaState;
 use aui::interact::{dismiss_layer, dropdown_separator, menu_panel};
 use aui::overlay::modal_panel;
 use aui::util::{h_flex, v_flex};
@@ -37,6 +52,8 @@ use gpui_kit::component::input::Textarea;
 use crate::app::{
     Harness, SkillsClose, SkillsDown, SkillsEnter, SkillsFind, SkillsToggle, SkillsUp,
 };
+use crate::overlays::Overlays;
+use crate::region::Region;
 use crate::skills::{self, scope_word, Activation, ScopeSection, Skill, SkillsCatalog};
 use crate::wire::WireCall;
 
@@ -221,7 +238,7 @@ pub enum SkillsDialog {
     #[default]
     Closed,
     /// New skill…: the name and description live in the page's fields
-    /// ([`Harness::skills_new_name`](crate::app::Harness::skills_new_name));
+    /// ([`SkillsPage::new_name`], [`SkillsPage::new_desc`]);
     /// the scope and the inline error live here.
     New {
         /// This project or Personal.
@@ -334,9 +351,33 @@ pub fn taken_names(catalog: &SkillsCatalog, scope: TargetScope) -> Vec<String> {
     catalog.section_rows(section).iter().map(|row| row.name.clone()).collect()
 }
 
-/// The page's state. Plain data on [`Harness`]; the library components are
-/// stateless and read it each frame.
-pub struct SkillsPage {
+/// What the page needs from the root: pushed every frame and before every
+/// root call into the page (see the module doc). Never persists.
+#[derive(Clone)]
+pub(crate) struct SkillsFacts {
+    /// The workspace root the page lists for: the current project, else
+    /// the launch workspace.
+    pub root: String,
+    /// The header crumb's project name ("Unfiled" with no project).
+    pub project_name: String,
+    /// The lane the page speaks for: the open session's, else the pick new
+    /// sessions start on.
+    pub lane: crate::providers::ProviderId,
+}
+
+/// What the page asks of the root (see the module doc).
+#[derive(Clone, Debug)]
+pub(crate) enum SkillsPageEvent {
+    /// The header crumb: the project menu, anchored for the page.
+    OpenProjectMenu,
+    /// "Ask Muse to write one" (A5): a new Muse session in the current
+    /// project; the page already armed its `/create-skill ` draft.
+    AskMuseToWrite,
+}
+
+/// The Skills page: its state, its fields and its background CLI calls. The
+/// library components are stateless and read it each frame.
+pub(crate) struct SkillsPage {
     /// Whether the centre column shows the page instead of the transcript.
     pub(crate) open: bool,
     /// The last landed list. A failed re-list keeps the previous one.
@@ -374,10 +415,40 @@ pub struct SkillsPage {
     pub(crate) import_loading: bool,
     /// The modal layer: New, Install preview, Import preview, Remove (A2–A6).
     pub(crate) dialog: SkillsDialog,
+    /// The search field (⌘F on the page; name and description).
+    pub(crate) query: Entity<TextareaState>,
+    /// The New-skill dialog's name field.
+    pub(crate) new_name: Entity<TextareaState>,
+    /// The New-skill dialog's description field.
+    pub(crate) new_desc: Entity<TextareaState>,
+    /// "Ask Muse to write one" (A5) arms this: the next activated session
+    /// that writes skills by prompt opens with the `/create-skill ` draft,
+    /// never sent ([`Self::take_create_draft`]).
+    pending_create: bool,
+    /// The `muse` program every `muse skills …` call runs.
+    program: String,
+    /// The window's floating layer, shared with the root: the page's toasts
+    /// and the `/` menu's skills cache.
+    overlays: Entity<Overlays>,
+    /// What the root told the page (see [`SkillsFacts`]).
+    pub(crate) facts: SkillsFacts,
+    /// The page's background CLI calls and the folder picker: they die with
+    /// the page.
+    tasks: Vec<Task<()>>,
 }
 
-impl Default for SkillsPage {
-    fn default() -> Self {
+impl EventEmitter<SkillsPageEvent> for SkillsPage {}
+
+impl WireCall for SkillsPage {
+    fn wire_tasks(&mut self) -> &mut Vec<Task<()>> {
+        &mut self.tasks
+    }
+}
+
+impl SkillsPage {
+    /// The page at boot, closed, with nothing listed: `program` runs the
+    /// CLI; `root` is the launch workspace until the root pushes facts.
+    pub(crate) fn new(program: String, root: String, overlays: Entity<Overlays>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         SkillsPage {
             open: false,
             catalog: SkillsCatalog::default(),
@@ -396,6 +467,30 @@ impl Default for SkillsPage {
             import_counts: None,
             import_loading: false,
             dialog: SkillsDialog::Closed,
+            query: cx.new(|cx| composer_state_rows("Search skills", 1, 1, window, cx)),
+            new_name: cx.new(|cx| composer_state_rows("Skill name", 1, 1, window, cx)),
+            new_desc: cx.new(|cx| composer_state_rows("What it does and when to use it", 3, 6, window, cx)),
+            pending_create: false,
+            program,
+            overlays,
+            facts: SkillsFacts { root, project_name: "Unfiled".to_owned(), lane: crate::providers::ProviderId::Muse },
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Consume the "Ask Muse to write one" arm, for a session that writes
+    /// skills by prompt.
+    pub(crate) fn take_create_draft(&mut self) -> bool {
+        std::mem::take(&mut self.pending_create)
+    }
+
+    /// Leave the page outright (selecting or starting a session, opening
+    /// Settings): no layer-by-layer peel.
+    pub(crate) fn leave(&mut self, cx: &mut Context<Self>) {
+        if self.open || self.detail_focused {
+            self.open = false;
+            self.detail_focused = false;
+            cx.notify();
         }
     }
 }
@@ -535,26 +630,23 @@ pub fn fixture_catalog(which: &str) -> SkillsCatalog {
 // The window side: open, re-list, mutate, keyboard, render.
 // ---------------------------------------------------------------------------
 
-impl Harness {
-    /// The workspace root the page lists for: the current project, else the
-    /// launch workspace.
-    pub(crate) fn skills_root(&self) -> String {
-        self.current_project()
-            .map(|project| project.root.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned())
+impl SkillsPage {
+    /// The workspace root the page lists for (see [`SkillsFacts::root`]).
+    fn root(&self) -> String {
+        self.facts.root.clone()
     }
 
     /// Open the page: re-list on open (D55), keep the previous list behind.
     /// A list for another root is dropped first, so a project switch never
     /// shows stale rows while the new list lands.
     pub(crate) fn open_skills(&mut self, cx: &mut Context<Self>) {
-        self.skills.open = true;
-        self.skills.detail_focused = false;
-        let root = self.skills_root();
-        if self.skills.catalog.project_root != root {
-            self.skills.catalog = SkillsCatalog::empty(&root);
-            self.skills.selected = None;
-            self.skills.detail_body = None;
+        self.open = true;
+        self.detail_focused = false;
+        let root = self.root();
+        if self.catalog.project_root != root {
+            self.catalog = SkillsCatalog::empty(&root);
+            self.selected = None;
+            self.detail_body = None;
         }
         self.relist_skills(cx);
         cx.notify();
@@ -563,19 +655,19 @@ impl Harness {
     /// Esc peels one layer at a time: a dialog, then the menu, then the
     /// page itself (D54). Selecting a session returns outright.
     pub(crate) fn close_skills(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.skills.dialog, SkillsDialog::Closed) {
-            self.skills.dialog = SkillsDialog::Closed;
+        if !matches!(self.dialog, SkillsDialog::Closed) {
+            self.dialog = SkillsDialog::Closed;
             cx.notify();
             return;
         }
-        if self.skills.add_menu_open {
-            self.skills.add_menu_open = false;
+        if self.add_menu_open {
+            self.add_menu_open = false;
             cx.notify();
             return;
         }
-        if self.skills.open {
-            self.skills.open = false;
-            self.skills.detail_focused = false;
+        if self.open {
+            self.open = false;
+            self.detail_focused = false;
             cx.notify();
         }
     }
@@ -583,27 +675,27 @@ impl Harness {
     /// Re-list on the background executor; the previous catalog stays until
     /// the new one lands. A failed run keeps the rows and sets the banner.
     pub(crate) fn relist_skills(&mut self, cx: &mut Context<Self>) {
-        if self.skills.loading {
+        if self.loading {
             return;
         }
-        self.skills.loading = true;
-        let program = self.args.program.clone();
-        let root = self.skills_root();
+        self.loading = true;
+        let program = self.program.clone();
+        let root = self.root();
         self.wire_call(cx, move || skills::list_catalog(&program, &root), |this, catalog, cx| {
-            this.skills.loading = false;
+            this.loading = false;
             if catalog.errors.is_empty() {
                 // A clean list replaces the page and clears the banner; the
                 // selection follows by id, dropping off the page when gone.
-                let selected = this.skills.selected.clone();
-                this.skills.catalog = catalog;
-                this.skills.error = None;
+                let selected = this.selected.clone();
+                this.catalog = catalog;
+                this.error = None;
                 this.sync_menu_skills(cx);
                 if selected.as_ref().is_some_and(|id| this.skills_lookup(id).is_none()) {
-                    this.skills.selected = None;
-                    this.skills.detail_body = None;
+                    this.selected = None;
+                    this.detail_body = None;
                 }
             } else {
-                this.skills.error = catalog.errors.first().cloned();
+                this.error = catalog.errors.first().cloned();
             }
             cx.notify();
         });
@@ -612,39 +704,39 @@ impl Harness {
     /// Look a selected key up: a live row, or a dimmed overridden one.
     fn skills_lookup(&self, key: &str) -> Option<VisibleRow> {
         if let Some(name) = key.strip_prefix("overridden:") {
-            return self.skills.catalog.overridden.iter().position(|o| o.name == name).map(VisibleRow::Overridden);
+            return self.catalog.overridden.iter().position(|o| o.name == name).map(VisibleRow::Overridden);
         }
-        self.skills.catalog.rows.iter().position(|s| s.id == key || s.name == key).map(VisibleRow::Live)
+        self.catalog.rows.iter().position(|s| s.id == key || s.name == key).map(VisibleRow::Live)
     }
 
     /// Select a row: the detail follows, and its SKILL.md starts loading.
     /// Disk reads land synchronously; virtual skills inspect off the UI
     /// thread and the pane reads "Loading…" meanwhile.
     pub(crate) fn select_skill(&mut self, key: String, cx: &mut Context<Self>) {
-        self.skills.selected = Some(key.clone());
-        self.skills.detail_body = None;
-        self.skills.overflow_open = false;
-        let root = self.skills_root();
+        self.selected = Some(key.clone());
+        self.detail_body = None;
+        self.overflow_open = false;
+        let root = self.root();
         if let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) {
-            let skill = self.skills.catalog.rows[index].clone();
+            let skill = self.catalog.rows[index].clone();
             if skill.is_virtual() {
-                self.skills.detail_loading = true;
-                let program = self.args.program.clone();
+                self.detail_loading = true;
+                let program = self.program.clone();
                 self.wire_call(
                     cx,
                     move || skills::skill_body(&program, &skill, &root),
                     move |this, body, cx| {
-                        this.skills.detail_loading = false;
-                        if this.skills.selected.as_deref() == Some(key.as_str()) {
-                            this.skills.detail_body = body.map(|text| (key.clone(), text));
+                        this.detail_loading = false;
+                        if this.selected.as_deref() == Some(key.as_str()) {
+                            this.detail_body = body.map(|text| (key.clone(), text));
                         }
                         cx.notify();
                     },
                 );
-            } else if let Some(body) = skills::skill_body(&self.args.program, &self.skills.catalog.rows[index], &root)
+            } else if let Some(body) = skills::skill_body(&self.program, &self.catalog.rows[index], &root)
             {
-                let id = self.skills.catalog.rows[index].id.clone();
-                self.skills.detail_body = Some((id, body));
+                let id = self.catalog.rows[index].id.clone();
+                self.detail_body = Some((id, body));
             }
         }
         cx.notify();
@@ -654,7 +746,7 @@ impl Harness {
     /// only on the re-list, never optimistically (D55).
     pub(crate) fn toggle_skill(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(VisibleRow::Live(index)) = self.skills_lookup(key) else { return };
-        let row = &self.skills.catalog.rows[index];
+        let row = &self.catalog.rows[index];
         let next = if row.activation.is_on() { Activation::Off } else { Activation::On };
         self.apply_skill_state(row.id.clone(), row.scope().to_owned(), next, cx);
     }
@@ -662,7 +754,7 @@ impl Harness {
     /// Set one skill's mode through the CLI, then re-list (D55, D57).
     pub(crate) fn set_skill_mode(&mut self, key: &str, mode: SkillMode, cx: &mut Context<Self>) {
         let Some(VisibleRow::Live(index)) = self.skills_lookup(key) else { return };
-        let row = &self.skills.catalog.rows[index];
+        let row = &self.catalog.rows[index];
         let next = match mode {
             SkillMode::Auto => Activation::On,
             SkillMode::Only => Activation::UserInvocableOnly,
@@ -673,7 +765,7 @@ impl Harness {
     /// Set one skill's full state from the detail pane (D57), then re-list.
     pub(crate) fn set_skill_state(&mut self, key: &str, state: SkillState, cx: &mut Context<Self>) {
         let Some(VisibleRow::Live(index)) = self.skills_lookup(key) else { return };
-        let row = &self.skills.catalog.rows[index];
+        let row = &self.catalog.rows[index];
         let next = match state {
             SkillState::Automatic => Activation::On,
             SkillState::OnlyMention => Activation::UserInvocableOnly,
@@ -686,13 +778,13 @@ impl Harness {
     /// then a re-list in the same background closure, so the page never
     /// shows a state the list did not confirm.
     fn apply_skill_state(&mut self, id: String, scope: String, activation: Activation, cx: &mut Context<Self>) {
-        if self.skills.loading {
+        if self.loading {
             return;
         }
-        self.skills.loading = true;
-        self.skills.error = None;
-        let program = self.args.program.clone();
-        let root = self.skills_root();
+        self.loading = true;
+        self.error = None;
+        let program = self.program.clone();
+        let root = self.root();
         self.wire_call(
             cx,
             move || {
@@ -701,15 +793,15 @@ impl Harness {
                 (result, catalog)
             },
             |this, (result, catalog), cx| {
-                this.skills.loading = false;
+                this.loading = false;
                 if let Err(message) = result {
-                    this.skills.error = Some(message);
+                    this.error = Some(message);
                 } else if catalog.errors.is_empty() {
-                    this.skills.catalog = catalog;
-                    this.skills.error = None;
+                    this.catalog = catalog;
+                    this.error = None;
                     this.sync_menu_skills(cx);
                 } else {
-                    this.skills.error = catalog.errors.first().cloned();
+                    this.error = catalog.errors.first().cloned();
                 }
                 cx.notify();
             },
@@ -720,19 +812,19 @@ impl Harness {
     /// Move the list selection by `delta`, wrapping. A move from the
     /// keyboard leaves the detail pane.
     pub(crate) fn skills_move(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let query = self.skills_query.read(cx).value().trim().to_owned();
-        let rows = visible_rows(&self.skills.catalog, self.skills.filter, self.skills.hide_off, &query);
+        let query = self.query.read(cx).value().trim().to_owned();
+        let rows = visible_rows(&self.catalog, self.filter, self.hide_off, &query);
         if rows.is_empty() {
             return;
         }
-        let current = self.skills.selected.as_deref().and_then(|key| {
+        let current = self.selected.as_deref().and_then(|key| {
             rows.iter().position(|row| self.visible_key(row) == key)
         });
         let next = match current {
             Some(at) => (((at as isize + delta) % rows.len() as isize + rows.len() as isize) % rows.len() as isize) as usize,
             None => 0,
         };
-        self.skills.detail_focused = false;
+        self.detail_focused = false;
         let key = self.visible_key(&rows[next]);
         self.select_skill(key, cx);
     }
@@ -740,58 +832,58 @@ impl Harness {
     /// The visible rows' selection key: the skill id, or `overridden:<name>`.
     fn visible_key(&self, row: &VisibleRow) -> String {
         match row {
-            VisibleRow::Live(index) => self.skills.catalog.rows.get(*index).map(|s| s.id.clone()).unwrap_or_default(),
+            VisibleRow::Live(index) => self.catalog.rows.get(*index).map(|s| s.id.clone()).unwrap_or_default(),
             VisibleRow::Overridden(index) => {
-                self.skills.catalog.overridden.get(*index).map(|o| format!("overridden:{}", o.name)).unwrap_or_default()
+                self.catalog.overridden.get(*index).map(|o| format!("overridden:{}", o.name)).unwrap_or_default()
             }
         }
     }
 
     /// Space on a list row: on/off (D57). Dimmed rows have no switch.
     pub(crate) fn skills_toggle_selected(&mut self, cx: &mut Context<Self>) {
-        if self.skills.detail_focused {
+        if self.detail_focused {
             return;
         }
-        if let Some(key) = self.skills.selected.clone() {
+        if let Some(key) = self.selected.clone() {
             self.toggle_skill(&key, cx);
         }
     }
 
     /// Enter on a list row: focus the detail pane.
     pub(crate) fn skills_focus_detail(&mut self, cx: &mut Context<Self>) {
-        if self.skills.selected.is_some() {
-            self.skills.detail_focused = true;
+        if self.selected.is_some() {
+            self.detail_focused = true;
             cx.notify();
         }
     }
 
     /// ⌘F on the page: the search field takes the keyboard.
     pub(crate) fn skills_focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.skills_query.focus_handle(cx), cx);
+        window.focus(&self.query.focus_handle(cx), cx);
     }
 
     /// Push the landed catalog into the `/` menu's cache for this root, so
     /// the menu follows the page after any mutation (D64).
     fn sync_menu_skills(&mut self, cx: &mut Context<Self>) {
-        let root = self.skills_root();
-        let rows = self.skills.catalog.rows.clone();
+        let root = self.root();
+        let rows = self.catalog.rows.clone();
         self.overlays.update(cx, |overlays, _| overlays.set_skills(root, rows));
     }
 
     /// Toggle the "Add skill ▾" menu (A1). Opening dry-runs both sources
     /// for the import trails; the counts cache for the menu's life.
     pub(crate) fn toggle_add_menu(&mut self, cx: &mut Context<Self>) {
-        if self.skills.add_menu_open {
-            self.skills.add_menu_open = false;
+        if self.add_menu_open {
+            self.add_menu_open = false;
             cx.notify();
             return;
         }
-        self.skills.add_menu_open = true;
-        self.skills.dialog = SkillsDialog::Closed;
-        self.skills.import_counts = None;
-        self.skills.import_loading = true;
-        let program = self.args.program.clone();
-        let catalog = self.skills.catalog.clone();
+        self.add_menu_open = true;
+        self.dialog = SkillsDialog::Closed;
+        self.import_counts = None;
+        self.import_loading = true;
+        let program = self.program.clone();
+        let catalog = self.catalog.clone();
         self.wire_call(
             cx,
             move || {
@@ -811,8 +903,8 @@ impl Harness {
                 ImportCounts { claude: count(skills::ImportSource::ClaudeCode), codex: count(skills::ImportSource::Codex) }
             },
             |this, counts, cx| {
-                this.skills.import_loading = false;
-                this.skills.import_counts = Some(counts);
+                this.import_loading = false;
+                this.import_counts = Some(counts);
                 cx.notify();
             },
         );
@@ -821,11 +913,10 @@ impl Harness {
 
     /// The menu's import trailing: "N new", "none", or "…" while counting.
     fn add_menu_trail(&self, source: skills::ImportSource) -> String {
-        if self.skills.import_loading {
+        if self.import_loading {
             return "…".to_owned();
         }
         let count = self
-            .skills
             .import_counts
             .map(|counts| match source {
                 skills::ImportSource::ClaudeCode => counts.claude,
@@ -837,16 +928,16 @@ impl Harness {
 
     /// Open New skill… (A2): fresh fields, This project, no error.
     pub(crate) fn open_new_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.skills.add_menu_open = false;
-        self.skills_new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        self.skills_new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        self.skills.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
+        self.add_menu_open = false;
+        self.new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
         cx.notify();
     }
 
     /// Move New skill… / the install preview between scopes.
     pub(crate) fn set_target_scope(&mut self, scope: TargetScope, cx: &mut Context<Self>) {
-        match &mut self.skills.dialog {
+        match &mut self.dialog {
             SkillsDialog::New { scope: current, .. } => *current = scope,
             SkillsDialog::InstallPreview { scope: current, armed_replace, .. } => {
                 *current = scope;
@@ -859,8 +950,8 @@ impl Harness {
 
     /// Close the dialog, if one stands open.
     pub(crate) fn close_skills_dialog(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.skills.dialog, SkillsDialog::Closed) {
-            self.skills.dialog = SkillsDialog::Closed;
+        if !matches!(self.dialog, SkillsDialog::Closed) {
+            self.dialog = SkillsDialog::Closed;
             cx.notify();
         }
     }
@@ -868,39 +959,39 @@ impl Harness {
     /// Create the New skill (A2): validate inline, write or install, then
     /// `validate`, re-list, select the new row and open it in the editor.
     pub(crate) fn create_new_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (scope, name, description) = match &self.skills.dialog {
+        let (scope, name, description) = match &self.dialog {
             SkillsDialog::New { scope, .. } => {
-                (*scope, self.skills_new_name.read(cx).value().trim().to_owned(), self.skills_new_desc.read(cx).value().trim().to_owned())
+                (*scope, self.new_name.read(cx).value().trim().to_owned(), self.new_desc.read(cx).value().trim().to_owned())
             }
             _ => return,
         };
-        let taken = taken_names(&self.skills.catalog, scope);
+        let taken = taken_names(&self.catalog, scope);
         let error = skills::validate_skill_name(&name, &taken)
             .err()
             .or_else(|| skills::validate_skill_description(&description).err());
         if let Some(error) = error {
-            if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+            if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
                 *slot = Some(error);
             }
             cx.notify();
             return;
         }
-        let root = self.skills_root();
-        let program = self.args.program.clone();
+        let root = self.root();
+        let program = self.program.clone();
         let select = name.clone();
         match scope {
             TargetScope::Project => {
                 let file = match skills::create_project_skill(&root, &name, &description) {
                     Ok(file) => file,
                     Err(error) => {
-                        if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+                        if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
                             *slot = Some(error);
                         }
                         cx.notify();
                         return;
                     }
                 };
-                self.skills.dialog = SkillsDialog::Closed;
+                self.dialog = SkillsDialog::Closed;
                 let dir = file.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| file.clone());
                 self.wire_call(
                     cx,
@@ -910,15 +1001,15 @@ impl Harness {
                         (verdict, catalog, file)
                     },
                     move |this, (verdict, catalog, file), cx| {
-                        this.skills.loading = false;
+                        this.loading = false;
                         if catalog.errors.is_empty() {
-                            this.skills.catalog = catalog;
-                            this.skills.error = None;
+                            this.catalog = catalog;
+                            this.error = None;
                             this.sync_menu_skills(cx);
                         } else {
-                            this.skills.error = catalog.errors.first().cloned();
+                            this.error = catalog.errors.first().cloned();
                         }
-                        this.skills.selected = Some(select.clone());
+                        this.selected = Some(select.clone());
                         this.load_selected_body(cx);
                         let (title, detail) = match verdict {
                             Ok(verdict) => ("Skill created", verdict),
@@ -931,7 +1022,7 @@ impl Harness {
                         cx.notify();
                     },
                 );
-                self.skills.loading = true;
+                self.loading = true;
             }
             TargetScope::Personal => {
                 let tmp = std::env::temp_dir().join(format!("baaz-new-skill-{name}"));
@@ -943,13 +1034,13 @@ impl Harness {
                             .map_err(|e| format!("Could not write the scaffold: {e}"))
                     })
                 {
-                    if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+                    if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
                         *slot = Some(error);
                     }
                     cx.notify();
                     return;
                 }
-                self.skills.dialog = SkillsDialog::Closed;
+                self.dialog = SkillsDialog::Closed;
                 self.wire_call(
                     cx,
                     move || {
@@ -959,23 +1050,22 @@ impl Harness {
                         (installed, catalog)
                     },
                     move |this, (installed, catalog), cx| {
-                        this.skills.loading = false;
+                        this.loading = false;
                         match installed {
                             Ok(()) => {
                                 if catalog.errors.is_empty() {
-                                    this.skills.catalog = catalog;
-                                    this.skills.error = None;
+                                    this.catalog = catalog;
+                                    this.error = None;
                                     this.sync_menu_skills(cx);
                                 } else {
-                                    this.skills.error = catalog.errors.first().cloned();
+                                    this.error = catalog.errors.first().cloned();
                                 }
-                                this.skills.selected = Some(select.clone());
+                                this.selected = Some(select.clone());
                                 this.load_selected_body(cx);
                                 // The installed copy is the row's file now;
                                 // open it, falling back to the scaffold.
-                                let root = this.skills_root();
+                                let root = this.root();
                                 let path = this
-                                    .skills
                                     .catalog
                                     .find(&select)
                                     .and_then(|row| row.disk_path(&root))
@@ -990,7 +1080,7 @@ impl Harness {
                                 });
                             }
                             Err(message) => {
-                                this.skills.error = Some(message.clone());
+                                this.error = Some(message.clone());
                                 this.overlays.update(cx, |overlays, _| {
                                     overlays.toast("Create failed", message);
                                 });
@@ -999,7 +1089,7 @@ impl Harness {
                         cx.notify();
                     },
                 );
-                self.skills.loading = true;
+                self.loading = true;
             }
         }
         // The New dialog's fields clear only on open, so a failed Create
@@ -1011,37 +1101,37 @@ impl Harness {
     /// Load the selected row's SKILL.md the way selection does: disk reads
     /// land synchronously, virtual skills inspect off the UI thread.
     fn load_selected_body(&mut self, cx: &mut Context<Self>) {
-        let key = match self.skills.selected.clone() {
+        let key = match self.selected.clone() {
             Some(key) => key,
             None => return,
         };
-        let root = self.skills_root();
+        let root = self.root();
         let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) else { return };
-        let skill = self.skills.catalog.rows[index].clone();
+        let skill = self.catalog.rows[index].clone();
         if skill.is_virtual() {
-            self.skills.detail_body = None;
-            self.skills.detail_loading = true;
-            let program = self.args.program.clone();
+            self.detail_body = None;
+            self.detail_loading = true;
+            let program = self.program.clone();
             self.wire_call(
                 cx,
                 move || skills::skill_body(&program, &skill, &root),
                 move |this, body, cx| {
-                    this.skills.detail_loading = false;
-                    if this.skills.selected.as_deref() == Some(key.as_str()) {
-                        this.skills.detail_body = body.map(|text| (key.clone(), text));
+                    this.detail_loading = false;
+                    if this.selected.as_deref() == Some(key.as_str()) {
+                        this.detail_body = body.map(|text| (key.clone(), text));
                     }
                     cx.notify();
                 },
             );
-        } else if let Some(body) = skills::skill_body(&self.args.program, &skill, &root) {
-            self.skills.detail_body = Some((skill.id.clone(), body));
+        } else if let Some(body) = skills::skill_body(&self.program, &skill, &root) {
+            self.detail_body = Some((skill.id.clone(), body));
         }
     }
 
     /// Install from folder… (A3): the native picker, then `validate` and
     /// the preview modal.
     pub(crate) fn choose_install_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.skills.add_menu_open = false;
+        self.add_menu_open = false;
         cx.notify();
         cx.activate(true);
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -1074,7 +1164,7 @@ impl Harness {
 
     /// Validate a picked folder and open the install preview over it.
     fn preview_install_folder(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
-        let program = self.args.program.clone();
+        let program = self.program.clone();
         self.wire_call(
             cx,
             move || {
@@ -1097,7 +1187,7 @@ impl Harness {
                     Ok(verdict) => verdict,
                     Err(message) => message,
                 };
-                this.skills.dialog = SkillsDialog::InstallPreview {
+                this.dialog = SkillsDialog::InstallPreview {
                     dir: dir.to_string_lossy().into_owned(),
                     name,
                     description,
@@ -1116,25 +1206,25 @@ impl Harness {
     /// CLI (`--force` only after the explicit Replace arm); This project
     /// copies into `.agents/skills`. Then re-list.
     pub(crate) fn confirm_install_preview(&mut self, cx: &mut Context<Self>) {
-        let (dir, name, scope, armed) = match &self.skills.dialog {
+        let (dir, name, scope, armed) = match &self.dialog {
             SkillsDialog::InstallPreview { dir, name, scope, armed_replace, .. } => {
                 (dir.clone(), name.clone(), *scope, *armed_replace)
             }
             _ => return,
         };
-        let taken = taken_names(&self.skills.catalog, scope);
+        let taken = taken_names(&self.catalog, scope);
         if taken.iter().any(|other| other == &name) && !armed {
-            if let SkillsDialog::InstallPreview { armed_replace, .. } = &mut self.skills.dialog {
+            if let SkillsDialog::InstallPreview { armed_replace, .. } = &mut self.dialog {
                 *armed_replace = true;
             }
             cx.notify();
             return;
         }
-        let root = self.skills_root();
-        let program = self.args.program.clone();
+        let root = self.root();
+        let program = self.program.clone();
         let dir_path = std::path::PathBuf::from(&dir);
         let select = name.clone();
-        self.skills.dialog = SkillsDialog::Closed;
+        self.dialog = SkillsDialog::Closed;
         self.wire_call(
             cx,
             move || {
@@ -1153,17 +1243,17 @@ impl Harness {
                 (outcome, catalog)
             },
             move |this, (outcome, catalog), cx| {
-                this.skills.loading = false;
+                this.loading = false;
                 match outcome {
                     Ok(()) => {
                         if catalog.errors.is_empty() {
-                            this.skills.catalog = catalog;
-                            this.skills.error = None;
+                            this.catalog = catalog;
+                            this.error = None;
                             this.sync_menu_skills(cx);
                         } else {
-                            this.skills.error = catalog.errors.first().cloned();
+                            this.error = catalog.errors.first().cloned();
                         }
-                        this.skills.selected = Some(select.clone());
+                        this.selected = Some(select.clone());
                         this.load_selected_body(cx);
                         this.overlays.update(cx, |overlays, _| {
                             overlays.toast("Skill installed", format!("`{}` is ready.", select.as_str()));
@@ -1178,17 +1268,17 @@ impl Harness {
                 cx.notify();
             },
         );
-        self.skills.loading = true;
+        self.loading = true;
         cx.notify();
     }
 
     /// Open the import preview for a source (A4): the dry-run, classified
     /// against the landed catalog.
     pub(crate) fn open_import(&mut self, source: skills::ImportSource, cx: &mut Context<Self>) {
-        self.skills.add_menu_open = false;
-        self.skills.dialog = SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None };
-        let program = self.args.program.clone();
-        let catalog = self.skills.catalog.clone();
+        self.add_menu_open = false;
+        self.dialog = SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None };
+        let program = self.program.clone();
+        let catalog = self.catalog.clone();
         self.wire_call(
             cx,
             move || skills::import_dry_run(&program, source),
@@ -1212,11 +1302,11 @@ impl Harness {
                                 checked: !matches!(status, skills::ImportStatus::Installed),
                             });
                         }
-                        this.skills.dialog =
+                        this.dialog =
                             SkillsDialog::Import { source, rows, skipped, loading: false, error: None };
                     }
                     Err(message) => {
-                        this.skills.dialog =
+                        this.dialog =
                             SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: false, error: Some(message) };
                     }
                 }
@@ -1228,7 +1318,7 @@ impl Harness {
 
     /// Flip one import row's checkbox. Installed rows are dead (A4).
     pub(crate) fn toggle_import_row(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let SkillsDialog::Import { rows, .. } = &mut self.skills.dialog {
+        if let SkillsDialog::Import { rows, .. } = &mut self.dialog {
             if let Some(row) = rows.iter_mut().find(|row| row.name == name).filter(|row| row.selectable()) {
                 row.checked = !row.checked;
             }
@@ -1241,7 +1331,7 @@ impl Harness {
     /// (`--force` only for checked "Replaces yours" rows). Then re-list
     /// and toast "Imported k skills".
     pub(crate) fn run_import(&mut self, cx: &mut Context<Self>) {
-        let (source, picked) = match &self.skills.dialog {
+        let (source, picked) = match &self.dialog {
             SkillsDialog::Import { source, rows, loading: false, error: None, .. } => {
                 let picked: Vec<ImportDialogRow> =
                     rows.iter().filter(|row| row.checked && row.selectable()).cloned().collect();
@@ -1253,16 +1343,16 @@ impl Harness {
             return;
         }
         let whole = {
-            let selectable = match &self.skills.dialog {
+            let selectable = match &self.dialog {
                 SkillsDialog::Import { rows, .. } => rows.iter().filter(|row| row.selectable()).count(),
                 _ => 0,
             };
             picked.len() == selectable && picked.iter().all(|row| row.status == skills::ImportStatus::New)
         };
         let count = picked.len();
-        let root = self.skills_root();
-        let program = self.args.program.clone();
-        self.skills.dialog = SkillsDialog::Closed;
+        let root = self.root();
+        let program = self.program.clone();
+        self.dialog = SkillsDialog::Closed;
         self.wire_call(
             cx,
             move || {
@@ -1285,15 +1375,15 @@ impl Harness {
                 (outcome, catalog)
             },
             move |this, (outcome, catalog), cx| {
-                this.skills.loading = false;
+                this.loading = false;
                 match outcome {
                     Ok(()) => {
                         if catalog.errors.is_empty() {
-                            this.skills.catalog = catalog;
-                            this.skills.error = None;
+                            this.catalog = catalog;
+                            this.error = None;
                             this.sync_menu_skills(cx);
                         } else {
-                            this.skills.error = catalog.errors.first().cloned();
+                            this.error = catalog.errors.first().cloned();
                         }
                         let noun = if count == 1 { "skill" } else { "skills" };
                         this.overlays.update(cx, |overlays, _| {
@@ -1309,7 +1399,7 @@ impl Harness {
                 cx.notify();
             },
         );
-        self.skills.loading = true;
+        self.loading = true;
         cx.notify();
     }
 
@@ -1317,19 +1407,19 @@ impl Harness {
     /// new session in the current project —
     /// always on the **muse** lane, whatever the remembered provider — with
     /// the `/create-skill ` draft in the composer, focused, never sent.
-    pub(crate) fn ask_muse_to_write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.skills.add_menu_open = false;
-        self.skills.dialog = SkillsDialog::Closed;
-        self.new_provider = crate::providers::ProviderId::Muse.as_str().to_owned();
-        self.pending_create_skill = true;
-        self.new_session(window, cx);
+    pub(crate) fn ask_muse_to_write(&mut self, cx: &mut Context<Self>) {
+        self.add_menu_open = false;
+        self.dialog = SkillsDialog::Closed;
+        self.pending_create = true;
+        cx.emit(SkillsPageEvent::AskMuseToWrite);
+        cx.notify();
     }
 
     /// Open Remove… for a row (A6). Bundled and plugin rows have no Remove
     /// — only Off — so they never reach this dialog.
     pub(crate) fn open_remove_dialog(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(VisibleRow::Live(index)) = self.skills_lookup(key) else { return };
-        let row = self.skills.catalog.rows[index].clone();
+        let row = self.catalog.rows[index].clone();
         let personal = row.section() == ScopeSection::Personal;
         if !personal && row.section() != ScopeSection::Project {
             return;
@@ -1337,7 +1427,7 @@ impl Harness {
         let (headline, detail) = if personal {
             (format!("Remove {} from your personal skills?", row.name), format!("`{}` leaves every project.", row.id))
         } else {
-            let root = self.skills_root();
+            let root = self.root();
             let path = row
                 .disk_path(&root)
                 .and_then(|file| file.parent().map(|dir| dir.to_path_buf()))
@@ -1345,7 +1435,7 @@ impl Harness {
                 .unwrap_or_else(|| skills::project_skill_dir(&root, &row.name).to_string_lossy().into_owned());
             (format!("Remove {} from this project?", row.name), format!("Moves {path} to the Trash."))
         };
-        self.skills.dialog = SkillsDialog::Remove {
+        self.dialog = SkillsDialog::Remove {
             key: key.to_owned(),
             name: row.name,
             headline,
@@ -1358,15 +1448,15 @@ impl Harness {
     /// Run the confirmed Remove (A6): Personal uninstalls through the CLI;
     /// project rows move the folder to the Trash, never `rm`. Then re-list.
     pub(crate) fn confirm_remove(&mut self, cx: &mut Context<Self>) {
-        let (key, name, personal) = match &self.skills.dialog {
+        let (key, name, personal) = match &self.dialog {
             SkillsDialog::Remove { key, name, personal, .. } => (key.clone(), name.clone(), *personal),
             _ => return,
         };
-        self.skills.dialog = SkillsDialog::Closed;
-        let root = self.skills_root();
-        let program = self.args.program.clone();
+        self.dialog = SkillsDialog::Closed;
+        let root = self.root();
+        let program = self.program.clone();
         if personal {
-            let id = self.skills.catalog.rows.iter().find(|row| row.name == name).map(|row| row.id.clone()).unwrap_or(name.clone());
+            let id = self.catalog.rows.iter().find(|row| row.name == name).map(|row| row.id.clone()).unwrap_or(name.clone());
             self.wire_call(
                 cx,
                 move || {
@@ -1375,15 +1465,15 @@ impl Harness {
                     (outcome, catalog)
                 },
                 move |this, (outcome, catalog), cx| {
-                    this.skills.loading = false;
+                    this.loading = false;
                     match outcome {
                         Ok(()) => {
                             if catalog.errors.is_empty() {
-                                this.skills.catalog = catalog;
-                                this.skills.error = None;
+                                this.catalog = catalog;
+                                this.error = None;
                                 this.sync_menu_skills(cx);
                             } else {
-                                this.skills.error = catalog.errors.first().cloned();
+                                this.error = catalog.errors.first().cloned();
                             }
                             this.overlays.update(cx, |overlays, _| {
                                 overlays.toast("Skill removed", format!("`{name}` is gone."));
@@ -1399,10 +1489,9 @@ impl Harness {
                     cx.notify();
                 },
             );
-            self.skills.loading = true;
+            self.loading = true;
         } else {
             let dir = self
-                .skills
                 .catalog
                 .find(&name)
                 .and_then(|row| row.disk_path(&root))
@@ -1446,25 +1535,25 @@ impl Harness {
             return Err(format!("unknown skills fixture `{which}`"));
         }
         let which = if which.is_empty() { "page" } else { which };
-        self.skills.open = true;
-        self.skills.detail_focused = false;
-        self.skills.loading = false;
-        self.skills.error = None;
-        self.skills.add_menu_open = false;
-        self.skills.dialog = SkillsDialog::Closed;
-        self.skills.import_counts = None;
-        self.skills.import_loading = false;
-        self.skills.catalog = fixture_catalog(if which == "empty" { "empty" } else { "page" });
+        self.open = true;
+        self.detail_focused = false;
+        self.loading = false;
+        self.error = None;
+        self.add_menu_open = false;
+        self.dialog = SkillsDialog::Closed;
+        self.import_counts = None;
+        self.import_loading = false;
+        self.catalog = fixture_catalog(if which == "empty" { "empty" } else { "page" });
         // The K3 captures layer their dialog over the page fixture: the
         // menu with its cached trails, the import preview over
         // deterministic rows, the New dialog with empty fields.
         match rest.trim() {
             "add-menu" => {
-                self.skills.add_menu_open = true;
-                self.skills.import_counts = Some(ImportCounts { claude: 1, codex: 0 });
+                self.add_menu_open = true;
+                self.import_counts = Some(ImportCounts { claude: 1, codex: 0 });
             }
             "import-preview" => {
-                self.skills.dialog = SkillsDialog::Import {
+                self.dialog = SkillsDialog::Import {
                     source: skills::ImportSource::ClaudeCode,
                     rows: fixture_import_rows(),
                     skipped: 1,
@@ -1473,9 +1562,9 @@ impl Harness {
                 };
             }
             "new" => {
-                self.skills_new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                self.skills_new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                self.skills.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
+                self.new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+                self.new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+                self.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
             }
             _ => {}
         }
@@ -1484,17 +1573,17 @@ impl Harness {
         // (the page fixture opens on a bundled skill) reads the inspect
         // fixture through the live parse, so the read-only preview draws
         // instead of "No preview available" — there is no CLI offline.
-        let root = self.skills_root();
-        if let Some(first) = self.skills.catalog.rows.first().cloned() {
-            self.skills.selected = Some(first.id.clone());
+        let root = self.root();
+        if let Some(first) = self.catalog.rows.first().cloned() {
+            self.selected = Some(first.id.clone());
             if !first.is_virtual() {
-                if let Some(body) = skills::skill_body(&self.args.program, &first, &root) {
-                    self.skills.detail_body = Some((first.id.clone(), body));
+                if let Some(body) = skills::skill_body(&self.program, &first, &root) {
+                    self.detail_body = Some((first.id.clone(), body));
                 }
             } else {
                 let text = include_str!("../tests/fixtures/skills/inspect-browser-app-delivery.json");
                 if let Some(body) = skills::parse_inspect_preview(text.as_bytes()) {
-                    self.skills.detail_body = Some((first.id.clone(), body));
+                    self.detail_body = Some((first.id.clone(), body));
                 }
             }
         }
@@ -1502,37 +1591,27 @@ impl Harness {
         Ok(())
     }
 
-    /// The lane the page speaks for: the open session's, else the pick new
-    /// sessions start on.
-    fn skills_lane(&self, cx: &App) -> crate::providers::ProviderId {
-        self.active
-            .as_ref()
-            .map(|view| view.read(cx).provider_kind())
-            .unwrap_or_else(|| crate::providers::ProviderId::parse(&self.new_provider))
-    }
-
     /// The page: header, provider line, banner, meter, filter, list and
     /// detail. Every interactive element carries an accessibility role and
     /// a human label.
-    pub(crate) fn render_skills_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Window focus re-lists while the page stands open (D55): edge
         // triggered, so a focused frame does no work of its own.
         let focused = window.is_window_active();
-        if focused && !self.skills.window_focused {
+        if focused && !self.window_focused {
             self.relist_skills(cx);
         }
-        self.skills.window_focused = focused;
+        self.window_focused = focused;
 
         let p = cx.aui().colors;
-        let query = self.skills_query.read(cx).value().trim().to_owned();
-        let rows = visible_rows(&self.skills.catalog, self.skills.filter, self.skills.hide_off, &query);
-        let counts = filter_counts(&self.skills.catalog);
-        let project_name =
-            self.current_project().map(|project| project.name.clone()).unwrap_or_else(|| "Unfiled".to_owned());
+        let query = self.query.read(cx).value().trim().to_owned();
+        let rows = visible_rows(&self.catalog, self.filter, self.hide_off, &query);
+        let counts = filter_counts(&self.catalog);
+        let project_name = self.facts.project_name.clone();
 
         // The header: "Skills · [project crumb ▾]", search (⌘F), "Add skill ▾".
-        let open_menu = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.open_project_menu(this.current_project.clone(), true, cx);
+        let open_menu = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            cx.emit(SkillsPageEvent::OpenProjectMenu);
         });
         let add_skill = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.toggle_add_menu(cx);
@@ -1557,11 +1636,11 @@ impl Harness {
             .child(div().flex_1())
             .child(div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("Search"))
             .child(
-                aui::data::field_frame("skills-search-field", &self.skills_query, window, cx)
+                aui::data::field_frame("skills-search-field", &self.query, window, cx)
                     .flex_none()
                     .w(px(SKILLS_SEARCH_W))
                     .child(
-                        Textarea::new(&self.skills_query)
+                        Textarea::new(&self.query)
                             .appearance(false)
                             .bordered(false)
                             .role_size(TextRole::Body)
@@ -1583,7 +1662,7 @@ impl Harness {
 
         // Provider sessions still open the page; the line under the header
         // says whose skills these are.
-        if let Some(line) = skills_provider_line(self.skills_lane(cx)) {
+        if let Some(line) = skills_provider_line(self.facts.lane) {
             column = column.child(
                 div()
                     .flex_none()
@@ -1597,9 +1676,9 @@ impl Harness {
         }
 
         // The error banner, with the CLI's message and Try again (S1).
-        if let Some(error) = self.skills.error.clone() {
+        if let Some(error) = self.error.clone() {
             let retry = cx.listener(|this: &mut Self, _, _window: &mut Window, cx| {
-                this.skills.error = None;
+                this.error = None;
                 this.relist_skills(cx);
             });
             column = column.child(
@@ -1612,10 +1691,9 @@ impl Harness {
         }
 
         // The cost meter (D59).
-        let (total, caption) = meter_text(&self.skills.catalog);
+        let (total, caption) = meter_text(&self.catalog);
         let levels = [InkLevel::Ink, InkLevel::Ink2, InkLevel::Ink3, InkLevel::Ink4];
         let segments: Vec<CostSegment> = self
-            .skills
             .catalog
             .meter_by_section()
             .iter()
@@ -1629,15 +1707,15 @@ impl Harness {
         // The filter row: segments with counts, the Hide off switch.
         let labels: Vec<SharedString> =
             crate::skills_page::SkillsFilter::ALL.iter().zip(counts).map(|(f, n)| SharedString::from(f.label(n))).collect();
-        let active = crate::skills_page::SkillsFilter::ALL.iter().position(|f| *f == self.skills.filter).unwrap_or(0);
+        let active = crate::skills_page::SkillsFilter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0);
         let pick_filter = cx.listener(|this: &mut Self, index: &usize, _, cx| {
             if let Some(filter) = crate::skills_page::SkillsFilter::ALL.get(*index).copied() {
-                this.skills.filter = filter;
+                this.filter = filter;
                 cx.notify();
             }
         });
         let flip_hide = cx.listener(|this: &mut Self, _: &SwitchIntent, _, cx| {
-            this.skills.hide_off = !this.skills.hide_off;
+            this.hide_off = !this.hide_off;
             cx.notify();
         });
         let filter_row = h_flex()
@@ -1655,7 +1733,7 @@ impl Harness {
             .child(div().flex_1())
             .child(div().flex_none().role_in(TextRole::Body, cx).text_color(p.fg_muted).child("Hide off"))
             .child(
-                switch("skills-hide-off", self.skills.hide_off, false)
+                switch("skills-hide-off", self.hide_off, false)
                     .accessibility_label("Hide off")
                     .on_intent(move |intent, window, cx| flip_hide(&intent, window, cx)),
             );
@@ -1667,13 +1745,13 @@ impl Harness {
             list = list.child(self.render_skills_empty(window, cx));
         } else {
             for section in ScopeSection::ALL {
-                if self.skills.filter.section().is_some_and(|kept| kept != section) {
+                if self.filter.section().is_some_and(|kept| kept != section) {
                     continue;
                 }
                 let live: Vec<usize> = rows
                     .iter()
                     .filter_map(|row| match row {
-                        VisibleRow::Live(index) if self.skills.catalog.rows[*index].section() == section => Some(*index),
+                        VisibleRow::Live(index) if self.catalog.rows[*index].section() == section => Some(*index),
                         _ => None,
                     })
                     .collect();
@@ -1683,17 +1761,17 @@ impl Harness {
                         VisibleRow::Overridden(index) => Some(*index),
                         _ => None,
                     })
-                    .filter(|index| loser_section(&self.skills.catalog.overridden[*index]) == section)
+                    .filter(|index| loser_section(&self.catalog.overridden[*index]) == section)
                     .collect();
                 if live.is_empty() && losers.is_empty() {
                     continue;
                 }
-                let hint = section_hint(section, &self.skills_root());
+                let hint = section_hint(section, &self.root());
                 let count = format!("{}", live.len() + losers.len());
                 list = list.child(scope_section_header(section.label(), hint, count));
                 // Built-in folds past the first two rows (D56).
                 let shown: Vec<usize> = if section == ScopeSection::Builtin
-                    && !self.skills.show_all_builtin
+                    && !self.show_all_builtin
                     && live.len() > 2
                 {
                     live[..2].to_vec()
@@ -1711,9 +1789,9 @@ impl Harness {
                 }
                 if section == ScopeSection::Builtin && live.len() > 2 {
                     let more = live.len() - 2;
-                    if self.skills.show_all_builtin {
+                    if self.show_all_builtin {
                         let less = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.skills.show_all_builtin = false;
+                            this.show_all_builtin = false;
                             cx.notify();
                         });
                         list = list.child(
@@ -1725,7 +1803,7 @@ impl Harness {
                         );
                     } else {
                         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.skills.show_all_builtin = true;
+                            this.show_all_builtin = true;
                             cx.notify();
                         });
                         list = list.child(
@@ -1811,7 +1889,7 @@ impl Harness {
         let mut root = div().flex_1().min_h_0().min_w_0().w_full().overflow_hidden().relative().child(column);
         // The test hook the feedback-mode layout test measures.
         root = root.debug_selector(|| "skills-page".into());
-        if self.skills.add_menu_open {
+        if self.add_menu_open {
             root = root.child(self.render_add_menu(column_max, column_pad, cx));
         }
         if let Some(overlay) = overlay {
@@ -1845,11 +1923,11 @@ impl Harness {
         let import_codex = cx.listener(|this: &mut Self, _: &SharedString, _, cx| {
             this.open_import(skills::ImportSource::Codex, cx);
         });
-        let ask = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.ask_muse_to_write(window, cx));
+        let ask = cx.listener(|this: &mut Self, _: &SharedString, _, cx| this.ask_muse_to_write(cx));
         // A click outside the card closes the menu. The catcher is
         // transparent, so the page behind it captures unchanged.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.skills.add_menu_open = false;
+            this.add_menu_open = false;
             cx.notify();
         });
         // "Ask Muse to write one" is Muse's own row: it always opens a Muse
@@ -1950,7 +2028,7 @@ impl Harness {
     /// The modal layer (A2–A6), centred over a scrim above the list.
     /// Every control carries its role and label.
     fn render_skills_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        match self.skills.dialog.clone() {
+        match self.dialog.clone() {
             SkillsDialog::Closed => None,
             SkillsDialog::New { scope, error } => Some(self.render_new_dialog(window, cx, scope, error)),
             SkillsDialog::InstallPreview { dir, name, description, tokens, files, diagnostics, scope, armed_replace } => {
@@ -2007,11 +2085,11 @@ impl Harness {
                     .gap(px(scale::SP_2))
                     .child(div().flex_none().ui(TextRole::Caption).text_color(p.fg_muted).child("Name"))
                     .child(
-                        aui::data::field_frame("skills-new-name-field", &self.skills_new_name, window, cx)
+                        aui::data::field_frame("skills-new-name-field", &self.new_name, window, cx)
                             .flex_none()
                             .w_full()
                             .child(
-                                Textarea::new(&self.skills_new_name)
+                                Textarea::new(&self.new_name)
                                     .appearance(false)
                                     .bordered(false)
                                     .role_size(TextRole::Body)
@@ -2035,11 +2113,11 @@ impl Harness {
                     .gap(px(scale::SP_2))
                     .child(div().flex_none().ui(TextRole::Caption).text_color(p.fg_muted).child("Description"))
                     .child(
-                        aui::data::field_frame("skills-new-desc-field", &self.skills_new_desc, window, cx)
+                        aui::data::field_frame("skills-new-desc-field", &self.new_desc, window, cx)
                             .flex_none()
                             .w_full()
                             .child(
-                                Textarea::new(&self.skills_new_desc)
+                                Textarea::new(&self.new_desc)
                                     .appearance(false)
                                     .bordered(false)
                                     .role_size(TextRole::Body)
@@ -2283,10 +2361,10 @@ impl Harness {
 
     /// One live row: name, chips, description, tokens, mode chip, switch.
     fn render_skill_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let skill = self.skills.catalog.rows[index].clone();
+        let skill = self.catalog.rows[index].clone();
         let mut chips = Vec::new();
         // The winner's chip names the loser it shadows (D58).
-        for loser in &self.skills.catalog.overridden {
+        for loser in &self.catalog.overridden {
             if loser.name == skill.name && loser.by_scope == skill.scope() {
                 chips.push(SkillChip::new(
                     format!("Overrides {} {}", scope_word(&loser.scope), loser.name),
@@ -2311,7 +2389,7 @@ impl Harness {
             Activation::UserInvocableOnly => Some(SkillMode::Only),
             Activation::Off => None,
         };
-        let selected = self.skills.selected.as_deref() == Some(skill.id.as_str());
+        let selected = self.selected.as_deref() == Some(skill.id.as_str());
         let model = SkillRowModel {
             id: SharedString::from(skill.id.clone()),
             name: SharedString::from(skill.name.clone()),
@@ -2341,9 +2419,9 @@ impl Harness {
 
     /// One dimmed overridden row: viewable, never flippable (D58).
     fn render_overridden_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let loser = self.skills.catalog.overridden[index].clone();
+        let loser = self.catalog.overridden[index].clone();
         let key = format!("overridden:{}", loser.name);
-        let selected = self.skills.selected.as_deref() == Some(key.as_str());
+        let selected = self.selected.as_deref() == Some(key.as_str());
         let model = SkillRowModel {
             id: SharedString::from(key.clone()),
             name: SharedString::from(loser.name.clone()),
@@ -2363,12 +2441,12 @@ impl Harness {
 
     /// The detail pane for the selection: a live skill, or a dimmed loser.
     fn render_skill_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let key = self.skills.selected.clone()?;
+        let key = self.selected.clone()?;
         if let Some(name) = key.strip_prefix("overridden:") {
             return Some(self.render_overridden_detail(name, cx));
         }
-        let skill = self.skills.catalog.rows.iter().find(|s| s.id == key)?.clone();
-        let root = self.skills_root();
+        let skill = self.catalog.rows.iter().find(|s| s.id == key)?.clone();
+        let root = self.root();
         let p = cx.aui().colors;
         let state = match skill.activation {
             Activation::On => SkillState::Automatic,
@@ -2401,7 +2479,7 @@ impl Harness {
         }
 
         // SKILL.md rendered with the library markdown, frontmatter stripped.
-        let body = self.skills.detail_body.clone().filter(|(id, _)| *id == skill.id).map(|(_, text)| text);
+        let body = self.detail_body.clone().filter(|(id, _)| *id == skill.id).map(|(_, text)| text);
         let body_element: AnyElement = match body {
             Some(text) if !text.trim().is_empty() => prose(
                 format!("skill-body-{}", skill.id),
@@ -2415,7 +2493,7 @@ impl Harness {
                 },
             )
             .into_any_element(),
-            _ if self.skills.detail_loading => {
+            _ if self.detail_loading => {
                 div().w_full().ui(TextRole::Body).text_color(p.fg_muted).child("Loading…").into_any_element()
             }
             _ => div().w_full().ui(TextRole::Body).text_color(p.fg_muted).child("No preview available.").into_any_element(),
@@ -2447,7 +2525,7 @@ impl Harness {
 
         // The ⋯ menu: Validate and Copy path, with the personal line on
         // personal rows (D60, §7).
-        if self.skills.overflow_open {
+        if self.overflow_open {
             let mut menu = v_flex().w_full().gap(px(scale::SP_2));
             if skill.section() == ScopeSection::Personal {
                 menu = menu.child(
@@ -2456,9 +2534,9 @@ impl Harness {
             }
             let disk = skill.disk_path(&root);
             if let Some(dir) = disk.as_ref().and_then(|file| file.parent().map(|d| d.to_path_buf())) {
-                let program = self.args.program.clone();
+                let program = self.program.clone();
                 let validate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.skills.overflow_open = false;
+                    this.overflow_open = false;
                     let program = program.clone();
                     let dir = dir.clone();
                     this.wire_call(cx, move || skills::validate_skill(&program, &dir), |this, result, cx| {
@@ -2481,7 +2559,7 @@ impl Harness {
                 );
             }
             let copy = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.skills.overflow_open = false;
+                this.overflow_open = false;
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
                 cx.notify();
             });
@@ -2494,7 +2572,7 @@ impl Harness {
                 let key = skill.id.clone();
                 let name = skill.name.clone();
                 let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.skills.overflow_open = false;
+                    this.overflow_open = false;
                     this.open_remove_dialog(&key, cx);
                 });
                 menu = menu.child(
@@ -2520,19 +2598,19 @@ impl Harness {
         let on_detail = cx.listener(move |this: &mut Self, intent: &SkillDetailIntent, _, cx| match intent {
             SkillDetailIntent::SetState(state) => this.set_skill_state(&key, *state, cx),
             SkillDetailIntent::Action(action) if action.as_ref() == "overflow" => {
-                this.skills.overflow_open = !this.skills.overflow_open;
+                this.overflow_open = !this.overflow_open;
                 cx.notify();
             }
             SkillDetailIntent::Action(action) if action.as_ref() == "reveal" => {
-                if let Some(row) = this.skills.catalog.find(&key) {
-                    if let Some(path) = row.disk_path(&this.skills_root()) {
+                if let Some(row) = this.catalog.find(&key) {
+                    if let Some(path) = row.disk_path(&this.root()) {
                         cx.reveal_path(&path);
                     }
                 }
             }
             SkillDetailIntent::Action(action) if action.as_ref() == "open" => {
-                if let Some(row) = this.skills.catalog.find(&key) {
-                    if let Some(path) = row.disk_path(&this.skills_root()) {
+                if let Some(row) = this.catalog.find(&key) {
+                    if let Some(path) = row.disk_path(&this.root()) {
                         if crate::system_open::open_detached([&path]).is_err() {
                             crate::baaz_log!("could not open {}", path.display());
                         }
@@ -2547,7 +2625,7 @@ impl Harness {
     /// A dimmed loser's detail: name, scope, path and why it lost (D58).
     fn render_overridden_detail(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let loser = self.skills.catalog.overridden.iter().find(|o| o.name == name).cloned();
+        let loser = self.catalog.overridden.iter().find(|o| o.name == name).cloned();
         let (scope, path, message) = match loser {
             Some(loser) => (scope_word(&loser.scope).to_owned(), loser.path.clone().unwrap_or_default(), loser.message()),
             None => ("—".to_owned(), String::new(), "Shadowed by a higher-priority skill.".to_owned()),
@@ -2567,7 +2645,7 @@ impl Harness {
     /// The empty list: the search miss, or the empty-project state (D56).
     fn render_skills_empty(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let query = self.skills_query.read(cx).value().trim().to_owned();
+        let query = self.query.read(cx).value().trim().to_owned();
         let copy = if !query.is_empty() {
             format!("No skills match “{query}”.")
         } else {
@@ -2582,6 +2660,127 @@ impl Harness {
             .child(div().role_in(TextRole::Subtitle, cx).text_color(p.ink).child("Nothing here"))
             .child(div().role_in(TextRole::Body, cx).text_color(p.fg_muted).child(copy))
             .into_any_element()
+    }
+}
+
+impl Focusable for SkillsPage {
+    /// The search field: where ⌘F puts the keyboard, the page's one field
+    /// that is always mounted.
+    fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
+        self.query.focus_handle(cx)
+    }
+}
+
+impl Region for SkillsPage {
+    /// "Skills": the centre header's title while the page stands open.
+    fn title(&self, _cx: &App) -> SharedString {
+        "Skills".into()
+    }
+
+    /// Nothing: the page's header row (crumb, search, Add skill) is part of
+    /// its own column, under the centre header.
+    fn actions(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+
+    /// While open: the page replaces the centre, so Browse's page hides
+    /// under it exactly like under the palette, menus, dialogs and Settings.
+    fn covers_page(&self, _cx: &App) -> bool {
+        self.open
+    }
+}
+
+impl Render for SkillsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_page(window, cx)
+    }
+}
+
+// ── the root's side ─────────────────────────────────────────────────────
+
+impl Harness {
+    /// What the page needs from the root now (see [`SkillsFacts`]).
+    pub(crate) fn skills_facts(&self, cx: &App) -> SkillsFacts {
+        let project = self.current_project();
+        SkillsFacts {
+            root: project
+                .map(|project| project.root.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned()),
+            project_name: project.map(|project| project.name.clone()).unwrap_or_else(|| "Unfiled".to_owned()),
+            lane: self
+                .active
+                .as_ref()
+                .map(|view| view.read(cx).provider_kind())
+                .unwrap_or_else(|| crate::providers::ProviderId::parse(&self.new_provider)),
+        }
+    }
+
+    /// Run `f` on the page with fresh facts: every root call into the page
+    /// goes through here, so the page never lists for a stale project.
+    pub(crate) fn with_skills_page<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SkillsPage, &mut Context<SkillsPage>) -> R) -> R {
+        let facts = self.skills_facts(cx);
+        self.skills_page.update(cx, |page, cx| {
+            page.facts = facts;
+            f(page, cx)
+        })
+    }
+
+    /// Whether the Skills page stands open in the centre.
+    pub(crate) fn skills_open(&self, cx: &App) -> bool {
+        self.skills_page.read(cx).open
+    }
+
+    /// Open the page (the sidebar's Skills row, ⌘K "Skills", `/skills`):
+    /// re-list on open ([`SkillsPage::open_skills`]).
+    pub(crate) fn open_skills(&mut self, cx: &mut Context<Self>) {
+        self.with_skills_page(cx, |page, cx| page.open_skills(cx));
+    }
+
+    /// Esc from anywhere the window's Cancel reaches: one layer of the page
+    /// per press ([`SkillsPage::close_skills`]).
+    pub(crate) fn close_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_page.update(cx, |page, cx| page.close_skills(cx));
+    }
+
+    /// Re-list the open page for the current project.
+    pub(crate) fn relist_skills(&mut self, cx: &mut Context<Self>) {
+        self.with_skills_page(cx, |page, cx| page.relist_skills(cx));
+    }
+
+    /// Leave the page outright ([`SkillsPage::leave`]).
+    pub(crate) fn leave_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_page.update(cx, |page, cx| page.leave(cx));
+    }
+
+    /// The `skills[:…]` step verb ([`SkillsPage::step_skills`]).
+    pub(crate) fn step_skills(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        self.with_skills_page(cx, |page, cx| page.step_skills(rest, window, cx))
+    }
+
+    /// The page for this frame: push the facts, then compose its view.
+    /// Composed uncached: the facts are pushed during the root's render.
+    pub(crate) fn compose_skills_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let facts = self.skills_facts(cx);
+        self.skills_page.update(cx, |page, _| page.facts = facts);
+        self.skills_page.clone().into_any_element()
+    }
+
+    /// One event from the page, mapped to the root's own method.
+    pub(crate) fn on_skills_page_event(
+        &mut self,
+        _page: &Entity<SkillsPage>,
+        event: &SkillsPageEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SkillsPageEvent::OpenProjectMenu => self.open_project_menu(self.current_project.clone(), true, cx),
+            // Always on the **muse** lane, whatever the remembered provider.
+            SkillsPageEvent::AskMuseToWrite => {
+                self.new_provider = crate::providers::ProviderId::Muse.as_str().to_owned();
+                self.new_session(window, cx);
+            }
+        }
     }
 }
 

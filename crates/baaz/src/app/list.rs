@@ -667,7 +667,7 @@ impl Harness {
         // Whose tabs hold a running block (D52): what stamps the sidebar
         // hint below. Part of the key, so a block starting or ending
         // rebuilds the rows without waiting for a list invalidation.
-        let terminals = self.terminal_host.read(cx).busy_counts(cx);
+        let terminals = self.terminal_dock.read(cx).host().read(cx).busy_counts(cx);
         let mut cache = self.list_cache.borrow_mut();
         if cache.key.as_ref().is_some_and(
             |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_terminals)| {

@@ -664,7 +664,7 @@ fn a_new_session_leaves_the_skills_page(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             harness.select_new_provider(ProviderId::Codex, cx);
-            harness.skills.open = true;
+            harness.skills_page.update(cx, |page, _| page.open = true);
         });
     });
     vc.update(|window, cx| {
@@ -674,7 +674,7 @@ fn a_new_session_leaves_the_skills_page(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         assert!(harness.active.is_some(), "the new session opened");
-        assert!(!harness.skills.open, "New session leaves the Skills page");
+        assert!(!harness.skills_open(cx), "New session leaves the Skills page");
     });
     lane_restore(state);
 }
@@ -690,20 +690,20 @@ fn escape_leaves_the_skills_page_from_outside_it(cx: &mut gpui::TestAppContext) 
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.auth = Auth::SignedIn(crate::auth::Identity {
                 lane: provider::AccountLane::AccountLogin,
                 name: "Test".into(),
                 email: String::new(),
             });
-            harness.skills.open = true;
+            harness.skills_page.update(cx, |page, _| page.open = true);
         });
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| harness.cancel(window, cx));
     });
     vc.update(|_, cx| {
-        assert!(!baaz.read(cx).skills.open, "Escape leaves the Skills page");
+        assert!(!baaz.read(cx).skills_open(cx), "Escape leaves the Skills page");
     });
     lane_restore(state);
 }

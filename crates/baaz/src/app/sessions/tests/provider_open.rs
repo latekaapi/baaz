@@ -349,7 +349,7 @@ fn a_landed_provider_draft_moves_its_keys_and_keeps_the_requested_mode(cx: &mut 
             let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
             harness.overrides.entry(id.clone()).or_default();
             crate::sessions::write(&harness.overrides);
-            assert!(harness.terminal_providers.contains_key(&id));
+            assert!(harness.terminal_dock.read(cx).knows_provider(&id));
             id
         })
     });
@@ -361,8 +361,8 @@ fn a_landed_provider_draft_moves_its_keys_and_keeps_the_requested_mode(cx: &mut 
         assert!(!harness.overrides.contains_key(&provisional), "the override moved");
         assert!(harness.overrides.contains_key("s-open"));
         assert!(!crate::sessions::read().contains_key(&provisional), "on disk too");
-        assert!(!harness.terminal_providers.contains_key(&provisional), "the terminal provider moved");
-        assert!(harness.terminal_providers.contains_key("s-open"));
+        assert!(!harness.terminal_dock.read(cx).knows_provider(&provisional), "the terminal provider moved");
+        assert!(harness.terminal_dock.read(cx).knows_provider("s-open"));
         assert_eq!(
             view.read(cx).mode_label(),
             aui_protocol::PermissionMode::DenyUnmatched.label(),
@@ -388,7 +388,7 @@ fn closing_an_opening_provider_draft_forgets_it_and_drops_the_late_child(cx: &mu
             assert!(!harness.open_state.drafts.contains_key(&project), "no draft names the closed view");
             assert!(!harness.open_state.unsent.contains(&id));
             assert!(!harness.open_state.starts_in_flight.contains(&id), "scripted verbs stop waiting on it");
-            assert!(!harness.terminal_providers.contains_key(&id));
+            assert!(!harness.terminal_dock.read(cx).knows_provider(&id));
             id
         })
     });

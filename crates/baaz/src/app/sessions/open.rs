@@ -168,7 +168,7 @@ impl Harness {
             self.current_project = Some(id.to_owned());
             projects::write(&self.projects);
             // A new session in another project moves the page's root (D55).
-            if self.skills.open {
+            if self.skills_open(cx) {
                 self.relist_skills(cx);
             }
         }
@@ -385,7 +385,7 @@ impl Harness {
             workspace,
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
-            terminal_host: Some(self.terminal_host.clone()),
+            terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
@@ -512,8 +512,7 @@ impl Harness {
         }
         self.adopt_session_project(&session_id, cx);
         // Selecting a session returns from the Skills page (D54).
-        self.skills.open = false;
-        self.skills.detail_focused = false;
+        self.leave_skills(cx);
         // A click while a provider switch is pending cancels the switch:
         // the old view unlocks with its chip and draft intact, the
         // switch's open lands stale (child shut down, nothing parked), and
@@ -735,7 +734,7 @@ impl Harness {
         self.current_project = Some(id);
         projects::write(&self.projects);
         // The project moved under the open Skills page: re-list (D55).
-        if moved && self.skills.open {
+        if moved && self.skills_open(cx) {
             self.relist_skills(cx);
         }
     }
@@ -761,7 +760,7 @@ impl Harness {
         let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
-        let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
+        let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host(cx)) };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
@@ -903,7 +902,7 @@ impl Harness {
         // takes its provisional names with it.
         let never_landed = self.find_view(session_id, cx).is_some_and(|view| view.read(cx).is_opening_lane());
         if never_landed {
-            self.forget_provisional(session_id);
+            self.forget_provisional(session_id, cx);
         }
         // The next `activate` re-points the event subscription at the new
         // view; the dropped view's subscription fires nothing after this,
@@ -983,8 +982,7 @@ impl Harness {
         // swallows the new session the way it did before. Selecting a
         // session closes it earlier in `resume_inner`; closing it here too
         // is idempotent there and covers every other opener.
-        self.skills.open = false;
-        self.skills.detail_focused = false;
+        self.leave_skills(cx);
         // The UI points at what is open: the row highlight and the header
         // label read this, never the view, so every swap refreshes it here
         // rather than at each call site.
@@ -1056,8 +1054,7 @@ impl Harness {
         // `/create-skill ` draft and the composer focused. Never sent. The
         // arm survives a non-muse activation untouched — the draft is a muse
         // skill prompt, so it waits for a muse session.
-        if self.pending_create_skill && view.read(cx).provider_kind().writes_skills_by_prompt() {
-            self.pending_create_skill = false;
+        if view.read(cx).provider_kind().writes_skills_by_prompt() && self.skills_page.update(cx, |page, _| page.take_create_draft()) {
             let draft = crate::skills_page::create_skill_draft().to_owned();
             view.update(cx, |view, cx| {
                 view.set_draft(draft, window, cx);
@@ -1134,7 +1131,7 @@ impl Harness {
             let evicted = self.registry.evict_idle(&drafts, SESSION_CACHE_LIMIT, cx);
             for (id, view) in evicted {
                 if view.read(cx).is_opening_lane() {
-                    self.forget_provisional(&id);
+                    self.forget_provisional(&id, cx);
                 }
             }
         }

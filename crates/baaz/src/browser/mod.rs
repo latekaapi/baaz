@@ -1909,7 +1909,7 @@ impl Harness {
     pub(crate) fn browse_centre_live(&self, cx: &gpui::App) -> bool {
         self.browse_centre_shown(cx).is_some()
             && self.pending_switch_dest(cx).is_none()
-            && !self.skills.open
+            && !crate::region::Region::covers_page(self.skills_page.read(cx), cx)
     }
 
     /// Ad blocking's element hiding (owner, 12 Nov: blocked ads left empty

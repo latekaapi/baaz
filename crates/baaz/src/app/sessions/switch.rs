@@ -127,7 +127,7 @@ impl Harness {
         }
         old_view.update(cx, |v, _| v.shutdown_lane());
         if new_id != old_id && old_view.read(cx).is_opening_lane() {
-            self.forget_provisional(old_id);
+            self.forget_provisional(old_id, cx);
         }
         if let Some(cached) = self.cache_take(old_id) {
             // A stale parked copy under the same id never survives the swap

@@ -656,7 +656,7 @@ impl Harness {
             workspace: std::env::temp_dir().to_string_lossy().into_owned(),
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
-            terminal_host: Some(self.terminal_host.clone()),
+            terminal_host: Some(self.terminal_host(cx)),
         };
         // Reachable over the socket like a real chat, so a check can make it
         // open tabs and work (its task folder, Done closes tabs) — no turn.
