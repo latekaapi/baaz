@@ -11,11 +11,28 @@
 //!
 //! The switches and the Appearance theme stay in `layout.json` — there is
 //! no second store, and no copy of it: the layout is one gpui global
-//! ([`crate::layout::LayoutStore`]).
-//! [`crate::app::Harness::settings_sections`] builds the sections' rows
-//! from it every frame, and a switch intent flips the matching layout field
-//! through [`crate::layout::Layout::update`], which writes the file and
+//! ([`crate::layout::LayoutStore`]). The page's rows read it every frame,
+//! and a switch intent flips the matching layout field through
+//! [`crate::layout::Layout::update`] (the root's
+//! [`Harness::flip_setting`](crate::app::Harness::flip_setting), which also
+//! applies what a switch changes elsewhere), which writes the file and
 //! re-renders every view that observes the global.
+//!
+//! The page is a [`Region`] entity (task 4.4): [`SettingsPage`] owns its
+//! route ([`SettingsPageState`]), its Shortcuts search field and focus, the
+//! Shortcuts rows and recording, and every menu and fold on its pages, and
+//! renders itself — the surface as its view, the section list
+//! ([`SettingsPage::render_nav`]) and the crumbs
+//! ([`SettingsPage::render_crumbs`]) for the root to seat in the sidebar
+//! column and the bar, the close button as its [`Region::actions`]. What
+//! only the root knows (the archived sessions, the default browser, history,
+//! the move plan, the import offer, the provider new sessions start in)
+//! reaches it as [`SettingsFacts`], pushed every frame and before every root
+//! call into it (`Harness::with_settings_page`); the provider cards read the
+//! shared [`ProviderStatusModel`](crate::provider_model::ProviderStatusModel)
+//! (the Codex sign-in, what a card waits on), which the page observes. What
+//! reaches past it goes out as a [`SettingsEvent`]. Others ask the entity
+//! whether it stands open (`Harness::settings_open`), never a copy.
 //!
 //! B11b decisions, kept here so every caller agrees:
 //!
@@ -40,22 +57,28 @@
 //! Extensibility: a later section is one more id in
 //! [`normalize_settings_target`] + [`SETTINGS_SECTIONS`], one more id in
 //! [`apply_setting`]/[`setting_home`], and one more page arm in
-//! [`Harness::render_settings_content`].
+//! [`SettingsPage::render_content`].
 //!
 //! The Shortcuts section is the exception to that shape: its rows come from
-//! [`crate::keymap::effective_bindings`], cached on [`Harness`](crate::app::Harness)
-//! (`shortcuts_cache`) and rebuilt per frame, and its edits go through
-//! [`Harness::handle_shortcut`](crate::app::Harness::handle_shortcut).
+//! [`crate::keymap::effective_bindings`], cached on the page
+//! ([`SettingsPage::shortcuts`], re-read on open and after every edit), and
+//! its edits go through [`SettingsPage::handle_shortcut`].
 
 use aui::data::{button, icon_button, section, segmented, settings_row, switch, ButtonSize, SwitchIntent, SETTINGS_ROW_PAD_Y};
 use aui::interact::{interactive, list_row, LIST_INSET, ROW_GAP};
-use aui::overlay::{SettingsRow, SettingsSection, ShortcutEdit};
+use aui::overlay::ShortcutEdit;
+#[cfg(test)]
+use aui::overlay::{SettingsRow, SettingsSection};
 use aui::util::{h_flex, v_flex};
 use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
-use gpui::{div, prelude::*, px, AnyElement, Context, Focusable, SharedString, Window};
+use std::collections::{HashMap, HashSet};
 
-use crate::app::Harness;
+use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, Window};
+use gpui_kit::base::input::TextareaState;
+
+use crate::app::{Harness, SettingsFind, SETTINGS_CONTEXT};
+use crate::region::Region;
 use crate::browser::toolbar::SearchEngine;
 use crate::layout::{browser_download_dir, tilde_path, Layout};
 use crate::providers::ProviderId;
@@ -277,7 +300,9 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
 }
 
 /// The General page's switch rows, from the layout they read: the row
-/// model the page renders and the coverage test enumerates.
+/// model the coverage test enumerates (the page draws its own rows; this
+/// table outlived the old modal and only the tests read it now).
+#[cfg(test)]
 pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![
         SettingsRow::Switch {
@@ -334,6 +359,7 @@ const SUMMARY_LINE_DETAIL: &str = "Add a second line under each session: what it
 /// The Appearance page's switch rows, from the layout they read: the row
 /// model the coverage test enumerates. The theme is a segmented choice,
 /// not a switch; its id (`theme`) homes through [`setting_home`].
+#[cfg(test)]
 pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![SettingsRow::Switch {
         id: SharedString::from("summary_line"),
@@ -344,7 +370,8 @@ pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 }
 
 /// The Sidebar page's switch rows, from the layout they read: the row
-/// model the page renders and the coverage test enumerates.
+/// model the coverage test enumerates (test-only, like the General table).
+#[cfg(test)]
 pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![
         SettingsRow::Switch {
@@ -485,99 +512,355 @@ pub(crate) fn terminal_taken_keys() -> Vec<&'static str> {
     keys
 }
 
-impl Harness {
-    /// Every section's rows, built from state each frame: General (the
-    /// three model-spending switches, the fold switch and feedback mode),
-    /// Appearance (the summary line; the theme is a segmented choice),
-    /// Sidebar (branch), Providers (enable switches), Shortcuts
-    /// (live keymap). Archived has no switches — its page lists sessions.
-    ///
-    /// A later section is one more arm here (and one more `on_switch` id in
-    /// [`Self::flip_setting`]).
-    pub(crate) fn settings_sections(&self, cx: &gpui::App) -> Vec<SettingsSection> {
-        vec![
-            SettingsSection {
-                id: SharedString::from("general"),
-                label: SharedString::from("General"),
-                rows: general_settings_rows(crate::layout::Layout::get(cx)),
-            },
-            SettingsSection {
-                id: SharedString::from("appearance"),
-                label: SharedString::from("Appearance"),
-                rows: appearance_settings_rows(crate::layout::Layout::get(cx)),
-            },
-            SettingsSection {
-                id: SharedString::from("sidebar"),
-                label: SharedString::from("Sidebar"),
-                rows: sidebar_settings_rows(crate::layout::Layout::get(cx)),
-            },
-            crate::settings_providers::providers_section(),
-            shortcuts_section(
-                &self.shortcuts_cache,
-                self.recording_shortcut.as_deref(),
-                &self.shortcut_errors,
-            ),
-        ]
-    }
+/// One archived session as the Archived page lists it.
+#[derive(Clone, Debug)]
+pub(crate) struct ArchivedRow {
+    /// The session id Unarchive names.
+    pub id: String,
+    /// The row's label.
+    pub label: String,
+    /// The project it is filed under ("Unfiled" without one).
+    pub project: String,
+    /// When it last moved.
+    pub updated: chrono::DateTime<chrono::Local>,
+}
 
-    /// The active session id for the page's restore record, if any.
-    fn settings_active_id(&self, cx: &mut Context<Self>) -> Option<String> {
-        self.active.as_ref().map(|view| view.read(cx).session_id.clone())
-    }
+/// The Providers page's one-time move row (B4M), from the root's cached
+/// plan: the title, and the dry-run's paths behind "Show paths".
+#[derive(Clone, Debug)]
+pub(crate) struct MigrationRow {
+    /// "Move N older …".
+    pub title: String,
+    /// One line per planned file.
+    pub paths: Vec<String>,
+}
 
-    /// Open the Settings page on the Providers section: where the account
-    /// menu's "Providers…" row lands. Idempotent (open, never toggle).
-    pub(crate) fn open_providers(&mut self, cx: &mut Context<Self>) {
-        self.open_settings_page("providers", cx);
-    }
+/// What the page needs from the root: pushed every frame and before every
+/// root call into the page (`Harness::with_settings_page`). Only the open
+/// section's data is gathered — a closed page gets the defaults. Never
+/// persists.
+#[derive(Clone, Default)]
+pub(crate) struct SettingsFacts {
+    /// The provider new sessions start in (the "New sessions" picker).
+    pub new_provider: Option<ProviderId>,
+    /// Archived: the archived sessions, newest first.
+    pub archived: Vec<ArchivedRow>,
+    /// Browser: the cached `https` handler (never a live lookup).
+    pub default_browser: Option<String>,
+    /// Browser: Make default was pressed and macOS has not confirmed.
+    pub default_browser_pending: bool,
+    /// Browser › Your data: how many pages history holds.
+    pub history_pages: u64,
+    /// Browser › Your data: the sites history never records.
+    pub excluded_sites: Vec<String>,
+    /// Providers: the move row, while moves remain.
+    pub migration: Option<MigrationRow>,
+    /// A provider sub-page: the import offer under its card.
+    pub import_line: Option<crate::import_ui::CardLine>,
+}
 
-    /// Open the Settings page on legacy dialog index `section` (menu rows,
-    /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 General, 1 Appearance,
-    /// 2 Sidebar, 3 Notifications, 4 Browser, 5 Providers, 6 Shortcuts,
-    /// 7 Archived). Idempotent (open, never toggle). Menus, palette and
-    /// modal go first.
-    pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
-        let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
-        self.open_settings_page(target, cx);
-    }
+/// What the page asks of the root: everything that reaches past the
+/// page's own state and the layout global.
+#[derive(Clone, Debug)]
+pub(crate) enum SettingsEvent {
+    /// A nav row or crumb: open the page at this target (the root's
+    /// `open_settings_page`, which also closes what Settings replaces).
+    Navigate(String),
+    /// Back, ✕: close and restore.
+    Close,
+    /// A switch row (or the summary line): flip it and apply it.
+    Flip { id: String, on: bool },
+    /// Appearance › Theme.
+    Theme(crate::layout::ThemePref),
+    /// Appearance › Text size.
+    TextSize(crate::layout::TextSizePref),
+    /// Appearance › Density.
+    Density(crate::layout::DensityPref),
+    /// A provider's Enable switch.
+    FlipProvider { id: ProviderId, on: bool },
+    /// A provider card's button (its Details toggle stays on the page).
+    ProviderIntent(aui::screens::ProviderIntent),
+    /// The "New sessions" picker's pick.
+    SetDefaultProvider(ProviderId),
+    /// "Set up providers…": the connect screen.
+    OpenConnect,
+    /// The move row's Move.
+    MigrateSessions,
+    /// The import line's button.
+    OpenImportSheet,
+    /// Archived: Unarchive this session.
+    Unarchive(String),
+    /// Browser › Your data: Clear…
+    ClearHistory,
+    /// Browser › Your data: Import from Chrome.
+    ImportChrome,
+    /// Browser › Your data: record this site again.
+    IncludeSite(String),
+    /// Browser › Default browser: Make default.
+    MakeDefaultBrowser,
+    /// Browser › Chromium: open `chrome://settings` in Browse.
+    OpenChromiumSettings,
+}
 
-    /// Open the Settings page at `target` (`settings:<target>` spelling).
-    /// Saves the active session for close-restore; hides (never writes)
-    /// right-pane and terminal state. Opening closes the Skills page, so
-    /// only one full-page route stands open. Opening arms the surface's
-    /// focus, so keyboard nav and ⌘F work without a click first.
-    pub(crate) fn open_settings_page(&mut self, target: &str, cx: &mut Context<Self>) {
-        self.refresh_shortcuts();
-        self.recording_shortcut = None;
-        let active = self.settings_active_id(cx);
-        self.settings_page.open(target, active);
-        self.focus_settings = true;
-        // The "New sessions start in" menu never outlives its page.
-        self.connect_menu_open = false;
-        // Settings replaces the Skills page as it does the transcript.
-        self.leave_skills(cx);
-        self.overlays.update(cx, |overlays, _| {
-            overlays.menu = None;
-            overlays.palette = None;
-            overlays.dialog = None;
+/// The Settings page (task 4.4): a region entity that owns its route
+/// state, its search field and focus, the Shortcuts section's rows and
+/// recording, and every menu and fold on its pages; it renders its nav,
+/// its crumbs and its surface itself. See the module doc.
+pub(crate) struct SettingsPage {
+    /// The route: open flag, section, last-visited and restore record.
+    pub(crate) state: SettingsPageState,
+    /// The Shortcuts search field (⌘F on the page).
+    pub(crate) search: Entity<TextareaState>,
+    /// The surface's focus, tracked on the surface element.
+    pub(crate) focus: FocusHandle,
+    /// Set when the next render should move the keyboard onto the
+    /// surface: armed by every open, so keyboard nav and ⌘F work without a
+    /// click first.
+    focus_armed: bool,
+    /// The Shortcuts section's live rows, re-read on open and after every
+    /// edit: a file read per frame is not state.
+    pub(crate) shortcuts: Vec<crate::keymap::EffectiveBinding>,
+    /// Which Shortcuts row captures the next keystroke, by row id;
+    /// exactly one arms at a time.
+    pub(crate) recording: Option<String>,
+    /// The last refused write per Shortcuts row, by row id: shown as the
+    /// row's detail until the next edit on that row.
+    pub(crate) shortcut_errors: HashMap<String, String>,
+    /// Browser › Assistant's model menu stands open.
+    assistant_menu_open: bool,
+    /// The provider cards whose Details are open (closed by default).
+    pub(crate) details_open: HashSet<ProviderId>,
+    /// The "New sessions start in" menu stands open (it never outlives
+    /// its page).
+    pub(crate) default_menu_open: bool,
+    /// Whether the move row shows its dry-run path list (B4M): view
+    /// state, never persisted, shut by default.
+    pub(crate) migration_paths_expanded: bool,
+    /// What the root told the page (see [`SettingsFacts`]).
+    pub(crate) facts: SettingsFacts,
+    /// The window's provider facts: a provider card reads the Codex
+    /// sign-in and what it waits on here, and redraws as they move.
+    model: Entity<crate::provider_model::ProviderStatusModel>,
+    /// The downloads folder panel: dies with the page.
+    tasks: Vec<Task<()>>,
+    /// The model observation that redraws an open page.
+    _observe: gpui::Subscription,
+}
+
+impl EventEmitter<SettingsEvent> for SettingsPage {}
+
+impl SettingsPage {
+    /// The page at boot, closed.
+    pub(crate) fn new(model: Entity<crate::provider_model::ProviderStatusModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&model, |this, _, cx| {
+            if this.state.open {
+                cx.notify();
+            }
         });
-        // Settings → Providers recomputes the B4M plan off the UI thread:
-        // the row renders the cache (never the walker) and follows when
-        // the recompute lands.
-        if target.split('/').next() == Some(crate::settings_providers::PROVIDERS_SECTION_ID) {
-            self.refresh_migration_cache(cx);
-            // The import offer on the Claude Code / Codex cards (docs/72):
-            // the cached plan renders at once; a stale one recomputes
-            // behind it, never on the render path.
-            self.refresh_import_scan_if_stale(cx);
+        SettingsPage {
+            state: SettingsPageState::default(),
+            search: cx.new(|cx| aui::composer::composer_state_rows("Search shortcuts", 1, 1, window, cx)),
+            focus: cx.focus_handle(),
+            focus_armed: false,
+            shortcuts: crate::keymap::effective_bindings(),
+            recording: None,
+            shortcut_errors: HashMap::new(),
+            assistant_menu_open: false,
+            details_open: HashSet::new(),
+            default_menu_open: false,
+            migration_paths_expanded: false,
+            facts: SettingsFacts::default(),
+            model,
+            tasks: Vec::new(),
+            _observe: observe,
+        }
+    }
+
+    /// Whether the page stands open (`Route::Settings`).
+    pub(crate) fn is_open(&self) -> bool {
+        self.state.open
+    }
+
+    /// Open at `target` (`settings:<target>` spelling), saving `active`
+    /// for close-restore: the Shortcuts rows re-read, a recording
+    /// disarmed, the "New sessions" menu shut, the surface's focus armed.
+    /// Idempotent: open, never toggle. Only the root calls it, and the
+    /// root redraws (the page's view is composed in the root's frame).
+    pub(crate) fn open(&mut self, target: &str, active: Option<String>) {
+        self.refresh_shortcuts();
+        self.recording = None;
+        self.state.open(target, active);
+        self.focus_armed = true;
+        self.default_menu_open = false;
+    }
+
+    /// Close: the route shuts and a recording disarms. The root restores
+    /// the rest and redraws (`Harness::close_settings`).
+    pub(crate) fn close(&mut self) {
+        self.state.close();
+        self.recording = None;
+    }
+
+    /// Leave for navigation: nothing to restore. `false` when the page
+    /// was not open; the root redraws when it was.
+    pub(crate) fn exit_for_navigation(&mut self) -> bool {
+        if !self.state.open {
+            return false;
+        }
+        self.state.exit_for_navigation();
+        self.recording = None;
+        true
+    }
+
+    /// One Escape press on the open page (§1.3 order): what it did. Every
+    /// layer but [`SettingsEscape::Close`] is the page's own; closing is
+    /// the root's ([`Harness::settings_escape`]).
+    pub(crate) fn escape(&mut self, cx: &mut Context<Self>) -> SettingsEscape {
+        let step = settings_escape(
+            self.recording.is_some(),
+            !self.state.shortcut_search.trim().is_empty(),
+            &self.state.section,
+        );
+        match step {
+            SettingsEscape::CancelRecording => self.recording = None,
+            SettingsEscape::ClearSearch => self.state.shortcut_search.clear(),
+            SettingsEscape::UpToProviders => {
+                self.state.section = "providers".to_owned();
+                self.state.last_visited = "providers".to_owned();
+            }
+            SettingsEscape::Close => return step,
+        }
+        cx.notify();
+        step
+    }
+
+    /// Open a provider card's Details (the `details:` step verb).
+    pub(crate) fn open_details(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        self.details_open.insert(id);
+        cx.notify();
+    }
+
+    /// Open the "New sessions start in" menu (the `connect-menu` step verb
+    /// while Settings stands open). `false` when the page is shut.
+    pub(crate) fn open_default_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.state.open {
+            return false;
+        }
+        self.default_menu_open = true;
+        cx.notify();
+        true
+    }
+}
+
+impl SettingsPage {
+    /// The "New sessions" picker's intents: its menu is the page's own;
+    /// a pick goes to the root, which remembers it in `provider.json`.
+    /// Other intents are not the picker's and do nothing here.
+    pub(crate) fn default_provider_intent(&mut self, intent: aui::screens::ConnectIntent, cx: &mut Context<Self>) {
+        use aui::screens::ConnectIntent;
+        match intent {
+            ConnectIntent::ToggleDefaultMenu => self.default_menu_open = !self.default_menu_open,
+            ConnectIntent::CloseDefaultMenu => self.default_menu_open = false,
+            ConnectIntent::SetDefault(provider) => {
+                self.default_menu_open = false;
+                cx.emit(SettingsEvent::SetDefaultProvider(ProviderId::from_icon(provider)));
+            }
+            _ => return,
         }
         cx.notify();
     }
 
+    /// One provider card intent: Details folds on the page; everything else
+    /// (switch, re-check, sign in/out, install, docs, path) is the root's.
+    fn provider_intent(&mut self, intent: aui::screens::ProviderIntent, cx: &mut Context<Self>) {
+        if intent.action == aui::screens::ProviderAction::ToggleDetails {
+            let id = ProviderId::parse(intent.id.as_ref());
+            if !self.details_open.remove(&id) {
+                self.details_open.insert(id);
+            }
+            cx.notify();
+            return;
+        }
+        cx.emit(SettingsEvent::ProviderIntent(intent));
+    }
+}
+
+impl Focusable for SettingsPage {
+    /// The surface: where opening puts the keyboard.
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Region for SettingsPage {
+    /// The open page's title ("General", "Codex").
+    fn title(&self, _cx: &App) -> SharedString {
+        page_title(&self.state.section).into()
+    }
+
+    /// The centre header's right end: one ghost close button labelled
+    /// "Close settings".
+    fn actions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let close = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::Close));
+        Some(
+            icon_button("settings-close", IconName::X)
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Close settings")
+                .on_click(close)
+                .into_any_element(),
+        )
+    }
+
+    /// While open: the page replaces the centre and right columns, so
+    /// Browse's page hides under it.
+    fn covers_page(&self, _cx: &App) -> bool {
+        self.state.open
+    }
+}
+
+impl Render for SettingsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The page takes the keyboard the frame after it opens. Skipped in
+        // deterministic captures, like the composer's own focus.
+        if std::mem::take(&mut self.focus_armed) && self.state.open && !crate::clock::deterministic() {
+            window.focus(&self.focus, cx);
+        }
+        self.render_content(window, cx)
+    }
+}
+
+/// Set the engine an address commit searches with. The Settings →
+/// Browser page's rows own it (and `settings-set:search-engine=`); the
+/// toolbar reads it on every commit.
+pub(crate) fn set_search_engine(engine: SearchEngine, cx: &mut App) {
+    crate::layout::Layout::update(cx, |layout| layout.search_engine = engine);
+}
+
+/// Point downloads at `dir`: persisted, and passed to the CEF backend at
+/// once, like at startup. The Settings → Browser page's Change row and
+/// nothing else writes this.
+pub(crate) fn set_download_dir(dir: std::path::PathBuf, cx: &mut App) {
+    #[cfg(feature = "cef")]
+    aui_cef::CefBackend::set_download_dir(dir.clone());
+    crate::layout::Layout::update(cx, |layout| layout.download_dir = Some(dir));
+}
+
+/// The page title for `section`: a provider sub-page's provider, else the
+/// section's label (General for anything unknown).
+pub(crate) fn page_title(section: &str) -> &'static str {
+    if let Some(id) = provider_subpage_id(section) {
+        id.label()
+    } else {
+        SETTINGS_SECTIONS.iter().find(|(id, _)| *id == section).map(|(_, label)| *label).unwrap_or("General")
+    }
+}
+
+impl SettingsPage {
     /// Re-read the Shortcuts cache, so the section shows the file as it is
     /// now — after a write, or after a hand edit while the page stood open.
     fn refresh_shortcuts(&mut self) {
-        self.shortcuts_cache = crate::keymap::effective_bindings();
+        self.shortcuts = crate::keymap::effective_bindings();
     }
 
     /// A Shortcuts row edit, reported through the dialog's `on_shortcut`
@@ -591,7 +874,7 @@ impl Harness {
         match edit {
             ShortcutEdit::Record => {
                 if shortcut_is_editable(id) {
-                    self.recording_shortcut = Some(id.to_string());
+                    self.recording = Some(id.to_string());
                     self.shortcut_errors.remove(id.as_ref());
                 }
             }
@@ -609,7 +892,7 @@ impl Harness {
                         }
                     })
                     .unwrap_or(false);
-                self.recording_shortcut = None;
+                self.recording = None;
                 if accepted {
                     self.refresh_shortcuts();
                     crate::app::bind_keys(cx);
@@ -628,203 +911,19 @@ impl Harness {
                         }
                     })
                     .unwrap_or(false);
-                self.recording_shortcut = None;
+                self.recording = None;
                 if accepted {
                     self.refresh_shortcuts();
                     crate::app::bind_keys(cx);
                 }
             }
             ShortcutEdit::Cancel => {
-                if self.recording_shortcut.as_deref() == Some(id.as_ref()) {
-                    self.recording_shortcut = None;
+                if self.recording.as_deref() == Some(id.as_ref()) {
+                    self.recording = None;
                 }
             }
         }
         cx.notify();
-    }
-
-    /// Close the Settings page, restoring the saved session. Scroll,
-    /// draft, focus, right pane and terminal come back exactly: the page
-    /// never wrote their state, it only hid them. Closing parks the
-    /// composer next frame, and marks the overlay closed already, so the
-    /// frame's just-closed parking does not steal the composer back to
-    /// the root.
-    pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings_page.close();
-        self.recording_shortcut = None;
-        self.focus_composer = true;
-        self.overlay_was_open = false;
-        cx.notify();
-    }
-
-    /// One Escape press on the page (§1.3 order): cancel a recording, clear
-    /// the Shortcuts search, go up from a provider sub-page, else close and
-    /// restore. Returns `true` when the page stood open.
-    pub(crate) fn settings_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.settings_page.open {
-            return false;
-        }
-        match settings_escape(
-            self.recording_shortcut.is_some(),
-            !self.settings_page.shortcut_search.trim().is_empty(),
-            &self.settings_page.section.clone(),
-        ) {
-            SettingsEscape::CancelRecording => {
-                self.recording_shortcut = None;
-            }
-            SettingsEscape::ClearSearch => {
-                self.settings_page.shortcut_search.clear();
-            }
-            SettingsEscape::UpToProviders => {
-                self.settings_page.section = "providers".to_owned();
-                self.settings_page.last_visited = "providers".to_owned();
-            }
-            SettingsEscape::Close => {
-                self.close_settings(cx);
-                return true;
-            }
-        }
-        cx.notify();
-        true
-    }
-
-    /// Leave the page for navigation (⌘N, palette jump, session click):
-    /// the destination owns the next route, so nothing is restored.
-    pub(crate) fn exit_settings_for_navigation(&mut self, cx: &mut Context<Self>) {
-        if self.settings_page.open {
-            self.settings_page.exit_for_navigation();
-            self.recording_shortcut = None;
-            cx.notify();
-        }
-    }
-
-    /// `settings[:<section>]`: open the page, optionally at that section
-    /// (`settings:sidebar`, `settings:providers/codex`, or a row id that
-    /// names its home page). Empty reopens the last-visited section
-    /// (General on first open). A target the page does not know is an
-    /// `Err` and opens nothing — the page would otherwise fall back to
-    /// General and the capture would show the wrong section. Idempotent:
-    /// open, never toggle.
-    pub(crate) fn step_settings(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let target = rest.trim();
-        if !settings_target_known(target) {
-            return Err(format!("no settings section or row named {target:?}"));
-        }
-        self.open_settings_page(target, cx);
-        Ok(())
-    }
-
-    /// Flip one Settings switch by its row id and persist it.
-    ///
-    /// Unknown ids are ignored: a later section adds its own id to
-    /// [`apply_setting`].
-    pub(crate) fn flip_setting(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
-        if let Some(provider) = crate::settings_providers::parse_enabled_row(id) {
-            self.flip_provider_enabled(provider, on, cx);
-            return;
-        }
-        // Every reader observes the layout global, so the change reaches
-        // them all from here — the fold switch re-folds every open view,
-        // parked ones included (B12fix), with no push into them.
-        if !crate::layout::Layout::stage(cx, |layout| apply_setting(layout, id, on)) {
-            return;
-        }
-        crate::layout::Layout::save(cx);
-        // Turning feedback mode off mid-session parks the shell Off but
-        // keeps the draft, so the next toggle resumes it.
-        if id == "feedback_mode" && !on {
-            self.feedback_setting_off(cx);
-        }
-        self.invalidate_list();
-        // A Notifications switch applies now: the Dock badge follows its
-        // switch without waiting for a session to move (task 3.5).
-        if id.starts_with("notify_") {
-            self.check_attention(cx);
-        }
-    }
-
-    /// Settings › Appearance › Theme: store `pref` and paint with it now.
-    /// The stored choice is what the next launch opens in (see
-    /// [`boot_theme`]); View → Toggle Theme goes through here too, so the
-    /// page always shows what the window paints.
-    pub(crate) fn set_theme_pref(
-        &mut self,
-        pref: crate::layout::ThemePref,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
-        crate::layout::Layout::update(cx, |layout| layout.theme = pref);
-        self.apply_theme_pref(window, cx);
-    }
-
-    /// Paint with the stored theme choice, System resolved against the
-    /// system's appearance now. A no-op when the window already paints it.
-    /// The window's appearance observer calls this while the choice is
-    /// System, so a macOS switch repaints Baaz too.
-    pub(crate) fn apply_theme_pref(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        let kind = crate::layout::Layout::get(cx).theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()));
-        if cx.aui().kind != kind {
-            aui_tokens::AuiTheme::set_kind(kind, window, cx);
-            // Rows cached with the old palette rebuild on the next frame.
-            self.invalidate_list();
-        }
-        cx.notify();
-    }
-
-    /// Settings › Appearance › Density: store `pref` and lay the window out
-    /// at it now — every text role and the shared row height (task 2.10).
-    pub(crate) fn set_density_pref(
-        &mut self,
-        pref: crate::layout::DensityPref,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
-        crate::layout::Layout::update(cx, |layout| layout.density = pref);
-        if cx.aui().density != pref.density() {
-            aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
-            // Rows cached at the old sizes rebuild on the next frame.
-            self.invalidate_list();
-            self.retype_sessions(cx);
-        }
-    }
-
-    /// Settings › Appearance › Text size: store `pref` and set every text
-    /// role at it now (task 2.10).
-    pub(crate) fn set_text_size_pref(
-        &mut self,
-        pref: crate::layout::TextSizePref,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
-        crate::layout::Layout::update(cx, |layout| layout.text_size = pref);
-        if cx.aui().text_size != pref.text_size() {
-            aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
-            self.invalidate_list();
-            self.retype_sessions(cx);
-        }
-    }
-
-    /// Every live transcript (open, parked, the browser chat) measures its
-    /// rows again at the new type: see [`crate::session::SessionView::retype`].
-    fn retype_sessions(&mut self, cx: &mut Context<Self>) {
-        for view in self.registry.live(self.active.as_ref()) {
-            view.update(cx, |view, cx| view.retype(cx));
-        }
-    }
-
-    /// Set the engine an address commit searches with. The Settings →
-    /// Browser page's rows own it; the toolbar reads it on every commit.
-    pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
-        crate::layout::Layout::update(cx, |layout| layout.search_engine = engine);
-    }
-
-    /// Point downloads at `dir`: persisted, and passed to the CEF backend
-    /// at once, like at startup. The Settings → Browser page's Change
-    /// row and nothing else writes this.
-    pub(crate) fn set_download_dir_path(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
-        #[cfg(feature = "cef")]
-        aui_cef::CefBackend::set_download_dir(dir.clone());
-        crate::layout::Layout::update(cx, |layout| layout.download_dir = Some(dir));
     }
 
     /// The Settings → Browser page's Change row: the native folder
@@ -846,9 +945,9 @@ impl Harness {
                         "choose_downloads_folder: panel chose {}",
                         paths.first().map(|p| p.display().to_string()).unwrap_or_default()
                     );
-                    let _ = this.update(cx, |this, cx| {
+                    let _ = this.update(cx, |_, cx| {
                         if let Some(dir) = paths.first() {
-                            this.set_download_dir_path(dir.clone(), cx);
+                            set_download_dir(dir.clone(), cx);
                         }
                     });
                 }
@@ -859,133 +958,17 @@ impl Harness {
         }));
     }
 
-    /// The Settings → Browser page's Chromium row: leave Settings for
-    /// Browse and show `chrome://settings` in a person tab, where
-    /// Chromium owns passwords, cookies and site settings. An existing
-    /// `chrome://settings` tab is selected instead of opening another.
-    pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_settings(cx);
-        self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded(cx);
-        let space = self.browse_space();
-        let existing = self
-            .browser
-            .tabs
-            .person_tabs(space.as_deref())
-            .iter()
-            .find(|tab| tab.url == CHROMIUM_SETTINGS_URL)
-            .map(|tab| tab.id);
-        match existing {
-            Some(id) => self.select_browse_sidebar_tab(id, window, cx),
-            None => {
-                if let Err(reason) = self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx) {
-                    crate::baaz_log!("open_chromium_settings: no tab opened: {reason}");
-                }
-            }
-        }
-    }
-
-    /// `settings-set:<key>=<value>`: the scripted twin of the Settings
-    /// rows that are not plain switches. `search-engine=<name>`,
-    /// `summary-line=<on|off>`, `theme=<system|light|dark>`,
-    /// `density=<comfortable|compact>` and `text-size=<default|large>` land
-    /// instantly; an unknown key or a value that does not parse is an
-    /// `Err`, never a silent no-op.
-    pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let (key, value) =
-            rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
-        match key {
-            "search-engine" => match SearchEngine::parse(value) {
-                Some(engine) => {
-                    self.set_search_engine(engine, cx);
-                    Ok(())
-                }
-                None => Err(format!("unknown search engine {value:?}")),
-            },
-            "summary-line" => {
-                let on = match value {
-                    "on" => true,
-                    "off" => false,
-                    _ => return Err(format!("summary-line wants on or off, not {value:?}")),
-                };
-                self.flip_setting("summary_line", on, cx);
-                Ok(())
-            }
-            "theme" => match crate::layout::ThemePref::parse(value) {
-                Some(pref) => {
-                    self.set_theme_pref(pref, None, cx);
-                    Ok(())
-                }
-                None => Err(format!("theme wants system, light or dark, not {value:?}")),
-            },
-            "density" => match crate::layout::DensityPref::parse(value) {
-                Some(pref) => {
-                    self.set_density_pref(pref, None, cx);
-                    Ok(())
-                }
-                None => Err(format!("density wants comfortable or compact, not {value:?}")),
-            },
-            "text-size" => match crate::layout::TextSizePref::parse(value) {
-                Some(pref) => {
-                    self.set_text_size_pref(pref, None, cx);
-                    Ok(())
-                }
-                None => Err(format!("text-size wants default or large, not {value:?}")),
-            },
-            _ => Err(format!(
-                "unknown settings key {key:?} (expected search-engine=<name>, summary-line=<on|off>, theme=<system|light|dark>, density=<comfortable|compact> or text-size=<default|large>)"
-            )),
-        }
-    }
-
-    /// `auto-title`: flip the automatic-naming switch and persist it. The
-    /// switch itself lives on the Settings page's General section; this
-    /// verb is what captures flip. Off means no title model call ever.
-    /// Always flips: `Ok`.
-    pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let on = !crate::layout::Layout::get(cx).auto_title;
-        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_title", on)) {
-            return Err("no auto_title switch to flip".to_owned());
-        }
-        self.invalidate_list();
-        Ok(())
-    }
-
-    /// `auto-summary`: flip the sidebar-summaries switch and persist it.
-    /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
-    /// the ladder's preview rung still fills every second line. Always flips: `Ok`.
-    pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let on = !crate::layout::Layout::get(cx).auto_summary;
-        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_summary", on)) {
-            return Err("no auto_summary switch to flip".to_owned());
-        }
-        self.invalidate_list();
-        Ok(())
-    }
-
-    /// The old modal slot: the page renders inline now (left column +
-    /// centre surface), so this is always `None`. Kept so the window
-    /// root's overlay slot keeps compiling while callers move over.
-    pub(crate) fn render_settings(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        None
-    }
-
-    /// Whether the Settings page stands open (`Route::Settings`).
-    pub(crate) fn settings_open(&self) -> bool {
-        self.settings_page.open
-    }
-
     /// The Settings nav in the sidebar column: Back, a rule, then one flat
     /// list row per page (provider sub-pages nested under Providers while
     /// it is selected), a rule before Archived.
-    pub(crate) fn render_settings_nav(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_nav(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let selected = settings_parent(&self.settings_page.section);
+        let selected = settings_parent(&self.state.section);
         let back = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             // A keyboard/VoiceOver press; a pointer press already closed on
             // mouse-down (see below), so this is a no-op then.
-            if this.settings_open() {
-                this.close_settings(cx);
+            if this.state.open {
+                cx.emit(SettingsEvent::Close);
             }
         });
         // Close on mouse-down: closing on click (mouse-up) let the same
@@ -993,8 +976,8 @@ impl Harness {
         // Sessions | Browse switch sits exactly under Back, so leaving
         // Settings from Browse flipped to Sessions (found live, B2a).
         let back_down = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            if this.settings_open() {
-                this.close_settings(cx);
+            if this.state.open {
+                cx.emit(SettingsEvent::Close);
             }
             cx.stop_propagation();
         });
@@ -1031,8 +1014,8 @@ impl Harness {
             .aria_label("Settings sections");
         for (id, label) in SETTINGS_SECTIONS {
             let target = id.to_string();
-            let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.open_settings_page(&target, cx);
+            let open = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(SettingsEvent::Navigate(target.clone()));
             });
             section_list = section_list
                 .child(list_row(SharedString::from(format!("settings-nav-{id}")), label.to_string()).selected(selected == *id).on_click(open));
@@ -1041,9 +1024,9 @@ impl Harness {
             if *id == "providers" && selected == "providers" {
                 for provider in ProviderId::all() {
                     let sub = format!("providers/{}", provider.as_str());
-                    let sub_active = self.settings_page.section == sub;
-                    let open_sub = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                        this.open_settings_page(&sub, cx);
+                    let sub_active = self.state.section == sub;
+                    let open_sub = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        cx.emit(SettingsEvent::Navigate(sub.clone()));
                     });
                     section_list = section_list.child(
                         list_row(SharedString::from(format!("settings-nav-{}", provider.as_str())), provider.label().to_string())
@@ -1061,13 +1044,12 @@ impl Harness {
         list.child(section_list).into_any_element()
     }
 
-    /// The bar while Settings is open: the breadcrumb (`Settings / Providers /
-    /// Codex`) as a navigation landmark in the title slot, one ghost close
-    /// button labelled "Close settings" at the right; no mode switch.
-    pub(crate) fn render_settings_chrome(&self, cx: &mut Context<Self>) -> crate::app::BarChrome {
+    /// The bar's title while Settings is open: the breadcrumb (`Settings /
+    /// Providers / Codex`) as a navigation landmark. The close button is
+    /// the page's [`Region::actions`]; the bar has no mode switch.
+    pub(crate) fn render_crumbs(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let crumbs = settings_breadcrumb(&self.settings_page.section);
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
+        let crumbs = settings_breadcrumb(&self.state.section);
         let mut trail = h_flex().id("settings-breadcrumb").flex_none().items_center().gap(px(scale::SP_2)).role(gpui::Role::Navigation).aria_label(format!(
             "Breadcrumb, {}",
             crumbs.join(" / ")
@@ -1080,10 +1062,10 @@ impl Harness {
             let crumb_el = div().flex_none().role_in(TextRole::Body, cx).text_color(if last { p.ink } else { p.fg_muted }).child(crumb.clone());
             // Every crumb but the page itself is a link to its page (owner,
             // 2026-10-29: the crumbs looked clickable and were not).
-            let crumb_el = match settings_crumb_target(&self.settings_page.section, index) {
+            let crumb_el = match settings_crumb_target(&self.state.section, index) {
                 Some(target) => {
-                    let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                        this.open_settings_page(target, cx);
+                    let open = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        cx.emit(SettingsEvent::Navigate(target.to_owned()));
                     });
                     interactive(SharedString::from(format!("settings-crumb-{index}")), crumb_el.px(px(scale::SP_1)))
                         .role("link")
@@ -1095,19 +1077,7 @@ impl Harness {
             };
             trail = trail.child(crumb_el);
         }
-        crate::app::BarChrome {
-            lead: self.render_sidebar_toggle(cx),
-            switch: None,
-            title: Some(trail.into_any_element()),
-            right: Some(
-                icon_button("settings-close", IconName::X)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label("Close settings")
-                    .on_click(move |_, window, cx| close(&(), window, cx))
-                    .into_any_element(),
-            ),
-        }
+        trail.into_any_element()
     }
 
     /// The settings surface: centre+right merged into one column (content
@@ -1117,18 +1087,14 @@ impl Harness {
     /// resizes anything. Each page: the title (`t-title`) over one Body
     /// `fg-muted` line, then sections [`SETTINGS_SECTION_GAP`] apart (a
     /// `t-subtitle` title over line-split rows, no box around them).
-    pub(crate) fn render_settings_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Keep the filter source in one place: the search entity owns the
         // text while the page stands open.
-        self.settings_page.shortcut_search =
-            self.settings_search.read(cx).value().trim().to_owned();
-        let section = self.settings_page.section.clone();
+        self.state.shortcut_search =
+            self.search.read(cx).value().trim().to_owned();
+        let section = self.state.section.clone();
         let p = cx.aui().colors;
-        let title: &str = if let Some(id) = provider_subpage_id(&section) {
-            id.label()
-        } else {
-            SETTINGS_SECTIONS.iter().find(|(id, _)| *id == section).map(|(_, label)| *label).unwrap_or("General")
-        };
+        let title = page_title(&section);
         let blurb = settings_blurb(&section);
         let body: AnyElement = match section.as_str() {
             "general" => self.settings_general_page(cx),
@@ -1146,16 +1112,16 @@ impl Harness {
         // dialog's capture, moved onto the page): a bare modifier stays
         // armed, anything else sets the row. Escape never reaches here —
         // it matches Cancel first, which disarms through `settings_escape`.
-        let capture = self.recording_shortcut.clone();
+        let capture = self.recording.clone();
         let page = cx.entity().downgrade();
         h_flex()
             .id("settings-surface")
             .size_full()
             .justify_center()
-            .track_focus(&self.settings_focus)
-            .key_context(crate::app::SETTINGS_CONTEXT)
-            .on_action(cx.listener(|this, _: &crate::app::SettingsFind, window, cx| {
-                window.focus(&this.settings_search.focus_handle(cx), cx);
+            .track_focus(&self.focus)
+            .key_context(SETTINGS_CONTEXT)
+            .on_action(cx.listener(|this, _: &SettingsFind, window, cx| {
+                window.focus(&this.search.focus_handle(cx), cx);
             }))
             .on_key_down(move |event, _window, cx| {
                 let Some(row_id) = &capture else {
@@ -1223,8 +1189,8 @@ impl Harness {
     ) -> AnyElement {
         let id = row_id.to_owned();
         // The switch asks to flip; the row knows what it showed.
-        let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
-            this.flip_setting(&id, !on, cx);
+        let flip = cx.listener(move |_: &mut Self, _: &SwitchIntent, _, cx| {
+            cx.emit(SettingsEvent::Flip { id: id.clone(), on: !on });
         });
         settings_row(label.to_string())
             .description(detail.to_string())
@@ -1296,9 +1262,9 @@ impl Harness {
     fn settings_appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::layout::{DensityPref, TextSizePref, ThemePref};
         let active = ThemePref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).theme).unwrap_or(0);
-        let set = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+        let set = cx.listener(|_: &mut Self, index: &usize, _, cx| {
             if let Some(pref) = ThemePref::ALL.get(*index) {
-                this.set_theme_pref(*pref, Some(window), cx);
+                cx.emit(SettingsEvent::Theme(*pref));
             }
         });
         let theme = settings_row("Theme")
@@ -1312,9 +1278,9 @@ impl Harness {
             )
             .into_any_element();
         let size_active = TextSizePref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).text_size).unwrap_or(0);
-        let set_size = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+        let set_size = cx.listener(|_: &mut Self, index: &usize, _, cx| {
             if let Some(pref) = TextSizePref::ALL.get(*index) {
-                this.set_text_size_pref(*pref, Some(window), cx);
+                cx.emit(SettingsEvent::TextSize(*pref));
             }
         });
         let text_size = settings_row("Text size")
@@ -1328,9 +1294,9 @@ impl Harness {
             )
             .into_any_element();
         let density_active = DensityPref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).density).unwrap_or(0);
-        let set_density = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+        let set_density = cx.listener(|_: &mut Self, index: &usize, _, cx| {
             if let Some(pref) = DensityPref::ALL.get(*index) {
-                this.set_density_pref(*pref, Some(window), cx);
+                cx.emit(SettingsEvent::Density(*pref));
             }
         });
         let density = settings_row("Density")
@@ -1362,9 +1328,9 @@ impl Harness {
     /// address field commits to the chosen one from the next Enter on.
     fn settings_browser_search_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let active = SearchEngine::ALL.iter().position(|e| *e == crate::layout::Layout::get(cx).search_engine).unwrap_or(0);
-        let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+        let set = cx.listener(|_: &mut Self, index: &usize, _, cx| {
             if let Some(engine) = SearchEngine::ALL.get(*index) {
-                this.set_search_engine(*engine, cx);
+                set_search_engine(*engine, cx);
             }
         });
         let control = div().debug_selector(|| "settings-search-engine".into()).child(
@@ -1390,7 +1356,7 @@ impl Harness {
         use aui::composer::{model_menu, PickerRow};
         let p = cx.aui().colors;
         let statuses = crate::provider_status::live_statuses();
-        let current = self.assistant_choice(cx);
+        let current = crate::browser::assistant::current_choice(cx);
         let mut anchor = div().relative().flex_none();
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
         let mut chip = button("settings-assistant-model", chip_label)
@@ -1543,15 +1509,14 @@ impl Harness {
     /// the sites history never records, each with Remove. (Import from
     /// Chrome joins this group.)
     fn settings_browser_data_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let db = self.browser.db();
-        let pages = db.len();
+        let pages = self.facts.history_pages;
         let summary = format!(
             "{} · kept {} days · never from an agent’s tabs",
             if pages == 1 { "1 page".to_owned() } else { format!("{pages} pages") },
             crate::browser::history::KEEP_DAYS
         );
-        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.ask_clear_history(cx));
-        let import = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_chrome_import(cx));
+        let clear = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ClearHistory));
+        let import = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ImportChrome));
         let mut rows = vec![
             settings_row("Import from Chrome")
                 .description("Bookmarks and history. Chrome is only read; nothing in it changes.")
@@ -1570,7 +1535,7 @@ impl Harness {
                 )
                 .into_any_element(),
         ];
-        let sites = db.excluded();
+        let sites = self.facts.excluded_sites.clone();
         rows.push(
             settings_row("Never remembered")
                 .description(if sites.is_empty() {
@@ -1582,9 +1547,8 @@ impl Harness {
         );
         for (index, site) in sites.into_iter().enumerate() {
             let owned = site.clone();
-            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.browser.db().include(&owned);
-                cx.notify();
+            let remove = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(SettingsEvent::IncludeSite(owned.clone()));
             });
             rows.push(site_row(
                 &site,
@@ -1657,8 +1621,8 @@ impl Harness {
     /// site settings — lives at `chrome://settings`, opened in a Browse
     /// tab.
     fn settings_browser_chromium_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.open_chromium_settings(window, cx);
+        let open = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            cx.emit(SettingsEvent::OpenChromiumSettings);
         });
         let row = div().debug_selector(|| "settings-browser-chromium".into()).child(
             settings_row("Chromium settings")
@@ -1684,26 +1648,15 @@ impl Harness {
     /// fixed capture text instead, so captures never depend on the
     /// machine's handler.
     fn settings_browser_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let handler = self.default_browser_handler().map(str::to_owned);
+        let handler = self.facts.default_browser.clone();
         let status = crate::default_browser::row_status_text(
             handler.as_deref(),
-            self.default_browser_confirm_pending,
+            self.facts.default_browser_pending,
         );
         // B2a-H7
         let mut row = settings_row("Default browser").description(status);
         if crate::default_browser::offers_make_default(handler.as_deref()) {
-            let make = cx.listener(|this: &mut Self, _: &(), _, cx| {
-                if !crate::default_browser::make_baaz_default() {
-                    crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
-                }
-                // macOS confirms asynchronously: wait for the re-read
-                // (~1 s) and the next focus-regain instead of showing a
-                // stale handler.
-                this.default_browser_confirm_pending = true;
-                this.default_browser_recheck_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
-                cx.notify();
-            });
+            let make = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SettingsEvent::MakeDefaultBrowser));
             row = row.control(
                 button("settings-browser-make-default", "Make default")
                     .accessibility_label("Make Baaz your default browser")
@@ -1792,14 +1745,14 @@ impl Harness {
             let wire = status.provider.as_str().to_owned();
             let open = cx.listener({
                 let wire = wire.clone();
-                move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.open_settings_page(&format!("providers/{wire}"), cx);
+                move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    cx.emit(SettingsEvent::Navigate(format!("providers/{wire}")));
                 }
             });
             let provider = status.provider;
             let enabled = status.enabled;
-            let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
-                this.flip_provider_enabled(provider, !enabled, cx);
+            let flip = cx.listener(move |_: &mut Self, _: &SwitchIntent, _, cx| {
+                cx.emit(SettingsEvent::FlipProvider { id: provider, on: !enabled });
             });
             let name = status.provider.label();
             // The switch, then the drill-in into the provider's page.
@@ -1818,7 +1771,7 @@ impl Harness {
                 );
             rows.push(settings_row(name).description(status.headline_text().to_string()).control(control).into_any_element());
         }
-        let setup = cx.listener(|this: &mut Self, _: &(), _, cx| this.open_connect_screen(cx));
+        let setup = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SettingsEvent::OpenConnect));
         let _ = window;
         settings_sections_stack()
             .child(self.settings_group("Providers", rows, cx))
@@ -1859,18 +1812,15 @@ impl Harness {
         statuses: &[crate::provider_status::ProviderStatus],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = ProviderId::parse(&self.new_provider);
-        let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.connect_menu_open) {
+        let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
+        let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.default_menu_open) {
             Some(picker) => {
                 let weak = cx.entity().downgrade();
                 let control = aui::screens::default_provider_picker(
                     "settings-default-provider",
                     picker,
                     move |intent, _window, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.default_provider_intent(intent);
-                            cx.notify();
-                        });
+                        let _ = weak.update(cx, |this, cx| this.default_provider_intent(intent, cx));
                     },
                     cx,
                 );
@@ -1893,7 +1843,7 @@ impl Harness {
     /// One provider sub-page: the Account group (today's card) plus the
     /// Tools group ("Use my own MCP servers", Claude Code and Codex only).
     fn settings_provider_subpage(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(id) = provider_subpage_id(&self.settings_page.section) else {
+        let Some(id) = provider_subpage_id(&self.state.section) else {
             return self.settings_providers_overview(window, cx);
         };
         let statuses = crate::provider_status::live_statuses();
@@ -1901,15 +1851,16 @@ impl Harness {
         let Some(status) = status else {
             return self.settings_providers_overview(window, cx);
         };
+        let model = self.model.read(cx);
         let data = crate::settings_providers::with_busy(
-            crate::settings_providers::card_data(status, &self.codex_login, self.provider_details_open.contains(&id)),
-            self.provider_busy.get(&id).copied(),
+            crate::settings_providers::card_data(status, &model.codex_login, self.details_open.contains(&id)),
+            model.busy.get(&id).copied(),
         );
-        let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, window, cx| {
-            this.handle_provider_intent(intent.clone(), window, cx);
+        let intent = cx.listener(move |this: &mut Self, intent: &aui::screens::ProviderIntent, _, cx| {
+            this.provider_intent(intent.clone(), cx);
         });
         let assist = cx.listener(|this: &mut Self, key: &gpui::SharedString, _, cx| {
-            this.codex_assist_link(key, cx);
+            this.model.update(cx, |model, cx| model.codex_assist_link(key, cx));
         });
         // The card sits on the page itself (the D5 board), not inside a
         // settings group; the MCP switch keeps its own Tools group under it.
@@ -1920,8 +1871,12 @@ impl Harness {
         // The P7 offer sits under Details, inside the card's frame (the
         // board). The provider card has no footer slot, so the two share
         // one flat card here, a 1 px line between them.
-        let card = match self.import_card_line(id, cx) {
-            Some(line) => aui::data::card().flush().label(format!("{} account", id.label())).section(card).section(line).into_any_element(),
+        let card = match self.facts.import_line.as_ref() {
+            Some(line) => {
+                let open = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::OpenImportSheet));
+                let line = crate::import_ui::card_line_row(id, line, open, cx);
+                aui::data::card().flush().label(format!("{} account", id.label())).section(card).section(line).into_any_element()
+            }
             None => card,
         };
         let mut page = settings_sections_stack().child(card);
@@ -1936,8 +1891,8 @@ impl Harness {
     /// Reserved row, and Restore defaults only when something differs.
     fn settings_shortcuts_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let query = self.settings_search.read(cx).value().trim().to_lowercase();
-        let bindings = &self.shortcuts_cache;
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let bindings = &self.shortcuts;
         let differs = shortcuts_differ_from_defaults(bindings);
         let restore = cx.listener(|this: &mut Self, _: &(), _, cx| {
             crate::keymap::restore_defaults();
@@ -1948,13 +1903,13 @@ impl Harness {
         let mut column = settings_sections_stack();
         let mut header_row = h_flex().w_full().flex_none().items_center().gap(px(scale::SP_3));
         header_row = header_row.child(
-            aui::data::field_frame("settings-shortcut-search", &self.settings_search, window, cx)
+            aui::data::field_frame("settings-shortcut-search", &self.search, window, cx)
                 .flex_none()
                 .w(px(SHORTCUT_SEARCH_W))
                 .role(gpui::Role::SearchInput)
                 .aria_label("Search shortcuts")
                 .child(
-                    gpui_kit::component::input::Textarea::new(&self.settings_search)
+                    gpui_kit::component::input::Textarea::new(&self.search)
                         .appearance(false)
                         .bordered(false)
                         .role_size(TextRole::Body)
@@ -1981,7 +1936,7 @@ impl Harness {
                 continue;
             }
             let id = shortcut_row_id(&binding.action, binding.context.as_deref());
-            let recording = self.recording_shortcut.as_deref() == Some(id.as_str());
+            let recording = self.recording.as_deref() == Some(id.as_str());
             let detail = if let Some(error) = self.shortcut_errors.get(&id) {
                 Some(error.clone())
             } else if !binding.editable {
@@ -2047,9 +2002,7 @@ impl Harness {
     /// Unarchive. Empty state: one muted line.
     fn settings_archived_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let mut archived: Vec<&crate::sidebar::SessionEntry> =
-            self.sessions.iter().filter(|e| e.archived).collect();
-        archived.sort_by(|a, b| a.updated.cmp(&b.updated).reverse());
+        let archived: Vec<&ArchivedRow> = self.facts.archived.iter().collect();
         if archived.is_empty() {
             return v_flex()
                 .w_full()
@@ -2066,10 +2019,10 @@ impl Harness {
                 .into_any_element();
         }
         let mut order: Vec<String> = Vec::new();
-        let mut by_project: std::collections::HashMap<String, Vec<&crate::sidebar::SessionEntry>> =
+        let mut by_project: std::collections::HashMap<String, Vec<&ArchivedRow>> =
             std::collections::HashMap::new();
         for entry in archived {
-            let name = entry.project_name.clone().unwrap_or_else(|| "Unfiled".to_owned());
+            let name = entry.project.clone();
             by_project.entry(name.clone()).or_default().push(entry);
             if !order.contains(&name) {
                 order.push(name);
@@ -2081,8 +2034,8 @@ impl Harness {
             let mut els = Vec::new();
             for entry in rows {
                 let id = entry.id.clone();
-                let unarchive = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-                    this.unarchive_session(id.clone(), cx);
+                let unarchive = cx.listener(move |_: &mut Self, _: &(), _, cx| {
+                    cx.emit(SettingsEvent::Unarchive(id.clone()));
                 });
                 els.push(
                     settings_row(entry.label.clone())
@@ -2101,6 +2054,454 @@ impl Harness {
     }
 }
 
+// ── the root's side ─────────────────────────────────────────────────────
+
+impl Harness {
+
+    /// The active session id for the page's restore record, if any.
+    fn settings_active_id(&self, cx: &mut Context<Self>) -> Option<String> {
+        self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+    }
+
+    /// Open the Settings page on the Providers section: where the account
+    /// menu's "Providers…" row lands. Idempotent (open, never toggle).
+    pub(crate) fn open_providers(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_page("providers", cx);
+    }
+
+    /// Open the Settings page on legacy dialog index `section` (menu rows,
+    /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 General, 1 Appearance,
+    /// 2 Sidebar, 3 Notifications, 4 Browser, 5 Providers, 6 Shortcuts,
+    /// 7 Archived). Idempotent (open, never toggle). Menus, palette and
+    /// modal go first.
+    pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
+        let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
+        self.open_settings_page(target, cx);
+    }
+
+    /// Open the Settings page at `target` (`settings:<target>` spelling).
+    /// Saves the active session for close-restore; hides (never writes)
+    /// right-pane and terminal state. Opening closes the Skills page, so
+    /// only one full-page route stands open. Opening arms the surface's
+    /// focus, so keyboard nav and ⌘F work without a click first.
+    pub(crate) fn open_settings_page(&mut self, target: &str, cx: &mut Context<Self>) {
+        let active = self.settings_active_id(cx);
+        self.settings_page.update(cx, |page, _| page.open(target, active));
+        // Settings replaces the Skills page as it does the transcript.
+        self.leave_skills(cx);
+        self.overlays.update(cx, |overlays, _| {
+            overlays.menu = None;
+            overlays.palette = None;
+            overlays.dialog = None;
+        });
+        // Settings → Providers recomputes the B4M plan off the UI thread:
+        // the row renders the cache (never the walker) and follows when
+        // the recompute lands.
+        if target.split('/').next() == Some(crate::settings_providers::PROVIDERS_SECTION_ID) {
+            self.refresh_migration_cache(cx);
+            // The import offer on the Claude Code / Codex cards (docs/72):
+            // the cached plan renders at once; a stale one recomputes
+            // behind it, never on the render path.
+            self.refresh_import_scan_if_stale(cx);
+        }
+        cx.notify();
+    }
+
+    /// Close the Settings page, restoring the saved session. Scroll,
+    /// draft, focus, right pane and terminal come back exactly: the page
+    /// never wrote their state, it only hid them. Closing parks the
+    /// composer next frame, and marks the overlay closed already, so the
+    /// frame's just-closed parking does not steal the composer back to
+    /// the root.
+    pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_page.update(cx, |page, _| page.close());
+        self.focus_composer = true;
+        self.overlay_was_open = false;
+        cx.notify();
+    }
+
+    /// One Escape press on the page (§1.3 order): cancel a recording, clear
+    /// the Shortcuts search, go up from a provider sub-page — the page's own
+    /// layers ([`SettingsPage::escape`]) — else close and restore. Returns
+    /// `true` when the page stood open.
+    pub(crate) fn settings_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.settings_open(cx) {
+            return false;
+        }
+        match self.settings_page.update(cx, |page, cx| page.escape(cx)) {
+            SettingsEscape::Close => self.close_settings(cx),
+            // Up from a sub-page moves the nav's selection and the crumbs,
+            // which the root's frame draws.
+            SettingsEscape::UpToProviders => cx.notify(),
+            SettingsEscape::CancelRecording | SettingsEscape::ClearSearch => {}
+        }
+        true
+    }
+
+    /// Leave the page for navigation (⌘N, palette jump, session click):
+    /// the destination owns the next route, so nothing is restored.
+    pub(crate) fn exit_settings_for_navigation(&mut self, cx: &mut Context<Self>) {
+        if self.settings_page.update(cx, |page, _| page.exit_for_navigation()) {
+            cx.notify();
+        }
+    }
+
+    /// `settings[:<section>]`: open the page, optionally at that section
+    /// (`settings:sidebar`, `settings:providers/codex`, or a row id that
+    /// names its home page). Empty reopens the last-visited section
+    /// (General on first open). A target the page does not know is an
+    /// `Err` and opens nothing — the page would otherwise fall back to
+    /// General and the capture would show the wrong section. Idempotent:
+    /// open, never toggle.
+    pub(crate) fn step_settings(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let target = rest.trim();
+        if !settings_target_known(target) {
+            return Err(format!("no settings section or row named {target:?}"));
+        }
+        self.open_settings_page(target, cx);
+        Ok(())
+    }
+
+    /// Flip one Settings switch by its row id and persist it.
+    ///
+    /// Unknown ids are ignored: a later section adds its own id to
+    /// [`apply_setting`].
+    pub(crate) fn flip_setting(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if let Some(provider) = crate::settings_providers::parse_enabled_row(id) {
+            self.flip_provider_enabled(provider, on, cx);
+            return;
+        }
+        // Every reader observes the layout global, so the change reaches
+        // them all from here — the fold switch re-folds every open view,
+        // parked ones included (B12fix), with no push into them.
+        if !crate::layout::Layout::stage(cx, |layout| apply_setting(layout, id, on)) {
+            return;
+        }
+        crate::layout::Layout::save(cx);
+        // Turning feedback mode off mid-session parks the shell Off but
+        // keeps the draft, so the next toggle resumes it.
+        if id == "feedback_mode" && !on {
+            self.feedback_setting_off(cx);
+        }
+        self.invalidate_list();
+        // A Notifications switch applies now: the Dock badge follows its
+        // switch without waiting for a session to move (task 3.5).
+        if id.starts_with("notify_") {
+            self.check_attention(cx);
+        }
+    }
+
+    /// Settings › Appearance › Theme: store `pref` and paint with it now.
+    /// The stored choice is what the next launch opens in (see
+    /// [`boot_theme`]); View → Toggle Theme goes through here too, so the
+    /// page always shows what the window paints.
+    pub(crate) fn set_theme_pref(
+        &mut self,
+        pref: crate::layout::ThemePref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        crate::layout::Layout::update(cx, |layout| layout.theme = pref);
+        self.apply_theme_pref(window, cx);
+    }
+
+    /// Paint with the stored theme choice, System resolved against the
+    /// system's appearance now. A no-op when the window already paints it.
+    /// The window's appearance observer calls this while the choice is
+    /// System, so a macOS switch repaints Baaz too.
+    pub(crate) fn apply_theme_pref(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let kind = crate::layout::Layout::get(cx).theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()));
+        if cx.aui().kind != kind {
+            aui_tokens::AuiTheme::set_kind(kind, window, cx);
+            // Rows cached with the old palette rebuild on the next frame.
+            self.invalidate_list();
+        }
+        cx.notify();
+    }
+
+    /// Settings › Appearance › Density: store `pref` and lay the window out
+    /// at it now — every text role and the shared row height (task 2.10).
+    pub(crate) fn set_density_pref(
+        &mut self,
+        pref: crate::layout::DensityPref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        crate::layout::Layout::update(cx, |layout| layout.density = pref);
+        if cx.aui().density != pref.density() {
+            aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
+            // Rows cached at the old sizes rebuild on the next frame.
+            self.invalidate_list();
+            self.retype_sessions(cx);
+        }
+    }
+
+    /// Settings › Appearance › Text size: store `pref` and set every text
+    /// role at it now (task 2.10).
+    pub(crate) fn set_text_size_pref(
+        &mut self,
+        pref: crate::layout::TextSizePref,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        crate::layout::Layout::update(cx, |layout| layout.text_size = pref);
+        if cx.aui().text_size != pref.text_size() {
+            aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
+            self.invalidate_list();
+            self.retype_sessions(cx);
+        }
+    }
+
+    /// Every live transcript (open, parked, the browser chat) measures its
+    /// rows again at the new type: see [`crate::session::SessionView::retype`].
+    fn retype_sessions(&mut self, cx: &mut Context<Self>) {
+        for view in self.registry.live(self.active.as_ref()) {
+            view.update(cx, |view, cx| view.retype(cx));
+        }
+    }
+
+    /// The Settings → Browser page's Chromium row: leave Settings for
+    /// Browse and show `chrome://settings` in a person tab, where
+    /// Chromium owns passwords, cookies and site settings. An existing
+    /// `chrome://settings` tab is selected instead of opening another.
+    pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(cx);
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.ensure_tabs_loaded(cx);
+        let space = self.browse_space();
+        let existing = self
+            .browser
+            .tabs
+            .person_tabs(space.as_deref())
+            .iter()
+            .find(|tab| tab.url == CHROMIUM_SETTINGS_URL)
+            .map(|tab| tab.id);
+        match existing {
+            Some(id) => self.select_browse_sidebar_tab(id, window, cx),
+            None => {
+                if let Err(reason) = self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx) {
+                    crate::baaz_log!("open_chromium_settings: no tab opened: {reason}");
+                }
+            }
+        }
+    }
+
+    /// `settings-set:<key>=<value>`: the scripted twin of the Settings
+    /// rows that are not plain switches. `search-engine=<name>`,
+    /// `summary-line=<on|off>`, `theme=<system|light|dark>`,
+    /// `density=<comfortable|compact>` and `text-size=<default|large>` land
+    /// instantly; an unknown key or a value that does not parse is an
+    /// `Err`, never a silent no-op.
+    pub(crate) fn step_settings_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (key, value) =
+            rest.split_once('=').map(|(key, value)| (key.trim(), value.trim())).unwrap_or((rest.trim(), ""));
+        match key {
+            "search-engine" => match SearchEngine::parse(value) {
+                Some(engine) => {
+                    set_search_engine(engine, cx);
+                    Ok(())
+                }
+                None => Err(format!("unknown search engine {value:?}")),
+            },
+            "summary-line" => {
+                let on = match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("summary-line wants on or off, not {value:?}")),
+                };
+                self.flip_setting("summary_line", on, cx);
+                Ok(())
+            }
+            "theme" => match crate::layout::ThemePref::parse(value) {
+                Some(pref) => {
+                    self.set_theme_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("theme wants system, light or dark, not {value:?}")),
+            },
+            "density" => match crate::layout::DensityPref::parse(value) {
+                Some(pref) => {
+                    self.set_density_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("density wants comfortable or compact, not {value:?}")),
+            },
+            "text-size" => match crate::layout::TextSizePref::parse(value) {
+                Some(pref) => {
+                    self.set_text_size_pref(pref, None, cx);
+                    Ok(())
+                }
+                None => Err(format!("text-size wants default or large, not {value:?}")),
+            },
+            _ => Err(format!(
+                "unknown settings key {key:?} (expected search-engine=<name>, summary-line=<on|off>, theme=<system|light|dark>, density=<comfortable|compact> or text-size=<default|large>)"
+            )),
+        }
+    }
+
+    /// `auto-title`: flip the automatic-naming switch and persist it. The
+    /// switch itself lives on the Settings page's General section; this
+    /// verb is what captures flip. Off means no title model call ever.
+    /// Always flips: `Ok`.
+    pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let on = !crate::layout::Layout::get(cx).auto_title;
+        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_title", on)) {
+            return Err("no auto_title switch to flip".to_owned());
+        }
+        self.invalidate_list();
+        Ok(())
+    }
+
+    /// `auto-summary`: flip the sidebar-summaries switch and persist it.
+    /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
+    /// the ladder's preview rung still fills every second line. Always flips: `Ok`.
+    pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let on = !crate::layout::Layout::get(cx).auto_summary;
+        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_summary", on)) {
+            return Err("no auto_summary switch to flip".to_owned());
+        }
+        self.invalidate_list();
+        Ok(())
+    }
+
+    /// Whether the Settings page stands open (`Route::Settings`).
+    pub(crate) fn settings_open(&self, cx: &App) -> bool {
+        self.settings_page.read(cx).is_open()
+    }
+
+    /// The open page's id (`general`, `providers/codex`), empty while shut.
+    pub(crate) fn settings_section(&self, cx: &App) -> String {
+        self.settings_page.read(cx).state.section.clone()
+    }
+
+    /// What the page needs from the root now (see [`SettingsFacts`]): only
+    /// the open section's data is gathered; a shut page gets the defaults.
+    pub(crate) fn settings_facts(&self, cx: &App) -> SettingsFacts {
+        let page = self.settings_page.read(cx);
+        if !page.state.open {
+            return SettingsFacts::default();
+        }
+        let section = page.state.section.as_str();
+        let mut facts = SettingsFacts {
+            new_provider: Some(ProviderId::parse(&self.new_provider)),
+            ..SettingsFacts::default()
+        };
+        match section {
+            "archived" => {
+                let mut archived: Vec<&crate::sidebar::SessionEntry> = self.sessions.iter().filter(|e| e.archived).collect();
+                archived.sort_by(|a, b| a.updated.cmp(&b.updated).reverse());
+                facts.archived = archived
+                    .into_iter()
+                    .map(|entry| ArchivedRow {
+                        id: entry.id.clone(),
+                        label: entry.label.clone(),
+                        project: entry.project_name.clone().unwrap_or_else(|| "Unfiled".to_owned()),
+                        updated: entry.updated,
+                    })
+                    .collect();
+            }
+            "browser" => {
+                facts.default_browser = self.default_browser_handler().map(str::to_owned);
+                facts.default_browser_pending = self.default_browser_confirm_pending;
+                let db = self.browser.db();
+                facts.history_pages = db.len();
+                facts.excluded_sites = db.excluded();
+            }
+            "providers" => {
+                let empty: &[crate::session_migration::PlannedMove] = &[];
+                let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
+                if !plan.is_empty() {
+                    let (n_claude, n_codex) = crate::session_migration::session_counts(plan);
+                    facts.migration = Some(MigrationRow {
+                        title: crate::session_migration::prompt_title(n_claude, n_codex),
+                        paths: crate::session_migration::row_paths(plan),
+                    });
+                }
+            }
+            _ => {
+                if let Some(id) = provider_subpage_id(section) {
+                    facts.import_line = self.import_card_line(id);
+                }
+            }
+        }
+        facts
+    }
+
+    /// Run `f` on the page with fresh facts: every root call into the page
+    /// that reads them goes through here.
+    pub(crate) fn with_settings_page<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut SettingsPage, &mut Context<SettingsPage>) -> R,
+    ) -> R {
+        let facts = self.settings_facts(cx);
+        self.settings_page.update(cx, |page, cx| {
+            page.facts = facts;
+            f(page, cx)
+        })
+    }
+
+    /// The page's three slots for this frame, facts pushed first: its
+    /// section list for the sidebar column, its surface for the centre
+    /// (composed uncached: the facts arrive during this render), and the
+    /// bar (the root's sidebar toggle, the page's crumbs and close).
+    pub(crate) fn compose_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement, crate::app::BarChrome) {
+        let lead = self.render_sidebar_toggle(cx);
+        let (nav, title, right) = self.with_settings_page(cx, |page, cx| {
+            (page.render_nav(cx), page.render_crumbs(cx), page.actions(window, cx))
+        });
+        let chrome = crate::app::BarChrome { lead, switch: None, title: Some(title), right };
+        (nav, self.settings_page.clone().into_any_element(), chrome)
+    }
+
+    /// One event from the page, mapped to the root's own method.
+    pub(crate) fn on_settings_event(
+        &mut self,
+        _page: &Entity<SettingsPage>,
+        event: &SettingsEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SettingsEvent::Navigate(target) => self.open_settings_page(target, cx),
+            SettingsEvent::Close => self.close_settings(cx),
+            SettingsEvent::Flip { id, on } => self.flip_setting(id, *on, cx),
+            SettingsEvent::Theme(pref) => self.set_theme_pref(*pref, Some(window), cx),
+            SettingsEvent::TextSize(pref) => self.set_text_size_pref(*pref, Some(window), cx),
+            SettingsEvent::Density(pref) => self.set_density_pref(*pref, Some(window), cx),
+            SettingsEvent::FlipProvider { id, on } => self.flip_provider_enabled(*id, *on, cx),
+            SettingsEvent::ProviderIntent(intent) => self.handle_provider_intent(intent.clone(), window, cx),
+            SettingsEvent::SetDefaultProvider(id) => {
+                self.new_provider = id.as_str().to_owned();
+                crate::providers::write_last_provider(*id);
+                cx.notify();
+            }
+            SettingsEvent::OpenConnect => self.open_connect_screen(cx),
+            SettingsEvent::MigrateSessions => self.confirm_session_migration(cx),
+            SettingsEvent::OpenImportSheet => self.open_import_sheet(cx),
+            SettingsEvent::Unarchive(id) => self.unarchive_session(id.clone(), cx),
+            SettingsEvent::ClearHistory => self.ask_clear_history(cx),
+            SettingsEvent::ImportChrome => self.open_chrome_import(cx),
+            SettingsEvent::IncludeSite(site) => {
+                self.browser.db().include(site);
+                cx.notify();
+            }
+            SettingsEvent::MakeDefaultBrowser => {
+                if !crate::default_browser::make_baaz_default() {
+                    crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
+                }
+                // macOS confirms asynchronously: wait for the re-read
+                // (~1 s) and the next focus-regain instead of showing a
+                // stale handler.
+                self.default_browser_confirm_pending = true;
+                self.default_browser_recheck_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                cx.notify();
+            }
+            SettingsEvent::OpenChromiumSettings => self.open_chromium_settings(window, cx),
+        }
+    }
+}
+
 /// A page's sections, [`SETTINGS_SECTION_GAP`] apart.
 fn settings_sections_stack() -> gpui::Div {
     v_flex().w_full().gap(px(SETTINGS_SECTION_GAP))
@@ -2108,7 +2509,7 @@ fn settings_sections_stack() -> gpui::Div {
 
 /// One per-site rule or exception under its group's row: the host as the
 /// row's title, the rule's word under it, its action at the right.
-fn site_row(host: &str, word: Option<&'static str>, action: impl IntoElement, _cx: &Context<Harness>) -> AnyElement {
+fn site_row(host: &str, word: Option<&'static str>, action: impl IntoElement, _cx: &App) -> AnyElement {
     let row = settings_row(host.to_owned()).control(action);
     match word {
         Some(word) => row.description(word),
@@ -2201,8 +2602,9 @@ fn is_bare_modifier(keystroke: &gpui::Keystroke) -> bool {
     )
 }
 
-/// Which section `id` names: its index, or the first section when `id` is
-/// empty or unknown. Pure, so tests can drive it without a window.
+/// Which section `id` names in a row-model list: its index, or the first
+/// section when `id` is empty or unknown. Test-only, like the row tables.
+#[cfg(test)]
 pub(crate) fn settings_section_index(sections: &[SettingsSection], id: &str) -> usize {
     if id.is_empty() {
         return 0;
@@ -2212,7 +2614,7 @@ pub(crate) fn settings_section_index(sections: &[SettingsSection], id: &str) -> 
 
 /// A Shortcuts row's stable id: the action and its context, joined on a
 /// separator neither may contain, so [`parse_shortcut_row_id`] recovers both
-/// for [`Harness::handle_shortcut`](crate::app::Harness::handle_shortcut).
+/// for [`SettingsPage::handle_shortcut`].
 pub(crate) fn shortcut_row_id(action: &str, context: Option<&str>) -> String {
     format!("{action}\u{1f}{}", context.unwrap_or(""))
 }
@@ -2250,7 +2652,9 @@ fn shortcut_is_editable(id: &str) -> bool {
 /// the last refusal on that row, else the reserved reason, else the context
 /// when off-global. A final Reserved group lists "Terminal takes the key"
 /// ONCE (the terminal's keys folded into one row), never once per key.
-/// Pure, so tests drive it without a window.
+/// The row model the tests pin; the page draws its own Shortcuts rows
+/// ([`SettingsPage::render_content`]).
+#[cfg(test)]
 pub(crate) fn shortcuts_section(
     bindings: &[crate::keymap::EffectiveBinding],
     recording: Option<&str>,

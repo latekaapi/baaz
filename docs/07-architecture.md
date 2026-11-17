@@ -121,26 +121,27 @@ pinned, then `connect`. `crates/baaz/tests/seam_ratchet.rs` keeps
 Production `Render` impls: `Harness` (`app.rs`), `SessionView`
 (`session/render.rs`), `SidebarPane` (`sidebar_view.rs`), the region
 entities `RightPane` (`right_pane.rs`), `TerminalDock`
-(`terminal/dock.rs`) and `SkillsPage` (`skills_page.rs`), `OverlayView`
-(`overlay.rs`) and `FeedbackTip` (`feedback/ui.rs`); `BenchRoot` is
-bench-only. All paths in this section are under `crates/baaz/src/`.
+(`terminal/dock.rs`), `SkillsPage` (`skills_page.rs`), `SettingsPage`
+(`settings.rs`) and `ConnectScreen` (`connect.rs`), the setup sheet's
+`SetupHost` (`setup.rs`), `OverlayView` (`overlay.rs`) and `FeedbackTip`
+(`feedback/ui.rs`); `BenchRoot` is bench-only. All paths in this section are under `crates/baaz/src/`.
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 197 fields. Its methods are spread over 52
+`Harness` (`app.rs`) has 177 fields. Its methods are spread over 52
 `impl Harness` blocks in 38 files (`app/*.rs`, `sidebar_view.rs`,
 `browser/mod.rs`, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
 |---|---|
-| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `connect_statuses`, `codex_login`, `setup_sheet`, `provider_banners`, `tier` |
+| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `muse_sheet`, `tier`; `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
 | session list and its caches | `sessions`, `list_cache`, `chain_index`, `index`, `overrides`, `provider_sessions`, `projects`, `saved_list`, `branches` |
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
 | sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal/rename fields, `sidebar_wheel` |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
 | browser and Browse mode | `browser` (`BrowserRegistry`), `browse_*` fields, the agent line and card (`line_ui`, `card_ui`), the four overlay windows (`overlay`, `corner`, `page_float`, `card_float`) |
-| settings, skills, palettes, shortcuts | `settings_page`, `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, `chrome_import`, `shortcuts_cache`, several `TextareaState` query fields |
+| settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, `chrome_import`, several `TextareaState` query fields |
 | terminal | `terminal_dock`: a region entity (`terminal/dock.rs`, task 4.4) that owns the tab host, its focus, the resize drag and the bridge providers; `terminal_service`, the agent's terminal and browser tools socket |
 | focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
 
@@ -149,8 +150,10 @@ overlay windows, provider status, boot session, scripted steps) and later
 `sync_browser` (`browser/mod.rs`), then composes the shell. The right pane
 is a region entity ([`region.rs`](../crates/baaz/src/region.rs)): the root
 pushes it this frame's facts and composes its view, and the pane reconciles
-its own reads in its own render. The terminal dock and the Skills page are
-composed the same way.
+its own reads in its own render. The terminal dock, the Skills page, the
+Settings page (its section list in the sidebar column, its crumbs and close
+in the bar, its surface in the centre) and the connect screen are composed
+the same way.
 The sidebar and the transcript are `.cached()` subtrees, so they skip work
 while clean (except while assistive tech is on).
 
@@ -189,7 +192,9 @@ running or starting, a pending approval or question) is never evicted.
 | `SidebarPane` | `sidebar_view.rs` | nothing: its render calls `Harness::render_sidebar`. It is invalidated by comparing a hand-built `SidebarKey` each frame |
 | `Overlays` | `overlays.rs` | state only: the dialog, the open menu, the palette, toasts, the `@`-picker walks. Rendered by `Harness` and by the composer |
 | `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content) |
-| settings | `settings.rs`, `settings_providers.rs` | `SettingsPageState` and the pages, as `Harness` fields |
+| `SettingsPage` | `settings.rs`, `settings_providers.rs` | the Settings page as a region entity: its route (`SettingsPageState`), search and focus, the Shortcuts rows and recording, its menus and folds; the root pushes `SettingsFacts` and handles `SettingsEvent`s |
+| `ProviderStatusModel` | `provider_model.rs` | the window's provider facts: statuses (following the status cache), sign-out banners, busy cards, the Codex sign-in flow; observed by `ConnectScreen`, `SetupHost` and `SettingsPage` |
+| `ConnectScreen`, `SetupHost` | `connect.rs`, `setup.rs` | the first-run connect screen (a region entity: whether it stands, its footer menu) and the setup sheet (the open sheet, its terminals and focus) |
 | `SkillsPage` | `skills_page.rs` | the Skills page as a region entity: catalog, filter, selection, dialogs, its fields and CLI calls |
 | browser | `browser/` | `BrowserRegistry` (one `WebviewState` per tab, CEF or WKWebView; a fake backend for captures), tabs, history and bookmarks (`browser.db`), adblock, favicons, the agent tools in `browser/automation/` |
 | terminal | `terminal/` | `TerminalDock` (the dock region entity), `TerminalHost` (an entity the dock holds: tabs by project root over `aui_terminal` ptys) and `TerminalService` (the socket, on `Harness`) |

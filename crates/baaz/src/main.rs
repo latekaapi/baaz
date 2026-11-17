@@ -81,6 +81,7 @@ mod plan;
 mod project_menu;
 mod projects;
 mod provider_search;
+mod provider_model;
 mod provider_sessions;
 mod provider_status;
 mod providers;

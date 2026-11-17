@@ -19,9 +19,10 @@ use std::path::PathBuf;
 
 use aui::screens::{setup_sheet, sheet_scrim, SetupStatus};
 use aui_terminal::{terminal_grid, ScriptChunk, TerminalSession};
-use gpui::{prelude::*, AnyElement, Context, Entity, Window};
+use gpui::{prelude::*, AnyElement, Context, Entity, FocusHandle, Subscription, Window};
 
 use crate::app::Harness;
+use crate::provider_model::{ProviderModelEvent, ProviderStatusModel};
 use crate::provider_status::{Headline, Installed, ProviderStatus};
 use crate::providers::ProviderId;
 
@@ -174,12 +175,54 @@ fn scripted_terminal(command: &str) -> Vec<ScriptChunk> {
     vec![ScriptChunk::new(0, format!("~ % {command}"))]
 }
 
-impl Harness {
+/// The setup sheet's owner (task 4.4): the open sheet, its terminals and
+/// their focus. It follows the shared [`ProviderStatusModel`] itself — the
+/// status line redraws as probes land, and an Install sheet whose CLI has
+/// landed signed out moves on to signing in — and renders itself over
+/// whatever screen asked; the root seats it (`Harness::compose_setup_sheet`).
+pub(crate) struct SetupHost {
+    /// The sheet while it is up: which provider, what for.
+    pub(crate) sheet: Option<SetupSheet>,
+    /// The sheet's terminals, one per provider, kept across Close.
+    terminals: SetupTerminals,
+    /// The sheet terminal's keyboard focus.
+    focus: FocusHandle,
+    /// The window's provider facts, which the status line follows.
+    model: Entity<ProviderStatusModel>,
+    /// The model observation (redraw) and its change subscription (advance).
+    _subscriptions: [Subscription; 2],
+}
+
+impl SetupHost {
+    /// No sheet up, no terminal made yet.
+    pub(crate) fn new(model: Entity<ProviderStatusModel>, cx: &mut Context<Self>) -> Self {
+        let redraw = cx.observe(&model, |this, _, cx| {
+            if this.sheet.is_some() {
+                cx.notify();
+            }
+        });
+        let advance = cx.subscribe(&model, |this, _, event: &ProviderModelEvent, cx| match event {
+            ProviderModelEvent::Changed => this.advance(cx),
+        });
+        SetupHost {
+            sheet: None,
+            terminals: SetupTerminals::default(),
+            focus: cx.focus_handle(),
+            model,
+            _subscriptions: [redraw, advance],
+        }
+    }
+
+    /// Whether a sheet is up.
+    pub(crate) fn is_open(&self) -> bool {
+        self.sheet.is_some()
+    }
+
     /// Open the setup sheet for `id`: the provider's terminal (made on first
     /// use, a login shell in the home directory) gets the command typed, the
     /// watch starts, and the terminal takes the keyboard. Nothing runs until
     /// the person presses Enter.
-    pub(crate) fn open_setup_sheet(
+    pub(crate) fn open(
         &mut self,
         id: ProviderId,
         kind: SetupKind,
@@ -191,9 +234,9 @@ impl Harness {
         if !crate::provider_status::deterministic() {
             self.type_when_ready(id, session, command, PROMPT_WAIT, cx);
         }
-        self.setup_sheet = Some(SetupSheet { provider: id, kind });
+        self.sheet = Some(SetupSheet { provider: id, kind });
         crate::provider_status::watch_setup(id);
-        window.focus(&self.setup_focus, cx);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -228,7 +271,7 @@ impl Harness {
                     let busy = session.alt_screen() || session.blocks().iter().any(|block| block.running());
                     (busy, session.marks().len())
                 });
-                let already = this.setup_terminals.typed.get(&id) == Some(&(command.clone(), ran));
+                let already = this.terminals.typed.get(&id) == Some(&(command.clone(), ran));
                 if busy || already {
                     return;
                 }
@@ -241,7 +284,7 @@ impl Harness {
                     session.paste(&command);
                 });
                 let ran = session.read(cx).marks().len();
-                this.setup_terminals.typed.insert(id, (command, ran));
+                this.terminals.typed.insert(id, (command, ran));
             });
         })
         .detach();
@@ -252,21 +295,19 @@ impl Harness {
     /// 2026-10-25: one trip, not two). Claude Code's terminal gets `claude
     /// auth login` typed once the installer has finished; Codex, which signs
     /// in through its app-server, shows its next step instead (see
-    /// [`Self::render_setup_sheet`]).
-    pub(crate) fn advance_setup_sheet(&mut self, cx: &mut Context<Self>) {
-        let Some(sheet) = self.setup_sheet else { return };
+    /// the sheet's render).
+    fn advance(&mut self, cx: &mut Context<Self>) {
+        let Some(sheet) = self.sheet else { return };
         if sheet.kind != SetupKind::Install || sheet.provider != ProviderId::ClaudeCode {
             return;
         }
-        let Some(status) = self.connect_statuses.iter().find(|status| status.provider == sheet.provider).cloned() else {
-            return;
-        };
+        let status = self.model.read(cx).status(sheet.provider);
         if !install_landed_signed_out(&status) {
             return;
         }
         let Some(command) = SetupKind::SignIn.command(sheet.provider) else { return };
-        self.setup_sheet = Some(SetupSheet { provider: sheet.provider, kind: SetupKind::SignIn });
-        if let Some(session) = self.setup_terminals.sessions.get(&sheet.provider).cloned() {
+        self.sheet = Some(SetupSheet { provider: sheet.provider, kind: SetupKind::SignIn });
+        if let Some(session) = self.terminals.sessions.get(&sheet.provider).cloned() {
             if !crate::provider_status::deterministic() {
                 // The installer may still be printing: wait for its prompt.
                 self.type_when_ready(sheet.provider, session, command, CHAIN_WAIT, cx);
@@ -280,7 +321,7 @@ impl Harness {
     /// mode (captures, tests) a scripted backend shows the prompt and the
     /// typed command and never spawns a shell.
     fn setup_terminal(&mut self, id: ProviderId, command: &str, cx: &mut Context<Self>) -> Entity<TerminalSession> {
-        if let Some(session) = self.setup_terminals.sessions.get(&id) {
+        if let Some(session) = self.terminals.sessions.get(&id) {
             return session.clone();
         }
         let session = if crate::provider_status::deterministic() {
@@ -305,7 +346,7 @@ impl Harness {
             TerminalSession::new(Box::new(pty), 80, 7).with_nonce(&nonce)
         };
         let entity = cx.new(|_| session);
-        self.setup_terminals.sessions.insert(id, entity.clone());
+        self.terminals.sessions.insert(id, entity.clone());
         entity
     }
 
@@ -314,7 +355,7 @@ impl Harness {
     /// `Err` for a provider id no registry entry owns (never the Muse
     /// fallback), an unknown or missing stage, extra payload, or a stage
     /// that provider has no command for.
-    pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    pub(crate) fn step(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let mut parts = rest.split(':');
         let raw_id = parts.next().unwrap_or("").trim();
         let Some(id) = ProviderId::parse_known(raw_id) else {
@@ -332,53 +373,47 @@ impl Harness {
         if kind.command(id).is_none() {
             return Err(format!("{} has no command for that setup stage", id.as_str()));
         }
-        self.open_setup_sheet(id, kind, window, cx);
+        self.open(id, kind, window, cx);
         Ok(())
     }
 
     /// Close the sheet (Close, Done, ✕, Escape). The terminal and the watch
     /// keep going.
-    pub(crate) fn close_setup_sheet(&mut self, cx: &mut Context<Self>) {
-        if self.setup_sheet.take().is_some() {
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) -> bool {
+        let was = self.sheet.take().is_some();
+        if was {
             cx.notify();
         }
+        was
     }
 
     /// The sheet over whatever screen asked, or `None` while closed.
-    pub(crate) fn render_setup_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sheet = self.setup_sheet?;
+    fn render_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sheet = self.sheet?;
         let id = sheet.provider;
-        let status = self
-            .connect_statuses
-            .iter()
-            .find(|status| status.provider == id)
-            .cloned()
-            .unwrap_or_else(|| ProviderStatus::checking(id));
-        let session = self.setup_terminals.sessions.get(&id)?.clone();
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_setup_sheet(cx));
+        let status = self.model.read(cx).status(id);
+        let session = self.terminals.sessions.get(&id)?.clone();
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.close(cx);
+        });
         let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
-                this.close_setup_sheet(cx);
+                this.close(cx);
                 cx.stop_propagation();
             }
         });
-        let terminal = terminal_grid(&session).focus_handle(self.setup_focus.clone());
+        let terminal = terminal_grid(&session).focus_handle(self.focus.clone());
         let mut body = setup_sheet("setup-sheet", id.icon(), sheet.kind.title(id))
             .status(setup_status(sheet.kind, &status))
-            .terminal(gpui::div().size_full().track_focus(&self.setup_focus).child(terminal))
+            .terminal(gpui::div().size_full().track_focus(&self.focus).child(terminal))
             .note(setup_note(sheet.kind, &status))
             .on_close(move |window, cx| close(&(), window, cx));
         // Codex installed but signed out: its sign-in is the in-row flow,
         // one press away from here (the sheet closes onto the waiting row).
         if id == ProviderId::Codex && sheet.kind == SetupKind::Install && install_landed_signed_out(&status) {
             let sign_in = cx.listener(|this: &mut Self, _: &(), _, cx| {
-                this.close_setup_sheet(cx);
-                if !matches!(
-                    this.codex_login,
-                    crate::connect::CodexLogin::Waiting { .. } | crate::connect::CodexLogin::Device { .. }
-                ) {
-                    this.start_codex_login(false, cx);
-                }
+                this.close(cx);
+                this.model.update(cx, |model, cx| model.begin_codex_signin(cx));
             });
             body = body.next_step("Sign in to Codex", move |window, cx| sign_in(&(), window, cx));
         }
@@ -390,6 +425,44 @@ impl Harness {
                 .child(sheet_scrim("setup-sheet-scrim", body, None))
                 .into_any_element(),
         )
+    }
+}
+
+impl Render for SetupHost {
+    /// The sheet's layer while one is up; nothing otherwise (the root seats
+    /// the view only while a sheet stands).
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_sheet(cx).unwrap_or_else(|| gpui::Empty.into_any_element())
+    }
+}
+
+// ── the root's side ─────────────────────────────────────────────────────
+
+impl Harness {
+    /// Open the setup sheet for `id` ([`SetupHost::open`]).
+    pub(crate) fn open_setup_sheet(&mut self, id: ProviderId, kind: SetupKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.setup.update(cx, |setup, cx| setup.open(id, kind, window, cx));
+    }
+
+    /// Close the sheet; `false` when none was up.
+    pub(crate) fn close_setup_sheet(&mut self, cx: &mut Context<Self>) -> bool {
+        self.setup.update(cx, |setup, cx| setup.close(cx))
+    }
+
+    /// Whether a setup sheet stands.
+    pub(crate) fn setup_open(&self, cx: &gpui::App) -> bool {
+        self.setup.read(cx).is_open()
+    }
+
+    /// `setup:<provider>:<stage>` ([`SetupHost::step`]).
+    pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        self.setup.update(cx, |setup, cx| setup.step(rest, window, cx))
+    }
+
+    /// The sheet's view while one stands, for the connect screen's stack
+    /// or the shell's.
+    pub(crate) fn compose_setup_sheet(&self, cx: &gpui::App) -> Option<AnyElement> {
+        self.setup_open(cx).then(|| self.setup.clone().into_any_element())
     }
 }
 

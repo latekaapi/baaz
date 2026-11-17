@@ -5,7 +5,7 @@
 //! switch per provider (`provider-enabled:<wire>` ids, flipping through
 //! [`Harness::flip_provider_enabled`]). The section's page — the overview
 //! plus one sub-page per provider
-//! ([`Harness::render_settings_content`](crate::app::Harness::render_settings_content))
+//! ([`SettingsPage::render_content`](crate::settings::SettingsPage::render_content))
 //! — renders one [`provider_card`](aui::screens::provider_card) per
 //! provider from the live statuses.
 //!
@@ -20,6 +20,7 @@
 
 use aui::data::{button, card, settings_row, switch, SwitchIntent, SETTINGS_ROW_GAP};
 use aui_tokens::TextRole;
+#[cfg(test)]
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
@@ -27,6 +28,7 @@ use gpui::{prelude::*, px, AnyElement, Context, SharedString, Window};
 use aui::util::{h_flex, v_flex};
 
 use crate::app::Harness;
+use crate::settings::SettingsPage;
 use crate::overlays::{Dialog, DialogAction};
 use crate::provider_status::{Headline, ProviderStatus};
 use crate::providers::ProviderId;
@@ -117,9 +119,6 @@ pub(crate) fn with_busy(mut data: ProviderCardData, busy: Option<ProviderBusy>) 
         }
     }
 }
-
-/// How long a settled press's toast stays before it leaves by itself.
-const SETTLED_TOAST_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The toast a settled press ends in: what the person asked, and what the
 /// re-probe found. `(title, body)`.
@@ -407,7 +406,8 @@ pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
 /// [`Harness::flip_provider_enabled`] (`provider-enabled:<wire>` ids,
 /// routed by [`parse_enabled_row`]); the cards live on the Providers
 /// overview and sub-pages
-/// ([`Harness::render_settings_content`](crate::app::Harness::render_settings_content)).
+/// ([`SettingsPage::render_content`](crate::settings::SettingsPage::render_content)).
+#[cfg(test)]
 pub(crate) fn providers_section() -> SettingsSection {
     let statuses = crate::provider_status::live_statuses();
     let mut rows = vec![SettingsRow::Note {
@@ -474,26 +474,9 @@ pub(crate) fn use_own_mcp_state(layout: &crate::layout::Layout, id: ProviderId) 
     }
 }
 
-impl Harness {
-    /// Flip a provider Enabled switch from either the section rows or a
-    /// card. Persists through the status cache; a disabled provider
-    /// stops being probed and leaves the composer menu.
-    pub(crate) fn flip_provider_enabled(&mut self, id: ProviderId, on: bool, cx: &mut Context<Self>) {
-        crate::provider_status::set_provider_enabled(id, on);
-        // A re-enable re-probes at once so its card stops reading stale;
-        // a disable needs no probe (probes skip disabled providers).
-        if on {
-            crate::provider_status::recheck_provider(id);
-        }
-        // A disabled pick is never the default for new sessions again.
-        if !on && self.new_provider == id.as_str() {
-            let fallback = live_default_new_provider();
-            self.new_provider = fallback.as_str().to_owned();
-            crate::providers::write_last_provider(fallback);
-        }
-        cx.notify();
-    }
-
+/// The Settings provider pages' own rows: the MCP switch and the move
+/// row read only the layout and the facts the root pushes.
+impl SettingsPage {
     /// Flip a "Use my own MCP servers" switch and persist it. Sessions
     /// started after the flip build their argv with (on) or without (off)
     /// Baaz's scoping; live sessions keep the argv they spawned with.
@@ -527,22 +510,18 @@ impl Harness {
     /// The B4M migration row under the cards, or `None` when nothing
     /// waits: the "Move N …" title, the dry-run count with an expandable
     /// path list, and the Move button through the same journaling
-    /// executor the one-time prompt uses. Reads only the cached plan —
-    /// never the owner-home walk (see `MigrationCache::plan_for_render`).
-    /// Both buttons carry accessibility labels, like every Settings
-    /// switch.
+    /// executor the one-time prompt uses (the root's
+    /// `confirm_session_migration`). Reads only the root's cached plan,
+    /// pushed as [`crate::settings::MigrationRow`] — never the owner-home
+    /// walk (see `MigrationCache::plan_for_render`). Both buttons carry
+    /// accessibility labels, like every Settings switch.
     pub(crate) fn migration_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let empty: &[crate::session_migration::PlannedMove] = &[];
-        let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
-        if plan.is_empty() {
-            return None;
-        }
+        let row = self.facts.migration.as_ref()?;
         let p = cx.aui().colors;
-        let (n_claude, n_codex) = crate::session_migration::session_counts(plan);
-        let title = crate::session_migration::prompt_title(n_claude, n_codex);
+        let title = row.title.clone();
         let paths_label = if self.migration_paths_expanded { "Hide paths" } else { "Show paths" };
-        let paths_toggle_label = format!("{paths_label} ({} files)", plan.len());
-        let go = cx.listener(|this: &mut Self, _: &(), _, cx| this.confirm_session_migration(cx));
+        let paths_toggle_label = format!("{paths_label} ({} files)", row.paths.len());
+        let go = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(crate::settings::SettingsEvent::MigrateSessions));
         let toggle = cx.listener(|this: &mut Self, _: &(), _, cx| this.toggle_migration_paths(cx));
         let mut text = v_flex().flex_1().min_w_0().child(
             gpui::div().text_color(p.ink).ui(TextRole::Body).semibold().child(SharedString::from(title)),
@@ -556,7 +535,7 @@ impl Harness {
         );
         if self.migration_paths_expanded {
             let mut list = v_flex().gap(px(scale::SP_1)).pt(px(scale::SP_1));
-            for path in crate::session_migration::row_paths(plan) {
+            for path in row.paths.iter().cloned() {
                 list = list.child(
                     gpui::div()
                         .text_color(p.fg_muted)
@@ -598,6 +577,33 @@ impl Harness {
         )
     }
 
+    /// Flip the move row's path list open or shut.
+    pub(crate) fn toggle_migration_paths(&mut self, cx: &mut Context<Self>) {
+        self.migration_paths_expanded = !self.migration_paths_expanded;
+        cx.notify();
+    }
+}
+
+impl Harness {
+    /// Flip a provider Enabled switch from either the section rows or a
+    /// card. Persists through the status cache; a disabled provider
+    /// stops being probed and leaves the composer menu.
+    pub(crate) fn flip_provider_enabled(&mut self, id: ProviderId, on: bool, cx: &mut Context<Self>) {
+        crate::provider_status::set_provider_enabled(id, on);
+        // A re-enable re-probes at once so its card stops reading stale;
+        // a disable needs no probe (probes skip disabled providers).
+        if on {
+            crate::provider_status::recheck_provider(id);
+        }
+        // A disabled pick is never the default for new sessions again.
+        if !on && self.new_provider == id.as_str() {
+            let fallback = live_default_new_provider();
+            self.new_provider = fallback.as_str().to_owned();
+            crate::providers::write_last_provider(fallback);
+        }
+        cx.notify();
+    }
+
     /// One provider intent from a card: switch, re-check, sign in/out,
     /// install, docs.
     pub(crate) fn handle_provider_intent(
@@ -616,18 +622,15 @@ impl Harness {
             ProviderAction::Update => self.open_setup_sheet(id, crate::setup::SetupKind::Update, window, cx),
             ProviderAction::Cancel => {
                 if id == ProviderId::Codex {
-                    self.codex_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.provider_model.update(cx, |model, _| model.cancel_codex_login());
                 }
             }
             ProviderAction::Docs => {
                 cx.open_url(docs_url(id));
             }
-            ProviderAction::ToggleDetails => {
-                if !self.provider_details_open.remove(&id) {
-                    self.provider_details_open.insert(id);
-                }
-                cx.notify();
-            }
+            // Details fold on the Settings page itself
+            // (`SettingsPage::provider_intent`), never here.
+            ProviderAction::ToggleDetails => {}
             ProviderAction::ChangePath => self.choose_provider_path(id, cx),
             ProviderAction::ClearPath => {
                 crate::details::set_path_override(id, None);
@@ -717,8 +720,7 @@ impl Harness {
         // the tests script. The card says "Signing out…" meanwhile, then
         // re-probes; a failure is a toast, never only a log line (owner,
         // 2026-10-29: confirming Sign out looked like nothing happened).
-        self.provider_busy.insert(id, ProviderBusy::SigningOut);
-        cx.notify();
+        self.provider_model.update(cx, |model, cx| model.mark_signing_out(id, cx));
         let run = cx.background_spawn(async move { run_sign_out(id, &LiveCommander) });
         cx.spawn(async move |this, cx| {
             let result = run.await;
@@ -726,67 +728,17 @@ impl Harness {
                 Ok(()) => this.recheck_with_feedback(id, true, cx),
                 Err(error) => {
                     eprintln!("baaz: sign out of {}: {error}", id.as_str());
-                    this.provider_busy.remove(&id);
-                    this.overlays.update(cx, |overlays, _| {
-                        overlays.toast(format!("Couldn't sign out of {}", id.label()), error);
-                    });
-                    cx.notify();
+                    this.provider_model.update(cx, |model, cx| model.sign_out_failed(id, error, cx));
                 }
             });
         })
         .detach();
     }
 
-    /// Re-probe `id` with the card saying so; [`Self::settle_provider_busy`]
-    /// clears it and names the result once the probe lands.
+    /// Re-probe `id` with the card saying so
+    /// ([`ProviderStatusModel::recheck_with_feedback`](crate::provider_model::ProviderStatusModel::recheck_with_feedback)).
     pub(crate) fn recheck_with_feedback(&mut self, id: ProviderId, after_sign_out: bool, cx: &mut Context<Self>) {
-        if crate::provider_status::deterministic() {
-            // Captures probe nothing: the scripted status is the answer.
-            crate::provider_status::recheck_provider(id);
-            cx.notify();
-            return;
-        }
-        self.provider_busy.insert(id, ProviderBusy::Checking { after_sign_out });
-        crate::provider_status::recheck_provider(id);
-        cx.notify();
-    }
-
-    /// A probe landed: every card waiting on a re-check whose probe is no
-    /// longer running settles, with a toast naming what it found.
-    pub(crate) fn settle_provider_busy(&mut self, cx: &mut Context<Self>) {
-        let settled: Vec<(ProviderId, bool)> = self
-            .provider_busy
-            .iter()
-            .filter_map(|(id, busy)| match busy {
-                ProviderBusy::Checking { after_sign_out } if !crate::provider_status::probing(*id) => {
-                    Some((*id, *after_sign_out))
-                }
-                _ => None,
-            })
-            .collect();
-        if settled.is_empty() {
-            return;
-        }
-        let statuses = crate::provider_status::live_statuses();
-        for (id, after_sign_out) in settled {
-            self.provider_busy.remove(&id);
-            if let Some(status) = statuses.iter().find(|status| status.provider == id) {
-                let (title, body) = settled_toast(status, after_sign_out);
-                let toast = self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
-                // A press's answer, not news: it leaves by itself (QA,
-                // 2026-10-30: it sat on screen through several more steps).
-                // A failed sign-out's toast is not this one and stays.
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(SETTLED_TOAST_FOR).await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-        }
-        cx.notify();
+        self.provider_model.update(cx, |model, cx| model.recheck_with_feedback(id, after_sign_out, cx));
     }
 
     /// Start a sign-in: the Muse sheet, the setup sheet with `claude auth
@@ -807,14 +759,7 @@ impl Harness {
             // The one Codex sign-in: the connect screen's, which keeps its
             // app-server alive until `account/login/completed` and runs it
             // with the login-shell PATH (docs/65 §3.1 #10).
-            SignInPlan::CodexBrowser => {
-                if !matches!(
-                    self.codex_login,
-                    crate::connect::CodexLogin::Waiting { .. } | crate::connect::CodexLogin::Device { .. }
-                ) {
-                    self.start_codex_login(false, cx);
-                }
-            }
+            SignInPlan::CodexBrowser => self.provider_model.update(cx, |model, cx| model.begin_codex_signin(cx)),
         }
     }
 }

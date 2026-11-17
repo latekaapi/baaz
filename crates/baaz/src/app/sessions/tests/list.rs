@@ -511,7 +511,7 @@ fn muse_never_gates_the_other_providers_rows(cx: &mut gpui::TestAppContext) {
             // Offline chrome boots into the capture login screen; a live
             // launch with Muse signed out does not.
             harness.args.offline = false;
-            assert!(harness.shell_up(), "the shell is up in live mode with Muse signed out");
+            assert!(harness.shell_up(cx), "the shell is up in live mode with Muse signed out");
             harness.args.offline = true;
         });
     });

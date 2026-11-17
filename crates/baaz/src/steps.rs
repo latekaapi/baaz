@@ -185,7 +185,7 @@
 //! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the line's chat — `answer` lands the inline answer, `steps` opens the card, `draft` the landed draft (R3), free: no turn |
 //! | `handoff-picker` | open the agent card's handoff picker (R3 board 3a), free |
 //! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for fails the step, free |
-//! | `connect-menu` | open the connect screen's "New sessions start in" menu, free |
+//! | `connect-menu` | open the "New sessions start in" menu: the connect screen's footer, else Settings › Providers' (fails when neither is up), free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
 //! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would; no child, no turn; unknown parts fail the step, free |
@@ -502,8 +502,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // D5 providers: the setup sheet (`setup:<provider>:<install|signin|update>`)
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
-    WindowVerb { verb: "connect-menu", run: |this, _, _, cx| { this.connect_menu_open = true; cx.notify(); Ok(()) } },
-    WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.step_codex_login(rest, cx) },
+    WindowVerb { verb: "connect-menu", run: |this, _, _, cx| this.step_connect_menu(cx) },
+    WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.provider_model.update(cx, |model, cx| model.step_codex_login(rest, cx)) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); Ok(()) } },
     WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },
     // P7 import (docs/72): the sheet, a folder's box, the run, the Undo.
@@ -527,8 +527,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             // The banner a typed auth failure raises, on the open session's
             // provider; no session records a step failure.
             let id = this.active.as_ref().map(|view| view.read(cx).provider_kind()).ok_or("no open session")?;
-            this.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
-            this.typed_signed_out.insert(id);
+            this.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
             cx.notify();
             Ok(())
         },
@@ -552,8 +551,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         verb: "details",
         run: |this, rest, _, cx| {
             let id = crate::providers::ProviderId::parse_known(rest).ok_or_else(|| format!("no provider `{rest}`"))?;
-            this.provider_details_open.insert(id);
-            cx.notify();
+            this.settings_page.update(cx, |page, cx| page.open_details(id, cx));
             Ok(())
         },
     },
@@ -582,7 +580,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             let target = rest
                 .parse::<usize>()
                 .ok()
-                .and_then(|index| crate::settings::settings_crumb_target(&this.settings_page.section, index));
+                .and_then(|index| crate::settings::settings_crumb_target(&this.settings_section(cx), index));
             let target = target.ok_or_else(|| format!("no crumb `{rest}` on this Settings page"))?;
             this.open_settings_page(target, cx);
             Ok(())
@@ -651,7 +649,7 @@ impl Harness {
     pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         // Refused while the Settings page stands open (B11b), like the
         // keys: a capture aid must not flip hidden pane state either.
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return Err("the Settings page is open".into());
         }
         let slug = rest.trim();
@@ -709,7 +707,7 @@ impl Harness {
     pub(crate) fn step_files_reveal(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         // Refused while the Settings page stands open (B11b): it opens the
         // pane on Files, a pane-kind command.
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return Err("the Settings page is open".into());
         }
         let raw = rest.trim();
@@ -734,7 +732,7 @@ impl Harness {
     pub(crate) fn step_files_select(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         // Refused while the Settings page stands open (B11b): it opens the
         // pane on Files, a pane-kind command.
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return Err("the Settings page is open".into());
         }
         let id = rest.trim();

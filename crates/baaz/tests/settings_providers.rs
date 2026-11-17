@@ -120,7 +120,7 @@ fn providers_page_has_close_and_setup_row() {
     pin(&settings, "open_connect_screen", "set-up row opens connect");
     let connect = read_repo("crates/baaz/src/connect.rs");
     pin(&connect, "fn open_connect_screen", "connect open entry point");
-    pin(&connect, "show_connect = true", "connect screen opens");
+    pin(&connect, "screen.show()", "connect screen opens");
 }
 
 /// Every Settings page has a probe entry: General, Providers, one provider

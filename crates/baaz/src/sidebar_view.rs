@@ -958,7 +958,7 @@ impl Harness {
             },
             // Settings › Sidebar › "Show a summary line" (docs/83 §4).
             bylines: if crate::layout::Layout::get(cx).summary_line { Bylines::Summary } else { Bylines::Off },
-            account: self.sidebar_account(account_menu_open),
+            account: self.sidebar_account(account_menu_open, cx),
             browse,
         }
     }
@@ -966,13 +966,13 @@ impl Harness {
     /// The footer and its menu: the signed-in person (or the signed-out
     /// placeholder), the tier's plan label, and — only while the menu is
     /// open — one usage card per enabled provider from `usage_rows`.
-    fn sidebar_account(&self, menu_open: bool) -> Account {
+    fn sidebar_account(&self, menu_open: bool, cx: &gpui::App) -> Account {
         // Every provider alike (owner, 2026-10-29: the footer read Muse's
         // sign-in as the app's): the account of the provider new sessions
         // start on when it is connected, else the first connected one in
         // switcher order. Muse's plan label still comes from its tier.
         let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan, status) = footer_identity(&self.connect_statuses, &self.new_provider, muse_plan);
+        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), &self.new_provider, muse_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),

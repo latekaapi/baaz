@@ -193,7 +193,7 @@ impl Harness {
         }
         // Parked only while the shell is not on screen; a signed-out Muse
         // no longer holds every link from other apps (docs/50 P1).
-        if !self.shell_up() {
+        if !self.shell_up(cx) {
             self.pending_external_urls.extend(web);
             cx.notify();
             return;
@@ -224,7 +224,7 @@ impl Harness {
     /// until the shell is up — while the login stands open the queue
     /// stays parked.
     pub(crate) fn flush_pending_external_urls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let queued = take_flushable_queue(self.shell_up(), &mut self.pending_external_urls);
+        let queued = take_flushable_queue(self.shell_up(cx), &mut self.pending_external_urls);
         if !queued.is_empty() {
             self.open_external_tabs(&queued, window, cx);
         }
@@ -238,7 +238,7 @@ impl Harness {
     /// is empty — otherwise URLs parked at the login screen would wait
     /// for another click that never comes.
     pub(crate) fn poll_external_urls(&mut self, cx: &mut Context<Self>) {
-        let signed_in = self.shell_up();
+        let signed_in = self.shell_up(cx);
         if external_queue_len() == 0 && (!signed_in || self.pending_external_urls.is_empty()) {
             return;
         }
@@ -470,7 +470,7 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.show_connect = true;
+                h.connect_screen.update(cx, |screen, _| screen.show());
                 h.ingest_external_urls(
                     vec!["https://queued-one.example/".to_owned(), "https://queued-two.example/".to_owned()],
                     window,
@@ -494,7 +494,7 @@ mod tests {
         // Continue past the connect screen, then frames: no direct flush.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.show_connect = false;
+                h.connect_screen.update(cx, |screen, _| screen.dismiss());
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
             })

@@ -24,9 +24,10 @@
 //!   the root hide the page (or show its still picture) instead.
 //!
 //! The right pane ([`crate::right_pane::RightPane`]) is the first region;
-//! the terminal dock ([`crate::terminal::TerminalDock`]) and the Skills page
-//! ([`crate::skills_page::SkillsPage`]) followed (plan 4.4); the Settings
-//! page and the Connect screen are next.
+//! the terminal dock ([`crate::terminal::TerminalDock`]), the Skills page
+//! ([`crate::skills_page::SkillsPage`]), the Settings page
+//! ([`crate::settings::SettingsPage`]) and the connect screen
+//! ([`crate::connect::ConnectScreen`]) followed (plan 4.4).
 
 use gpui::{AnyElement, App, Context, Focusable, Render, SharedString, Window};
 

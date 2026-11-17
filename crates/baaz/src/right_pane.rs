@@ -647,7 +647,7 @@ impl Harness {
             session,
             provider,
             pending_neutral: self.pending_right_neutral(cx),
-            settings_open: self.settings_page.open,
+            settings_open: self.settings_open(cx),
             page: self.existing_browser(cx),
             live: matches!(self.auth, crate::login::Auth::SignedIn(_)) || !(self.args.offline || self.args.replay.is_some()),
         }

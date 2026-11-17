@@ -622,7 +622,7 @@ impl Harness {
     fn show_imported_in_sidebar(&mut self, cx: &mut Context<Self>) {
         let first = self.import.run.as_ref().and_then(|run| run.added.first().cloned());
         self.close_import_sheet(cx);
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             self.close_settings(cx);
         }
         if let Some(id) = first {
@@ -705,9 +705,10 @@ impl Harness {
 
     // --------------------------------------------------------------- render
 
-    /// The import line under a Claude Code / Codex Settings card, or `None`
-    /// (no cache yet, no sessions, or not one of the two).
-    pub(crate) fn import_card_line(&self, id: ProviderId, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The import line's words under a Claude Code / Codex Settings card,
+    /// or `None` (no cache yet, no sessions, or not one of the two). The
+    /// Settings page draws it ([`card_line_row`]).
+    pub(crate) fn import_card_line(&self, id: ProviderId) -> Option<CardLine> {
         let provider = match id {
             ProviderId::ClaudeCode => CLAUDE,
             ProviderId::Codex => CODEX,
@@ -715,42 +716,19 @@ impl Harness {
         };
         let plan = self.import.plan()?;
         let live = live_tally(plan, provider, &self.provider_sessions);
-        let line = card_line(&live, provider, self.import.journal.imported(provider, &self.provider_sessions))?;
-        let p = cx.aui().colors;
-        let mut row = h_flex()
-            .id(SharedString::from(format!("import-card-line-{provider}")))
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_3))
-            .px(px(CARD_PAD_X))
-            .py(px(CARD_PAD_Y))
-            .text_color(p.fg_muted)
-            .child(icon(IconName::Clock).size(px(scale::ICON_SM)).color(p.fg_muted))
-            .child(div().flex_1().min_w_0().role_in(TextRole::Caption, cx).child(line.text.clone()));
-        if let Some(label) = line.button {
-            let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_import_sheet(cx));
-            let mut btn = button(SharedString::from(format!("import-card-open-{provider}")), label)
-                .size(ButtonSize::Row)
-                .accessibility_label(format!("{} · {label}", id.label()))
-                .on_click(move |event, window, cx| open(event, window, cx));
-            if line.quiet {
-                btn = btn.ghost();
-            }
-            row = row.child(btn);
-        }
-        Some(row.into_any_element())
+        card_line(&live, provider, self.import.journal.imported(provider, &self.provider_sessions))
     }
 
     /// The connect screen's assist runs for the import offer: "Found N
     /// earlier sessions on this Mac. Import…" — first run only, once a
     /// provider with sessions not in Baaz is Connected.
-    pub(crate) fn import_connect_assist(&self) -> Vec<aui::screens::AssistRun> {
+    pub(crate) fn import_connect_assist(&self, cx: &gpui::App) -> Vec<aui::screens::AssistRun> {
         if !self.import.first_run {
             return Vec::new();
         }
         let Some(plan) = self.import.plan() else { return Vec::new() };
         let connected = |id: ProviderId| {
-            self.connect_statuses
+            self.provider_statuses(cx)
                 .iter()
                 .any(|s| s.provider == id && s.headline() == crate::provider_status::Headline::Connected)
         };
@@ -1218,6 +1196,39 @@ fn folder_row(
                 .child(provider_mark(provider.icon()).size(px(scale::ICON_SM)))
                 .child(thousands(n)),
         );
+    }
+    row.into_any_element()
+}
+
+/// The import line under `id`'s Settings card: the clock, the words, and
+/// the line's button (opening the import sheet through `open`).
+pub(crate) fn card_line_row(
+    id: ProviderId,
+    line: &CardLine,
+    open: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &gpui::App,
+) -> AnyElement {
+    let provider = if id == ProviderId::Codex { CODEX } else { CLAUDE };
+    let p = cx.aui().colors;
+    let mut row = h_flex()
+        .id(SharedString::from(format!("import-card-line-{provider}")))
+        .w_full()
+        .items_center()
+        .gap(px(scale::SP_3))
+        .px(px(CARD_PAD_X))
+        .py(px(CARD_PAD_Y))
+        .text_color(p.fg_muted)
+        .child(icon(IconName::Clock).size(px(scale::ICON_SM)).color(p.fg_muted))
+        .child(div().flex_1().min_w_0().role_in(TextRole::Caption, cx).child(line.text.clone()));
+    if let Some(label) = line.button {
+        let mut btn = button(SharedString::from(format!("import-card-open-{provider}")), label)
+            .size(ButtonSize::Row)
+            .accessibility_label(format!("{} · {label}", id.label()))
+            .on_click(open);
+        if line.quiet {
+            btn = btn.ghost();
+        }
+        row = row.child(btn);
     }
     row.into_any_element()
 }

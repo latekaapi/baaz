@@ -222,8 +222,7 @@ impl Harness {
                 // sheet, clears Muse's quiet banner, and marks Muse seen
                 // so a later sign-out earns the banner instead of a gate.
                 self.muse_sheet = false;
-                self.provider_banners.remove(&crate::providers::ProviderId::Muse);
-                self.seen_connected.insert(crate::providers::ProviderId::Muse);
+                self.provider_model.update(cx, |model, _| model.muse_signed_in());
                 self.load_sessions(cx);
                 // `--tier` fakes the probe for a screenshot, and nothing else:
                 // it wins over the lane, exactly as `probe_tier` does, so a
@@ -256,16 +255,10 @@ impl Harness {
                 // Never a full-screen gate: on the connect screen the rows
                 // already show it; in the shell the sessions wait on the
                 // connection and a quiet banner names the way back.
-                if self.show_connect {
+                if self.connect_open(cx) {
                     self.forget_muse_rows(cx);
                 } else if was_in {
-                    self.seen_connected.insert(crate::providers::ProviderId::Muse);
-                    self.provider_banners.insert(
-                        crate::providers::ProviderId::Muse,
-                        crate::connect::signed_out_banner_text(
-                            crate::providers::ProviderId::Muse,
-                        ),
-                    );
+                    self.provider_model.update(cx, |model, _| model.muse_signed_out());
                 }
                 self.run_login_steps(cx);
                 cx.notify();
@@ -502,14 +495,8 @@ impl Harness {
                     // A deliberate sign-out still clears, but outside the
                     // connect screen it lands in the shell with the quiet
                     // banner — never the old full-screen gate.
-                    if !this.show_connect {
-                        this.seen_connected.insert(crate::providers::ProviderId::Muse);
-                        this.provider_banners.insert(
-                            crate::providers::ProviderId::Muse,
-                            crate::connect::signed_out_banner_text(
-                                crate::providers::ProviderId::Muse,
-                            ),
-                        );
+                    if !this.connect_open(cx) {
+                        this.provider_model.update(cx, |model, _| model.muse_signed_out());
                     }
                     cx.notify();
                 }
@@ -670,10 +657,9 @@ impl Harness {
             // The first-run Connect your providers screen, for captures:
             // rows from the scripted statuses, all Checking when unset.
             LoginSample::Connect => {
-                self.show_connect = true;
+                self.connect_screen.update(cx, |screen, _| screen.show());
                 self.muse_sheet = false;
-                self.connect_statuses = crate::connect::initial_connect_statuses();
-                self.connect_status_stamp = crate::connect::status_stamp();
+                self.provider_model.update(cx, |model, _| model.reload());
                 // The sample is a first run: the import offer may stand
                 // under the rows (a capture scans only a fixture home).
                 self.import.first_run = true;

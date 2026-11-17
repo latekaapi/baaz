@@ -49,7 +49,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use aui::a11y_text::a11y_text_input;
 use aui::composer::composer_state_rows;
@@ -700,54 +699,22 @@ pub struct Harness {
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
-    /// Y5: first-run connect screen state. At boot `show_connect` is decided
-    /// from stored facts only (the shell renders immediately otherwise, and
-    /// Muse's `account/read` never gates the window); afterwards only the
-    /// person sets it, from Settings → Providers → "Set up providers…".
-    pub(crate) show_connect: bool,
-    /// The statuses the connect screen renders: cache/script at boot, kept
-    /// fresh from the cache file while shown.
-    pub(crate) connect_statuses: Vec<crate::provider_status::ProviderStatus>,
-    /// The Codex Sign in flow's state (Idle until its row starts it).
-    pub(crate) codex_login: crate::connect::CodexLogin,
-    /// Cancel for the running Codex login thread, replaced on every start.
-    pub(crate) codex_cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// Bumped by every Codex sign-in start: a superseded flow's updates are
-    /// dropped (Use a code instead after the browser flow).
-    pub(crate) codex_generation: u64,
+    /// The window's provider facts (task 4.4): the statuses, the quiet
+    /// sign-out banners, the cards waiting on a press and the Codex sign-in
+    /// flow, owned once and read (or observed) by every surface that shows
+    /// them ([`crate::provider_model`]).
+    pub(crate) provider_model: Entity<crate::provider_model::ProviderStatusModel>,
+    /// The first-run Connect your providers screen (Y5): a region entity
+    /// that owns whether it stands and its footer menu (`connect.rs`).
+    pub(crate) connect_screen: Entity<crate::connect::ConnectScreen>,
+    /// The setup sheet (D5 B2): an entity that owns the open sheet, its
+    /// terminals and their focus (`setup.rs`).
+    pub(crate) setup: Entity<crate::setup::SetupHost>,
     /// Today's Muse login flow, presented as a sheet over the connect
     /// screen (or over the shell from the account menu) — never the app's
-    /// first screen.
+    /// first screen. Drawn from `login`/`auth` (Stage 5's), so it stays on
+    /// the root with them.
     pub(crate) muse_sheet: bool,
-    /// The connect screen's footer picker menu is open.
-    pub(crate) connect_menu_open: bool,
-    /// Settings › Browser › Assistant's model menu stands open.
-    pub(crate) assistant_menu_open: bool,
-    /// Settings provider cards whose Details are open (closed by default).
-    pub(crate) provider_details_open: HashSet<ProviderId>,
-    /// Provider cards waiting on something the person pressed (Re-check,
-    /// Sign out): the card says so until the result lands, then a toast
-    /// names it — a press with no visible answer read as broken.
-    pub(crate) provider_busy: HashMap<ProviderId, crate::settings_providers::ProviderBusy>,
-    /// The setup sheet (D5 B2) while it is up: which provider, what for.
-    pub(crate) setup_sheet: Option<crate::setup::SetupSheet>,
-    /// The sheet's terminals, one per provider, kept across Close.
-    pub(crate) setup_terminals: crate::setup::SetupTerminals,
-    /// The sheet terminal's keyboard focus.
-    pub(crate) setup_focus: FocusHandle,
-    /// Quiet per-provider banners for cached-Connected providers that later
-    /// probe Signed out: shown on that provider's composer, never a gate.
-    pub(crate) provider_banners: HashMap<ProviderId, String>,
-    /// Banners a typed auth failure raised (D5 B5): a re-probe that still
-    /// reads Connected (an invalid API key reads "logged in") must not clear
-    /// them; the person's own Sign in hands them back to the status.
-    pub(crate) typed_signed_out: HashSet<ProviderId>,
-    /// Providers the cache has called Connected this launch: only these
-    /// earn a sign-out banner (a provider never connected gets none).
-    pub(crate) seen_connected: HashSet<ProviderId>,
-    /// The provider-status cache's mtime when last read, so the connect
-    /// screen and banners follow background probes without polling reads.
-    pub(crate) connect_status_stamp: crate::connect::StatusStamp,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
     /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
@@ -1083,14 +1050,6 @@ pub struct Harness {
     pub(crate) hosting_overlay: bool,
     /// Set when the next frame should move the keyboard to the composer.
     pub(crate) focus_composer: bool,
-    /// The Settings surface's focus, tracked on the surface element.
-    /// Opening the page arms [`Harness::focus_settings`], and the next
-    /// frame moves the keyboard onto the surface — so keyboard nav and
-    /// ⌘F (SettingsFind) work without a click first.
-    pub(crate) settings_focus: FocusHandle,
-    /// Set when the next frame should move the keyboard onto the Settings
-    /// surface. Armed by `open_settings_page`, consumed in `on_frame`.
-    pub(crate) focus_settings: bool,
     /// What the billing probe said, or `None` while it has not said it yet
     /// (spec §3.2). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
@@ -1109,9 +1068,6 @@ pub struct Harness {
     /// names these sessions, so without this the sidebar forgets them on
     /// every restart (W5).
     pub(crate) provider_sessions: crate::provider_sessions::ProviderSessionStore,
-    /// Whether the Settings → Providers migration row shows its dry-run
-    /// path list (B4M). Pure view state: never persisted, defaults shut.
-    pub(crate) migration_paths_expanded: bool,
     /// The B4M plan cache: computed once off the UI thread by
     /// [`crate::session_migration::Harness::refresh_migration_cache`],
     /// read by every render. `None` until the first background compute
@@ -1212,16 +1168,6 @@ pub struct Harness {
     /// a new session and a project or space change. Part of the sidebar key
     /// (and read by the centre every frame).
     pub(crate) browse_session_tab: Option<crate::browser::TabId>,
-    /// The Settings Shortcuts section's live rows, re-read when the dialog
-    /// opens and after every shortcut edit. The dialog builds from state
-    /// every frame, and a file read per frame is not state.
-    pub(crate) shortcuts_cache: Vec<crate::keymap::EffectiveBinding>,
-    /// Which Shortcuts row is capturing the next keystroke, by row id. The
-    /// dialog owns no state of its own; exactly one row arms at a time.
-    pub(crate) recording_shortcut: Option<String>,
-    /// The last refused write per Shortcuts row, by row id: shown as the
-    /// row's detail until the next edit on that row.
-    pub(crate) shortcut_errors: HashMap<String, String>,
     /// The terminal dock under the composer: its tabs (keyed by project
     /// root, D43), focus, resize drag and bridge providers
     /// ([`terminal::TerminalDock`], task 4.4).
@@ -1266,11 +1212,10 @@ pub struct Harness {
     /// The session whose row is being renamed in place, and the field doing it.
     pub(crate) renaming: Option<String>,
     pub(crate) rename: Entity<TextareaState>,
-    /// The Settings page state: open flag, section, last-visited and
-    /// restore record (`Route::Settings`, B11).
-    pub(crate) settings_page: crate::settings::SettingsPageState,
-    /// The Settings Shortcuts search field (⌘F on the page).
-    pub(crate) settings_search: Entity<TextareaState>,
+    /// The Settings page (`Route::Settings`, B11): a region entity that
+    /// owns its route, search, focus, Shortcuts rows and recording, and its
+    /// pages' menus and folds (`settings.rs`, task 4.4).
+    pub(crate) settings_page: Entity<crate::settings::SettingsPage>,
     /// The Skills page (docs/15-skills.md §4): a region entity that owns its
     /// open flag, catalog, filter, search, selection, dialogs and CLI calls
     /// (`skills_page.rs`, task 4.4).
@@ -1414,6 +1359,10 @@ impl Harness {
         let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), cx));
         // The Skills page, closed: it lists for the launch workspace until
         // the root pushes the current project.
+        let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone()));
+        let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), cx));
+        let setup = cx.new(|cx| crate::setup::SetupHost::new(provider_model.clone(), cx));
+        let settings_page = cx.new(|cx| crate::settings::SettingsPage::new(provider_model.clone(), window, cx));
         let skills_page = {
             let program = args.program.clone();
             let root = args.workspace.to_string_lossy().into_owned();
@@ -1479,23 +1428,10 @@ impl Harness {
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
-            show_connect: false,
-            connect_statuses: Vec::new(),
-            codex_login: crate::connect::CodexLogin::Idle,
-            codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            codex_generation: 0,
+            provider_model,
+            connect_screen,
+            setup,
             muse_sheet: false,
-            connect_menu_open: false,
-            assistant_menu_open: false,
-            provider_details_open: HashSet::new(),
-            provider_busy: HashMap::new(),
-            setup_sheet: None,
-            setup_terminals: crate::setup::SetupTerminals::default(),
-            setup_focus: cx.focus_handle(),
-            provider_banners: HashMap::new(),
-            typed_signed_out: HashSet::new(),
-            seen_connected: HashSet::new(),
-            connect_status_stamp: (None, 0),
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
@@ -1585,15 +1521,12 @@ impl Harness {
             focus_palette: cx.focus_handle(),
             hosting_overlay: false,
             focus_composer: true,
-            settings_focus: cx.focus_handle(),
-            focus_settings: false,
             tier: None,
             tier_probing: false,
             tier_retry: Default::default(),
             tier_retry_timer: None,
             overrides: crate::sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
-            migration_paths_expanded: false,
             migration_cache: None,
             migration_refresh_in_flight: false,
             import: crate::import_ui::ImportUi::boot(),
@@ -1606,9 +1539,6 @@ impl Harness {
             sessions_list_in_flight: false,
             sessions_list_stale: false,
             saved_list: None,
-            shortcuts_cache: crate::keymap::effective_bindings(),
-            recording_shortcut: None,
-            shortcut_errors: HashMap::new(),
             terminal_dock,
             terminal_service,
             show_hidden: false,
@@ -1624,8 +1554,7 @@ impl Harness {
             search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
-            settings_page: crate::settings::SettingsPageState::default(),
-            settings_search: cx.new(|cx| composer_state_rows("Search shortcuts", 1, 1, window, cx)),
+            settings_page,
             skills_page,
             renaming_project: None,
             project_colour_open: false,
@@ -1805,6 +1734,12 @@ impl Harness {
         // The Skills page's asks (the project menu, a Muse session for A5).
         let skills = this.skills_page.clone();
         this.field_subscriptions.push(cx.subscribe_in(&skills, window, Self::on_skills_page_event));
+        let settings = this.settings_page.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&settings, window, Self::on_settings_event));
+        let connect = this.connect_screen.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&connect, window, Self::on_connect_event));
+        let model = this.provider_model.clone();
+        this.field_subscriptions.push(cx.subscribe(&model, Self::on_provider_model_event));
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
@@ -1917,16 +1852,17 @@ impl Harness {
         // shell at once from the cached statuses. Muse's `account/read`
         // still reports (and refreshes Muse's row), but never gates the
         // window.
-        this.show_connect = crate::connect::decide_launch(crate::provider_status::first_run_at_boot())
+        let first_run = crate::connect::decide_launch(crate::provider_status::first_run_at_boot())
             == crate::connect::LaunchDecision::Connect;
+        if first_run {
+            this.connect_screen.update(cx, |screen, _| screen.show());
+        }
         // P7: the first-run connect screen offers the import once a
         // provider is Connected; its counts come from a background scan.
-        this.import.first_run = this.show_connect;
-        if this.show_connect {
+        this.import.first_run = first_run;
+        if first_run {
             this.refresh_import_scan(cx);
         }
-        this.connect_statuses = crate::connect::initial_connect_statuses();
-        this.connect_status_stamp = crate::connect::status_stamp();
         // Muse is one provider among three (docs/50 P1): it starts only when
         // the person has it on and it was not found missing. Otherwise the
         // shell settles on the local and provider records at once.
@@ -2218,8 +2154,8 @@ impl Harness {
     /// Whether the shell is on screen: not behind the connect screen. What
     /// links from other apps wait for. (The capture-only whole-window login
     /// screen is gone, docs/82 0.16: no launch ever showed it.)
-    pub(crate) fn shell_up(&self) -> bool {
-        !self.show_connect
+    pub(crate) fn shell_up(&self, cx: &App) -> bool {
+        !self.connect_open(cx)
     }
 
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
@@ -2443,7 +2379,7 @@ impl Harness {
     /// hides the dock without writing its state, and a toggle would
     /// otherwise flip it invisibly.
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return;
         }
         crate::layout::Layout::stage(cx, |layout| layout.terminal_open = !layout.terminal_open);
@@ -2479,7 +2415,7 @@ impl Harness {
     /// page hides the pane without writing its state, and a toggle would
     /// otherwise flip it — and its per-session record — invisibly.
     pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return;
         }
         // A user toggle always animates, even when a restore armed the
@@ -2578,7 +2514,7 @@ impl Harness {
     /// its test pins, so it compiles into test builds only.
     #[cfg(test)]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return;
         }
         // A user pick always animates (see `toggle_right`).
@@ -2861,7 +2797,7 @@ impl Harness {
     /// Settings page stands open (B11b), like the dock toggle: opening the
     /// dock would flip hidden state invisibly.
     pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return;
         }
         self.with_terminal_dock(cx, |dock, cx| dock.new_terminal(window, cx));
@@ -2877,7 +2813,7 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return;
         }
         self.with_terminal_dock(cx, |dock, cx| dock.open_tab(tab, window, cx));
@@ -2896,7 +2832,7 @@ impl Harness {
             .unwrap_or_else(|| PathBuf::from(self.workspace()));
         // The scripted dock stays shut while the Settings page stands open
         // (B11b): a capture aid must not flip hidden state either.
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return Err("the Settings page is open".into());
         }
         self.with_terminal_dock(cx, |dock, cx| dock.open_scripted(&root, title, window, cx));
@@ -2994,7 +2930,7 @@ impl Harness {
     /// click opens the pane on that screen (sliding the strip when it was
     /// open on another), and the lit toggle closes it.
     fn pane_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open = crate::layout::Layout::get(cx).right_open && !self.settings_page.open;
+        let open = crate::layout::Layout::get(cx).right_open && !self.settings_open(cx);
         let shown = layout::right_kind(crate::layout::Layout::get(cx));
         let mut row = h_flex().flex_none().items_center().gap(px(ROW_GAP));
         for (kind, id) in [
@@ -5411,7 +5347,7 @@ impl Harness {
         // Deferred, not built here: `on_frame` runs inside render, and the
         // point is that no frame constructs a webview. Waits for an active
         // session so it warms that session's browser, not a home one.
-        if !self.browser_idle_warmed && self.shell_up() && self.active.is_some() {
+        if !self.browser_idle_warmed && self.shell_up(cx) && self.active.is_some() {
             self.browser_idle_warmed = true;
             if !self.browser.fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
                 self.defer_browser_prewarm(cx);
@@ -5598,13 +5534,14 @@ impl Harness {
                 rehint,
             );
         }
-        // The connect screen owns the whole window while it is up: it
-        // follows the status cache and runs parked row actions, nothing
-        // else. The login screen owns it the same way, but only for the
+        // The connect screen owns the whole window while it is up: the
+        // provider model follows the status cache (the screen observes it
+        // and redraws itself) and the session lifecycle below waits behind
+        // it. The login screen owns it the same way, but only for the
         // offline/replay captures that still boot into it — a live launch
         // never gates on Muse any more, so a signed-out shell runs the
         // lifecycle below like a signed-in one.
-        if self.show_connect {
+        if self.connect_open(cx) {
             self.sync_provider_state(cx);
             // Window verbs (the setup sheet, the footer menu) script the
             // connect screen's captures; nothing else runs here.
@@ -5641,15 +5578,6 @@ impl Harness {
                 view.update(cx, |view, cx| view.focus_composer(window, cx));
             }
         }
-        // The Settings page takes the keyboard the frame after it opens, so
-        // keyboard nav and ⌘F work without a click first. Skipped in
-        // deterministic captures, like the composer's own focus.
-        if std::mem::take(&mut self.focus_settings)
-            && self.settings_page.open
-            && !crate::clock::deterministic()
-        {
-            window.focus(&self.settings_focus, cx);
-        }
     }
 }
 
@@ -5665,9 +5593,9 @@ impl Render for Harness {
         // The connect screen owns the whole window on a first run; the shell
         // is not built behind it. Any other launch renders the shell at once:
         // a slow or signed-out Muse never gates the window.
-        let body: AnyElement = if self.show_connect {
+        let body: AnyElement = if self.connect_open(cx) {
             aui::shell::place_native_lights(window, cx);
-            self.render_connect(window, cx).into_any_element()
+            self.compose_connect(window, cx)
         } else {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
@@ -5681,17 +5609,22 @@ impl Render for Harness {
             // centre+right merge into the settings surface (right pane
             // and terminal hidden, not closed — their state is untouched
             // and restored on exit).
-            let settings_open = self.settings_page.open;
+            let settings_open = self.settings_open(cx);
             let right_open = crate::layout::Layout::get(cx).right_open && !settings_open;
-            let sidebar: AnyElement = if settings_open {
-                self.render_settings_nav(cx)
+            // The Settings page fills three slots (task 4.4): its section
+            // list, its surface, and the bar's crumbs and close.
+            let (settings_nav, settings_surface, settings_chrome) = match settings_open.then(|| self.compose_settings(window, cx)) {
+                Some((nav, surface, chrome)) => (Some(nav), Some(surface), Some(chrome)),
+                None => (None, None, None),
+            };
+            let sidebar: AnyElement = if let Some(nav) = settings_nav {
+                nav
             } else if window.is_a11y_active() {
                 self.sidebar_pane.clone().into_any_element()
             } else {
                 self.sidebar_pane.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             };
-            let centre = if settings_open {
-                let content = self.render_settings_content(window, cx);
+            let centre = if let Some(content) = settings_surface {
                 match self.render_corner_stack(cx) {
                     Some(stack) => div().relative().size_full().child(content).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
                     None => content,
@@ -5720,9 +5653,9 @@ impl Render for Harness {
             // cannot follow a per-frame resize without jank — and cuts a hole
             // for the peek so it shows over the page.
             let browse = crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !settings_open;
-            let chrome = if settings_open {
+            let chrome = if let Some(chrome) = settings_chrome {
                 self.set_browse_holes(Vec::new(), cx);
-                self.render_settings_chrome(cx)
+                chrome
             } else {
                 self.render_bar_chrome(window, cx)
             };
@@ -5863,14 +5796,13 @@ impl Render for Harness {
         // the in-header copy's recorded bounds.
         let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
         let feedback_popover = self.render_feedback_popover(window, cx);
-        let settings = self.render_settings(cx);
         // The connect screen draws its own setup and import sheets
-        // (`render_connect`); drawing them here as well stacked a second
+        // (`compose_connect`); drawing them here as well stacked a second
         // scrim under the first (the window behind went to 25 %).
-        let connect_owns_sheets = self.show_connect;
+        let connect_owns_sheets = self.connect_open(cx);
         let muse_sheet = self
             .render_muse_sheet(window, cx)
-            .or_else(|| if connect_owns_sheets { None } else { self.render_setup_sheet(cx) })
+            .or_else(|| if connect_owns_sheets { None } else { self.compose_setup_sheet(cx) })
             .or_else(|| if connect_owns_sheets { None } else { self.render_import_sheet(cx) })
             .or_else(|| self.render_chrome_import(cx));
         let palette = if modal_hosted { None } else { self.render_palette(cx) };
@@ -5936,7 +5868,7 @@ impl Render for Harness {
                 }
             })
         };
-        let (palette, dialog, settings, muse_sheet) = (held(palette), held(dialog), held(settings), held(muse_sheet));
+        let (palette, dialog, muse_sheet) = (held(palette), held(dialog), held(muse_sheet));
         let (overflow, back_history, project_menu, right_views) = (held(overflow), held(back_history), held(project_menu), held(right_views));
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
@@ -5990,7 +5922,7 @@ impl Render for Harness {
         let overlay_now = self.overlays.read(cx).palette.is_some()
             || self.overlays.read(cx).dialog.is_some()
             || self.overlays.read(cx).menu.is_some()
-            || self.settings_page.open
+            || self.settings_open(cx)
             || self.feedback.is_open();
         let overlay_just_closed = self.overlay_was_open && !overlay_now;
         // Two triggers, and both are needed. The first frame has nothing
@@ -6279,7 +6211,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &aui_webview::FocusAddress, window, cx| {
                     // Ignored while the Settings page stands open (B11b): a
                     // pane-kind command, like the toggles.
-                    if !this.settings_page.open {
+                    if !this.settings_open(cx) {
                         this.focus_browser_address(window, cx);
                     }
                 }))
@@ -6295,7 +6227,6 @@ impl Render for Harness {
                 .children(capture)
                 .children(palette)
                 .children(dialog)
-                .children(settings)
                 .children(muse_sheet)
                 .children(row_detail)
                 .children(overflow)
@@ -6425,8 +6356,7 @@ impl Harness {
         // capture-only login screen or the Muse sign-in sheet. A signed-out
         // Muse used to take every press, so nothing else ever got Escape
         // on a machine that does not use Muse (docs/50 P1).
-        if self.setup_sheet.is_some() {
-            self.close_setup_sheet(cx);
+        if self.close_setup_sheet(cx) {
             return;
         }
         if self.muse_sheet {
@@ -6435,7 +6365,7 @@ impl Harness {
         }
         // The Settings page is the first thing Escape takes back:
         // recording → search → sub-page up → close+restore (§1.3).
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             self.settings_escape(cx);
             return;
         }
@@ -6922,7 +6852,7 @@ mod tests {
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
+        assert!(vc.update(|_, cx| baaz.read(cx).settings_open(cx)));
         let (right_open, terminal_open, overrides) = vc.update(|_, cx| {
             let h = baaz.read(cx);
             (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).terminal_open, h.overrides.clone())
@@ -6939,7 +6869,7 @@ mod tests {
             assert_eq!(crate::layout::Layout::get(cx).right_open, right_open, "toggle_right changed hidden state");
             assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "a dock command changed hidden state");
             assert!(h.overrides == overrides, "a per-session pane record was written");
-            assert!(h.settings_page.open, "a guarded command closed Settings");
+            assert!(h.settings_open(cx), "a guarded command closed Settings");
         });
         // The matching palette action is ignored the same way: it neither
         // acts nor exits the page.
@@ -6961,7 +6891,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "the palette action flipped the dock");
-            assert!(h.settings_page.open, "the ignored palette action exited Settings");
+            assert!(h.settings_open(cx), "the ignored palette action exited Settings");
         });
         restore_state(state);
     }
@@ -7047,6 +6977,55 @@ mod tests {
         restore_state(state);
     }
 
+    /// Task 4.4: the Settings page is its own region entity. Its own state
+    /// — a Shortcuts row armed then disarmed by Escape, a provider card's
+    /// Details, the move row's path list, the "New sessions" menu — lands
+    /// on the page and notifies the page alone; the root is never notified,
+    /// and the page still stands open (the root reads it each frame).
+    #[gpui::test]
+    fn the_settings_page_records_a_shortcut_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let state = hermetic_state("settings-entity");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let opened = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings("shortcuts", cx)));
+        assert!(opened.is_ok(), "the page opens: {opened:?}");
+        vc.run_until_parked();
+        let page = vc.update(|_, cx| baaz.read(cx).settings_page.clone());
+        let (page_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (p, r) = (page_notes.clone(), root_notes.clone());
+            (cx.observe(&page, move |_, _| p.set(p.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+        });
+        let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
+        vc.update(|_, cx| page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Record, cx)));
+        assert_eq!(vc.update(|_, cx| page.read(cx).recording.clone()), Some(id.to_string()), "Record arms the row");
+        // Escape's first layer is the page's own: it disarms the row.
+        let escaped = vc.update(|_, cx| baaz.update(cx, |h, cx| h.settings_escape(cx)));
+        assert!(escaped, "Escape went to the open page");
+        vc.update(|_, cx| page.update(cx, |page, cx| page.open_details(crate::providers::ProviderId::Codex, cx)));
+        vc.update(|_, cx| page.update(cx, |page, cx| page.toggle_migration_paths(cx)));
+        vc.update(|_, cx| page.update(cx, |page, cx| page.open_default_menu(cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let shown = page.read(cx);
+            assert!(shown.recording.is_none(), "Escape disarmed the row");
+            assert!(shown.details_open.contains(&crate::providers::ProviderId::Codex), "Details opened on the page");
+            assert!(shown.migration_paths_expanded, "the path list unfolded on the page");
+            assert!(shown.default_menu_open, "the picker's menu opened on the page");
+            assert!(baaz.read(cx).settings_open(cx), "the page itself stays open");
+            assert!(crate::region::Region::covers_page(shown, cx), "an open page covers Browse's page");
+            assert_eq!(crate::region::Region::title(shown, cx).as_ref(), "Shortcuts");
+        });
+        assert!(page_notes.get() > 0, "the page is notified");
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the page's own state");
+        restore_state(state);
+    }
+
     /// B11b: opening the palette — and cancelling it — keeps the Settings
     /// page exactly where it was.
     #[gpui::test]
@@ -7063,8 +7042,8 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.settings_page.open, "opening the palette exited Settings");
-            assert_eq!(h.settings_page.section, "sidebar");
+            assert!(h.settings_open(cx), "opening the palette exited Settings");
+            assert_eq!(h.settings_section(cx), "sidebar");
         });
         // Cancelling (Escape's path: close the topmost overlay) keeps it.
         vc.update(|_, cx| {
@@ -7074,8 +7053,8 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.settings_page.open, "cancelling the palette exited Settings");
-            assert_eq!(h.settings_page.section, "sidebar");
+            assert!(h.settings_open(cx), "cancelling the palette exited Settings");
+            assert_eq!(h.settings_section(cx), "sidebar");
         });
         restore_state(state);
     }
@@ -7094,7 +7073,7 @@ mod tests {
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("sidebar", cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
+        assert!(vc.update(|_, cx| baaz.read(cx).settings_open(cx)));
         // A second session landing is the switch: build it the way the
         // scripted chrome does, then run the real choke point.
         vc.update(|window, cx| {
@@ -7112,15 +7091,15 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(!h.settings_page.open, "a session switch left Settings open");
-            assert_eq!(h.settings_page.saved_active, None, "a navigation exit keeps a restore record");
+            assert!(!h.settings_open(cx), "a session switch left Settings open");
+            assert_eq!(h.settings_page.read(cx).state.saved_active, None, "a navigation exit keeps a restore record");
         });
         // ⌘, reopens the last-visited section (Sidebar), not General.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("", cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.settings_page.open);
-            assert_eq!(h.settings_page.section, "sidebar", "⌘, did not reopen the last section");
+            assert!(h.settings_open(cx));
+            assert_eq!(h.settings_section(cx), "sidebar", "⌘, did not reopen the last section");
         });
         restore_state(state);
     }
@@ -7145,7 +7124,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
         draw_shell(&mut *vc, &baaz);
-        let surface = vc.update(|_, cx| baaz.read(cx).settings_focus.clone());
+        let surface = vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).focus.clone());
         assert_eq!(
             vc.update(|window, cx| window.focused(cx)),
             Some(surface),
@@ -8016,16 +7995,20 @@ mod tests {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
                 h.open_settings_page("providers", cx);
-                h.default_provider_intent(ConnectIntent::ToggleDefaultMenu);
-                assert!(h.connect_menu_open, "the chip opens its menu");
-                h.default_provider_intent(ConnectIntent::SetDefault(aui_icons::Provider::Codex));
-                assert!(!h.connect_menu_open, "a pick closes it");
-                assert_eq!(h.new_provider, "codex");
-                h.default_provider_intent(ConnectIntent::ToggleDefaultMenu);
-                h.open_settings_page("general", cx);
-                assert!(!h.connect_menu_open, "leaving the page closes the menu");
             })
         });
+        // The picker's menu is the page's own; a pick reaches the root as
+        // an event, delivered when the update that emitted it ends.
+        let page = vc.update(|_, cx| baaz.read(cx).settings_page.clone());
+        let menu_open = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| page.read(cx).default_menu_open);
+        vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::ToggleDefaultMenu, cx)));
+        assert!(menu_open(vc), "the chip opens its menu");
+        vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::SetDefault(aui_icons::Provider::Codex), cx)));
+        assert!(!menu_open(vc), "a pick closes it");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).new_provider.clone()), "codex");
+        vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::ToggleDefaultMenu, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
+        assert!(!menu_open(vc), "leaving the page closes the menu");
         let stored = std::fs::read_to_string(state.2.join("provider.json")).expect("provider.json written");
         assert!(stored.contains("\"codex\""), "{stored}");
         assert_eq!(crate::providers::read_last_provider(), Some(crate::providers::ProviderId::Codex));
@@ -8135,7 +8118,7 @@ mod tests {
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("browser", cx)));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).settings_page.section.clone()),
+            vc.update(|_, cx| baaz.read(cx).settings_section(cx)),
             "browser",
             "settings:browser normalises onto the Browser page"
         );
@@ -8173,7 +8156,7 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_chromium_settings(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(!harness.settings_page.open, "the row leaves Settings");
+            assert!(!harness.settings_open(cx), "the row leaves Settings");
             assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "the row lands in Browse");
             let id = harness.browse_centre_shown(cx).expect("a tab shows");
             let url = harness.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
@@ -9326,7 +9309,7 @@ mod tests {
         let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx));
             });
         });
         let file = std::fs::read_to_string(state.2.join("keymap.json")).expect("the handler writes the file");
@@ -9337,7 +9320,7 @@ mod tests {
         let current = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("rebound");
         assert_eq!(current.keystroke, "cmd-t", "the effective binding moved");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).shortcut_errors.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).shortcut_errors.is_empty()),
             "a good write hangs no error on the row"
         );
         assert_eq!(
@@ -9358,10 +9341,10 @@ mod tests {
         let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-q".into()), cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-q".into()), cx));
             });
         });
-        let error = vc.update(|_, cx| baaz.read(cx).shortcut_errors.get(id.as_ref()).cloned());
+        let error = vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).shortcut_errors.get(id.as_ref()).cloned());
         let error = error.expect("the refusal hangs on the row");
         assert!(
             error.contains("reserved") && error.contains("Quits the app"),
@@ -9383,33 +9366,33 @@ mod tests {
         let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Record, cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Record, cx));
             });
         });
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).recording_shortcut.clone()),
+            vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).recording.clone()),
             Some(id.to_string()),
             "Record arms the row"
         );
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Cancel, cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Cancel, cx));
             });
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).recording_shortcut.clone()).is_none(),
+            vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).recording.clone()).is_none(),
             "Cancel disarms it"
         );
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx));
             });
         });
         let rebound = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("rebound");
         assert_eq!(rebound.keystroke, "cmd-t");
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Clear, cx);
+                harness.settings_page.update(cx, |page, cx| page.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Clear, cx));
             });
         });
         let file = std::fs::read_to_string(state.2.join("keymap.json")).unwrap_or_default();

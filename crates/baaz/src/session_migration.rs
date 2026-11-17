@@ -1064,7 +1064,7 @@ impl BaazHarness {
     /// a missing or stale cache kicks a background recompute and offers
     /// when it lands, so the walk never runs on the UI thread.
     pub(crate) fn maybe_offer_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.show_connect || crate::clock::deterministic() {
+        if self.connect_open(cx) || crate::clock::deterministic() {
             return;
         }
         let state = crate::store::support_dir();
@@ -1148,12 +1148,6 @@ impl BaazHarness {
     pub(crate) fn dismiss_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         dismiss(&crate::store::support_dir());
         self.close_dialog(cx);
-    }
-
-    /// Flip the Providers row's path list open or shut.
-    pub(crate) fn toggle_migration_paths(&mut self, cx: &mut gpui::Context<Self>) {
-        self.migration_paths_expanded = !self.migration_paths_expanded;
-        cx.notify();
     }
 }
 

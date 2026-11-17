@@ -597,7 +597,7 @@ impl Harness {
         // destination owns the next route) — except pane/terminal commands,
         // which are ignored with no state change while the page stands
         // open (B11b), like their keybindings.
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             if kind == PaletteKind::Commands
                 && Command::parse(&id).is_some_and(|command| command.is_pane_or_terminal())
             {
@@ -1492,7 +1492,7 @@ impl Harness {
     /// so a page loading under a toast never moves it. Settings hides the
     /// page, so the stack draws in the window there.
     pub(crate) fn corner_in_overlay(&self, cx: &gpui::App) -> bool {
-        crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !self.settings_page.open
+        crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !self.settings_open(cx)
     }
 
     /// The newest toast as the stack's chip, with `+n` while more wait. The
@@ -2480,7 +2480,7 @@ mod tests {
         assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay(cx)), "Sessions draws it in the window");
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse)));
         assert!(vc.update(|_, cx| baaz.read(cx).corner_in_overlay(cx)), "Browse draws it over the page");
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.settings_page.open = true));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.settings_page.update(cx, |page, _| page.state.open = true)));
         assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay(cx)), "Settings hides the page");
         restore_state(state);
     }

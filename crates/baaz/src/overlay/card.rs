@@ -22,7 +22,7 @@ const CARD_INSET: f32 = 16.0;
 impl Harness {
     /// Where the card (or column) window goes now, in screen space.
     fn wanted_card_float(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.card_ui == CardUi::Closed || self.settings_open() {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.card_ui == CardUi::Closed || self.settings_open(cx) {
             return None;
         }
         let page = self.browser.centre_page_rect?;

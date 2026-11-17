@@ -66,6 +66,16 @@ pub fn model_choices(provider: ProviderId) -> Vec<ModelChoice> {
     }
 }
 
+/// The provider and model a new browser chat starts with now, from the
+/// layout's stored pick and the live statuses: what the browser chat starts
+/// on and what Settings › Browser › Assistant shows. `None` when no provider
+/// can start a session.
+pub(crate) fn current_choice(cx: &gpui::App) -> Option<ModelChoice> {
+    let statuses = crate::provider_status::live_statuses();
+    let default = crate::settings_providers::default_new_provider(&statuses);
+    resolve(&crate::layout::Layout::get(cx).assistant, |p| crate::settings_providers::usable_provider(&statuses, p), default)
+}
+
 /// The provider and model a new browser chat starts with: the stored pick
 /// while its provider is usable, else `default_provider`'s cheapest model.
 /// `None` when no provider can start a session.

@@ -20,9 +20,7 @@ impl Harness {
     /// The provider and model a new browser chat starts with, or `None`
     /// when no provider can start a session.
     pub(crate) fn assistant_choice(&self, cx: &gpui::App) -> Option<ModelChoice> {
-        let statuses = crate::provider_status::live_statuses();
-        let default = crate::settings_providers::default_new_provider(&statuses);
-        assistant::resolve(&crate::layout::Layout::get(cx).assistant, |p| crate::settings_providers::usable_provider(&statuses, p), default)
+        assistant::current_choice(cx)
     }
 
     /// The browser chat's session id, if one is open.

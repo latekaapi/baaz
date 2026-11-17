@@ -802,7 +802,7 @@ impl Harness {
         // Flat (docs/83 §3): the page is the centre column edge to edge —
         // between the sidebar column and the right column, the dock below
         // it inside the column.
-        if !self.settings_open() {
+        if !self.settings_open(cx) {
             let sidebar = if crate::layout::Layout::get(cx).sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
             let mut right = if crate::layout::Layout::get(cx).right_open { gpui::px(self.right_width(cx)) } else { gpui::px(0.0) };
             // The docked agent column takes its strip beside the page (R3):
@@ -2219,7 +2219,11 @@ impl Harness {
         // shows its session's Browser kind with nothing over it.
         let overlays = self.overlays.read(cx);
         let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
-        let settings_open = self.settings_open() || self.muse_sheet || self.setup_sheet.is_some();
+        // The Settings page covers the page while it stands (the region
+        // contract's `covers_page`), as the two sheets do.
+        let settings_open = crate::region::Region::covers_page(self.settings_page.read(cx), cx)
+            || self.muse_sheet
+            || self.setup_open(cx);
         // A modal the overlay window hosts sits above the live page: it
         // covers nothing (`OverlayKind::Modal`).
         let modal_hosted = self.modal_overlay_wanted(cx);
@@ -5633,7 +5637,7 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(300));
         vc.run_until_parked();
         assert!(
-            vc.update(|_, cx| baaz.read(cx).settings_page.open),
+            vc.update(|_, cx| baaz.read(cx).settings_open(cx)),
             "⌘, from the page opens Settings"
         );
         routing_restore(state);

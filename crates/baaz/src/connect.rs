@@ -16,11 +16,22 @@
 //! Claude Code Sign in, every Install and every Update open the setup sheet
 //! ([`crate::setup`]) with the command typed, not run — the person presses
 //! Enter.
+//!
+//! The screen is a [`Region`] entity (task 4.4): [`ConnectScreen`] owns
+//! whether it stands and its footer menu, and renders the rows, the picker
+//! and the assist line from the shared
+//! [`ProviderStatusModel`](crate::provider_model::ProviderStatusModel) —
+//! the statuses and the Codex sign-in, which it observes, so a probe that
+//! lands redraws it without the root. What only the root knows (the
+//! provider new sessions start in, the import offer) reaches it as
+//! [`ConnectFacts`]; what reaches past it goes out as a [`ConnectEvent`].
+//! The sheets over it — Muse's sign-in (the root's, with the login state),
+//! the setup sheet ([`crate::setup::SetupHost`]) and the import sheet — are
+//! stacked over it by the root (`Harness::compose_connect`).
 
 use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aui::screens::{ConnectRowData, ProviderActionDef, ProviderHeadline as AuiHeadline, StatusLine};
@@ -259,7 +270,8 @@ pub fn build_rows(statuses: &[ProviderStatus], codex: &CodexLogin) -> Vec<Connec
 }
 
 /// The assist line's runs for a Codex sign-in in `state` (see
-/// [`Harness::codex_assist`]). Pure, so tests read it without a window.
+/// [`ProviderStatusModel::codex_assist`]). Pure, so tests read it without a
+/// window.
 pub fn codex_assist_runs(state: &CodexLogin) -> Vec<aui::screens::AssistRun> {
     use aui::screens::AssistRun as R;
     match state {
@@ -624,15 +636,17 @@ pub fn run_codex_login(
 // ------------------------------------------------------------ app wiring
 
 use aui::screens::{connect_providers, ConnectIntent, ProviderAction, ProviderIntent};
-use gpui::{AnyElement, AppContext as _, Context, Window};
+use gpui::{prelude::*, AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Window};
 
 use crate::app::Harness;
+use crate::provider_model::{ProviderModelEvent, ProviderStatusModel};
+use crate::region::Region;
 use crate::setup::SetupKind;
 
 /// The statuses a boot renders from: scripted in deterministic mode (or all
 /// Checking when nothing is scripted), the on-disk cache over Checking
 /// defaults live. Never probes — probes only write the cache file, and the
-/// stamp guard in [`Harness::sync_provider_state`] picks their results up.
+/// stamp guard in [`ProviderStatusModel::sync`] picks their results up.
 pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
     let mut statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
         .into_iter()
@@ -667,84 +681,232 @@ pub(crate) fn status_stamp() -> StatusStamp {
     (mtime, crate::provider_status::status_generation())
 }
 
-/// The part of the statuses a person can see: all of it but when each was
-/// last checked — except whether it has been checked at all (Checking).
-fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
-    statuses
-        .iter()
-        .cloned()
-        .map(|mut status| {
-            status.checked_at = status.checked_at.map(|_| 0);
-            status
-        })
-        .collect()
-}
-
 /// Why Muse was not started at launch: the person has it off, or the last
 /// probe found it missing. [`Harness::start_muse_once_available`] starts it
 /// when that stops being true.
 pub(crate) const MUSE_OFF: &str = "Muse is off or not installed";
 
-/// What [`Harness::sync_provider_state`] compares: the cache file's mtime
+/// What [`ProviderStatusModel::sync`] compares: the cache file's mtime
 /// (writes from usage readings and the Enabled switch) and the live
 /// service's publish count (probe results, which also wake the window).
 pub(crate) type StatusStamp = (Option<std::time::SystemTime>, u64);
 
-impl Harness {
+/// What the connect screen needs from the root: pushed every frame
+/// (`Harness::compose_connect`).
+#[derive(Clone, Default)]
+pub(crate) struct ConnectFacts {
+    /// The provider new sessions start in (the footer's picker).
+    pub new_provider: Option<ProviderId>,
+    /// The P7 import offer for the assist line (first run only), which
+    /// stands there while Codex is not signing in.
+    pub import_assist: Vec<aui::screens::AssistRun>,
+}
+
+/// What the connect screen asks of the root.
+#[derive(Clone, Debug)]
+pub(crate) enum ConnectEvent {
+    /// Continue or Skip: first run ends and the shell comes up.
+    Finish,
+    /// A row's button (sign in, install, update, docs, cancel, re-check).
+    ProviderAction { id: ProviderId, action: ProviderAction },
+    /// The footer picker's pick.
+    SetDefault(ProviderId),
+    /// The import offer's Import… link.
+    OpenImportSheet,
+}
+
+/// The first-run Connect your providers screen (task 4.4): a region entity
+/// that owns whether it stands and its footer menu, and renders itself from
+/// the shared [`ProviderStatusModel`] — rows, the footer's picker, the
+/// assist line. The sheets over it (Muse's sign-in, the setup sheet, the
+/// import sheet) are the root's and are stacked over it by the root.
+pub(crate) struct ConnectScreen {
+    /// Whether the screen owns the window (Y5). At boot it is decided from
+    /// stored facts only (the shell renders immediately otherwise, and
+    /// Muse's `account/read` never gates the window); afterwards only the
+    /// person opens it, from Settings → Providers → "Set up providers…".
+    pub(crate) open: bool,
+    /// The footer's "New sessions start in" menu stands open.
+    pub(crate) menu_open: bool,
+    /// The window's provider facts, observed: a probe that lands redraws
+    /// the rows without the root.
+    model: Entity<ProviderStatusModel>,
+    /// What the root told the screen (see [`ConnectFacts`]).
+    pub(crate) facts: ConnectFacts,
+    /// The screen's focus: the region contract's; its rows' buttons take
+    /// the keyboard as they are pressed.
+    focus: gpui::FocusHandle,
+    /// The model observation that redraws the screen.
+    _observe: gpui::Subscription,
+}
+
+impl EventEmitter<ConnectEvent> for ConnectScreen {}
+
+impl ConnectScreen {
+    /// The screen, shut, over `model`.
+    pub(crate) fn new(model: Entity<ProviderStatusModel>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&model, |_, _, cx| cx.notify());
+        ConnectScreen { open: false, menu_open: false, model, facts: ConnectFacts::default(), focus: cx.focus_handle(), _observe: observe }
+    }
+
+    /// Stand the screen up over the shell (or at boot). The root re-reads
+    /// the statuses and redraws.
+    pub(crate) fn show(&mut self) {
+        self.open = true;
+    }
+
+    /// Leave it: Continue/Skip. The menu never outlives the screen.
+    pub(crate) fn dismiss(&mut self) {
+        self.open = false;
+        self.menu_open = false;
+    }
+
+    /// Open the footer's menu (the `connect-menu` step verb). `false` while
+    /// the screen is shut.
+    pub(crate) fn open_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.open {
+            return false;
+        }
+        self.menu_open = true;
+        cx.notify();
+        true
+    }
+
+    /// One connect-screen intent: the footer menu is the screen's own, a
+    /// Codex assist link is the model's, everything else is the root's.
+    fn intent(&mut self, intent: ConnectIntent, cx: &mut Context<Self>) {
+        match intent {
+            ConnectIntent::Continue | ConnectIntent::Skip => cx.emit(ConnectEvent::Finish),
+            // The root redraws for the two that reach it.
+            ConnectIntent::Provider(ProviderIntent { id, action }) => {
+                self.menu_open = false;
+                cx.emit(ConnectEvent::ProviderAction { id: ProviderId::parse(&id), action });
+            }
+            ConnectIntent::ToggleDefaultMenu => {
+                self.menu_open = !self.menu_open;
+                cx.notify();
+            }
+            ConnectIntent::CloseDefaultMenu => {
+                self.menu_open = false;
+                cx.notify();
+            }
+            ConnectIntent::SetDefault(provider) => {
+                self.menu_open = false;
+                cx.emit(ConnectEvent::SetDefault(ProviderId::from_icon(provider)));
+            }
+            ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
+                cx.emit(ConnectEvent::OpenImportSheet);
+            }
+            ConnectIntent::Assist(key) => self.model.update(cx, |model, cx| model.codex_assist_link(&key, cx)),
+        }
+    }
+}
+
+impl Focusable for ConnectScreen {
+    /// The screen's own handle (it keeps no field to type in).
+    fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Region for ConnectScreen {
+    /// "Connect your providers": the screen's own heading.
+    fn title(&self, _cx: &App) -> SharedString {
+        "Connect your providers".into()
+    }
+
+    /// Nothing: the screen owns the whole window and draws its own footer.
+    fn actions(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+
+    /// While up: it owns the window, so no Browse page shows under it.
+    fn covers_page(&self, _cx: &App) -> bool {
+        self.open
+    }
+}
+
+impl Render for ConnectScreen {
     /// The first-run Connect your providers screen (D5 B1): rows from the
     /// status service (Checking until probes land) in the board's order, the
     /// footer's default picker over the Connected providers, Continue
-    /// (enabled once any provider is Connected) and Skip. The Muse sign-in
-    /// sheet renders over it when its row asked for sign-in.
-    pub(crate) fn render_connect(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use gpui::prelude::*;
-        let rows = build_rows(&self.connect_statuses, &self.codex_login);
-        let current = ProviderId::parse(&self.new_provider);
-        let picker = default_picker_for(&self.connect_statuses, current, self.connect_menu_open);
+    /// (enabled once any provider is Connected) and Skip.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.model.read(cx);
+        let rows = build_rows(&model.statuses, &model.codex_login);
+        let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
+        let picker = default_picker_for(&model.statuses, current, self.menu_open);
+        // Codex's sign-in owns the line while it runs; otherwise the P7
+        // offer may stand there (first run only).
+        let codex = model.codex_assist();
+        let assist = if codex.is_empty() { self.facts.import_assist.clone() } else { codex };
         let weak = cx.entity().downgrade();
         let mark = crate::mascot::connect_mascot(window, cx);
-        let screen = connect_providers("connect", rows)
-            .mark(mark)
-            .default_picker(picker)
-            .assist({
-                // Codex's sign-in owns the line while it runs; otherwise the
-                // P7 offer may stand there (first run only).
-                let codex = self.codex_assist();
-                if codex.is_empty() { self.import_connect_assist() } else { codex }
-            })
-            .on_intent(move |intent, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.connect_intent(intent, window, cx);
-                    cx.notify();
-                });
-            });
-        let mut stack = gpui::div().size_full().relative().child(screen);
+        connect_providers("connect", rows).mark(mark).default_picker(picker).assist(assist).on_intent(move |intent, _window, cx| {
+            let _ = weak.update(cx, |this, cx| this.intent(intent, cx));
+        })
+    }
+}
+
+// ── the root's side ─────────────────────────────────────────────────────
+
+impl Harness {
+    /// Whether the connect screen owns the window.
+    pub(crate) fn connect_open(&self, cx: &App) -> bool {
+        self.connect_screen.read(cx).open
+    }
+
+    /// What the connect screen needs from the root now (see [`ConnectFacts`]).
+    pub(crate) fn connect_facts(&self, cx: &App) -> ConnectFacts {
+        ConnectFacts { new_provider: Some(ProviderId::parse(&self.new_provider)), import_assist: self.import_connect_assist(cx) }
+    }
+
+    /// The connect screen for this frame — facts pushed, then its view
+    /// (uncached: the facts arrive during this render) — with the sheets
+    /// the root owns stacked over it: Muse's sign-in, the setup sheet, the
+    /// import sheet.
+    pub(crate) fn compose_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use gpui::prelude::*;
+        let facts = self.connect_facts(cx);
+        self.connect_screen.update(cx, |screen, _| screen.facts = facts);
+        let mut stack = gpui::div().size_full().relative().child(self.connect_screen.clone());
         if self.muse_sheet {
             stack = stack.child(self.muse_sheet_layer(window, cx));
         }
-        stack = stack.children(self.render_setup_sheet(cx));
+        stack = stack.children(self.compose_setup_sheet(cx));
         stack = stack.children(self.render_import_sheet(cx));
         stack.into_any_element()
     }
 
-    /// The muted line under the rows while Codex signs in (D5 B3): "Browser
-    /// didn't open? Copy the link · Use a code instead" while the browser
-    /// flow waits; "Enter <code> at <host/path> · Copy code · Open page"
-    /// once the person asked for a code (owner 2026-10-24: the code goes in
-    /// this line, no new surface). Empty otherwise.
-    pub(crate) fn codex_assist(&self) -> Vec<aui::screens::AssistRun> {
-        codex_assist_runs(&self.codex_login)
+    /// One event from the connect screen, mapped to the root's own method.
+    pub(crate) fn on_connect_event(
+        &mut self,
+        _screen: &Entity<ConnectScreen>,
+        event: &ConnectEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ConnectEvent::Finish => self.finish_connect(cx),
+            ConnectEvent::ProviderAction { id, action } => self.connect_provider_action(*id, *action, window, cx),
+            ConnectEvent::SetDefault(id) => {
+                self.new_provider = id.as_str().to_owned();
+                crate::providers::write_last_provider(*id);
+            }
+            ConnectEvent::OpenImportSheet => self.open_import_sheet(cx),
+        }
+        cx.notify();
     }
 
     /// The Muse sign-in sheet over the shell (the account menu's Sign in,
     /// Settings, the provider banner). `None` unless the sheet is up outside
-    /// the connect screen, which renders its own.
+    /// the connect screen, which stacks its own.
     pub(crate) fn render_muse_sheet(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.muse_sheet || self.show_connect {
+        if !self.muse_sheet || self.connect_open(cx) {
             return None;
         }
         Some(self.muse_sheet_layer(window, cx))
@@ -790,32 +952,12 @@ impl Harness {
         self.muse_sheet = true;
     }
 
-    /// The "New sessions start in" picker's intents, wherever it is drawn
-    /// (the connect footer, Settings › Providers — never both on screen, so
-    /// they share `connect_menu_open`): open or close its menu, or set the
-    /// default and remember it in `provider.json`. Other intents are not
-    /// the picker's and do nothing here.
-    pub(crate) fn default_provider_intent(&mut self, intent: ConnectIntent) {
-        match intent {
-            ConnectIntent::ToggleDefaultMenu => self.connect_menu_open = !self.connect_menu_open,
-            ConnectIntent::CloseDefaultMenu => self.connect_menu_open = false,
-            ConnectIntent::SetDefault(provider) => {
-                self.connect_menu_open = false;
-                let id = ProviderId::from_icon(provider);
-                self.new_provider = id.as_str().to_owned();
-                crate::providers::write_last_provider(id);
-            }
-            _ => {}
-        }
-    }
-
     /// Leave the connect screen: Continue and Skip both set
     /// `onboarding_completed`, so this launch and the next open the shell.
-    pub(crate) fn finish_connect(&mut self) {
+    pub(crate) fn finish_connect(&mut self, cx: &mut Context<Self>) {
         complete_onboarding();
-        self.show_connect = false;
+        self.connect_screen.update(cx, |screen, _| screen.dismiss());
         self.muse_sheet = false;
-        self.connect_menu_open = false;
         // New sessions start where the footer said: the stored pick while it
         // is Connected, else the first Connected in the board's order.
         let statuses = crate::provider_status::live_statuses();
@@ -834,39 +976,32 @@ impl Harness {
 
     /// Reopen the connect screen over the shell (Settings → Providers →
     /// "Set up providers…"). Works for a returning person too: the rows
-    /// start from the status cache at once, and [`Self::sync_provider_state`]
-    /// keeps them fresh while the screen is up. The screen owns the whole
-    /// window while it is up; the Settings page underneath keeps its
-    /// section, so closing the screen lands back on it.
+    /// start from the status cache at once, and the provider model keeps
+    /// them fresh while the screen is up. The screen owns the whole window
+    /// while it is up; the Settings page underneath keeps its section, so
+    /// closing the screen lands back on it.
     pub(crate) fn open_connect_screen(&mut self, cx: &mut Context<Self>) {
         self.muse_sheet = false;
-        self.connect_statuses = initial_connect_statuses();
-        self.connect_status_stamp = status_stamp();
-        self.show_connect = true;
+        self.provider_model.update(cx, |model, _| model.reload());
+        self.connect_screen.update(cx, |screen, _| screen.show());
         cx.notify();
     }
 
-    /// One connect-screen intent: row buttons, Continue, Skip.
-    fn connect_intent(&mut self, intent: ConnectIntent, window: &mut Window, cx: &mut Context<Self>) {
-        match intent {
-            ConnectIntent::Continue | ConnectIntent::Skip => self.finish_connect(),
-            ConnectIntent::Provider(ProviderIntent { id, action }) => {
-                self.connect_menu_open = false;
-                self.connect_provider_action(ProviderId::parse(&id), action, window, cx);
-            }
-            ConnectIntent::ToggleDefaultMenu
-            | ConnectIntent::CloseDefaultMenu
-            | ConnectIntent::SetDefault(_) => self.default_provider_intent(intent),
-            ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
-                self.open_import_sheet(cx);
-            }
-            ConnectIntent::Assist(key) => self.codex_assist_link(&key, cx),
+    /// `connect-menu`: open the "New sessions start in" menu on whichever
+    /// screen draws it — the connect footer, else Settings › Providers. An
+    /// `Err` when neither is up: the menu would open nowhere.
+    pub(crate) fn step_connect_menu(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.connect_screen.update(cx, |screen, cx| screen.open_menu(cx)) {
+            return Ok(());
         }
+        if self.settings_page.update(cx, |page, cx| page.open_default_menu(cx)) {
+            return Ok(());
+        }
+        Err("neither the connect screen nor the Settings page is up".to_owned())
     }
 
-    /// One row action. Terminal work (prefills) and the Codex login only
-    /// park flags here — `on_frame` runs them with the window and the
-    /// entity context; everything else applies at once.
+    /// One row action, wherever its button sits (a connect row, the setup
+    /// sheet's chain, the composer banner, a failed launch's card).
     pub(crate) fn connect_provider_action(
         &mut self,
         id: ProviderId,
@@ -879,11 +1014,7 @@ impl Harness {
                 ProviderId::Muse => {
                     self.open_muse_sheet();
                 }
-                ProviderId::Codex => {
-                    if !matches!(self.codex_login, CodexLogin::Waiting { .. } | CodexLogin::Device { .. }) {
-                        self.start_codex_login(false, cx);
-                    }
-                }
+                ProviderId::Codex => self.provider_model.update(cx, |model, cx| model.begin_codex_signin(cx)),
                 ProviderId::ClaudeCode => self.open_setup_sheet(id, SetupKind::SignIn, window, cx),
             },
             ProviderAction::Install => self.open_setup_sheet(id, SetupKind::Install, window, cx),
@@ -893,7 +1024,7 @@ impl Harness {
             ProviderAction::Update => self.open_setup_sheet(id, SetupKind::Update, window, cx),
             ProviderAction::Cancel => {
                 if id == ProviderId::Codex {
-                    self.codex_cancel.store(true, Ordering::SeqCst);
+                    self.provider_model.update(cx, |model, _| model.cancel_codex_login());
                 }
             }
             ProviderAction::Recheck => crate::provider_status::reprobe_provider(id),
@@ -907,126 +1038,34 @@ impl Harness {
         }
     }
 
-    /// `codex-login:<waiting|device|failed>` (`--steps`): Codex's sign-in in
-    /// that state with sample values, for captures. Starts nothing. Any
-    /// other state is an `Err` and leaves the sign-in as it was.
-    pub(crate) fn step_codex_login(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.codex_login = match rest.trim() {
-            "waiting" => CodexLogin::Waiting { auth_url: "https://example.invalid/oauth/authorize".into() },
-            "device" => CodexLogin::Device { url: "https://auth.openai.com/codex/device".into(), code: "K7QX-9P2M".into() },
-            "failed" => CodexLogin::Failed { reason: "The sign-in timed out.".into() },
-            other => return Err(format!("unknown codex-login state {other:?} (expected waiting, device or failed)")),
-        };
-        cx.notify();
-        Ok(())
-    }
-
-    /// A link in the assist line (the connect screen's, or the Codex card's
-    /// in Settings): copy the browser link, switch to a device code, copy the
-    /// code, open the page the code goes in.
-    pub(crate) fn codex_assist_link(&mut self, key: &str, cx: &mut Context<Self>) {
-        match (key, &self.codex_login) {
-            ("copy-link", CodexLogin::Waiting { auth_url }) if !auth_url.is_empty() => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(auth_url.clone()));
-            }
-            ("use-code", CodexLogin::Waiting { .. }) => self.start_codex_login(true, cx),
-            ("copy-code", CodexLogin::Device { code, .. }) => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
-            }
-            ("open-page", CodexLogin::Device { url, .. }) => {
-                let _ = crate::auth::open_in_browser(url);
-            }
-            _ => {}
-        }
-    }
-
-    /// Start the Codex Sign in flow: the Waiting row applies at once, the
-    /// blocking app-server login runs off the UI thread, its start answer
-    /// (the browser link, or the device code) reaches the row as it lands,
-    /// and its terminal state re-probes Codex on success. `device` is "Use a
-    /// code instead". A newer start (Use a code after the browser flow)
-    /// supersedes the older one: its updates carry an older generation and
-    /// are dropped.
-    pub(crate) fn start_codex_login(&mut self, device: bool, cx: &mut Context<Self>) {
-        let program = crate::providers::resolve_program(ProviderId::Codex)
-            .map(|program| program.to_string_lossy().into_owned());
-        let Some(program) = program else {
-            self.codex_login = CodexLogin::Failed { reason: "Codex is not installed — Install first.".into() };
-            cx.notify();
-            return;
-        };
-        // A running flow is abandoned: its thread sees the old flag.
-        self.codex_cancel.store(true, Ordering::SeqCst);
-        self.codex_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let cancel = Arc::clone(&self.codex_cancel);
-        self.codex_generation += 1;
-        let generation = self.codex_generation;
-        self.codex_login = CodexLogin::Waiting { auth_url: String::new() };
-        cx.notify();
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<CodexLogin>();
-        cx.background_spawn(async move {
-            let progress = tx.clone();
-            let terminal = run_codex_login(&program, &cancel, device, move |begun| {
-                let _ = progress.unbounded_send(begun.clone());
-            });
-            let _ = tx.unbounded_send(terminal);
-        })
-        .detach();
-        cx.spawn(async move |this, cx| {
-            use futures::StreamExt as _;
-            while let Some(state) = rx.next().await {
-                let alive = this.update(cx, |this, cx| {
-                    if this.codex_generation != generation {
-                        return;
-                    }
-                    if state == CodexLogin::Completed {
-                        crate::provider_status::reprobe_provider(ProviderId::Codex);
-                    }
-                    this.codex_login = state;
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Follow the status cache while shown, and the sign-out banners while
-    /// in the shell: background probes only write the cache file, so its
-    /// mtime (or the scripted source, in deterministic mode) is the clock.
+    /// Follow the status cache ([`ProviderStatusModel::sync`]): each frame
+    /// and on every probe the service publishes. What follows a visible
+    /// change on the root's side lands in [`Self::on_provider_model_event`].
     pub(crate) fn sync_provider_state(&mut self, cx: &mut Context<Self>) {
-        if crate::provider_status::deterministic() {
-            let fresh = initial_connect_statuses();
-            if fresh != self.connect_statuses {
-                self.connect_statuses = fresh;
-                self.sync_banners_from_statuses();
+        self.provider_model.update(cx, |model, cx| model.sync(cx));
+    }
+
+    /// The statuses changed visibly: the default provider follows the
+    /// probes, a parked Muse starts once it is available, and the window
+    /// redraws (the sidebar's footer and the banners read the model).
+    pub(crate) fn on_provider_model_event(
+        &mut self,
+        _model: Entity<ProviderStatusModel>,
+        event: &ProviderModelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ProviderModelEvent::Changed => {
+                self.follow_default_provider(cx);
+                self.start_muse_once_available(cx);
                 cx.notify();
             }
-            return;
         }
-        let stamp = status_stamp();
-        if stamp == self.connect_status_stamp {
-            return;
-        }
-        self.connect_status_stamp = stamp;
-        // Before the no-visible-change return: a Re-check that found what
-        // the card already showed still owes the person its answer.
-        self.settle_provider_busy(cx);
-        let fresh = initial_connect_statuses();
-        // A re-probe that found what the window already shows moves only
-        // `checked_at`: nothing to redraw (nothing renders at rest, P0).
-        if visible(&fresh) == visible(&self.connect_statuses) {
-            self.connect_statuses = fresh;
-            return;
-        }
-        self.connect_statuses = fresh;
-        self.sync_banners_from_statuses();
-        self.follow_default_provider();
-        self.start_muse_once_available(cx);
-        self.advance_setup_sheet(cx);
-        cx.notify();
+    }
+
+    /// The statuses as the window shows them (the model's copy).
+    pub(crate) fn provider_statuses<'a>(&self, cx: &'a App) -> &'a [ProviderStatus] {
+        &self.provider_model.read(cx).statuses
     }
 
     /// Muse was parked at launch as off or not installed, and a probe now
@@ -1051,41 +1090,13 @@ impl Harness {
     /// With no provider picked by the person (nothing stored, no
     /// `--provider`), the default follows the probes as they land: boot
     /// chose it from Checking statuses, which is a placeholder.
-    fn follow_default_provider(&mut self) {
+    fn follow_default_provider(&mut self, cx: &App) {
         if self.args.provider_explicit || crate::providers::read_last_provider().is_some() {
             return;
         }
-        if let Some(id) = crate::settings_providers::default_new_provider(&self.connect_statuses) {
+        if let Some(id) = crate::settings_providers::default_new_provider(self.provider_statuses(cx)) {
             if id.as_str() != self.new_provider {
                 self.new_provider = id.as_str().to_owned();
-            }
-        }
-    }
-
-    /// The quiet banners: a provider the cache once called Connected that
-    /// now reads Signed out gets "X is signed out — Sign in" on its
-    /// composer; Connected clears it. Never a full-screen gate.
-    fn sync_banners_from_statuses(&mut self) {
-        for status in &self.connect_statuses {
-            let id = status.provider;
-            match status.headline() {
-                crate::provider_status::Headline::Connected => {
-                    self.seen_connected.insert(id);
-                    if !self.typed_signed_out.contains(&id) {
-                        self.provider_banners.remove(&id);
-                    }
-                    if id == ProviderId::Codex && matches!(self.codex_login, CodexLogin::Completed)
-                    {
-                        self.codex_login = CodexLogin::Idle;
-                    }
-                }
-                crate::provider_status::Headline::SignedOut
-                    if self.seen_connected.contains(&id) =>
-                {
-                    self.provider_banners.insert(id, signed_out_banner_text(id));
-                }
-                crate::provider_status::Headline::SignedOut => {}
-                _ => {}
             }
         }
     }
@@ -1097,7 +1108,7 @@ impl Harness {
     pub(crate) fn render_provider_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui::prelude::*;
         let id = self.active.as_ref().map(|view| view.read(cx).provider_kind())?;
-        let text = self.provider_banners.get(&id)?.clone();
+        let text = self.provider_model.read(cx).banners.get(&id)?.clone();
         let weak = cx.entity().downgrade();
         Some(
             gpui::div()
@@ -1120,8 +1131,7 @@ impl Harness {
     pub(crate) fn banner_sign_in(&mut self, id: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         // The person is acting on it: from here the status decides when the
         // banner goes (the next probe that reads Connected).
-        self.typed_signed_out.remove(&id);
-        // Window-needing work parks flags for `on_frame`, like the rows.
+        self.provider_model.update(cx, |model, _| model.release_typed_signed_out(id));
         let action = ProviderAction::SignIn;
         match id {
             ProviderId::Muse => {
@@ -1189,7 +1199,6 @@ mod tests {
     }
     use super::*;
     use crate::provider_status::{Advisory, Headline, Installed};
-    use gpui::prelude::*;
     use std::collections::VecDeque;
 
     /// A scripted [`LoginIo`]: the RPC the tests assert on, line by line.
@@ -1621,6 +1630,62 @@ mod tests {
         drop(guard);
     }
 
+    /// Task 4.4: the connect screen is its own region entity over the
+    /// shared provider model. Its footer menu, and a Codex sign-in moving on
+    /// the model, land on the screen and notify the screen alone (and the
+    /// model the screen observes); the root is never notified. Draws once
+    /// first, so the screen stands as a capture shows it.
+    #[gpui::test]
+    fn the_connect_screen_follows_its_menu_and_the_model_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let script = mixed_script();
+        let held = hermetic_scripted(Some(&script));
+        let dir = held.4.clone();
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| {
+                crate::app::Harness::new(
+                    harness_args(&dir, crate::LoginSample::Connect),
+                    crate::shot::CaptureToken::default(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        vc.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1440.), gpui::px(900.)),
+            |_, _| baaz.clone().into_any_element(),
+        );
+        vc.run_until_parked();
+        let (screen, model) = vc.update(|_, cx| (baaz.read(cx).connect_screen.clone(), baaz.read(cx).provider_model.clone()));
+        let (screen_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (s, r) = (screen_notes.clone(), root_notes.clone());
+            (cx.observe(&screen, move |_, _| s.set(s.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+        });
+        vc.update(|_, cx| screen.update(cx, |screen, cx| screen.intent(ConnectIntent::ToggleDefaultMenu, cx)));
+        let moved = vc.update(|_, cx| model.update(cx, |model, cx| model.step_codex_login("device", cx)));
+        assert!(moved.is_ok(), "{moved:?}");
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let shown = screen.read(cx);
+            assert!(shown.menu_open, "the footer menu opened on the screen");
+            assert!(baaz.read(cx).connect_open(cx), "the screen still owns the window");
+            assert!(crate::region::Region::covers_page(shown, cx), "an open screen covers Browse's page");
+            assert!(
+                matches!(model.read(cx).codex_login, CodexLogin::Device { .. }),
+                "the sign-in moved on the model"
+            );
+        });
+        assert!(screen_notes.get() >= 2, "the screen is notified for its menu and for the model: {}", screen_notes.get());
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the screen's own state");
+        restore_scripted(held);
+    }
+
     /// The `--login connect` capture boots into the connect screen with the
     /// scripted mixed rows, Continue gated open, and leaving (Continue or
     /// Skip) ends first run. Draws once, so a render panic fails here.
@@ -1643,14 +1708,13 @@ mod tests {
             })
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
-                assert!(harness.show_connect, "the connect sample boots into the screen");
-                assert_eq!(harness.connect_statuses.len(), 3);
-                assert!(
-                    crate::connect::continue_enabled(&harness.connect_statuses),
-                    "Muse Connected gates Continue open"
-                );
-            })
+            let harness = baaz.read(cx);
+            assert!(harness.connect_open(cx), "the connect sample boots into the screen");
+            assert_eq!(harness.provider_statuses(cx).len(), 3);
+            assert!(
+                crate::connect::continue_enabled(harness.provider_statuses(cx)),
+                "Muse Connected gates Continue open"
+            );
         });
         vc.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -1661,9 +1725,9 @@ mod tests {
         // deterministic mode, so drop the hermeticity first.
         std::env::remove_var("BAAZ_DETERMINISTIC");
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
-                harness.finish_connect();
-                assert!(!harness.show_connect, "Continue/Skip lands in the shell");
+            baaz.update(cx, |harness, cx| {
+                harness.finish_connect(cx);
+                assert!(!harness.connect_open(cx), "Continue/Skip lands in the shell");
             })
         });
         assert!(
@@ -1693,10 +1757,9 @@ mod tests {
             })
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
-                assert!(harness.show_connect);
-                assert!(!crate::connect::continue_enabled(&harness.connect_statuses));
-            })
+            let harness = baaz.read(cx);
+            assert!(harness.connect_open(cx));
+            assert!(!crate::connect::continue_enabled(harness.provider_statuses(cx)));
         });
         vc.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -1727,12 +1790,10 @@ mod tests {
             })
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
-                assert!(
-                    !harness.show_connect,
-                    "a returning launch never shows the connect screen"
-                );
-            })
+            assert!(
+                !baaz.read(cx).connect_open(cx),
+                "a returning launch never shows the connect screen"
+            );
         });
         vc.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),

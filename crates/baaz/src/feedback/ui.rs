@@ -1527,11 +1527,8 @@ impl crate::app::Harness {
     }
 
     /// The settings section in view, only while Settings is open.
-    pub(crate) fn feedback_settings_section(&self) -> Option<String> {
-        self.settings_page
-            .open
-            .then(|| self.settings_page.section.clone())
-            .filter(|section| !section.is_empty())
+    pub(crate) fn feedback_settings_section(&self, cx: &gpui::App) -> Option<String> {
+        self.settings_open(cx).then(|| self.settings_section(cx)).filter(|section| !section.is_empty())
     }
 
     /// Where the app was, for a note's [`ScreenContext`]: the mode, the
@@ -1556,7 +1553,7 @@ impl crate::app::Harness {
             session_title,
             right_pane: self.feedback_right_pane(cx),
             page_url: self.feedback_page_url(cx),
-            settings_section: self.feedback_settings_section(),
+            settings_section: self.feedback_settings_section(cx),
             window_w: f32::from(size.width),
             window_h: f32::from(size.height),
             scale: window.scale_factor(),
@@ -1576,7 +1573,7 @@ impl crate::app::Harness {
             session_title: None,
             right_pane: self.feedback_right_pane(cx),
             page_url: self.feedback_page_url(cx),
-            settings_section: self.feedback_settings_section(),
+            settings_section: self.feedback_settings_section(cx),
             window_w: 0.0,
             window_h: 0.0,
             scale: 1.0,
@@ -5270,7 +5267,7 @@ mod tests {
             let harness = baaz.read(cx);
             assert_eq!(harness.sessions.len(), sessions_before, "⌘N opens no session while Active");
             assert!(harness.active.is_none(), "⌘N opens no draft while Active");
-            assert!(!harness.settings_page.open, "Settings… stays closed while Active");
+            assert!(!harness.settings_open(cx), "Settings… stays closed while Active");
             assert!(harness.overlays.read(cx).palette.is_none(), "the palette stays closed while Active");
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
         });
@@ -5279,7 +5276,7 @@ mod tests {
             window.dispatch_action(Box::new(crate::app::OpenSettings), cx);
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).settings_page.open),
+            vc.update(|_, cx| baaz.read(cx).settings_open(cx)),
             "Settings… works again when Paused"
         );
         restore_state(state);

@@ -30,8 +30,7 @@ impl Harness {
             // re-probe so every surface agrees (D5 B5). No dialog.
             SessionEvent::SignedOut => {
                 let id = view.read(cx).provider_kind();
-                self.provider_banners.insert(id, crate::connect::signed_out_banner_text(id));
-                self.typed_signed_out.insert(id);
+                self.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
                 crate::provider_status::reprobe_provider(id);
                 cx.notify();
             }
@@ -148,14 +147,7 @@ impl Harness {
             SessionEvent::Logout => self.logout(cx),
             // "Enable" on a disabled-provider banner: Settings on the
             // Providers page, where the switch lives.
-            SessionEvent::OpenProviders => {
-                let sections = self.settings_sections(cx);
-                let section = crate::settings::settings_section_index(
-                    &sections,
-                    crate::settings_providers::PROVIDERS_SECTION_ID,
-                );
-                self.open_settings(section, cx);
-            }
+            SessionEvent::OpenProviders => self.open_providers(cx),
             SessionEvent::Status { detail } => {
                 // What the login is entitled to belongs at the top of
                 // `/status` and `/usage`: it is the first thing that decides

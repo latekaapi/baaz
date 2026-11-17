@@ -661,7 +661,7 @@ impl Harness {
     /// agent acts. `None` when the pane is not on a native page, the strip
     /// is moving, or nothing floats.
     fn wanted_page_float(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
-        if self.settings_page.open {
+        if self.settings_open(cx) {
             return None;
         }
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
@@ -741,7 +741,7 @@ impl Harness {
                 return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
             }
         }
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open() {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open(cx) {
             return None;
         }
         self.own_line_state(cx).map(|state| (state, None))
@@ -1120,7 +1120,7 @@ impl Harness {
     pub(crate) fn field_overlay_wanted(&self, cx: &App) -> bool {
         crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
             && crate::layout::Layout::get(cx).sidebar_open
-            && !self.settings_open()
+            && !self.settings_open(cx)
             && self.browse_address.is_some()
             && !(self.browse_centre_state(cx).is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
                 && self.browse_centre_tab_blank(cx))
