@@ -821,6 +821,23 @@ impl SessionView {
         }
     }
 
+    /// Whether the list stands at its end changed while it laid out: this
+    /// frame's needs-you banner and `SeenToEnd` were decided from the
+    /// position before the layout (`at_end_before`), so draw once more.
+    /// A jump that lands while rows are still unmeasured reads "at the end"
+    /// (gpui answers `None`) and, with nothing else to wake the window, the
+    /// banner pointing at a waiting card above never came (the
+    /// `transcript-full-top` capture flake). Deferred: a notify made inside
+    /// the draw is dropped.
+    pub(super) fn note_end_after_layout(&mut self, cx: &mut Context<Self>) {
+        if self.list_state.is_scrolled_to_end().unwrap_or(true) != self.at_end_before {
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |_, cx| cx.notify());
+            });
+        }
+    }
+
     /// The virtualised list itself, built from the cache and nothing else.
     pub(super) fn transcript_list(&mut self, folds: Folds, quote_bar: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         // The turn's progress, inline under the last message (owner
@@ -930,6 +947,7 @@ impl SessionView {
                             let _ = width_report.update(cx, |view, cx| {
                                 view.note_list_width(width);
                                 view.note_list_height(height, cx);
+                                view.note_end_after_layout(cx);
                             });
                         }
                     })
