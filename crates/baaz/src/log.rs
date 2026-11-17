@@ -53,6 +53,51 @@ pub fn init_file_log(dir: &std::path::Path) {
     });
 }
 
+/// The `log` crate's lines from the libraries under us (gpui, its platform
+/// layer) into Baaz's own log: warnings and errors from everything, and
+/// gpui's system-notification lines at info too. Without a logger the `log`
+/// macros go nowhere, so "notification authorization denied" and "failed to
+/// deliver system notification" were silent (Stage 3 follow-up).
+struct Forward;
+
+impl log::Log for Forward {
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= log::Level::Warn
+            || (meta.level() <= log::Level::Info && meta.target().contains("system_notification"))
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = format!("{} {}: {}", record.level(), record.target(), record.args());
+        // Some lines repeat every frame (gpui's "can't render at a zero
+        // size" for an svg laid out at nothing): each distinct line is
+        // written three times at most, so the log stays readable.
+        static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, u8>>> = std::sync::Mutex::new(None);
+        let Ok(mut seen) = SEEN.lock() else { return };
+        let count = seen.get_or_insert_with(Default::default).entry(line.clone()).or_insert(0);
+        if *count >= 3 {
+            return;
+        }
+        *count += 1;
+        let last = *count == 3;
+        drop(seen);
+        crate::baaz_log!("{line}{}", if last { " (repeats; not logged again)" } else { "" });
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install [`Forward`]. Idempotent: a second call (or another logger
+/// already set) is ignored. Only `main` calls it.
+pub fn init_forward() {
+    static FORWARD: Forward = Forward;
+    if log::set_logger(&FORWARD).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
 /// Queue one line for the log file, stamped with local time. A no-op
 /// before [`init_file_log`] (tests, `--perf-*`), and when the queue is
 /// full.

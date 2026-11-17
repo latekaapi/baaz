@@ -1846,6 +1846,52 @@ mod tests {
         restore_state(state);
     }
 
+    /// A replay names its row by the transcript on every open, not only the
+    /// first in a state dir: the second open finds the title the first one
+    /// stored, and the row used to keep the file name (the `jump-pill`
+    /// capture took its two shots in one state dir and disagreed).
+    #[gpui::test]
+    fn a_replay_keeps_its_transcript_title_on_the_second_open(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("replay-title-reopen");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let capture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl");
+        let want = "Show me the validation summary with code and links.";
+        for open in ["first", "second"] {
+            let mut args = test_args(&state.2);
+            args.replay = Some(capture.clone());
+            let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            vc.run_until_parked();
+            let label = vc.update(|_, cx| baaz.read(cx).sessions.first().map(|row| row.label.clone()));
+            assert_eq!(label.as_deref(), Some(want), "the {open} open's row");
+            crate::sessions::flush();
+        }
+        restore_state(state);
+    }
+
+    /// A scripted replay opens no draft over itself: `open_boot_session`
+    /// ran before the replay was `active`, saw no session, and opened an
+    /// empty draft for the steps — the header then said "New session" over
+    /// the replayed transcript (`transcript-full-top`, `-mid`).
+    #[gpui::test]
+    fn a_scripted_replay_opens_no_draft_over_itself(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("replay-steps-no-draft");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let mut args = test_args(&state.2);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-full.jsonl"));
+        args.steps = vec!["top".to_owned()];
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let (pending, drafts, header, row) = vc.update(|_, cx| {
+            let b = baaz.read(cx);
+            let id = b.active.as_ref().map(|v| v.read(cx).session_id.clone()).expect("the replay is open");
+            (b.pending_id.clone(), b.drafts.len(), b.collapsed_head_label(&b.chain_head(&id), cx), b.sessions.first().map(|r| r.label.clone()))
+        });
+        assert_eq!(pending, None, "nothing is opening over the replay");
+        assert_eq!(drafts, 0, "no draft was made for the steps");
+        assert_eq!(header, row, "the header names the replayed row");
+        restore_state(state);
+    }
+
     /// ⎋ on a caret menu keeps the caret in the field: the next key lands
     /// in the draft, for `/` and `@` alike (live, 2026-10-16: it went
     /// nowhere until the field was clicked).

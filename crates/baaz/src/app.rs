@@ -4682,6 +4682,16 @@ impl Harness {
         // window would shrink the list under the scroll (the click moved
         // `-1262 → -1198` on the clamp, not on the reveal).
         let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects);
+        // A title Baaz already stored for this capture (a rename, or the
+        // transcript-derived title an earlier open wrote) names the row the
+        // way it names a live one. Without this only the first open in a
+        // state dir showed the transcript's title: `title_from_transcript`
+        // below sees the stored one and stops, and the row kept the file
+        // name on every later open (the `jump-pill` capture flake).
+        if let Some(label) = sidebar::label_ladder(self.overrides.get(&replayed.id), None, None) {
+            replayed.label = label.to_owned();
+        }
+        replayed.named = self.overrides.get(&replayed.id).is_some_and(|meta| meta.name.is_some());
         replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
         // The replayed row stands for the folded capture, and no wire event
         // will ever sync it the way `session/list` does live: read the open
@@ -4714,11 +4724,6 @@ impl Harness {
         self.sessions_loaded = true;
         self.index_loaded = true;
         self.invalidate_list();
-        // `--session <id>`: the live boot opens it once the list arrives
-        // (`load_sessions`), and a replay window has no list reply — so the
-        // landed fixture is the arrival it waits for. A run
-        // with no session named keeps the replayed view.
-        self.open_boot_session(window, cx);
         // A replayed window has no wire, but the search palette still needs
         // the host's session index: read it (read-only) and rebuild `search.db`
         // so `--steps search:<query>` screenshots show session hits.
@@ -4748,6 +4753,14 @@ impl Harness {
         if let Some(view) = self.active.clone() {
             self.title_from_transcript(&view, cx);
         }
+        // `--session <id>`: the live boot opens it once the list arrives
+        // (`load_sessions`), and a replay window has no list reply — so the
+        // landed fixture is the arrival it waits for. A run with no session
+        // named keeps the replayed view. Only once the replay is `active`:
+        // called before, a run with `--steps` saw no session and opened an
+        // empty draft over the replay, and the header named the draft ("New
+        // session") above the replayed transcript.
+        self.open_boot_session(window, cx);
         self.maybe_run_steps(window, cx);
         cx.notify();
     }

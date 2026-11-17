@@ -159,6 +159,7 @@
 //! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
 //! | `group-bar` | flip the current-project accent bar flag |
 //! | `needs-you-filter:<on\|off>` | set the sidebar's "Needs you" filter (a setter; anything else fails the step) |
+//! | `row-needs-you:<label>` | the sidebar row with that label starts waiting for an approval and the app takes its attention look (a live check's offline way to post a real notification; no such row, or one already waiting, fails the step) |
 //! | `project-close:<name>` | close the project group named (a setter: a closed group stays closed); its header then shows the strongest state inside |
 //! | `group-branch` | flip the trailing-branch flag |
 //! | `auto-title` | flip the automatic session-naming switch |
@@ -451,6 +452,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "group-bar", run: |this, _, _, cx| this.step_group_bar(cx) },
     WindowVerb { verb: "project-close", run: |this, rest, _, cx| this.step_project_close(rest, cx) },
     WindowVerb { verb: "needs-you-filter", run: |this, rest, _, cx| this.step_needs_you_filter(rest, cx) },
+    WindowVerb { verb: "row-needs-you", run: |this, rest, _, cx| this.step_row_needs_you(rest, cx) },
     WindowVerb { verb: "group-branch", run: |this, _, _, cx| this.step_group_branch(cx) },
     WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
@@ -1139,6 +1141,16 @@ pub(crate) fn all_window_steps(steps: &[String]) -> bool {
         })
 }
 
+/// Whether a `--steps` script needs a session opened for it at boot: any
+/// script but one that only touches the window. A window-only script runs
+/// with no session (see `steps_ready_for`), and opening one anyway left an
+/// empty draft that an offline run never loads: the live check's centre
+/// went blank once the providers answered — the empty state, mascot and
+/// all, gone (Stage 3 follow-up, 17 Nov).
+pub(crate) fn steps_need_a_session(steps: &[String]) -> bool {
+    !steps.is_empty() && !all_window_steps(steps)
+}
+
 fn is_session_step(step: &str) -> bool {
     let (head, _) = split(step);
     WINDOW_VERBS.iter().all(|v| v.verb != head)
@@ -1390,6 +1402,11 @@ mod tests {
         // through on the strength of a typo.
         assert!(!all_window_steps(&["right:files".into(), "nonsense".into()]));
         assert!(!all_window_steps(&[]));
+        // A window-only script opens no boot session; a session verb, or
+        // `--send`'s own path, still does.
+        assert!(!super::steps_need_a_session(&[]));
+        assert!(!super::steps_need_a_session(&["wait:100".into(), "row-needs-you:Header spacing".into()]));
+        assert!(super::steps_need_a_session(&["right:files".into(), "draft:hello".into()]));
     }
 
     #[test]

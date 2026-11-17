@@ -6,8 +6,9 @@
 //! decides a state of its own. [`transitions`] is the pure part — what
 //! changed since the last look and what to say about it — and
 //! [`Harness::check_attention`] applies it: it posts through gpui's system
-//! notifications (which ask macOS for permission on the first post, never at
-//! launch, and do nothing outside an app bundle) and sets the Dock tile's
+//! notifications (which do nothing outside an app bundle; permission is
+//! asked at launch by [`ask_permission`], because a notification posted
+//! before the answer is dropped) and sets the Dock tile's
 //! badge. It runs after every session or provider event that can move a
 //! row, gated on the list epoch, so it costs a compare when nothing moved —
 //! never from render: gpui-pre 0.3.12 paints no frame for a covered window,
@@ -190,8 +191,12 @@ impl Harness {
         if badge_changed {
             set_dock_badge(badge);
         }
-        // The first look only learns (a launch announces nothing).
+        // The first look only learns (a launch announces nothing), and asks
+        // macOS once for permission to notify — see [`ask_permission`].
         if first {
+            if prefs.needs_you || prefs.done || prefs.failed {
+                ask_permission();
+            }
             return;
         }
         for post in look.posts {
@@ -244,6 +249,29 @@ impl Harness {
         Ok(())
     }
 
+    /// `row-needs-you:<label>`: the sidebar row with that label starts
+    /// waiting for an approval, as a wire status would make it, and the app
+    /// takes its look. Offline: the live check's only way to make a real
+    /// notification (and the permission prompt before the first) appear
+    /// without a model turn. No such row, or one already waiting, is an
+    /// `Err`.
+    pub(crate) fn step_row_needs_you(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let label = rest.trim();
+        let row = self
+            .sessions
+            .iter_mut()
+            .find(|row| row.label.eq_ignore_ascii_case(label))
+            .ok_or_else(|| format!("no sidebar row is labelled `{label}`"))?;
+        if matches!(row.session_state(), SessionState::NeedsYou(_)) {
+            return Err(format!("`{label}` is already waiting"));
+        }
+        row.approval_command = Some("cargo test --workspace".to_owned());
+        self.invalidate_list();
+        self.check_attention(cx);
+        cx.notify();
+        Ok(())
+    }
+
     /// Wire a notification click to its session: bring Baaz forward and
     /// open the session the notification named.
     pub(crate) fn on_notification_click(cx: &mut Context<Self>) {
@@ -291,6 +319,57 @@ fn app_is_active() -> bool {
 
 /// Set the Dock icon's badge to `count`, or clear it at zero. Tests and
 /// deterministic captures never touch the Dock.
+/// Ask macOS for permission to post notifications, at launch.
+///
+/// gpui asks only as it posts the first notification, and macOS drops a
+/// notification posted before the person has answered: live on the check
+/// build (17 Nov) the first "Waiting for your approval" never showed, only
+/// the permission prompt did. Asking at the first look moves the prompt to
+/// launch, so the first real alert lands. Once answered, macOS remembers and
+/// this does nothing visible. The answer is logged.
+///
+/// Outside an app bundle `UNUserNotificationCenter` aborts the process
+/// (gpui guards the same way), so a bare binary — every capture — skips it.
+fn ask_permission() {
+    if cfg!(test) || crate::provider_status::deterministic() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::{AnyClass, AnyObject, Bool};
+        use objc2::msg_send;
+        // SAFETY: Foundation and UserNotifications calls from the main
+        // thread; every object is checked for nil before use, and the
+        // completion block only logs.
+        unsafe {
+            let bundle: *mut AnyObject = msg_send![objc2::class!(NSBundle), mainBundle];
+            if bundle.is_null() {
+                return;
+            }
+            let id: *mut AnyObject = msg_send![bundle, bundleIdentifier];
+            if id.is_null() {
+                return;
+            }
+            let Some(class) = AnyClass::get(c"UNUserNotificationCenter") else { return };
+            let center: *mut AnyObject = msg_send![class, currentNotificationCenter];
+            if center.is_null() {
+                return;
+            }
+            let done = block2::RcBlock::new(|granted: Bool, error: *mut AnyObject| {
+                crate::baaz_log!(
+                    "notifications: permission {}{}",
+                    if granted.as_bool() { "granted" } else { "not granted" },
+                    if error.is_null() { "" } else { " (error)" }
+                );
+            });
+            // UNAuthorizationOptionSound | UNAuthorizationOptionAlert, the
+            // same options gpui asks for.
+            let options: usize = (1 << 1) | (1 << 2);
+            let _: () = msg_send![center, requestAuthorizationWithOptions: options, completionHandler: &*done];
+        }
+    }
+}
+
 fn set_dock_badge(count: usize) {
     if cfg!(test) || crate::provider_status::deterministic() {
         return;

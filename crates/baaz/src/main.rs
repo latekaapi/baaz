@@ -824,6 +824,7 @@ fn main() {
     // Finder launch has no stderr anyone reads (the 2026-10-31 hang left
     // nothing behind).
     crate::log::init_file_log(&crate::store::support_dir());
+    crate::log::init_forward();
     // One Baaz per state directory (docs/81 B D-4): a second launch on the
     // same directory brings the first forward and leaves, before it reads or
     // writes any store. `--print-tier` and `--bench` write no store and are
