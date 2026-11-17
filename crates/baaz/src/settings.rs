@@ -1790,7 +1790,7 @@ impl Harness {
             .child(
                 section("Notify me when")
                     .rows(events)
-                    .note("Nothing is sent for the session you are looking at. macOS asks to allow notifications the first time one fires."),
+                    .note("Nothing is sent for the session you are looking at. macOS asks once, when Baaz starts, whether to allow notifications."),
             )
             .child(section("Also").rows(extras))
             .into_any_element()

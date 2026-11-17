@@ -855,7 +855,7 @@ impl Harness {
             connected: self.muse_slot.is_ready(),
             session_arg: self.args.session.as_deref(),
             send: self.args.send.is_some(),
-            steps_pending: !self.args.steps.is_empty(),
+            steps_pending: crate::steps::steps_need_a_session(&self.args.steps),
             steps_begin_with_new: crate::steps::steps_begin_with_new(&self.args.steps),
             sessions_loaded: self.sessions_loaded,
         }) {
@@ -874,7 +874,7 @@ impl Harness {
             // somewhere to go — unless one is already on its way: the list
             // reply calls this too, and must not start a second session
             // behind the one [`Self::ensure_boot_session`] issued.
-            if (self.args.send.is_some() || !self.args.steps.is_empty())
+            if (self.args.send.is_some() || crate::steps::steps_need_a_session(&self.args.steps))
                 && self.active.is_none()
                 && !self.session_switch_pending
             {
