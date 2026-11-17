@@ -1005,7 +1005,7 @@ impl Harness {
             self.select_right(RightKind::Browser, cx);
             // A person's own open earns URL-field focus; an agent's never
             // does — undo the arm `select_right` owes the person.
-            self.browser_url_focus_armed = false;
+            self.browser.browser_url_focus_armed = false;
         }
         let mut right = self
             .overrides

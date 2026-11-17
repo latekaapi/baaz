@@ -2267,8 +2267,8 @@ impl Harness {
     pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_settings(cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded(cx);
-        let space = self.browse_space();
+        self.ensure_tabs_loaded();
+        let space = self.browser.browse_space();
         let existing = self
             .browser
             .tabs
@@ -2402,10 +2402,10 @@ impl Harness {
             }
             "browser" => {
                 facts.default_browser = self.default_browser_handler().map(str::to_owned);
-                facts.default_browser_pending = self.default_browser_confirm_pending;
-                let db = self.browser.db();
-                facts.history_pages = db.len();
-                facts.excluded_sites = db.excluded();
+                facts.default_browser_pending = self.browser.default_browser_confirm_pending;
+                let data = self.browser.data.read(cx);
+                facts.history_pages = data.history_len();
+                facts.excluded_sites = data.excluded().to_vec();
             }
             "providers" => {
                 let empty: &[crate::session_migration::PlannedMove] = &[];
@@ -2483,7 +2483,7 @@ impl Harness {
             SettingsEvent::ClearHistory => self.ask_clear_history(cx),
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
-                self.browser.db().include(site);
+                self.browser.data.update(cx, |data, cx| data.include(site, cx));
                 cx.notify();
             }
             SettingsEvent::MakeDefaultBrowser => {
@@ -2493,8 +2493,8 @@ impl Harness {
                 // macOS confirms asynchronously: wait for the re-read
                 // (~1 s) and the next focus-regain instead of showing a
                 // stale handler.
-                self.default_browser_confirm_pending = true;
-                self.default_browser_recheck_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                self.browser.default_browser_confirm_pending = true;
+                self.browser.default_browser_recheck_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
                 cx.notify();
             }
             SettingsEvent::OpenChromiumSettings => self.open_chromium_settings(window, cx),

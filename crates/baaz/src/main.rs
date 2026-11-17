@@ -1021,7 +1021,7 @@ fn main() {
                                             // SIGSEGV'd in shutdown, 11 Nov).
                                             this.close_peek(cx);
                                             this.flush_stores();
-                                            this.flush_tabs_save();
+                                            this.browser.flush_tabs_save();
                                             crate::layout::Layout::save(cx);
                                         })
                                     })

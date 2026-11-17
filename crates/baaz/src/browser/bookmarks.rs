@@ -8,7 +8,9 @@
 //! Every row carries a `source`: `baaz` for the person's own, or an import
 //! batch id, so Undo removes exactly what one import wrote.
 
-// The import (R4 step 7) and its Undo use the rest of this API.
+// The import (R4 step 7) and its Undo use the rest of this API. Every
+// function here runs in the `BrowserData` worker (`data.rs`); the UI reads
+// its in-memory front.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -72,6 +74,28 @@ fn bookmark_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bookmark> {
 
 const COLS: &str = "id, url, title, folder, added_ms";
 
+/// Every bookmark and folder with its position, in row order: what the
+/// in-memory front ([`super::data::Front`]) starts from.
+pub(crate) fn load_front(conn: &Connection) -> (Vec<super::data::Mark>, Vec<super::data::FolderRow>) {
+    let marks = conn
+        .prepare_cached(&format!("SELECT {COLS}, position FROM bookmarks ORDER BY id"))
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| Ok(super::data::Mark { mark: bookmark_row(row)?, position: row.get(5)? }))
+                .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let folders = conn
+        .prepare_cached("SELECT id, name, parent, position FROM bm_folders ORDER BY id")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                Ok(super::data::FolderRow { id: row.get(0)?, name: row.get(1)?, parent: row.get(2)?, position: row.get(3)? })
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    (marks, folders)
+}
+
 /// The person's bookmark for `url`, if any (the newest when several).
 pub(crate) fn find(conn: &Connection, url: &str) -> Option<Bookmark> {
     conn.query_row(
@@ -118,7 +142,9 @@ pub(crate) fn remove(conn: &Connection, id: i64) {
     let _ = conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id]);
 }
 
-/// Every folder, in tree order (parents before children, by position).
+/// Every folder, in tree order (parents before children, by position):
+/// the SQL reference for the front's `folders` (tests only).
+#[cfg(test)]
 pub(crate) fn folders(conn: &Connection) -> Vec<Folder> {
     let Ok(mut stmt) = conn.prepare_cached(
         "SELECT f.id, f.name, f.parent,
@@ -176,7 +202,9 @@ pub(crate) fn add_folder(conn: &Connection, name: &str, parent: Option<i64>, sou
     Some(conn.last_insert_rowid())
 }
 
-/// The bookmarks directly in `folder`, by position.
+/// The bookmarks directly in `folder`, by position (the SQL reference for
+/// the front's `in_folder`; tests only).
+#[cfg(test)]
 pub(crate) fn in_folder(conn: &Connection, folder: i64) -> Vec<Bookmark> {
     let Ok(mut stmt) = conn.prepare_cached(&format!("SELECT {COLS} FROM bookmarks WHERE folder = ?1 ORDER BY position, id")) else {
         return Vec::new();
@@ -184,7 +212,9 @@ pub(crate) fn in_folder(conn: &Connection, folder: i64) -> Vec<Bookmark> {
     stmt.query_map(params![folder], bookmark_row).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
-/// The newest bookmarks.
+/// The newest bookmarks (the SQL reference for the front's
+/// `recent_bookmarks`; tests only).
+#[cfg(test)]
 pub(crate) fn recent(conn: &Connection, limit: usize) -> Vec<Bookmark> {
     let Ok(mut stmt) = conn.prepare_cached(&format!("SELECT {COLS} FROM bookmarks ORDER BY added_ms DESC, id DESC LIMIT ?1")) else {
         return Vec::new();
@@ -192,7 +222,10 @@ pub(crate) fn recent(conn: &Connection, limit: usize) -> Vec<Bookmark> {
     stmt.query_map(params![limit as i64], bookmark_row).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
-/// Bookmarks whose title or address contains `query`, newest first.
+/// Bookmarks whose title or address contains `query`, newest first. The
+/// SQL reference the front's [`super::data::BrowserData::search_bookmarks`]
+/// mirrors (tests only: the UI reads the front).
+#[cfg(test)]
 pub(crate) fn search(conn: &Connection, query: &str, limit: usize) -> Vec<Bookmark> {
     let q = query.trim();
     if q.is_empty() {

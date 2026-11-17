@@ -269,7 +269,7 @@ impl Harness {
                         "provider open failed for a stale ask ({}): {error}",
                         provider_id.label()
                     );
-                    this.drop_pending_ask();
+                    this.browser.drop_pending_ask();
                     return;
                 }
                 // No switch is coming: release the session verbs waiting on
@@ -344,7 +344,7 @@ impl Harness {
                         "scripted provider open failed for a stale ask ({}): {reason}",
                         provider_id.label()
                     );
-                    self.drop_pending_ask();
+                    self.browser.drop_pending_ask();
                     return;
                 }
                 crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
@@ -376,12 +376,12 @@ impl Harness {
                 provider_id.as_str()
             );
             provider.shutdown();
-            self.drop_pending_ask();
+            self.browser.drop_pending_ask();
             return;
         }
         // The Ask's session just earned its id: key the draft to it before
         // the view lands, so `activate` takes it here — and only here.
-        self.key_pending_ask(&session_id);
+        self.browser.key_pending_ask(&session_id);
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         // The terminal relay's route lands here too: the ack's session id
         // is what the lane serves from now on — for Codex that is the
@@ -576,7 +576,7 @@ impl Harness {
             provider_id.as_str(),
             cx,
         );
-        self.key_pending_ask(&request_id);
+        self.browser.key_pending_ask(&request_id);
         let host = SessionHost {
             provider_id: provider_id.as_str().to_owned(),
             workspace: workspace.clone(),
@@ -790,7 +790,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.open_state.forget_opening(provisional);
-        self.drop_pending_ask();
+        self.browser.drop_pending_ask();
         let reason = failed.error.to_string();
         let Some(view) = self.find_view(provisional, cx) else {
             cx.notify();
@@ -839,7 +839,7 @@ impl Harness {
         if self.reveal.as_deref() == Some(old) {
             self.reveal = Some(new.to_owned());
         }
-        if let Some(ask) = self.pending_ask_draft.as_mut().filter(|ask| ask.target.as_deref() == Some(old)) {
+        if let Some(ask) = self.browser.pending_ask_draft.as_mut().filter(|ask| ask.target.as_deref() == Some(old)) {
             ask.target = Some(new.to_owned());
         }
         if let Some(meta) = self.overrides.remove(old) {
@@ -847,7 +847,7 @@ impl Harness {
             crate::sessions::write(&self.overrides);
             self.invalidate_list();
         }
-        match &mut self.line_ui {
+        match &mut self.agent_window.line_ui {
             crate::app::agent_window::LineUi::Answer { session, .. }
             | crate::app::agent_window::LineUi::Drafting { session, .. }
             | crate::app::agent_window::LineUi::Drafted { session, .. }
@@ -857,8 +857,8 @@ impl Harness {
             }
             _ => {}
         }
-        if let Some(pages) = self.browser_chat_pages.remove(old) {
-            self.browser_chat_pages.insert(new.to_owned(), pages);
+        if let Some(pages) = self.agent_window.browser_chat_pages.remove(old) {
+            self.agent_window.browser_chat_pages.insert(new.to_owned(), pages);
         }
         if let Some((id, _)) = self.reveal_unknown.as_mut().filter(|(id, _)| id == old) {
             *id = new.to_owned();
@@ -913,7 +913,7 @@ impl Harness {
         self.resubscribe_live_views(cx);
         self.open_state.switch_pending = false;
         // A failed open lands no session: the Ask has nowhere to go.
-        self.drop_pending_ask();
+        self.browser.drop_pending_ask();
         if let Some(id) = session_id.clone() {
             self.open_state.pending_id = Some(id.clone());
             self.restore_right_for_session(&id, cx);

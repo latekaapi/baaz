@@ -130,17 +130,17 @@ impl Harness {
     /// The picker over the card, while it is open: anchored under the
     /// card's ↗, right-aligned to it.
     pub(crate) fn render_handoff_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.handoff_picker_open {
+        if !self.agent_window.handoff_picker_open {
             return None;
         }
         let query = self
-            .handoff_query
+            .agent_window.handoff_query
             .get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Find a session or project", 1, 1, window, cx)))
             .clone();
         let text = query.read(cx).value().to_string();
         let (sessions, projects) = self.handoff_rows(&text);
         let total = sessions.len() + projects.len();
-        let selected = self.handoff_selected.min(total.saturating_sub(1));
+        let selected = self.agent_window.handoff_selected.min(total.saturating_sub(1));
         let rows_s: Vec<_> = sessions.iter().map(|(_, row)| row.clone()).collect();
         let rows_p: Vec<_> = projects.iter().map(|(_, row)| row.clone()).collect();
         let baaz = cx.weak_entity();
@@ -153,34 +153,34 @@ impl Harness {
                     }
                 }
                 HandoffIntent::Hover(index) => {
-                    this.handoff_selected = index;
+                    this.agent_window.handoff_selected = index;
                     cx.notify();
                 }
                 HandoffIntent::Close => {
-                    this.handoff_picker_open = false;
+                    this.agent_window.handoff_picker_open = false;
                     cx.notify();
                 }
             });
         });
         let keys = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _, cx| match event.keystroke.key.as_str() {
             "up" => {
-                this.handoff_selected = this.handoff_selected.saturating_sub(1);
+                this.agent_window.handoff_selected = this.agent_window.handoff_selected.saturating_sub(1);
                 cx.notify();
             }
             "down" => {
-                this.handoff_selected = (this.handoff_selected + 1).min(total.saturating_sub(1));
+                this.agent_window.handoff_selected = (this.agent_window.handoff_selected + 1).min(total.saturating_sub(1));
                 cx.notify();
             }
             "enter" => {
-                let text = this.handoff_query.as_ref().map(|q| q.read(cx).value().to_string()).unwrap_or_default();
+                let text = this.agent_window.handoff_query.as_ref().map(|q| q.read(cx).value().to_string()).unwrap_or_default();
                 let (sessions, projects) = this.handoff_rows(&text);
-                let target = sessions.into_iter().chain(projects).nth(this.handoff_selected).map(|(t, _)| t);
+                let target = sessions.into_iter().chain(projects).nth(this.agent_window.handoff_selected).map(|(t, _)| t);
                 if let Some(target) = target {
                     this.run_on_main(cx, move |this, window, cx| this.hand_off_browser_chat(target, window, cx));
                 }
             }
             "escape" => {
-                this.handoff_picker_open = false;
+                this.agent_window.handoff_picker_open = false;
                 cx.notify();
             }
             _ => {}
@@ -194,7 +194,7 @@ impl Harness {
     /// task folder, the target opens in Sessions with the chat's context as
     /// an unsent draft, and the chat records the handoff (board 3b).
     pub(crate) fn hand_off_browser_chat(&mut self, target: HandoffTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.handoff_picker_open = false;
+        self.agent_window.handoff_picker_open = false;
         let Some(chat) = self.registry.browser_chat().cloned() else { return };
         let (chat_id, answer) = {
             let view = chat.read(cx);
@@ -205,7 +205,7 @@ impl Harness {
         let owner = Owner::Session(chat_id.clone());
         let tabs: Vec<_> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| (tab.id, tab.title.clone(), tab.url.clone())).collect();
         // The person's pages it was asked about, then the tabs it opened.
-        let mut pages: Vec<(String, String)> = self.browser_chat_pages.get(&chat_id).cloned().unwrap_or_default();
+        let mut pages: Vec<(String, String)> = self.agent_window.browser_chat_pages.get(&chat_id).cloned().unwrap_or_default();
         for (_, title, url) in &tabs {
             if !pages.iter().any(|(_, u)| u == url) {
                 pages.push((title.clone(), url.clone()));
@@ -217,13 +217,13 @@ impl Harness {
             HandoffTarget::Session(id) => {
                 let label = self.sessions.iter().find(|e| &e.id == id).map(|e| e.label.clone()).unwrap_or_default();
                 let project = self.project_name_for(id).unwrap_or_default();
-                self.pending_ask_draft = Some(crate::app::PendingAsk { target: Some(id.clone()), query: draft });
+                self.browser.pending_ask_draft = Some(crate::app::PendingAsk { target: Some(id.clone()), query: draft });
                 self.set_mode(crate::layout::Mode::Sessions, window, cx);
                 if self.active_id(cx).as_deref() != Some(id.as_str()) {
                     self.resume(id.clone(), window, cx);
                 } else if let Some(view) = self.active.clone() {
                     // Already on screen: the draft goes straight into its composer.
-                    let text = self.pending_ask_draft.take().map(|p| p.query).unwrap_or_default();
+                    let text = self.browser.pending_ask_draft.take().map(|p| p.query).unwrap_or_default();
                     let existing = view.read(cx).draft_text(cx);
                     let next = crate::browser::toolbar::ask_draft_text(&existing, &text);
                     view.update(cx, |view, cx| view.set_draft(next, window, cx));
@@ -232,7 +232,7 @@ impl Harness {
             }
             HandoffTarget::Project(project) => {
                 let name = self.projects.find(project).map(|p| p.name.clone()).unwrap_or_default();
-                self.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query: draft });
+                self.browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query: draft });
                 self.new_session_in(Some(project.clone()), window, cx);
                 (self.active_id(cx), "a new session".to_owned(), name)
             }
@@ -241,7 +241,7 @@ impl Harness {
             for (tab, _, _) in &tabs {
                 self.browser.tabs.move_to(*tab, Owner::Session(target_id.clone()));
             }
-            self.schedule_tabs_write(cx);
+            self.browser.schedule_tabs_write();
         }
         self.terminal_service.revoke_grants(&chat_id);
         let n = tabs.len();
@@ -250,14 +250,14 @@ impl Harness {
             (true, n) => format!("its {n} {} now in that session's task folder", if n == 1 { "tab is" } else { "tabs are" }),
             (false, n) => format!("{project_label} · its {n} {} now in that session's task folder", if n == 1 { "tab is" } else { "tabs are" }),
         };
-        self.browser_handoffs.insert(chat_id, (target_id.unwrap_or_default(), target_label, detail));
+        self.agent_window.browser_handoffs.insert(chat_id, (target_id.unwrap_or_default(), target_label, detail));
         cx.notify();
     }
 
     /// Open the session the chat was handed off to (the card's Open).
     pub(crate) fn open_handoff_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.browser_chat_id(cx) else { return };
-        let Some((target, _, _)) = self.browser_handoffs.get(&chat).cloned() else { return };
+        let Some((target, _, _)) = self.agent_window.browser_handoffs.get(&chat).cloned() else { return };
         if target.is_empty() {
             return;
         }

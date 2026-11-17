@@ -468,9 +468,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         Ok(())
     } },
     WindowVerb { verb: "site-info", run: |this, _, _, cx| {
-        this.site_info_open = this.browse_centre_state(cx).is_some();
+        this.browser.site_info_open = this.browse_centre_state(cx).is_some();
         cx.notify();
-        if this.site_info_open { Ok(()) } else { Err("no page is open".into()) }
+        if this.browser.site_info_open { Ok(()) } else { Err("no page is open".into()) }
     } },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
@@ -489,7 +489,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
     WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
-    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.handoff_picker_open = true; cx.notify(); Ok(()) } },
+    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.agent_window.handoff_picker_open = true; cx.notify(); Ok(()) } },
     // Chromium's theme-change notification on every page window, as macOS
     // sends on an appearance or display change: the page ground must stay
     // white through it (owner 9 Nov: dark margins on Hacker News). Free.

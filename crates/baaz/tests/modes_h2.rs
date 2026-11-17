@@ -18,6 +18,21 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
+/// Every file of the `browser` module (task 4.5 split `browser/mod.rs` by
+/// seam): `mod.rs` first, then the rest by name, so a pin follows a
+/// function into whichever file holds it now.
+fn browser_source() -> String {
+    let dir = manifest().join("src").join("browser");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("src/browser reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .collect();
+    names.sort();
+    std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
 fn repo_file(name: &str) -> String {
     let path = manifest().join("../../").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
@@ -110,7 +125,7 @@ fn probe_entries_cover_both_modes() {
 /// with its own bounds; Sessions-mode visibility is unchanged.
 #[test]
 fn browse_centre_has_its_own_visibility_and_bounds() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     assert!(browser.contains("pub centre_browse: bool"), "the visibility input exists");
     assert!(
         browser.contains("(inputs.pane_open && inputs.kind_browser || inputs.centre_browse)"),
@@ -121,7 +136,7 @@ fn browse_centre_has_its_own_visibility_and_bounds() {
         "the centre page has its own rect"
     );
     assert!(
-        browser.contains("let centre_shown = self.browse_centre_shown(cx);"),
+        browser.contains("let centre_shown = self.browser.browse_centre_shown(cx);"),
         "sync resolves the centre tab every frame"
     );
     assert!(

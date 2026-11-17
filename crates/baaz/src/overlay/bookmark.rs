@@ -30,27 +30,26 @@ impl Harness {
     /// ⌘D: bookmark the shown page into the Bookmarks bar (if it is not
     /// yet) and open the popover on it. Again while open: Done.
     pub(crate) fn bookmark_shown_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark_edit.is_some() {
+        if self.browser.bookmark_edit.is_some() {
             self.close_bookmark_popover(cx);
             return;
         }
-        let Some(id) = self.browse_centre_shown(cx) else { return };
+        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
         let Some(tab) = self.browser.tabs.get(id).cloned() else { return };
         if !crate::browser::history::recordable(&tab.url) {
             return;
         }
-        let conn = self.browser.db().conn();
         let title = crate::browser::tabs::tab_label(&tab.title, &tab.url);
-        let Some(mark) = bookmarks::add(conn, &tab.url, &title, bookmarks::BAR, crate::browser::tabs::now_ms()) else { return };
-        self.browser.bookmarks_changed();
+        let now = crate::browser::tabs::now_ms();
+        let mark = self.browser.data.update(cx, |data, cx| data.add_bookmark(&tab.url, &title, bookmarks::BAR, now, cx));
         self.open_bookmark_popover(mark, window, cx);
     }
 
     /// The ★ in the address line: the popover on the page's bookmark.
     pub(crate) fn edit_shown_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown(cx) else { return };
+        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
         let Some(url) = self.browser.tabs.get(id).map(|tab| tab.url.clone()) else { return };
-        if let Some(mark) = bookmarks::find(self.browser.db().conn(), &url) {
+        if let Some(mark) = self.browser.data.read(cx).bookmark(&url) {
             self.open_bookmark_popover(mark, window, cx);
         }
     }
@@ -66,32 +65,31 @@ impl Harness {
                 this.close_bookmark_popover(cx);
             }
         });
-        self.bookmark_edit_sub = Some(subscription);
-        self.bookmark_edit = Some(BookmarkEdit { id: mark.id, name, folder: mark.folder, folders_open: false });
+        self.browser.bookmark_edit_sub = Some(subscription);
+        self.browser.bookmark_edit = Some(BookmarkEdit { id: mark.id, name, folder: mark.folder, folders_open: false });
         cx.notify();
     }
 
     /// Keep what is typed and close (Done, ↩, Escape, a click away).
     pub(crate) fn close_bookmark_popover(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.bookmark_edit.take() else { return };
-        self.bookmark_edit_sub = None;
+        let Some(edit) = self.browser.bookmark_edit.take() else { return };
+        self.browser.bookmark_edit_sub = None;
         let name = edit.name.read(cx).value().trim().to_owned();
-        let conn = self.browser.db().conn();
-        if !name.is_empty() {
-            bookmarks::update(conn, edit.id, &name, edit.folder);
-        } else if let Ok(old) = conn.query_row("SELECT title FROM bookmarks WHERE id = ?1", [edit.id], |r| r.get::<_, String>(0)) {
-            bookmarks::update(conn, edit.id, &old, edit.folder);
-        }
-        self.browser.bookmarks_changed();
+        self.browser.data.update(cx, |data, cx| {
+            // An emptied name keeps the old one (the folder still moves).
+            let title = if name.is_empty() { data.bookmark_by_id(edit.id).map(|mark| mark.title) } else { Some(name) };
+            if let Some(title) = title {
+                data.update_bookmark(edit.id, &title, edit.folder, cx);
+            }
+        });
         cx.notify();
     }
 
     /// Remove: the bookmark goes and the popover closes.
     pub(crate) fn remove_bookmark_from_popover(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.bookmark_edit.take() else { return };
-        self.bookmark_edit_sub = None;
-        bookmarks::remove(self.browser.db().conn(), edit.id);
-        self.browser.bookmarks_changed();
+        let Some(edit) = self.browser.bookmark_edit.take() else { return };
+        self.browser.bookmark_edit_sub = None;
+        self.browser.data.update(cx, |data, cx| data.remove_bookmark(edit.id, cx));
         cx.notify();
     }
 
@@ -99,11 +97,11 @@ impl Harness {
     pub(crate) fn render_bookmark_popover(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let edit = self.bookmark_edit.as_ref()?;
+        let edit = self.browser.bookmark_edit.as_ref()?;
         let name = edit.name.clone();
         let folder = edit.folder;
         let folders_open = edit.folders_open;
-        let all = bookmarks::folders(self.browser.db().conn());
+        let all = self.browser.data.read(cx).folders();
         let folder_name = bookmarks::folder_path(&all, folder);
         let label = |text: &'static str, cx: &gpui::App| {
             div().px(metrics.item_px).pt(px(scale::SP_2)).pb(px(scale::SP_1)).role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(text)
@@ -122,7 +120,7 @@ impl Harness {
                 .child(inner)
         };
         let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            if let Some(edit) = this.bookmark_edit.as_mut() {
+            if let Some(edit) = this.browser.bookmark_edit.as_mut() {
                 edit.folders_open = !edit.folders_open;
                 cx.notify();
             }
@@ -170,7 +168,7 @@ impl Harness {
                 let id = f.id;
                 let path = bookmarks::folder_path(&all, id);
                 let pick = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    if let Some(edit) = this.bookmark_edit.as_mut() {
+                    if let Some(edit) = this.browser.bookmark_edit.as_mut() {
                         edit.folder = id;
                         edit.folders_open = false;
                         cx.notify();

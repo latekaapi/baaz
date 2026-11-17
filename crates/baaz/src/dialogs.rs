@@ -881,7 +881,7 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::BackHistory) {
             return None;
         }
-        let id = self.browse_centre_shown(cx)?;
+        let id = self.browser.browse_centre_shown(cx)?;
         let mut past: Vec<String> = self
             .browser
             .histories
@@ -896,16 +896,16 @@ impl Harness {
             past.iter().map(|url| MenuRow::Toggle { label: url.clone().into(), checked: false }).collect();
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
-            this.ensure_tabs_loaded(cx);
+            this.ensure_tabs_loaded();
             // Rows read newest-first, so row `i` steps back `i + 1`.
-            if let Some(id) = this.browse_centre_shown(cx) {
+            if let Some(id) = this.browser.browse_centre_shown(cx) {
                 let steps = index.saturating_add(1);
                 if let Some(url) = this.browser.histories.entry(id).or_default().go_back_steps(steps) {
                     this.navigate_browse_tab(id, &url, window, cx);
                 }
             }
         });
-        let trigger = self.back_bounds?;
+        let trigger = self.browser.back_bounds?;
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();

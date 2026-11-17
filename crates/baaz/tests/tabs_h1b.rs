@@ -17,6 +17,21 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
+/// Every file of the `browser` module (task 4.5 split `browser/mod.rs` by
+/// seam): `mod.rs` first, then the rest by name, so a pin follows a
+/// function into whichever file holds it now.
+fn browser_source() -> String {
+    let dir = manifest().join("src").join("browser");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("src/browser reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .collect();
+    names.sort();
+    std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
 /// A pending tabs write lands synchronously in BOTH quit paths — the menu's
 /// `QuitApp` and the `on_app_quit` hook for Dock/signal quits — next to the
 /// layout/sessions flushes.
@@ -25,7 +40,7 @@ fn quit_flushes_a_pending_tabs_write_in_both_quit_paths() {
     for name in ["app.rs", "main.rs"] {
         let body = source(name);
         assert!(
-            body.contains("this.flush_tabs_save()"),
+            body.contains("this.browser.flush_tabs_save()"),
             "{name} flushes tabs at quit next to the sessions flush"
         );
     }
@@ -39,10 +54,10 @@ fn quit_flushes_a_pending_tabs_write_in_both_quit_paths() {
 /// themselves are tested on the store (`store::tests`).
 #[test]
 fn the_debounced_tabs_write_leaves_the_ui_thread_with_a_cap() {
-    let body = source("browser/mod.rs");
-    assert!(body.contains("tabs::save_soon(&self.browser.tabs);"), "the tab change queues a delayed save");
+    let body = browser_source();
+    assert!(body.contains("tabs::save_soon(&self.tabs);"), "the tab change queues a delayed save");
     assert!(body.contains("fn flush_tabs_save"), "a synchronous quit-time flush exists");
-    assert!(body.contains("tabs::write(&self.browser.tabs);"), "the quit flush writes the current model now");
+    assert!(body.contains("tabs::write(&self.tabs);"), "the quit flush writes the current model now");
     let tabs = source("browser/tabs.rs");
     assert!(tabs.contains("JsonStore::new(\"Browser/tabs.json\")"), "tabs.json has one writer");
 }
@@ -51,7 +66,7 @@ fn the_debounced_tabs_write_leaves_the_ui_thread_with_a_cap() {
 /// registered page would too — a closed tab stays dead through them.
 #[test]
 fn close_and_discard_unregister_the_agent_page() {
-    let body = source("browser/mod.rs");
+    let body = browser_source();
     assert!(
         body.contains("self.terminal_service.unregister_browser(key);"),
         "the last close unregisters the session's page"
@@ -75,7 +90,7 @@ fn close_and_discard_unregister_the_agent_page() {
 /// `browser_url`, and the migration runs only once per session.
 #[test]
 fn a_closed_last_tab_never_resurrects() {
-    let body = source("browser/mod.rs");
+    let body = browser_source();
     assert!(
         body.contains("self.clear_session_browser_url(&session, cx);"),
         "the last close forgets the session's stored browser_url"
@@ -106,7 +121,7 @@ fn a_visible_page_never_dirties_tabs_json() {
         !tabs.contains("saturating_sub(last) >= 1_000"),
         "no re-stamp throttle: a stamp costs no write"
     );
-    let body = source("browser/mod.rs");
+    let body = browser_source();
     assert!(
         !body.contains("mark_shown(id, tabs::now_ms()) {"),
         "the per-frame sync schedules no write for a merely visible page"
@@ -120,7 +135,7 @@ fn a_visible_page_never_dirties_tabs_json() {
 /// blank (owner screenshots 2026-10-11).
 #[test]
 fn close_and_keyboard_follow_the_shown_tab_not_the_project() {
-    let body = source("browser/mod.rs");
+    let body = browser_source();
     assert!(
         body.contains("active_of(&tab.owner, tab.space.as_deref())"),
         "was_active comes from the tab's own owner+space"

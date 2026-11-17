@@ -1,7 +1,8 @@
 //! R4 "Import from Chrome" (board R4Daily 2a–2d): the sheet over Settings ›
 //! Browser. The counts are read off the main thread (Chrome's History is
-//! copied first, and can be large); the import itself writes `browser.db`
-//! on the main thread in 500-row transactions. Chrome is only read.
+//! copied first, and can be large); the import itself runs in the
+//! `browser.db` worker ([`crate::browser::data`]) in 500-row transactions,
+//! and the sheet shows what it wrote when it lands. Chrome is only read.
 //! Passwords are not offered (see `browser::chrome_import`).
 
 use std::path::PathBuf;
@@ -36,6 +37,8 @@ pub(crate) struct ChromeImportSheet {
     pub stage: Stage,
     /// Bumped per count request, so a late answer for another profile drops.
     pub epoch: u64,
+    /// An import is running in the worker: a second Import press waits.
+    pub importing: bool,
 }
 
 impl Harness {
@@ -43,7 +46,7 @@ impl Harness {
     /// first profile and count it in the background.
     pub(crate) fn open_chrome_import(&mut self, cx: &mut Context<Self>) {
         let profiles = chrome_import::chrome_root().map(|root| chrome_import::profiles(&root)).unwrap_or_default();
-        self.chrome_import = Some(ChromeImportSheet { profiles, selected: 0, counts: None, bookmarks: true, history: true, stage: Stage::Choose, epoch: 0 });
+        self.chrome_import = Some(ChromeImportSheet { profiles, selected: 0, counts: None, bookmarks: true, history: true, stage: Stage::Choose, epoch: 0, importing: false });
         self.count_chrome_profile(cx);
         cx.notify();
     }
@@ -73,31 +76,37 @@ impl Harness {
     }
 
     fn run_chrome_import(&mut self, cx: &mut Context<Self>) {
-        let Some(sheet) = self.chrome_import.as_ref() else { return };
+        let Some(sheet) = self.chrome_import.as_mut().filter(|sheet| !sheet.importing) else { return };
         let Some(dir): Option<PathBuf> = sheet.profiles.get(sheet.selected).map(|p| p.dir.clone()) else { return };
         let (b, h) = (sheet.bookmarks, sheet.history);
+        sheet.importing = true;
         let started = std::time::Instant::now();
-        let done = chrome_import::import(self.browser.db(), &dir, b, h, crate::browser::tabs::now_ms(), |_, _| {});
-        crate::baaz_log!(
-            "chrome import: {} bookmarks, {} history pages in {} ms ({})",
-            done.bookmarks,
-            done.history,
-            started.elapsed().as_millis(),
-            done.source
-        );
-        self.browser.history_changed();
-        self.browser.bookmarks_changed();
-        if let Some(sheet) = self.chrome_import.as_mut() {
-            sheet.stage = Stage::Done(done);
-        }
-        cx.notify();
+        let now = crate::browser::tabs::now_ms();
+        let answer = self.browser.data.update(cx, |data, _| data.import_chrome(dir, b, h, now));
+        cx.spawn(async move |this, cx| {
+            let Ok(done) = answer.await else { return };
+            crate::baaz_log!(
+                "chrome import: {} bookmarks, {} history pages in {} ms ({})",
+                done.bookmarks,
+                done.history,
+                started.elapsed().as_millis(),
+                done.source
+            );
+            let _ = this.update(cx, |this, cx| {
+                if let Some(sheet) = this.chrome_import.as_mut() {
+                    sheet.importing = false;
+                    sheet.stage = Stage::Done(done);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn undo_chrome_import(&mut self, cx: &mut Context<Self>) {
         if let Some(ChromeImportSheet { stage: Stage::Done(done), .. }) = self.chrome_import.as_ref() {
-            chrome_import::undo(self.browser.db(), &done.source);
-            self.browser.history_changed();
-            self.browser.bookmarks_changed();
+            let source = done.source.clone();
+            self.browser.data.update(cx, |data, _| data.undo_import(&source));
             self.overlays.update(cx, |o, _| o.toast("Import undone", "What it added is gone; your own bookmarks and history stay."));
         }
         self.close_chrome_import(cx);

@@ -40,7 +40,7 @@ impl Harness {
     /// `page` (the shown tab's pane) and its partner side by side, the
     /// original left tab always on the left. `Err(page)` when there is none.
     pub(crate) fn render_split(&mut self, page: AnyElement, window: &mut Window, cx: &mut Context<Self>) -> Result<AnyElement, AnyElement> {
-        let (Some(pair), Some(shown), Some(partner)) = (self.browser.split, self.browse_centre_shown(cx), self.split_partner(cx)) else {
+        let (Some(pair), Some(shown), Some(partner)) = (self.browser.split, self.browser.browse_centre_shown(cx), self.split_partner(cx)) else {
             return Err(page);
         };
         let state = self.ensure_tab_page(crate::browser::HOME_KEY, partner, window, cx);
@@ -261,7 +261,7 @@ impl Harness {
             peek.state.update(cx, |state, _| state.set_holes(hole.to_vec()));
         }
         let pair = self.browser.split?;
-        let shown = self.browse_centre_shown(cx)?;
+        let shown = self.browser.browse_centre_shown(cx)?;
         let partner = self.split_partner(cx)?;
         let (left, right) = peek_split::split_rects(centre, self.browser.split_ratio);
         let close = |half: gpui::Bounds<Pixels>| {

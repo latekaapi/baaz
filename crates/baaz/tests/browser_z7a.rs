@@ -19,6 +19,21 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
+/// Every file of the `browser` module (task 4.5 split `browser/mod.rs` by
+/// seam): `mod.rs` first, then the rest by name, so a pin follows a
+/// function into whichever file holds it now.
+fn browser_source() -> String {
+    let dir = manifest().join("src").join("browser");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("src/browser reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .collect();
+    names.sort();
+    std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
 fn workspace_source(name: &str) -> String {
     let path = manifest().join("../../").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
@@ -78,7 +93,7 @@ fn browser_pane_renders_the_session_webview() {
 /// entries below.
 #[test]
 fn fake_backend_only_behind_the_boot_flag() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     assert!(browser.contains("self.browser.fake || cfg!(test)"), "fake is flag- or test-gated");
     assert!(browser.contains("WryBackend::new_at"), "production path builds WKWebView");
     assert!(browser.contains("set_obscured"), "the host hides the native view under overlays");
@@ -90,8 +105,9 @@ fn fake_backend_only_behind_the_boot_flag() {
 /// writing its URL onto `RightState`, and the tab verbs drive the strip.
 #[test]
 fn per_session_state_and_verbs_are_wired() {
-    let browser = source("browser/mod.rs");
-    assert!(browser.contains("states: HashMap<TabId"), "live pages are keyed by tab");
+    let browser = browser_source();
+    let state = source("browser/state.rs");
+    assert!(state.contains("states: HashMap<TabId"), "live pages are keyed by tab");
     assert!(browser.contains("register_tab_page"), "agent tools follow the active tab");
     let tabs = source("browser/tabs.rs");
     assert!(tabs.contains("pub(crate) struct Tabs"), "the tab model owns tabs per session and per project");
@@ -111,7 +127,7 @@ fn per_session_state_and_verbs_are_wired() {
 /// annotations append text, Console toasts.
 #[test]
 fn intents_land_in_the_draft() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     assert!(browser.contains("attach_screenshot"), "Screenshot attaches the PNG to the draft");
     assert!(browser.contains("append_draft_block"), "SendAnnotations appends pin text to the draft");
     assert!(browser.contains("Console is not available yet"), "Console toasts");

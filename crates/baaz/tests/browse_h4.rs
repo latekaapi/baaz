@@ -21,6 +21,21 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
+/// Every file of the `browser` module (task 4.5 split `browser/mod.rs` by
+/// seam): `mod.rs` first, then the rest by name, so a pin follows a
+/// function into whichever file holds it now.
+fn browser_source() -> String {
+    let dir = manifest().join("src").join("browser");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("src/browser reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .collect();
+    names.sort();
+    std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
 fn repo_file(name: &str) -> String {
     let path = manifest().join("../../").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
@@ -48,7 +63,7 @@ fn cmd_t_in_browse_opens_a_blank_tab_with_the_field_focused() {
         "NewSession branches in Browse"
     );
     assert!(app.contains("this.new_browse_sidebar_tab(window, cx);"), "⌘T in Browse opens a tab");
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let new_tab = fn_body(&browser, "new_browse_sidebar_tab");
     assert!(new_tab.contains("Owner::Person"), "the new tab is a person tab");
     assert!(new_tab.contains("BLANK"), "the new tab opens blank");
@@ -112,7 +127,7 @@ fn toolbar_roles_and_labels() {
     assert!(app.contains("gpui::Role::ListBoxOption"), "suggestions are list-box options");
     // D6: the pane's 'Browse full width' button became the nav row's
     // labelled 'Open in Browse' (agentic-ui page.rs), routed here.
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     assert!(
         browser.contains("WebviewIntent::OpenInBrowse => self.carry_session_tab_to_browse(window, cx)"),
         "the page's Open in Browse carries the session's page into Browse"
@@ -124,7 +139,7 @@ fn toolbar_roles_and_labels() {
 /// unit tests pin both halves obscured.
 #[test]
 fn omnibox_covering_is_pinned_in_source() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     assert!(browser.contains("omnibox_open: bool"), "visibility carries the omnibox input");
     assert!(browser.contains("omnibox_open: self.browse_omnibox_open(cx)"), "the sync feeds the input");
     assert!(
@@ -138,7 +153,7 @@ fn omnibox_covering_is_pinned_in_source() {
 /// project) leaves the field and resets the page-holds edge.
 #[test]
 fn omnibox_covers_only_while_rows_render() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let open = fn_body(&browser, "browse_omnibox_open");
     assert!(open.contains("browse_suggestions"), "open means rows actually rank");
     let app = source("app.rs");
@@ -170,7 +185,7 @@ fn browse_centre_hides_the_library_nav_row() {
 /// the sidebar hidden, in the main window.
 #[test]
 fn newtab_placeholder_and_dropdown_anchors() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let focus = fn_body(&browser, "focus_browse_address_with");
     assert!(
         focus.contains("set_placeholder(FIELD_PLACEHOLDER") && browser.contains("FIELD_PLACEHOLDER: &str = \"Search, open a page, or ask\""),
@@ -195,7 +210,7 @@ fn newtab_placeholder_and_dropdown_anchors() {
 /// name. Rows press on mouse-down so the click lands before blur.
 #[test]
 fn suggestions_pickup_and_row_presses() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let suggestions = fn_body(&browser, "browse_suggestions");
     assert!(suggestions.contains("!entry.hidden"), "hidden sessions never suggest");
     assert!(suggestions.contains("entry.project == current"), "suggestions stay in this project");
@@ -224,7 +239,7 @@ fn suggestions_pickup_and_row_presses() {
 /// own binding, so the commit never also fires.
 #[test]
 fn ask_draft_lands_on_arrival_never_sent() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let ask = fn_body(&browser, "browse_ask");
     assert!(ask.contains("PendingAsk { target: None, query }"), "Ask arms the unkeyed question");
     assert!(!ask.contains("self.active"), "Ask never touches whatever is active right now");
@@ -243,9 +258,9 @@ fn ask_draft_lands_on_arrival_never_sent() {
     assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
     let open = source("app/sessions/open.rs");
     let new = fn_body(&open, "new_session_in");
-    assert!(new.contains("self.drop_pending_ask()"), "an early return drops the draft");
+    assert!(new.contains("self.browser.drop_pending_ask()"), "an early return drops the draft");
     assert!(
-        open.contains("self.key_pending_ask("),
+        open.contains("self.browser.key_pending_ask("),
         "every open path keys the draft to its session"
     );
     let activate = fn_body(&open, "activate");
@@ -263,7 +278,7 @@ fn ask_draft_lands_on_arrival_never_sent() {
 /// (updating the sidebar selection there) instead of showing the tab.
 #[test]
 fn held_session_tab_clears_everywhere() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab", "step_tab_new"] {
         assert!(
             fn_body(&browser, name).contains("browse_session_tab = None"),

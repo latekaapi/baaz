@@ -182,16 +182,16 @@ impl crate::app::Harness {
     /// the first frame's read, or when the lookup fails. Render reads
     /// this only — never a live LaunchServices lookup.
     pub(crate) fn default_browser_handler(&self) -> Option<&str> {
-        self.default_browser_cache.as_ref().and_then(|inner| inner.as_deref())
+        self.browser.default_browser_cache.as_ref().and_then(|inner| inner.as_deref())
     }
 
     /// Re-read the `https` handler into the cache and retire the
     /// Make-default wait with its re-read. Read-only — never changes the
     /// default.
     pub(crate) fn refresh_default_browser_cache(&mut self) {
-        self.default_browser_cache = Some(default_handler_for_https());
-        self.default_browser_confirm_pending = false;
-        self.default_browser_recheck_at = None;
+        self.browser.default_browser_cache = Some(default_handler_for_https());
+        self.browser.default_browser_confirm_pending = false;
+        self.browser.default_browser_recheck_at = None;
     }
 }
 

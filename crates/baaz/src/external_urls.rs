@@ -10,7 +10,7 @@
 //! Every URL lands as a new **person tab** in the current project, the
 //! window switches to Browse mode, and the app and window come to the
 //! front. Before sign-in (the login screen still up) URLs wait in
-//! [`Harness::pending_external_urls`](crate::app::Harness) and open once
+//! [`BrowseState::pending_external_urls`](crate::browser::BrowseState) and open once
 //! the shell is up. Several URLs open several tabs, in order, the last
 //! one active. Baaz's own scheme and anything non-web are ignored with
 //! a log line. Nothing here ever changes the system default browser.
@@ -167,7 +167,7 @@ impl Harness {
     /// One batch of outside URLs into the shell: web URLs become person
     /// tabs in arrival order (the last ends active); the own scheme and
     /// anything non-web are ignored with a log line. Before sign-in the
-    /// web URLs wait in [`Self::pending_external_urls`] and open once
+    /// web URLs wait in [`BrowseState::pending_external_urls`](crate::browser::BrowseState::pending_external_urls) and open once
     /// the shell is up ([`Self::flush_pending_external_urls`]).
     pub(crate) fn ingest_external_urls(
         &mut self,
@@ -194,7 +194,7 @@ impl Harness {
         // Parked only while the shell is not on screen; a signed-out Muse
         // no longer holds every link from other apps (docs/50 P1).
         if !self.shell_up(cx) {
-            self.pending_external_urls.extend(web);
+            self.browser.pending_external_urls.extend(web);
             cx.notify();
             return;
         }
@@ -224,7 +224,7 @@ impl Harness {
     /// until the shell is up — while the login stands open the queue
     /// stays parked.
     pub(crate) fn flush_pending_external_urls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let queued = take_flushable_queue(self.shell_up(cx), &mut self.pending_external_urls);
+        let queued = take_flushable_queue(self.shell_up(cx), &mut self.browser.pending_external_urls);
         if !queued.is_empty() {
             self.open_external_tabs(&queued, window, cx);
         }
@@ -239,7 +239,7 @@ impl Harness {
     /// for another click that never comes.
     pub(crate) fn poll_external_urls(&mut self, cx: &mut Context<Self>) {
         let signed_in = self.shell_up(cx);
-        if external_queue_len() == 0 && (!signed_in || self.pending_external_urls.is_empty()) {
+        if external_queue_len() == 0 && (!signed_in || self.browser.pending_external_urls.is_empty()) {
             return;
         }
         let urls = drain_external_queue();
@@ -434,7 +434,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "an outside link switches to Browse");
-            let space = h.browse_space();
+            let space = h.browser.browse_space();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             // Entering Browse arms its own blank tab first; the outside
             // URLs open behind it, one tab per URL in arrival order.
@@ -448,7 +448,7 @@ mod tests {
             let active = h.browser.tabs.active_of(&Owner::Person, space.as_deref());
             let last = tabs.last().map(|tab| tab.id);
             assert_eq!(active, last, "the last URL ends active");
-            assert!(h.pending_external_urls.is_empty(), "nothing queues once signed in");
+            assert!(h.browser.pending_external_urls.is_empty(), "nothing queues once signed in");
         });
         restore_state(state);
     }
@@ -481,11 +481,11 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(
-                h.pending_external_urls,
+                h.browser.pending_external_urls,
                 vec!["https://queued-one.example/".to_owned(), "https://queued-two.example/".to_owned()],
                 "pre-shell URLs wait"
             );
-            let space = h.browse_space();
+            let space = h.browser.browse_space();
             assert!(
                 h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref()).is_empty(),
                 "nothing opens before the shell is up"
@@ -505,8 +505,8 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.pending_external_urls.is_empty(), "the frame hook drains the queue");
-            let space = h.browse_space();
+            assert!(h.browser.pending_external_urls.is_empty(), "the frame hook drains the queue");
+            let space = h.browser.browse_space();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             let got: Vec<&str> =
                 tabs.iter().map(|tab| tab.url.as_str()).filter(|url| *url != "about:blank").collect();

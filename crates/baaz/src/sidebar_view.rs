@@ -309,6 +309,9 @@ pub(crate) struct SidebarKey {
     tab_menu: Option<u64>,
     /// Bumped as favicons land, so the column repaints with them.
     favicons: u64,
+    /// Bumped as bookmarks change or land from `browser.db` (task 4.5:
+    /// the first load lands after boot), so the address row's ★ follows.
+    bookmarks: u64,
     /// The v2 screen's own inputs: the lifted pinned rows, what the
     /// pointer is over (the screen swaps trailing slots on it), the
     /// sections' and menus' open state, the view options, the loading
@@ -369,7 +372,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.browse_space();
+        let space = baaz.browser.browse_space();
         let active =
             baaz.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
         baaz.browser
@@ -394,7 +397,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.browse_space();
+        let space = baaz.browser.browse_space();
         baaz.browser
             .tabs
             .person_tabs(space.as_deref())
@@ -428,7 +431,7 @@ impl SidebarKey {
         if !baaz.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = baaz.browse_space();
+        let space = baaz.browser.browse_space();
         baaz.browser
             .tabs
             .session_tabs(space.as_deref())
@@ -483,8 +486,8 @@ impl SidebarKey {
         } else {
             (Vec::new(), 0, Vec::new(), Vec::new())
         };
-        let browse_session_tab = baaz.browse_session_tab.map(|id| id.0);
-        let tab_menu = baaz.tab_menu.map(|id| id.0);
+        let browse_session_tab = baaz.browser.browse_session_tab.map(|id| id.0);
+        let tab_menu = baaz.browser.tab_menu.map(|id| id.0);
         let account_menu_open = baaz.overlays.read(cx).is_open(MenuKind::Account);
         Self {
             visible: Rc::as_ptr(&visible) as usize,
@@ -501,6 +504,7 @@ impl SidebarKey {
             browse_session_tab,
             tab_menu,
             favicons: baaz.browser.favicons.generation,
+            bookmarks: baaz.browser.data.read(cx).generation(),
             pinned: Rc::as_ptr(&baaz.sidebar_pinned(cx)) as usize,
             hovered: baaz.sidebar_hovered.clone(),
             hovered_group: baaz.hovered_group.clone(),
@@ -516,8 +520,8 @@ impl SidebarKey {
                 baaz.show_archived,
                 baaz.hidden_count(),
             ),
-            browse_menu: baaz.browse_menu.clone(),
-            browse_naming: baaz.browse_naming.clone(),
+            browse_menu: baaz.browser.browse_menu.clone(),
+            browse_naming: baaz.browser.browse_naming.clone(),
             current_space: baaz.browser.tabs.current_space.clone(),
             loading: baaz.sidebar_loading(),
             skills_on: baaz.skills_page.read(cx).catalog.on_count(),
@@ -661,7 +665,7 @@ impl Harness {
         if !self.browser.tabs_loaded {
             return Vec::new();
         }
-        let space = self.browse_space();
+        let space = self.browser.browse_space();
         let active =
             self.browser.tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
         self.browser
@@ -928,7 +932,7 @@ impl Harness {
             selected: selected.map(SharedString::from),
             // The row a right-click menu belongs to stays lit while it is open
             // (canvas Menus board).
-            hovered: match self.browse_menu.as_ref().map(|menu| &menu.target) {
+            hovered: match self.browser.browse_menu.as_ref().map(|menu| &menu.target) {
                 Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(id.clone()),
                 Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
                 Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => {
@@ -1021,7 +1025,7 @@ impl Harness {
     /// tabs as a task folder, the shown page's address and history, the
     /// spaces, and the open menu / name field.
     fn browse_model(&self, cx: &mut Context<Self>) -> BrowseModel {
-        let space = self.browse_space().unwrap_or_default();
+        let space = self.browser.browse_space().unwrap_or_default();
         let snaps = self.browse_person_snaps(cx);
         let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
             self.browser.tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
@@ -1029,7 +1033,7 @@ impl Harness {
         // also has an active tab of its own, and counting those lit every
         // agent tab's row and moved the selected pill onto the last of them
         // (owner screenshots 2026-10-11: the page's own row had none).
-        let shown = self.browse_centre_shown(cx);
+        let shown = self.browser.browse_centre_shown(cx);
         let tab = |id: crate::browser::TabId, title: String, initial: String, _owner_active: bool, loading: bool, favicon: Option<String>| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
@@ -1089,7 +1093,7 @@ impl Harness {
                 }
             })
             .collect();
-        let shown = self.browse_centre_shown(cx);
+        let shown = self.browser.browse_centre_shown(cx);
         // The live page's URL, falling back to the tab's — the same read
         // the toolbar makes, so the two never disagree.
         let live_url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
@@ -1108,16 +1112,16 @@ impl Harness {
             .map(|space| BrowseSpace { id: space.id.clone().into(), name: space.name.clone().into(), own_signins: space.own_signins })
             .collect();
         let current = self.browser.tabs.spaces.iter().position(|s| s.id == space).unwrap_or(0);
-        let editing = self.browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
+        let editing = self.browser.browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
         // D4: the downloads button exists while downloads list; its dot
         // says one is running.
-        let downloads = self.browse_downloads(cx);
+        let downloads = self.browser.browse_downloads(cx);
         let downloads = (!downloads.is_empty())
             .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
         BrowseModel {
-            bookmarked: self.browse_centre_shown(cx)
+            bookmarked: self.browser.browse_centre_shown(cx)
                 .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
-                .is_some_and(|url| self.browser.is_bookmarked(&url)),
+                .is_some_and(|url| self.browser.data.read(cx).is_bookmarked(&url)),
             host: address.host,
             path: address.path,
             can_go_back: history.is_some_and(|h| h.can_back()),
@@ -1131,7 +1135,7 @@ impl Harness {
             space: current,
             hovered_today_header: self.hovered_today_header,
             editing,
-            menu: self.browse_menu.clone(),
+            menu: self.browser.browse_menu.clone(),
         }
     }
 
@@ -1420,14 +1424,14 @@ impl Harness {
                 self.focus_browse_address_with(&url, window, cx);
             }
             BrowseIntent::SiteInfo => {
-                self.site_info_open = self.browse_centre_state(cx).is_some();
+                self.browser.site_info_open = self.browse_centre_state(cx).is_some();
                 cx.notify();
             }
             BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
             BrowseIntent::Back => self.browse_go_back(window, cx),
             BrowseIntent::Forward => self.browse_go_forward(window, cx),
             BrowseIntent::Reload => {
-                if let Some(id) = self.browse_centre_shown(cx) {
+                if let Some(id) = self.browser.browse_centre_shown(cx) {
                     self.reload_browse_tab(id, window, cx);
                 }
             }
@@ -1448,7 +1452,7 @@ impl Harness {
             }
             BrowseIntent::ToggleFolder(id) => {
                 if self.browser.tabs.toggle_folder(&id) {
-                    self.schedule_tabs_write(cx);
+                    self.browser.schedule_tabs_write();
                 }
             }
             BrowseIntent::OpenTaskChat(session) => self.browse_task_folder_action(&session, TaskFolderAction::OpenChat, window, cx),
@@ -2570,7 +2574,7 @@ mod tests {
                 // enters Browse the way the switch does.
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2584,7 +2588,7 @@ mod tests {
         // A select moves the key.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
                 h.browser.tabs.activate(id);
             })
@@ -2594,7 +2598,7 @@ mod tests {
         // A pin moves the key (the pinned tile appears).
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let id = h.browser.tabs.person_tabs(space.as_deref())[0].id;
                 h.browser.tabs.set_pinned(id, true);
             })
@@ -2613,7 +2617,7 @@ mod tests {
         // The open tab menu is keyed too.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
-                h.tab_menu = h.browser.tabs.tabs.first().map(|tab| tab.id);
+                h.browser.tab_menu = h.browser.tabs.tabs.first().map(|tab| tab.id);
             })
         });
         let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
@@ -2639,7 +2643,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2659,7 +2663,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
+            let tabs = h.browser.tabs.person_tabs(h.browser.browse_space().as_deref());
             assert_eq!(tabs.len(), 1, "⌘W in Browse closes a tab, not the window");
         });
         // Sessions: the same handler must not touch the tabs — the belt
@@ -2674,7 +2678,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
+            let tabs = h.browser.tabs.person_tabs(h.browser.browse_space().as_deref());
             assert_eq!(tabs.len(), 1, "⌘W in Sessions closes no tab");
         });
         b3c_teardown(&dir, guard, old);
@@ -2696,7 +2700,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let mine = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
                 let agent = h.browser.tabs.open(space, crate::browser::Owner::Session("s-1".to_owned()), "https://b.example/", None);
                 h.browser.tabs.activate(agent);
@@ -2727,7 +2731,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let blank = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, crate::browser::tabs::BLANK, None);
                 h.browser.tabs.activate(blank);
                 assert!(h.browse_centre_tab_blank(cx), "a fresh tab is blank");
@@ -2751,7 +2755,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let first = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
                 h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://b.example/", None);
                 let folded = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://c.example/", None);
@@ -2764,7 +2768,7 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_browse_sidebar_tab(window, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
+            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browser.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
             let at = ids.iter().position(|id| *id == first).expect("first");
             let new = ids[at + 1];
             assert!(h.browser.tabs.get(new).is_some_and(|tab| tab.url == crate::browser::tabs::BLANK && tab.folder.is_none()), "a Today tab's new tab sits right after it, in Today");
@@ -2773,7 +2777,7 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_browse_sidebar_tab(window, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
+            let ids: Vec<_> = h.browser.tabs.person_tabs(h.browser.browse_space().as_deref()).iter().map(|tab| tab.id).collect();
             let at = ids.iter().position(|id| *id == folded).expect("folded");
             let new = h.browser.tabs.get(ids[at + 1]).expect("a tab after the folded one");
             assert_eq!(new.url, crate::browser::tabs::BLANK);
@@ -2792,7 +2796,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 h.browser.tabs.open(
                     space.clone(),
                     crate::browser::Owner::Person,
@@ -2807,7 +2811,7 @@ mod tests {
                     None,
                 );
                 h.browser.tabs.activate(shown);
-                h.browse_session_tab = Some(shown);
+                h.browser.browse_session_tab = Some(shown);
             })
         });
         let before = vc.update(|_, cx| baaz.read(cx).browser.tabs.generation);
@@ -2816,7 +2820,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.browse_session_tab.is_some(), "the session show survives the move");
+            assert!(h.browser.browse_session_tab.is_some(), "the session show survives the move");
             assert_eq!(
                 h.browser.tabs.generation, before,
                 "the move touches no person tab while a session tab shows"
@@ -2827,8 +2831,8 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.browse_session_tab.is_none(), "⌘W stops showing the session tab");
-            let tabs = h.browser.tabs.person_tabs(h.browse_space().as_deref());
+            assert!(h.browser.browse_session_tab.is_none(), "⌘W stops showing the session tab");
+            let tabs = h.browser.tabs.person_tabs(h.browser.browse_space().as_deref());
             assert_eq!(tabs.len(), 2, "⌘W closes nothing while a session tab shows");
         });
         b3c_teardown(&dir, guard, old);
@@ -3631,7 +3635,7 @@ mod tests {
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 h.browser.tabs.ensure_spaces(|_| None);
-                let space = h.browse_space();
+                let space = h.browser.browse_space();
                 let folder = h.browser.tabs.add_folder(crate::browser::tabs::PERSONAL, "Reading");
                 let filed = h.browser.tabs.open(space.clone(), Owner::Person, "https://filed.example/", None);
                 let pinned = h.browser.tabs.open(space, Owner::Person, "https://pinned.example/", None);

@@ -128,9 +128,9 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 177 fields. Its methods are spread over 52
-`impl Harness` blocks in 38 files (`app/*.rs`, `sidebar_view.rs`,
-`browser/mod.rs`, `dialogs.rs`, `login.rs` and others). Roughly:
+`Harness` (`app.rs`) has 120 fields. Its methods are spread over 61
+`impl Harness` blocks in 52 files (`app/*.rs`, `sidebar_view.rs`, the
+`browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
 |---|---|
@@ -140,14 +140,14 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
 | sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal/rename fields, `sidebar_wheel` |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
-| browser and Browse mode | `browser` (`BrowserRegistry`), `browse_*` fields, the agent line and card (`line_ui`, `card_ui`), the four overlay windows (`overlay`, `corner`, `page_float`, `card_float`) |
+| browser and Browse mode | `browser`: one `BrowseState` (`browser/state.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`) and `data`, the `browser.db` service; `agent_window`: one `AgentWindowState` (`app/agent_window.rs`) for the agent line and card (`line_ui`, `card_ui`), the card's float (`card_float`) and handoff picker |
 | settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, `chrome_import`, several `TextareaState` query fields |
 | terminal | `terminal_dock`: a region entity (`terminal/dock.rs`, task 4.4) that owns the tab host, its focus, the resize drag and the bridge providers; `terminal_service`, the agent's terminal and browser tools socket |
 | focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
 
 `Harness::render` is not cached. It first runs `on_frame` (window title,
 overlay windows, provider status, boot session, scripted steps) and later
-`sync_browser` (`browser/mod.rs`), then composes the shell. The right pane
+`sync_browser` (`browser/sync.rs`), then composes the shell. The right pane
 is a region entity ([`region.rs`](../crates/baaz/src/region.rs)): the root
 pushes it this frame's facts and composes its view, and the pane reconciles
 its own reads in its own render. The terminal dock, the Skills page, the
@@ -193,10 +193,11 @@ running or starting, a pending approval or question) is never evicted.
 | `Overlays` | `overlays.rs` | state only: the dialog, the open menu, the palette, toasts, the `@`-picker walks. Rendered by `Harness` and by the composer |
 | `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content) |
 | `SettingsPage` | `settings.rs`, `settings_providers.rs` | the Settings page as a region entity: its route (`SettingsPageState`), search and focus, the Shortcuts rows and recording, its menus and folds; the root pushes `SettingsFacts` and handles `SettingsEvent`s |
+| `BrowserData` | `browser/data.rs` | `browser.db` (task 4.5): the in-memory front (bookmarks, folders, excluded sites, history length, the Field's last history search) the UI reads, and the one worker task on the background executor that owns the connection; writes update the front at once and persist in order, landings notify; observed by `Harness` |
 | `ProviderStatusModel` | `provider_model.rs` | the window's provider facts: statuses (following the status cache), sign-out banners, busy cards, the Codex sign-in flow; observed by `ConnectScreen`, `SetupHost` and `SettingsPage` |
 | `ConnectScreen`, `SetupHost` | `connect.rs`, `setup.rs` | the first-run connect screen (a region entity: whether it stands, its footer menu) and the setup sheet (the open sheet, its terminals and focus) |
 | `SkillsPage` | `skills_page.rs` | the Skills page as a region entity: catalog, filter, selection, dialogs, its fields and CLI calls |
-| browser | `browser/` | `BrowserRegistry` (one `WebviewState` per tab, CEF or WKWebView; a fake backend for captures), tabs, history and bookmarks (`browser.db`), adblock, favicons, the agent tools in `browser/automation/` |
+| browser | `browser/` | `BrowseState` (`state.rs`: one `WebviewState` per tab, CEF or WKWebView, a fake backend for captures; the Browse fields), its `impl Harness` seams (`tabs_actions.rs`, `pages.rs`, `sync.rs`, `omnibox.rs`, `find.rs`, `permissions.rs`, `downloads.rs`, `page_actions.rs`, `keys.rs`, `steps.rs`, `agent_tabs.rs`; `mod.rs` holds no `impl Harness`), tabs, `BrowserData` (`data.rs`: history and bookmarks in `browser.db`, run by one worker on the background executor behind an in-memory front; nothing else names SQLite, `tests/browser_data_ratchet.rs`), adblock, favicons, the agent tools in `browser/automation/` |
 | terminal | `terminal/` | `TerminalDock` (the dock region entity), `TerminalHost` (an entity the dock holds: tabs by project root over `aui_terminal` ptys) and `TerminalService` (the socket, on `Harness`) |
 
 Every action a browser agent takes passes `browser::automation::policy::decide`

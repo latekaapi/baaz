@@ -22,13 +22,13 @@ const CARD_INSET: f32 = 16.0;
 impl Harness {
     /// Where the card (or column) window goes now, in screen space.
     fn wanted_card_float(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.card_ui == CardUi::Closed || self.settings_open(cx) {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.agent_window.card_ui == CardUi::Closed || self.settings_open(cx) {
             return None;
         }
         let page = self.browser.centre_page_rect?;
         let origin = window.bounds().origin;
         let pad = gpui::px(SHADOW_PAD);
-        match self.card_ui {
+        match self.agent_window.card_ui {
             CardUi::Column => {
                 // The column takes the strip the page gave up beside it
                 // (`browse_centre_page_rect` shrinks the page by it).
@@ -57,13 +57,13 @@ impl Harness {
 
     /// Open, move or close the card window, as the page float does.
     pub(crate) fn sync_card_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.agent_card_input.is_none() {
-            self.agent_card_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Steer, or ⌘↩ to queue", 1, 4, window, cx)));
+        if self.agent_window.agent_card_input.is_none() {
+            self.agent_window.agent_card_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Steer, or ⌘↩ to queue", 1, 4, window, cx)));
         }
         let wanted = self.wanted_card_float(window, cx);
-        let current = self.card_float.as_ref().map(|o| o.bounds).or(self.card_float_pending);
+        let current = self.agent_window.card_float.as_ref().map(|o| o.bounds).or(self.agent_window.card_float_pending);
         if wanted == current {
-            if let Some(float) = self.card_float.as_ref() {
+            if let Some(float) = self.agent_window.card_float.as_ref() {
                 let handle = float.handle;
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -71,21 +71,21 @@ impl Harness {
             }
             return;
         }
-        if let Some(old) = self.card_float.take() {
+        if let Some(old) = self.agent_window.card_float.take() {
             let handle = old.handle;
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
         }
-        self.card_float_pending = wanted;
+        self.agent_window.card_float_pending = wanted;
         let Some(bounds) = wanted else {
             return;
         };
         #[cfg(target_os = "macos")]
         super::never_main_panels();
         let baaz = cx.entity().downgrade();
-        let input = self.agent_card_input.clone();
-        let docked = self.card_ui == CardUi::Column;
+        let input = self.agent_window.agent_card_input.clone();
+        let docked = self.agent_window.card_ui == CardUi::Column;
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 let options = WindowOptions {
@@ -114,9 +114,9 @@ impl Harness {
             });
             let _ = this.update(cx, |this, cx| {
                 match opened {
-                    Ok(handle) if this.card_float_pending == Some(bounds) => {
-                        this.card_float_pending = None;
-                        this.card_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::AgentCard, bounds, print: 0 });
+                    Ok(handle) if this.agent_window.card_float_pending == Some(bounds) => {
+                        this.agent_window.card_float_pending = None;
+                        this.agent_window.card_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::AgentCard, bounds, print: 0 });
                     }
                     Ok(handle) => {
                         let handle: AnyWindowHandle = handle.into();
@@ -124,7 +124,7 @@ impl Harness {
                             let _ = handle.update(cx, |_, window, _| window.remove_window());
                         });
                     }
-                    Err(_) => this.card_float_pending = None,
+                    Err(_) => this.agent_window.card_float_pending = None,
                 }
                 cx.notify();
             });
@@ -161,7 +161,7 @@ impl Harness {
     /// handoff picker over it while it is open. Float windows have no themed
     /// root, so the wrapper sets the ink.
     pub(crate) fn render_agent_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let input = self.agent_card_input.clone()?;
+        let input = self.agent_window.agent_card_input.clone()?;
         let title = self.browser_chat_title(cx);
         let (transcript, model) = match self.registry.browser_chat() {
             Some(view) => {
@@ -205,10 +205,10 @@ impl Harness {
                 choices: vec!["Allow".into(), "Don't allow".into()],
             });
         }
-        if let Some((_, label, detail)) = self.browser_chat_id(cx).and_then(|id| self.browser_handoffs.get(&id).cloned()) {
+        if let Some((_, label, detail)) = self.browser_chat_id(cx).and_then(|id| self.agent_window.browser_handoffs.get(&id).cloned()) {
             transcript.items.push(aui::browse::agent_window::AgentItem::HandedOff { title: label.into(), detail: detail.into() });
         }
-        if self.line_page_chip {
+        if self.agent_window.line_page_chip {
             transcript.chips = vec![aui::composer::ComposerChip {
                 id: "this-page".into(),
                 kind: aui::composer::ComposerChipKind::File,
@@ -223,12 +223,12 @@ impl Harness {
         let on_intent = move |intent: aui::browse::agent_window::CardIntent, _: &mut Window, cx: &mut App| {
             let _ = baaz.update(cx, |this, cx| this.run_on_main(cx, move |this, window, cx| this.card_intent(intent, window, cx)));
         };
-        let card = match self.card_ui {
+        let card = match self.agent_window.card_ui {
             CardUi::Column => aui::browse::agent_window::agent_column("agent-card", &transcript, &input).on_intent(on_intent).into_any_element(),
             _ => aui::browse::agent_window::agent_card("agent-card", &transcript, &input).on_intent(on_intent).into_any_element(),
         };
         let ink = cx.aui().colors.ink;
-        let pad = if self.card_ui == CardUi::Column { 0.0 } else { SHADOW_PAD };
+        let pad = if self.agent_window.card_ui == CardUi::Column { 0.0 } else { SHADOW_PAD };
         let mut root = div().size_full().relative().p(gpui::px(pad)).text_color(ink).child(card);
         if let Some(picker) = self.render_handoff_picker(window, cx) {
             root = root.child(picker);

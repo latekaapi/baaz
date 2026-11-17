@@ -133,7 +133,7 @@ impl Harness {
     /// to the old project). Window-free, for the adoption paths that own no
     /// window.
     pub(crate) fn note_project_changed(&mut self, cx: &mut Context<Self>) {
-        self.browse_session_tab = None;
+        self.browser.browse_session_tab = None;
         self.drop_browse_address(cx);
         cx.notify();
     }

@@ -1,0 +1,621 @@
+//! Browse's tab actions on the window (task 4.5 split of `browser/mod.rs`): the
+//! tab keys and owners, the Browse sidebar's tab rows (new, select, close,
+//! pin, reopen, the ⌘1–9 / ⌘W / ⌘⇧T shortcuts) and the session tabs.
+
+use super::*;
+
+impl Harness {
+    /// The registry key whose webview the pane shows: the active session's
+    /// id, or the home key with no session open.
+    pub(crate) fn browser_key(&self, cx: &gpui::App) -> String {
+        self.active
+            .as_ref()
+            .map(|view| view.read(cx).session_id.clone())
+            .unwrap_or_else(|| HOME_KEY.to_owned())
+    }
+
+    /// Whose tabs the pane shows: the active session's, or the person's
+    /// with no session open.
+    pub(crate) fn shown_tab_owner(&self, cx: &gpui::App) -> Owner {
+        self.browser.tab_owner_for_key(&self.browser_key(cx))
+    }
+
+    /// Load the tab model on first use and migrate older restores: every
+    /// session with a stored `browser_url` and no tabs yet gets one
+    /// session tab with that URL. Persists when either step changed the
+    /// model.
+    pub(crate) fn ensure_tabs_loaded(&mut self) {
+        if self.browser.tabs_loaded {
+            return;
+        }
+        self.browser.tabs_loaded = true;
+        self.browser.tabs = tabs::load();
+        let mut changed = self.browser.tabs.migrate_from_overrides(&self.overrides);
+        // Spaces are the browser's own (docs/27 v2): an older file's
+        // per-project person tabs become Personal's folders, once.
+        let projects = &self.projects;
+        changed |= self.browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()));
+        if changed {
+            self.browser.schedule_tabs_write();
+        }
+    }
+
+    /// The owner's active tab, opening its first when it has none: a
+    /// session restores its last URL, everyone starts blank. The strip
+    /// shows only when the owner has at least one tab.
+    pub(super) fn ensure_owner_tab(&mut self, owner: &Owner) -> TabId {
+        let space = self.browser.owner_space(owner);
+        if let Some(id) = self.browser.tabs.active_of(owner, space.as_deref()) {
+            return id;
+        }
+        let stored = match owner {
+            Owner::Session(session) => self
+                .overrides
+                .get(session)
+                .and_then(|meta| meta.right.clone())
+                .and_then(|right| right.browser_url),
+            Owner::Person => None,
+        };
+        let space = self.browser.browse_space();
+        let id = self
+            .browser
+            .tabs
+            .open(space, owner.clone(), initial_url(stored.as_deref()), None);
+        self.browser.schedule_tabs_write();
+        id
+    }
+
+    /// Point the agent `browser_*` tools at `state`: the session key's
+    /// active tab's page. Called on every resolve and every tab switch, so
+    /// registration always follows the active tab.
+    pub(super) fn register_tab_page(&mut self, key: &str, id: TabId, state: &Entity<WebviewState>) {
+        self.terminal_service.register_browser(key, state.clone());
+        self.terminal_service.register_tab_page(key, id.0, state.clone());
+        self.browser.agent_tabs.insert(key.to_owned(), id);
+    }
+
+    /// Entering Browse ensures the project has a person tab to show
+    /// (B2a-H2): with none, one blank tab opens with the URL field
+    /// focused. A project that already has tabs is untouched — and in
+    /// particular never steals focus.
+    pub(crate) fn ensure_browse_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        let space = self.browser.browse_space();
+        if self.browser.tabs.active_of(&Owner::Person, space.as_deref()).is_none() {
+            self.new_browse_sidebar_tab(window, cx);
+        }
+    }
+
+    /// Open a blank person tab in the current project and select it, with
+    /// the address focused: the Browse sidebar's "New tab" row and the
+    /// entering-Browse ensure share this one path. Clears any held session
+    /// tab: ⌘T lands on the person's new tab.
+    pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        let space = self.browser.browse_space();
+        let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
+        // Next to the current tab, and in its folder when it sits in one
+        // (owner 2026-10-11): a new tab opened from a folder used to land
+        // at the end of Today instead.
+        let folder = after.and_then(|after| self.browser.tabs.get(after)).filter(|tab| !tab.pinned).and_then(|tab| tab.folder.clone());
+        let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
+        if let Some(folder) = folder {
+            self.browser.tabs.set_folder(id, Some(&folder));
+        }
+        self.browser.browse_session_tab = None;
+        self.browser.schedule_tabs_write();
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        // ⌘T lands on the new-tab page with the field focused (B2a-H4):
+        // the Harness-owned address input, empty for a blank tab.
+        self.focus_browse_address_with("", window, cx);
+        cx.notify();
+    }
+
+    /// Select the Browse sidebar's tab `id` (B2a-H2): the model
+    /// activates and the page builds when discarded. A closed — or a
+    /// session-owned — `id` is a no-op, so a × click racing the row's
+    /// own select never resurrects the tab. The selection moves first and
+    /// the address drops after, so focus lands on the newly shown page
+    /// (or the root) — never the old page. Selecting a person tab clears a
+    /// session tab the centre held.
+    pub(crate) fn select_browse_sidebar_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded();
+        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
+            return;
+        }
+        // The tab being left drops its find highlight (its strip keeps the
+        // query), and the shared input points at the arriving tab — both
+        // on the event, never during render.
+        if let Some(leaving) = self.browser.browse_centre_shown(cx) {
+            if leaving != id {
+                self.browser.stop_find_on_tab(leaving, cx);
+            }
+        }
+        if self.browser.tabs.activate(id) {
+            self.browser.schedule_tabs_write();
+        }
+        self.browser.browse_session_tab = None;
+        self.browser.tab_menu = None;
+        self.browser.tab_menu_bounds = None;
+        self.browser.browse_drop_target = None;
+        self.browser.browse_drop_at_end = false;
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        self.sync_find_input_to_tab(id, window, cx);
+        self.leave_browse_address(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the Browse tab shortcuts may fire: only in Browse mode.
+    /// The `BaazBrowse` key context scopes them; this is the belt.
+    pub(super) fn browse_command_ready(&mut self, cx: &mut Context<Self>) -> Option<Option<String>> {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+            return None;
+        }
+        self.ensure_tabs_loaded();
+        Some(self.browser.browse_space())
+    }
+
+    /// ⌘W in Browse: while a session tab shows, stop showing it —
+    /// back to the person's active tab, closing nothing. Otherwise close
+    /// the current project's active person tab, the model picking the
+    /// display-order neighbour. A no-op outside Browse (where ⌘W keeps
+    /// closing the window) or with no tab.
+    pub(crate) fn close_browse_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(space) = self.browse_command_ready(cx) else {
+            return;
+        };
+        if self.browser.browse_session_tab.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let owner = Owner::Person;
+        let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
+            return;
+        };
+        // ⌘W on the space's last tab closes the window, as a browser does
+        // (owner 2026-10-13): the tab goes (a real page joins the closed
+        // list for ⌘⇧T; a blank one does not), a fresh blank tab stands
+        // ready for the window's return, and the window hides the way
+        // ⌘W in Sessions does.
+        let last = self.browser.tabs.person_tabs(space.as_deref()).len() <= 1;
+        self.close_tab(HOME_KEY, id, window, cx);
+        if last {
+            window.dispatch_action(Box::new(crate::app::CloseWindow), cx);
+        }
+    }
+
+    /// ⌘⇧T in Browse: reopen the most recently closed tab, selecting it
+    /// for its owner and showing it when it is this project's person
+    /// tab. A no-op outside Browse or with nothing closed.
+    pub(crate) fn reopen_browse_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(space) = self.browse_command_ready(cx) else {
+            return;
+        };
+        let Some(id) = self.browser.tabs.reopen_last() else {
+            return;
+        };
+        self.browser.schedule_tabs_write();
+        let ours = self.browser.tabs.get(id).is_some_and(|tab| {
+            tab.owner == Owner::Person && tab.space.as_deref() == space.as_deref()
+        });
+        if ours {
+            self.browser.browse_session_tab = None;
+            self.ensure_tab_page(HOME_KEY, id, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// ⌘1–⌘8 (a 1-based display slot) and ⌘9 (the last tab) in Browse:
+    /// select that person tab. Unknown slots are a no-op, as is firing
+    /// outside Browse.
+    pub(crate) fn select_browse_nth(
+        &mut self,
+        n: usize,
+        last: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(space) = self.browse_command_ready(cx) else {
+            return;
+        };
+        let owner = Owner::Person;
+        let Some(id) = self.browser.tabs.nth_tab(&owner, space.as_deref(), n, last) else {
+            return;
+        };
+        self.select_browse_sidebar_tab(id, window, cx);
+    }
+
+    /// ⌥⌘↑/⌥⌘↓ in Browse: move the active person tab one display slot.
+    /// A no-op while a session tab shows (the moves act on the
+    /// person's hidden tab otherwise), at the edge, across the pinned
+    /// boundary, or outside Browse.
+    pub(crate) fn move_browse_shortcut(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(space) = self.browse_command_ready(cx) else {
+            return;
+        };
+        if self.browser.browse_session_tab.is_some() {
+            return;
+        }
+        if self.browser.tabs.move_active_by(&Owner::Person, space.as_deref(), delta) {
+            self.browser.schedule_tabs_write();
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Close the person tab `id` from the Browse sidebar's ×: the
+    /// model's neighbour rule picks what shows next, and closing the
+    /// project's last tab opens a fresh blank one (see
+    /// [`Self::close_tab`]). A closed or session-owned `id` is a no-op.
+    pub(crate) fn close_person_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
+            return;
+        }
+        self.browser.tab_menu = None;
+        self.browser.tab_menu_bounds = None;
+        self.browser.browse_drop_target = None;
+        self.browser.browse_drop_at_end = false;
+        self.close_tab(HOME_KEY, id, window, cx);
+    }
+
+    /// Pin or unpin the person tab `id`: the tab menu's Pin/Unpin row
+    /// and the `tab-pin:<n>` step. A closed or session-owned `id` is a
+    /// no-op. Answers the new pinned state.
+    pub(crate) fn toggle_pin_browse_tab(&mut self, id: TabId, cx: &mut Context<Self>) -> Option<bool> {
+        self.ensure_tabs_loaded();
+        let pinned = !self.browser.tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
+        self.browser.tabs.set_pinned(id, pinned).then_some(pinned)?;
+        self.browser.tab_menu = None;
+        self.browser.tab_menu_bounds = None;
+        self.browser.schedule_tabs_write();
+        cx.notify();
+        Some(pinned)
+    }
+
+    /// Reload the person tab `id` at its own URL and show it: the tab
+    /// menu's Reload row, and what a crashed row's click does (the `!`
+    /// tile's promise is reload *and* select). Activating clears a held
+    /// session tab, like every person-tab select. When the tab has
+    /// no live page the ensure rebuilds it anyway. A closed or
+    /// session-owned `id` is a no-op.
+    pub(crate) fn reload_browse_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        let Some(tab) = self.browser.tabs.get(id).cloned() else {
+            return;
+        };
+        if tab.owner != Owner::Person {
+            return;
+        }
+        if self.browser.tabs.activate(id) {
+            self.browser.schedule_tabs_write();
+        }
+        self.browser.browse_session_tab = None;
+        let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
+        let url = tab.url.clone();
+        if !url.is_empty() {
+            state.update(cx, |state, _cx| state.navigate(&url));
+        }
+        self.browser.tab_menu = None;
+        self.browser.tab_menu_bounds = None;
+        self.browser.browse_drop_target = None;
+        cx.notify();
+    }
+
+    /// Close the open tab menu, if any: Escape and click-outside share
+    /// this one path. Answers whether one stood open.
+    pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.browser.tab_menu.take().is_some() {
+            self.browser.tab_menu_bounds = None;
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Show a session-owned tab in the Browse centre (a task-folder row):
+    /// the model activates it for its session and the centre builds its
+    /// page — ownership never moves. A closed or person-owned `id` is a
+    /// no-op.
+    pub(crate) fn select_session_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        if self.browser.tabs.get(id).is_none_or(|tab| !matches!(tab.owner, Owner::Session(_))) {
+            return;
+        }
+        if let Some(leaving) = self.browser.browse_centre_shown(cx) {
+            if leaving != id {
+                self.browser.stop_find_on_tab(leaving, cx);
+            }
+        }
+        if self.browser.tabs.activate(id) {
+            self.browser.schedule_tabs_write();
+        }
+        self.browser.browse_session_tab = Some(id);
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        cx.notify();
+    }
+
+    /// A Browse sidebar row's select or close, routed by the tab's owner:
+    /// person tabs through the person paths, task-folder tabs through
+    /// [`Self::select_session_tab`] / [`Self::close_tab`] under their
+    /// session's key. An unknown `id` is a no-op.
+    pub(crate) fn browse_sidebar_tab(&mut self, id: TabId, close: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        let Some(owner) = self.browser.tabs.get(id).map(|tab| tab.owner.clone()) else {
+            return;
+        };
+        match (owner, close) {
+            (Owner::Person, false) => self.select_browse_sidebar_tab(id, window, cx),
+            (Owner::Person, true) => self.close_person_tab(id, window, cx),
+            (Owner::Session(_), false) => self.select_session_tab(id, window, cx),
+            (Owner::Session(session), true) => {
+                if self.browser.browse_session_tab == Some(id) {
+                    self.browser.browse_session_tab = None;
+                }
+                self.close_tab(&session, id, window, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Select `id` for its owner: the model activates, the page builds when
+    /// discarded, and the agent tools re-register onto it. A closed `id`
+    /// is a no-op, so a × click racing the row's own select never
+    /// resurrects the tab.
+    pub(crate) fn select_tab(
+        &mut self,
+        key: &str,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded();
+        if self.browser.tabs.get(id).is_none() {
+            return;
+        }
+        if self.browser.tabs.activate(id) {
+            self.browser.schedule_tabs_write();
+        }
+        self.ensure_tab_page(key, id, window, cx);
+        cx.notify();
+    }
+
+    /// Close `id`: the closed page is dropped; only when the closed tab
+    /// was its owner's active tab does anything else move — the model
+    /// picks the neighbour to activate and the agent tools follow it (or
+    /// lose the session's page when none is left). Closing a background
+    /// tab rebuilds and re-registers nothing. A session's last tab also
+    /// clears its stored `browser_url`, so the tab never resurrects from
+    /// the old restore — and the migration runs only once per session, so
+    /// it stays closed.
+    pub(crate) fn close_tab(
+        &mut self,
+        key: &str,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded();
+        let Some(tab) = self.browser.tabs.get(id).cloned() else {
+            return;
+        };
+        // The tab's OWN owner+space: [`Tabs::close`] keys the active
+        // pointer on them, and the current project's space is wrong when
+        // the close arrives from another space (a person tab closed while
+        // a different project is current).
+        let was_active = self
+            .browser
+            .tabs
+            .active_of(&tab.owner, tab.space.as_deref())
+            == Some(id);
+        let next = self.browser.tabs.close(id);
+        self.browser.states.remove(&id);
+        // The agent tools' registry holds every tab's page (R2's `tab`
+        // argument, R3's grants). Left there, a tab the person closed (⌘W,
+        // ✕) kept its page alive: the page parks its native view only when
+        // dropped, so the closed page stayed on screen over the next tab and
+        // read as a frozen window (owner, 9 Nov). Whoever closes, it goes.
+        self.terminal_service.unregister_tab_page(id.0);
+        self.browser.schedule_tabs_write();
+        // B2a-H2b: closing the current project's last person tab while
+        // in Browse opens a fresh blank one — entering Browse and this
+        // close are the two events that create tabs, never render. Other
+        // spaces and Sessions mode keep the closed state: emptiness
+        // there is honest, and the centre is not showing.
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
+            && tab.owner == Owner::Person
+            && tab.space == self.browser.browse_space()
+            && self.browser.tabs.person_tabs(tab.space.as_deref()).is_empty()
+        {
+            self.new_browse_sidebar_tab(window, cx);
+            return;
+        }
+        if !was_active {
+            cx.notify();
+            return;
+        }
+        match next {
+            Some(next) => {
+                self.ensure_tab_page(key, next, window, cx);
+            }
+            None => {
+                self.browser.agent_tabs.remove(key);
+                self.terminal_service.unregister_browser(key);
+                if let Owner::Session(session) = tab.owner {
+                    if session != key {
+                        self.browser.agent_tabs.remove(&session);
+                        self.terminal_service.unregister_browser(&session);
+                    }
+                    self.clear_session_browser_url(&session, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Forget a session's stored browser URL (its last tab just closed),
+    /// through the cheap debounced write — never the session-list settle.
+    /// A no-op when the stored URL is already gone.
+    pub(super) fn clear_session_browser_url(&mut self, session: &str, cx: &mut Context<Self>) {
+        let mut right = match self
+            .overrides
+            .get(session)
+            .and_then(|meta| meta.right.clone())
+        {
+            Some(right) => right,
+            None => return,
+        };
+        if right.browser_url.is_none() {
+            return;
+        }
+        right.browser_url = None;
+        if let Some(meta) = self.overrides.get_mut(session) {
+            meta.right = Some(right);
+        }
+        self.schedule_overrides_write(cx);
+    }
+
+
+
+    /// The pane's "Open in Browse": the session's active tab shows
+    /// full-width in Browse mode. The tab stays session-owned; the same
+    /// `WebviewState` moves — no reload, the state stays keyed by tab id and
+    /// the centre renders it through `browse_centre_page`.
+    pub(crate) fn carry_session_tab_to_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tabs_loaded();
+        let owner = self.shown_tab_owner(cx);
+        if !matches!(owner, Owner::Session(_)) {
+            return;
+        }
+        let space = self.browser.owner_space(&owner);
+        let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
+            return;
+        };
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        self.browser.browse_session_tab = Some(id);
+        cx.notify();
+    }
+
+
+    /// A session's name for the downloads credit and feedback notes: the
+    /// collapsed head label the Sessions header wears.
+    pub(crate) fn session_display_name(&self, session: &str, cx: &gpui::App) -> String {
+        // A session with no title yet (a draft) reads "New session" — never
+        // its raw id.
+        self.collapsed_head_label(session, cx)
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| String::from("New session"))
+    }
+
+    /// Flip a space's own sign-ins (confirmed): every page in it is dropped
+    /// and rebuilds in the other profile when shown (a page cannot move
+    /// between profiles). The own profile's data stays on disk.
+    pub(crate) fn toggle_space_signins(&mut self, space: &str, cx: &mut Context<Self>) {
+        let Some(found) = self.browser.tabs.spaces.iter_mut().find(|s| s.id == space) else { return };
+        found.own_signins = !found.own_signins;
+        let own = found.own_signins;
+        let name = found.name.clone();
+        let in_space: Vec<TabId> = self.browser.tabs.tabs.iter().filter(|t| t.space.as_deref() == Some(space)).map(|t| t.id).collect();
+        self.close_peek(cx);
+        if self.browser.split.is_some_and(|p| in_space.contains(&p.left) || in_space.contains(&p.right)) {
+            self.browser.split = None;
+        }
+        for id in &in_space {
+            if self.browser.states.remove(id).is_some() {
+                self.terminal_service.unregister_tab_page(id.0);
+            }
+        }
+        self.browser.agent_tabs.retain(|_, id| !in_space.contains(id));
+        self.browser.schedule_tabs_write();
+        crate::baaz_log!("browse: space {space} sign-ins → {}", if own { "its own" } else { "shared" });
+        self.overlays.update(cx, |o, _| {
+            o.toast(
+                if own { format!("\u{201C}{name}\u{201D} has its own sign-ins") } else { format!("\u{201C}{name}\u{201D} shares sign-ins again") },
+                if own { "Its pages reload signed out; sign in here." } else { "" },
+            )
+        });
+        cx.notify();
+    }
+
+    /// Reopen the closed tab `id` from a new-tab pick-up row and select it:
+    /// selecting clears any carried session tab, so the reopened person tab
+    /// shows. A no-op for an unknown id.
+    pub(crate) fn reopen_browse_closed_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_tabs_loaded();
+        if self.browser.tabs.reopen(id).is_some() {
+            self.select_browse_sidebar_tab(id, window, cx);
+        }
+    }
+}
+
+impl BrowseState {
+
+    /// The space an owner's active tab lives in: the current space for the
+    /// person, nothing for a session (its tabs show in every space).
+    pub(super) fn owner_space(&self, owner: &Owner) -> Option<String> {
+        match owner {
+            Owner::Person => self.browse_space(),
+            Owner::Session(_) => None,
+        }
+    }
+
+
+    /// Which owner `key` names: a session id names that session's tabs,
+    /// [`HOME_KEY`] (no session open) the person's tabs.
+    pub(crate) fn tab_owner_for_key(&self, key: &str) -> Owner {
+        if key == HOME_KEY {
+            Owner::Person
+        } else {
+            Owner::Session(key.to_owned())
+        }
+    }
+
+    /// The browser space Browse shows: person tabs are keyed by it, never by
+    /// the project (docs/27 §4.2). Before the tab file loads (or in a test
+    /// that skips the migration) it reads as Personal.
+    pub(crate) fn browse_space(&self) -> Option<String> {
+        let current = &self.tabs.current_space;
+        Some(if current.is_empty() { tabs::PERSONAL.to_owned() } else { current.clone() })
+    }
+    /// Queue `tabs.json` behind a tab change: the tabs store's delayed
+    /// save (750 ms), so a spell of changes — a title that keeps changing,
+    /// a burst of opens — coalesces into one write off the UI thread, the
+    /// newest snapshot wins, and a constant stream still lands within the
+    /// delay of its first change ([`crate::store::JsonStore`]).
+    pub(crate) fn schedule_tabs_write(&mut self) {
+        tabs::save_soon(&self.tabs);
+    }
+
+    /// Land the tabs durably, synchronously: the quit and window-close
+    /// durability point, next to the session stores' flush. Writes the
+    /// CURRENT model, superseding anything queued. A no-op when the tabs
+    /// never loaded, so a quit that never touched the browser writes
+    /// nothing; otherwise the in-memory-only `last_shown` stamps land here
+    /// at the latest.
+    pub(crate) fn flush_tabs_save(&mut self) {
+        if !self.tabs_loaded {
+            return;
+        }
+        tabs::write(&self.tabs);
+    }
+
+    /// The Chromium profile folder a tab's page lives in: its space's own
+    /// (`Spaces/<id>`) when that space keeps its own sign-ins, else the
+    /// shared profile (`None`).
+    pub(crate) fn tab_profile(&self, id: TabId) -> Option<String> {
+        let space = self.tabs.get(id)?.space.clone()?;
+        let own = self.tabs.spaces.iter().any(|s| s.id == space && s.own_signins);
+        own.then(|| format!("Spaces/{}", space.replace(['/', '.'], "_")))
+    }
+}

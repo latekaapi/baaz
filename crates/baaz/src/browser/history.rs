@@ -44,10 +44,31 @@ pub(crate) struct Visit {
     pub snippet: Option<String>,
 }
 
-/// The history store. Every call is cheap and synchronous (WAL, a few
-/// rows); a failed write is logged and dropped, never surfaced.
+/// The history store: one connection, owned by the `BrowserData` worker
+/// ([`super::data`]), which runs every call here on the background
+/// executor — never on the UI thread (each call asserts it, see
+/// [`super::data::check_off_ui`]). A failed write is logged and dropped,
+/// never surfaced.
 pub(crate) struct BrowserDb {
     conn: Connection,
+}
+
+/// Where the [`Recorder`] writes a visit and a late title: the store itself
+/// (tests, and the worker), or the `BrowserData` writer that queues them to
+/// the worker.
+pub(crate) trait HistorySink {
+    fn record_visit(&self, url: &str, title: &str, now: u64);
+    fn set_title(&self, url: &str, title: &str);
+}
+
+impl HistorySink for BrowserDb {
+    fn record_visit(&self, url: &str, title: &str, now: u64) {
+        BrowserDb::record_visit(self, url, title, now);
+    }
+
+    fn set_title(&self, url: &str, title: &str) {
+        BrowserDb::set_title(self, url, title);
+    }
 }
 
 /// Whether a URL may enter history at all (scheme only; exclusions are
@@ -104,6 +125,7 @@ impl BrowserDb {
     }
 
     pub(crate) fn open_at(path: &Path) -> Result<Self, rusqlite::Error> {
+        super::data::check_off_ui("browser.db open");
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 let _ = std::fs::create_dir_all(parent);
@@ -136,6 +158,12 @@ impl BrowserDb {
 
     /// The connection, for the tables that share the file (bookmarks).
     pub(crate) fn conn(&self) -> &Connection {
+        self.c()
+    }
+
+    /// The connection, after the off-the-UI-thread check.
+    fn c(&self) -> &Connection {
+        super::data::check_off_ui("browser.db");
         &self.conn
     }
 
@@ -145,7 +173,7 @@ impl BrowserDb {
 
     /// The sites history never records, sorted.
     pub(crate) fn excluded(&self) -> Vec<String> {
-        let Ok(mut stmt) = self.conn.prepare_cached("SELECT host FROM excluded ORDER BY host") else {
+        let Ok(mut stmt) = self.c().prepare_cached("SELECT host FROM excluded ORDER BY host") else {
             return Vec::new();
         };
         stmt.query_map([], |row| row.get::<_, String>(0))
@@ -160,9 +188,9 @@ impl BrowserDb {
             return;
         }
         let pattern = format!("%.{site}");
-        let _ = self.conn.execute("INSERT OR IGNORE INTO excluded(host) VALUES (?1)", params![site]);
+        let _ = self.c().execute("INSERT OR IGNORE INTO excluded(host) VALUES (?1)", params![site]);
         let urls: Vec<String> = self
-            .conn
+            .c()
             .prepare("SELECT url FROM visits WHERE host = ?1 OR host LIKE ?2")
             .and_then(|mut stmt| {
                 stmt.query_map(params![site, pattern], |row| row.get::<_, String>(0)).map(|rows| rows.flatten().collect())
@@ -175,7 +203,7 @@ impl BrowserDb {
 
     /// Record `site` again.
     pub(crate) fn include(&self, site: &str) {
-        let _ = self.conn.execute("DELETE FROM excluded WHERE host = ?1", params![host_of(site)]);
+        let _ = self.c().execute("DELETE FROM excluded WHERE host = ?1", params![host_of(site)]);
     }
 
     /// A visit to `url`: a new row, or one more visit to a known page.
@@ -188,7 +216,7 @@ impl BrowserDb {
         if self.excluded_host(&host) {
             return false;
         }
-        let result = self.conn.execute(
+        let result = self.c().execute(
             "INSERT INTO visits(url, title, host, first_ms, last_ms, count) VALUES (?1, ?2, ?3, ?4, ?4, 1)
              ON CONFLICT(url) DO UPDATE SET
                  last_ms = excluded.last_ms,
@@ -207,14 +235,14 @@ impl BrowserDb {
         if title.is_empty() {
             return;
         }
-        let _ = self.conn.execute("UPDATE visits SET title = ?2 WHERE url = ?1", params![url, title]);
+        let _ = self.c().execute("UPDATE visits SET title = ?2 WHERE url = ?1", params![url, title]);
     }
 
     /// Keep a page's words for search (after the dwell). Only a page already
     /// in history: an excluded site never had a row.
     pub(crate) fn set_text(&self, url: &str, title: &str, text: &str) {
         let known: bool = self
-            .conn
+            .c()
             .query_row("SELECT 1 FROM visits WHERE url = ?1", params![url], |_| Ok(true))
             .optional()
             .ok()
@@ -231,50 +259,50 @@ impl BrowserDb {
             }
             body.truncate(cut);
         }
-        let _ = self.conn.execute("DELETE FROM pages_fts WHERE url = ?1", params![url]);
+        let _ = self.c().execute("DELETE FROM pages_fts WHERE url = ?1", params![url]);
         let _ = self
-            .conn
+            .c()
             .execute("INSERT INTO pages_fts(url, title, body) VALUES (?1, ?2, ?3)", params![url, title, body]);
     }
 
     /// Forget one page.
     pub(crate) fn remove(&self, url: &str) {
-        let _ = self.conn.execute("DELETE FROM visits WHERE url = ?1", params![url]);
-        let _ = self.conn.execute("DELETE FROM pages_fts WHERE url = ?1", params![url]);
+        let _ = self.c().execute("DELETE FROM visits WHERE url = ?1", params![url]);
+        let _ = self.c().execute("DELETE FROM pages_fts WHERE url = ?1", params![url]);
     }
 
     /// Forget everything visited since `since_ms` (0: all history).
     pub(crate) fn clear_since(&self, since_ms: u64) {
         if since_ms == 0 {
-            let _ = self.conn.execute_batch("DELETE FROM visits; DELETE FROM pages_fts;");
+            let _ = self.c().execute_batch("DELETE FROM visits; DELETE FROM pages_fts;");
             return;
         }
-        let _ = self.conn.execute(
+        let _ = self.c().execute(
             "DELETE FROM pages_fts WHERE url IN (SELECT url FROM visits WHERE last_ms >= ?1)",
             params![since_ms as i64],
         );
-        let _ = self.conn.execute("DELETE FROM visits WHERE last_ms >= ?1", params![since_ms as i64]);
+        let _ = self.c().execute("DELETE FROM visits WHERE last_ms >= ?1", params![since_ms as i64]);
     }
 
     /// How many pages history holds.
     pub(crate) fn len(&self) -> u64 {
-        self.conn.query_row("SELECT count(*) FROM visits", [], |row| row.get::<_, i64>(0)).unwrap_or(0) as u64
+        self.c().query_row("SELECT count(*) FROM visits", [], |row| row.get::<_, i64>(0)).unwrap_or(0) as u64
     }
 
     fn prune(&self, now: u64) {
         let cutoff = now.saturating_sub(KEEP_DAYS * DAY_MS) as i64;
-        let _ = self.conn.execute(
+        let _ = self.c().execute(
             "DELETE FROM pages_fts WHERE url IN (SELECT url FROM visits WHERE last_ms < ?1)",
             params![cutoff],
         );
-        let _ = self.conn.execute("DELETE FROM visits WHERE last_ms < ?1", params![cutoff]);
+        let _ = self.c().execute("DELETE FROM visits WHERE last_ms < ?1", params![cutoff]);
     }
 
     /// The most recent pages, newest first.
     #[cfg(test)]
     pub(crate) fn recent(&self, limit: usize) -> Vec<Visit> {
         let Ok(mut stmt) =
-            self.conn.prepare_cached("SELECT url, title, last_ms, count FROM visits ORDER BY last_ms DESC LIMIT ?1")
+            self.c().prepare_cached("SELECT url, title, last_ms, count FROM visits ORDER BY last_ms DESC LIMIT ?1")
         else {
             return Vec::new();
         };
@@ -293,7 +321,7 @@ impl BrowserDb {
         }
         let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let mut out: Vec<Visit> = self
-            .conn
+            .c()
             .prepare_cached(
                 "SELECT url, title, last_ms, count FROM visits
                  WHERE title LIKE ?1 ESCAPE '\\' OR url LIKE ?1 ESCAPE '\\'
@@ -304,7 +332,7 @@ impl BrowserDb {
         if out.len() < limit {
             if let Some(fts) = fts_query(q) {
                 let words: Vec<Visit> = self
-                    .conn
+                    .c()
                     .prepare_cached(
                         "SELECT v.url, v.title, v.last_ms, v.count,
                                 snippet(pages_fts, 2, '', '', '…', 12)
@@ -386,13 +414,14 @@ pub(crate) enum Note {
 }
 
 impl Recorder {
-    /// One tab, as the sync sees it: record a new visit, a late title, and
-    /// say when the words are due. `person` is false for a session's tab,
+    /// One tab, as the sync sees it: record a new visit, a late title (into
+    /// `db`: the store, or the worker's queue), and say when the words are
+    /// due. `person` is false for a session's tab,
     /// which is never recorded. `shown` is whether it is the page in front.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe(
         &mut self,
-        db: &BrowserDb,
+        db: &dyn HistorySink,
         id: super::TabId,
         person: bool,
         url: &str,

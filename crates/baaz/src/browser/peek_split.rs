@@ -21,6 +21,7 @@ use gpui::{prelude::*, Bounds, Context, Entity, Pixels, Window};
 
 use super::tabs::{Owner, TabId};
 use crate::app::Harness;
+use super::BrowseState;
 
 /// Whether a Peek stands open: the CEF key router reads it from its
 /// callback (no Harness there) to claim Esc and ⌘↩ for the Peek.
@@ -123,7 +124,7 @@ impl Harness {
         let fake = self.browser.fake || cfg!(test);
         let _ = window;
         #[cfg_attr(not(feature = "cef"), allow(unused_variables))]
-        let profile = self.tab_profile(opener);
+        let profile = self.browser.tab_profile(opener);
         cx.new(|cx| {
             if !fake {
                 #[cfg(feature = "cef")]
@@ -165,7 +166,7 @@ impl Harness {
                 LinkGesture::Split if person && in_browse => self.open_split(opener, &url, cx),
                 _ => {
                     if super::chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, false).is_some() {
-                        self.schedule_tabs_write(cx);
+                        self.browser.schedule_tabs_write();
                     }
                 }
             }
@@ -208,7 +209,7 @@ impl Harness {
         if let Some(id) = super::chrome::place_popup_tab(&mut self.browser.tabs, peek.opener, &url, true) {
             peek.state.update(cx, |state, _| state.set_corner_radius(0.0));
             self.browser.states.insert(id, peek.state);
-            self.schedule_tabs_write(cx);
+            self.browser.schedule_tabs_write();
         }
         cx.notify();
     }
@@ -218,7 +219,7 @@ impl Harness {
         let Some(right) = super::chrome::place_popup_tab(&mut self.browser.tabs, opener, url, false) else { return };
         self.browser.split = Some(SplitPair { left: opener, right });
         self.browser.split_ratio = 0.5;
-        self.schedule_tabs_write(cx);
+        self.browser.schedule_tabs_write();
         cx.notify();
     }
 
@@ -235,7 +236,7 @@ impl Harness {
             }
         }
         window.focus(&self.focus_root, cx);
-        if self.browse_centre_shown(cx) == Some(half) {
+        if self.browser.browse_centre_shown(cx) == Some(half) {
             if let Some(other) = pair.partner(half) {
                 self.select_browse_sidebar_tab(other, window, cx);
             }
@@ -247,7 +248,7 @@ impl Harness {
     /// a half of the open Split and both tabs still exist.
     pub(crate) fn split_partner(&self, cx: &gpui::App) -> Option<TabId> {
         let pair = self.browser.split?;
-        let shown = self.browse_centre_shown(cx)?;
+        let shown = self.browser.browse_centre_shown(cx)?;
         let other = pair.partner(shown)?;
         self.browser.tabs.get(other).is_some().then_some(other)
     }
@@ -257,12 +258,12 @@ impl Harness {
     /// or no tab shown in the Browse centre, is an `Err`. Free.
     pub(crate) fn step_link_gesture(&mut self, rest: &str, gesture: LinkGesture, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded(cx);
+        self.ensure_tabs_loaded();
         let url = rest.trim();
         if !super::history::recordable(url) {
             return Err(format!("`{url}` is not a web page to open"));
         }
-        let opener = self.browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
+        let opener = self.browser.browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
         match gesture {
             LinkGesture::Peek => self.open_peek(opener, url, window, cx),
             LinkGesture::Split => {
@@ -278,12 +279,15 @@ impl Harness {
         }
         Ok(())
     }
+}
+
+impl BrowseState {
 
     /// Whether the open Split is still valid; a closed half ends it.
     pub(crate) fn prune_split(&mut self) {
-        if let Some(pair) = self.browser.split {
-            if self.browser.tabs.get(pair.left).is_none() || self.browser.tabs.get(pair.right).is_none() {
-                self.browser.split = None;
+        if let Some(pair) = self.split {
+            if self.tabs.get(pair.left).is_none() || self.tabs.get(pair.right).is_none() {
+                self.split = None;
             }
         }
     }

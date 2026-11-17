@@ -1508,7 +1508,7 @@ impl crate::app::Harness {
         // tab, so it is only the fallback.
         let url = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             let from_tab = self
-                .browse_centre_shown(cx)
+                .browser.browse_centre_shown(cx)
                 .and_then(|id| self.browser.tabs.get(id))
                 .map(|tab| tab.url.clone())
                 .filter(|url| !url.is_empty() && url != "about:blank");

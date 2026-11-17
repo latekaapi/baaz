@@ -21,6 +21,21 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
+/// Every file of the `browser` module (task 4.5 split `browser/mod.rs` by
+/// seam): `mod.rs` first, then the rest by name, so a pin follows a
+/// function into whichever file holds it now.
+fn browser_source() -> String {
+    let dir = manifest().join("src").join("browser");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("src/browser reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .collect();
+    names.sort();
+    std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
 /// The body of `fn name` inside `text`: from its declaration to the next
 /// closing brace at the same 4-space impl indent.
 fn fn_body<'a>(text: &'a str, name: &str) -> &'a str {
@@ -37,7 +52,7 @@ fn fn_body<'a>(text: &'a str, name: &str) -> &'a str {
 /// closed tab never strands a reader-less input.
 #[test]
 fn shared_find_input_drops_when_no_strip_stands_open() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let sync = fn_body(&browser, "sync_browser");
     let retain = sync.find("find_strips.retain(&live)").expect("closed tabs drop their strips");
     let drop = sync.find("browse_find = None").expect("the input drops with the last strip");
@@ -54,7 +69,7 @@ fn shared_find_input_drops_when_no_strip_stands_open() {
 /// that just closed.
 #[test]
 fn crashed_strip_closes_before_the_rect_stores() {
-    let browser = source("browser/mod.rs");
+    let browser = browser_source();
     let sync = fn_body(&browser, "sync_browser");
     let crash = sync.find("crashed().is_some()").expect("a crash closes the strip");
     let stack = sync.find("strip_stack_px").expect("the rect counts open strip rows");
