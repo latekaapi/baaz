@@ -14,7 +14,7 @@ impl Harness {
     /// those kinds. The grant keys on the full origin (scheme + host +
     /// port): a host-only report borrows them from the tab's URL.
     pub(crate) fn answer_shown_permission(&mut self, id: u64, allow: bool, remember_visit: bool, cx: &mut Context<Self>) {
-        let tab_url = self.browser.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()));
+        let tab_url = self.browser.read(cx).browse_centre_shown(cx).and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()));
         let ask = self.browse_centre_state(cx).and_then(|state| {
             state
                 .read(cx)
@@ -25,7 +25,7 @@ impl Harness {
         });
         if remember_visit && allow {
             if let (Some((origin, kinds)), Some(tab_url)) = (&ask, &tab_url) {
-                self.browser.visit_allows.remember(&chrome::normalize_origin(origin, tab_url), kinds);
+                self.browser.update(cx, |browser, _| browser.visit_allows.remember(&chrome::normalize_origin(origin, tab_url), kinds));
             }
         }
         if let Some(state) = self.browse_centre_state(cx) {
@@ -36,7 +36,7 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
 
     /// Route permission asks once per frame: origins trusted "while
     /// visiting" auto-answer on any tab, but only for the kinds granted —

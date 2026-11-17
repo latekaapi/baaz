@@ -13,6 +13,10 @@ impl Harness {
         event: &SessionEvent,
         cx: &mut Context<Self>,
     ) {
+        // A session event is where a session starts or stops working: the
+        // done task folders' sweep follows it (it ran on every frame
+        // before task 4.5b).
+        self.close_done_task_tabs(cx);
         match event {
             SessionEvent::Dialog { title, detail } => {
                 self.set_dialog(cx, Dialog {

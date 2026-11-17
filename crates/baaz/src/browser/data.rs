@@ -78,6 +78,9 @@ pub(crate) enum Op {
     ImportChrome { seq: u64, profile: PathBuf, bookmarks: bool, history: bool, now: u64, reply: oneshot::Sender<Imported> },
     /// Undo one import, then a snapshot (dispatch `seq`).
     UndoImport { seq: u64, source: String },
+    /// Every op queued before this one has run: say so (the quit drain,
+    /// [`BrowserData::flush_soon`]).
+    Flush(std::sync::mpsc::Sender<()>),
 }
 
 /// What the worker sends back, in order.
@@ -309,6 +312,32 @@ impl BrowserData {
 
     fn send(&self, op: Op) {
         let _ = self.jobs.unbounded_send(op);
+    }
+
+    /// How long quit waits for the worker to finish the writes queued
+    /// before it: long enough for a history write and a page's words, short
+    /// enough that a stuck file never holds the quit.
+    pub(crate) const QUIT_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Ask the worker to say when every write queued so far has reached
+    /// the file: the receiver hears once it has (ops run in order).
+    pub(crate) fn flush_soon(&self) -> std::sync::mpsc::Receiver<()> {
+        let (done, heard) = std::sync::mpsc::channel();
+        self.send(Op::Flush(done));
+        heard
+    }
+
+    /// Quit: block (at most `bound`) until every write queued so far has
+    /// reached the file, so a visit or a bookmark made just before ⌘Q is
+    /// not lost with the worker. Answers whether the worker caught up in
+    /// time. The worker runs on the background executor's threads, so the
+    /// wait never starves it.
+    pub(crate) fn drain_at_quit(&self, bound: std::time::Duration) -> bool {
+        let caught_up = self.flush_soon().recv_timeout(bound).is_ok();
+        if !caught_up {
+            crate::baaz_log!("browser.db: quit drain gave up after {} ms", bound.as_millis());
+        }
+        caught_up
     }
 
     /// A snapshot is asked for now: front writes from here on are journaled.
@@ -755,6 +784,9 @@ impl Worker {
                 chrome_import::undo(self.db(), &source);
                 send(Landed::Snapshot { seq, front: self.snapshot() });
             }
+            Op::Flush(done) => {
+                let _ = done.send(());
+            }
         }
     }
 }
@@ -801,6 +833,34 @@ mod tests {
         cx.run_until_parked();
         let row = on_disk(&path, |db| bookmarks::find(db.conn(), "https://rust-lang.org/learn")).expect("in the file");
         assert_eq!((row.id, row.title.as_str(), row.folder), (real, "The Book", bookmarks::OTHER));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Task 4.5b: quit drains the worker. A visit and a bookmark queued just
+    /// before quit are in the file once the flush is heard: the flush runs
+    /// behind every write queued before it, never ahead. The bounded wait
+    /// never hangs: on the test executor the worker cannot run while this
+    /// thread waits, so the drain gives up at its bound and says so.
+    #[gpui::test]
+    fn writes_queued_before_quit_are_in_the_file_after_the_drain(cx: &mut gpui::TestAppContext) {
+        let path = temp_db("quit-drain");
+        let data = cx.new(|cx| BrowserData::at(path.clone(), cx));
+        cx.run_until_parked();
+        // A real clock: reading the file back opens it, which prunes old visits.
+        let now = crate::browser::tabs::now_ms();
+        data.read_with(cx, |data, _| data.writer().record_visit("https://late.example/", "Late", now));
+        data.update(cx, |data, cx| data.add_bookmark("https://late.example/", "Late", bookmarks::BAR, now, cx));
+        let heard = data.read_with(cx, |data, _| data.flush_soon());
+        assert!(heard.try_recv().is_err(), "nothing has run yet");
+        assert_eq!(on_disk(&path, |db| db.len()), 0, "the visit is still queued");
+        cx.run_until_parked();
+        assert!(heard.try_recv().is_ok(), "the worker reached the flush");
+        assert_eq!(on_disk(&path, |db| db.len()), 1, "the visit queued before it is in the file");
+        assert!(on_disk(&path, |db| bookmarks::find(db.conn(), "https://late.example/")).is_some(), "so is the bookmark");
+        let started = std::time::Instant::now();
+        let caught_up = data.read_with(cx, |data, _| data.drain_at_quit(std::time::Duration::from_millis(50)));
+        assert!(!caught_up, "a worker that cannot run is given up on at the bound");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the bound holds");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

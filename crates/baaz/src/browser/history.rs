@@ -414,7 +414,7 @@ pub(crate) enum Note {
 }
 
 impl Recorder {
-    /// One tab, as the sync sees it: record a new visit, a late title (into
+    /// One tab, as the page reconcile sees it: record a new visit, a late title (into
     /// `db`: the store, or the worker's queue), and say when the words are
     /// due. `person` is false for a session's tab,
     /// which is never recorded. `shown` is whether it is the page in front.

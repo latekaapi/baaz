@@ -225,11 +225,11 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             assert!(
-                !harness.browser.session_has_page(&first),
+                !harness.browser.read(cx).session_has_page(&first),
                 "no webview is built for the still-open session while pending"
             );
             assert_eq!(
-                harness.browser.browser_builds, 0,
+                harness.browser.read(cx).browser_builds, 0,
                 "the pending frame builds no webview at all"
             );
             // A toggle flips only the live pane: neither session's

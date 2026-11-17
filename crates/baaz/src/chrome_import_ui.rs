@@ -82,7 +82,7 @@ impl Harness {
         sheet.importing = true;
         let started = std::time::Instant::now();
         let now = crate::browser::tabs::now_ms();
-        let answer = self.browser.data.update(cx, |data, _| data.import_chrome(dir, b, h, now));
+        let answer = self.browser.read(cx).data.clone().update(cx, |data, _| data.import_chrome(dir, b, h, now));
         cx.spawn(async move |this, cx| {
             let Ok(done) = answer.await else { return };
             crate::baaz_log!(
@@ -106,7 +106,7 @@ impl Harness {
     fn undo_chrome_import(&mut self, cx: &mut Context<Self>) {
         if let Some(ChromeImportSheet { stage: Stage::Done(done), .. }) = self.chrome_import.as_ref() {
             let source = done.source.clone();
-            self.browser.data.update(cx, |data, _| data.undo_import(&source));
+            self.browser.read(cx).data.clone().update(cx, |data, _| data.undo_import(&source));
             self.overlays.update(cx, |o, _| o.toast("Import undone", "What it added is gone; your own bookmarks and history stay."));
         }
         self.close_chrome_import(cx);

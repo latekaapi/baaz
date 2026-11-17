@@ -46,14 +46,14 @@ fn fn_body<'a>(text: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// The shared find input lives while any strip stands open: the per-frame
-/// sync drops it (and its subscription) once the closed-tab retain leaves
+/// The shared find input lives while any strip stands open: the page
+/// reconcile drops it (and its subscription) once the closed-tab retain leaves
 /// none — the same hand-over `close_browse_find` does for Done/Esc, so a
 /// closed tab never strands a reader-less input.
 #[test]
 fn shared_find_input_drops_when_no_strip_stands_open() {
     let browser = browser_source();
-    let sync = fn_body(&browser, "sync_browser");
+    let sync = fn_body(&browser, "reconcile_pages");
     let retain = sync.find("find_strips.retain(&live)").expect("closed tabs drop their strips");
     let drop = sync.find("browse_find = None").expect("the input drops with the last strip");
     assert!(drop > retain, "the drop follows the retain");
@@ -65,12 +65,12 @@ fn shared_find_input_drops_when_no_strip_stands_open() {
 
 /// A crashed page hides the find strip and owns the rect alone: the
 /// crash-close (`stop_find`, strip close) runs before the strip-stack
-/// rect computation, so the stored rect never reserves a row for a strip
-/// that just closed.
+/// rect computation in the frame's occlusion, so the stored rect never
+/// reserves a row for a strip that just closed.
 #[test]
 fn crashed_strip_closes_before_the_rect_stores() {
     let browser = browser_source();
-    let sync = fn_body(&browser, "sync_browser");
+    let sync = fn_body(&browser, "occlude");
     let crash = sync.find("crashed().is_some()").expect("a crash closes the strip");
     let stack = sync.find("strip_stack_px").expect("the rect counts open strip rows");
     let stored = sync.find("centre_page_rect = in_browse.then_some").expect("the rect stores once");

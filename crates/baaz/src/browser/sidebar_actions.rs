@@ -10,7 +10,7 @@ use gpui::{ClipboardItem, Context, Focusable, Window};
 use super::tabs::{self, TabId};
 use super::{Owner, HOME_KEY};
 use crate::app::Harness;
-use super::BrowseState;
+use super::BrowserView;
 
 /// A folder's name until the person types one.
 const NEW_FOLDER: &str = "New folder";
@@ -59,15 +59,15 @@ impl Harness {
         for id in ids {
             self.browse_sidebar_tab(id, true, window, cx);
         }
-        self.browser.schedule_tabs_write();
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
     }
 
     /// Open the right-click menu (one at a time) and keep the page from
     /// taking the next click.
     pub(crate) fn open_browse_menu(&mut self, menu: BrowseMenu, cx: &mut Context<Self>) {
-        self.browser.browse_naming = None;
-        self.browser.browse_menu = Some(menu);
+        self.browser.update(cx, |browser, _| browser.browse_naming = None);
+        self.browser.update(cx, |browser, _| browser.browse_menu = Some(menu));
         cx.notify();
     }
 
@@ -80,11 +80,11 @@ impl Harness {
     /// 2026-10-12 1:21 AM: ⋯ never toggled, the menu jumped to the pointer).
     pub(crate) fn toggle_browse_page_menu(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
         use aui::screens::sidebar::BrowseMenuTarget;
-        let open = self.browser.browse_menu.as_ref().is_some_and(|m| matches!(m.target, BrowseMenuTarget::Page { .. }));
-        match page_menu_press(open, self.browser.page_menu_closed.map(|at| at.elapsed())) {
+        let open = self.browser.read(cx).browse_menu.as_ref().is_some_and(|m| matches!(m.target, BrowseMenuTarget::Page { .. }));
+        match page_menu_press(open, self.browser.read(cx).page_menu_closed.map(|at| at.elapsed())) {
             PageMenuPress::Close => return self.close_browse_menu(cx),
             PageMenuPress::AlreadyClosed => {
-                self.browser.page_menu_closed = None;
+                self.browser.update(cx, |browser, _| browser.page_menu_closed = None);
                 return;
             }
             PageMenuPress::Open => {}
@@ -123,9 +123,9 @@ impl Harness {
 
     /// Close the right-click menu, if one is open.
     pub(crate) fn close_browse_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(menu) = self.browser.browse_menu.take() {
+        if let Some(menu) = self.browser.update(cx, |browser, _| browser.browse_menu.take()) {
             if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) {
-                self.browser.page_menu_closed = Some(std::time::Instant::now());
+                self.browser.update(cx, |browser, _| browser.page_menu_closed = Some(std::time::Instant::now()));
             }
             cx.notify();
         }
@@ -134,10 +134,10 @@ impl Harness {
     /// Put a name field on `target`, seeded with `draft` and focused: the
     /// sidebar's one rename editor serves folders and spaces too.
     pub(crate) fn start_browse_naming(&mut self, target: BrowseNaming, draft: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.browse_menu = None;
+        self.browser.update(cx, |browser, _| browser.browse_menu = None);
         self.renaming = None;
         self.rename.update(cx, |state, cx| state.set_value(draft.to_owned(), window, cx));
-        self.browser.browse_naming = Some(target);
+        self.browser.update(cx, |browser, _| browser.browse_naming = Some(target));
         window.focus(&self.rename.focus_handle(cx), cx);
         cx.notify();
     }
@@ -145,18 +145,18 @@ impl Harness {
     /// Commit a name field. A blank folder name keeps "New folder"; a blank
     /// new space is "Space N"; a blank rename keeps the old name.
     pub(crate) fn commit_browse_name(&mut self, target: BrowseNaming, text: &str, cx: &mut Context<Self>) {
-        self.browser.browse_naming = None;
+        self.browser.update(cx, |browser, _| browser.browse_naming = None);
         let text = text.trim();
         let changed = match target {
-            BrowseNaming::Folder(id) => self.browser.tabs.rename_folder(&id, text),
-            BrowseNaming::Space(Some(id)) => self.browser.tabs.rename_space(&id, text),
+            BrowseNaming::Folder(id) => self.browser.update(cx, |browser, _| browser.tabs.rename_folder(&id, text)),
+            BrowseNaming::Space(Some(id)) => self.browser.update(cx, |browser, _| browser.tabs.rename_space(&id, text)),
             BrowseNaming::Space(None) => {
-                self.browser.tabs.add_space(text);
+                self.browser.update(cx, |browser, _| browser.tabs.add_space(text));
                 true
             }
         };
         if changed {
-            self.browser.schedule_tabs_write();
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
         self.focus_composer = true;
         cx.notify();
@@ -164,7 +164,7 @@ impl Harness {
 
     /// Abandon a name field: the folder keeps whatever name it had.
     pub(crate) fn cancel_browse_name(&mut self, cx: &mut Context<Self>) {
-        if self.browser.browse_naming.take().is_some() {
+        if self.browser.update(cx, |browser, _| browser.browse_naming.take().is_some()) {
             cx.notify();
         }
     }
@@ -173,34 +173,34 @@ impl Harness {
     /// at the top of the current space's list, named in place, optionally
     /// taking `tab` with it.
     pub(crate) fn browse_new_folder(&mut self, tab: Option<TabId>, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let space = self.browser.browse_space().unwrap_or_default();
-        let id = self.browser.tabs.add_folder(&space, NEW_FOLDER);
+        self.ensure_tabs_loaded(cx);
+        let space = self.browser.read(cx).browse_space().unwrap_or_default();
+        let id = self.browser.update(cx, |browser, _| browser.tabs.add_folder(&space, NEW_FOLDER));
         if let Some(tab) = tab {
-            self.browser.tabs.set_folder(tab, Some(&id));
+            self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(&id)));
         }
-        self.browser.schedule_tabs_write();
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         self.start_browse_naming(BrowseNaming::Folder(id.into()), NEW_FOLDER, window, cx);
     }
 
     /// Today's "close all": every unpinned tab of yours in this space.
     pub(crate) fn browse_close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids = self.browser.space_person_tabs(false);
+        let ids = self.browser.read(cx).space_person_tabs(false);
         self.close_tabs(ids, window, cx);
     }
 
     /// A space chip: make it current and show its active tab (or a new one).
     pub(crate) fn browse_switch_space(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.tabs.spaces.get(index).map(|space| space.id.clone()) else {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).tabs.spaces.get(index).map(|space| space.id.clone()) else {
             return;
         };
-        if !self.browser.tabs.switch_space(&id) {
+        if !self.browser.update(cx, |browser, _| browser.tabs.switch_space(&id)) {
             return;
         }
-        self.browser.schedule_tabs_write();
-        self.browser.browse_session_tab = None;
-        match self.browser.tabs.active_of(&Owner::Person, Some(&id)) {
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        match self.browser.read(cx).tabs.active_of(&Owner::Person, Some(&id)) {
             Some(tab) => {
                 self.ensure_tab_page(HOME_KEY, tab, window, cx);
             }
@@ -212,7 +212,7 @@ impl Harness {
     /// The Ask button: a new session with the page as its unsent draft
     /// (the omnibox Ask's path), until the agent line lands (docs/27 R3).
     pub(crate) fn browse_ask_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.browser.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id)).map(|tab| (tab.title.clone(), tab.url.clone()));
+        let shown = self.browser.read(cx).browse_centre_shown(cx).and_then(|id| self.browser.read(cx).tabs.get(id)).map(|tab| (tab.title.clone(), tab.url.clone()));
         let query = match shown {
             Some((title, url)) if url != tabs::BLANK && !url.is_empty() => {
                 let title = tabs::tab_label(&title, &url);
@@ -225,19 +225,19 @@ impl Harness {
 
     /// A tab menu row.
     pub(crate) fn browse_tab_action(&mut self, tab: TabId, action: TabAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.browse_menu = None;
-        self.ensure_tabs_loaded();
-        let Some(found) = self.browser.tabs.get(tab).cloned() else {
+        self.browser.update(cx, |browser, _| browser.browse_menu = None);
+        self.ensure_tabs_loaded(cx);
+        let Some(found) = self.browser.read(cx).tabs.get(tab).cloned() else {
             cx.notify();
             return;
         };
         match action {
             TabAction::Duplicate => {
-                let copy = self.browser.tabs.open(found.space.clone(), found.owner.clone(), &found.url, Some(tab));
+                let copy = self.browser.update(cx, |browser, _| browser.tabs.open(found.space.clone(), found.owner.clone(), &found.url, Some(tab)));
                 if let Some(folder) = found.folder.as_deref() {
-                    self.browser.tabs.set_folder(copy, Some(folder));
+                    self.browser.update(cx, |browser, _| browser.tabs.set_folder(copy, Some(folder)));
                 }
-                self.browser.schedule_tabs_write();
+                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 self.browse_sidebar_tab(copy, false, window, cx);
             }
             TabAction::CopyLink => {
@@ -245,21 +245,21 @@ impl Harness {
                 self.overlays.update(cx, |overlays, _| overlays.toast("Link copied", &found.url));
             }
             TabAction::TogglePin => {
-                self.browser.tabs.set_pinned(tab, !found.pinned);
-                self.browser.schedule_tabs_write();
+                self.browser.update(cx, |browser, _| browser.tabs.set_pinned(tab, !found.pinned));
+                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
             }
             TabAction::MoveToFolder(folder) => {
-                self.browser.tabs.set_folder(tab, Some(folder.as_ref()));
-                self.browser.schedule_tabs_write();
+                self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(folder.as_ref())));
+                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
             }
             TabAction::MoveToNewFolder => self.browse_new_folder(Some(tab), window, cx),
             TabAction::RemoveFromFolder => {
-                self.browser.tabs.set_folder(tab, None);
-                self.browser.schedule_tabs_write();
+                self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, None));
+                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
             }
             TabAction::Close => self.browse_sidebar_tab(tab, true, window, cx),
             TabAction::CloseOthers => {
-                let others: Vec<TabId> = self.browser.space_person_tabs(false).into_iter().filter(|id| *id != tab).collect();
+                let others: Vec<TabId> = self.browser.read(cx).space_person_tabs(false).into_iter().filter(|id| *id != tab).collect();
                 self.close_tabs(others, window, cx);
             }
         }
@@ -268,20 +268,20 @@ impl Harness {
 
     /// A folder menu row.
     pub(crate) fn browse_folder_action(&mut self, folder: &str, action: FolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.browse_menu = None;
+        self.browser.update(cx, |browser, _| browser.browse_menu = None);
         match action {
             FolderAction::Rename => {
-                let name = self.browser.tabs.folders.iter().find(|f| f.id == folder).map(|f| f.name.clone()).unwrap_or_default();
+                let name = self.browser.read(cx).tabs.folders.iter().find(|f| f.id == folder).map(|f| f.name.clone()).unwrap_or_default();
                 self.start_browse_naming(BrowseNaming::Folder(folder.to_owned().into()), &name, window, cx);
             }
             FolderAction::CloseTabs => {
-                let space = self.browser.browse_space().unwrap_or_default();
-                let ids = self.browser.tabs.person_ids_in(&space, Some(folder));
+                let space = self.browser.read(cx).browse_space().unwrap_or_default();
+                let ids = self.browser.read(cx).tabs.person_ids_in(&space, Some(folder));
                 self.close_tabs(ids, window, cx);
             }
             FolderAction::Delete => {
-                if self.browser.tabs.delete_folder(folder) {
-                    self.browser.schedule_tabs_write();
+                if self.browser.update(cx, |browser, _| browser.tabs.delete_folder(folder)) {
+                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 }
             }
         }
@@ -290,13 +290,13 @@ impl Harness {
 
     /// A task-folder menu row (and the head's click: Open chat).
     pub(crate) fn browse_task_folder_action(&mut self, session: &str, action: TaskFolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.browse_menu = None;
+        self.browser.update(cx, |browser, _| browser.browse_menu = None);
         match action {
             // A browser chat opens in its card, over the page (R3); a
             // project session opens in Sessions.
             TaskFolderAction::OpenChat if self.is_browser_chat(session) && self.show_browser_chat(session, cx) => {
-                if self.agent_window.card_ui == crate::app::agent_window::CardUi::Closed {
-                    self.agent_window.card_ui = crate::app::agent_window::CardUi::Card;
+                if self.browser.read(cx).agent_window.card_ui == crate::app::agent_window::CardUi::Closed {
+                    self.browser.update(cx, |browser, _| browser.agent_window.card_ui = crate::app::agent_window::CardUi::Card);
                 }
             }
             TaskFolderAction::OpenChat => {
@@ -310,7 +310,7 @@ impl Harness {
             }
             TaskFolderAction::CloseTabs => {
                 let owner = Owner::Session(session.to_owned());
-                let ids: Vec<TabId> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
+                let ids: Vec<TabId> = self.browser.read(cx).tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
                 self.close_tabs(ids, window, cx);
             }
         }
@@ -320,14 +320,14 @@ impl Harness {
     /// A space-chip menu row. Deleting a space closes the pages it held;
     /// the last space is never deleted (the row is disabled).
     pub(crate) fn browse_space_action(&mut self, space: &str, action: SpaceAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.browse_menu = None;
+        self.browser.update(cx, |browser, _| browser.browse_menu = None);
         match action {
             SpaceAction::Rename => {
-                let name = self.browser.tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
+                let name = self.browser.read(cx).tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
                 self.start_browse_naming(BrowseNaming::Space(Some(space.to_owned().into())), &name, window, cx);
             }
             SpaceAction::SignIns => {
-                let Some(found) = self.browser.tabs.spaces.iter().find(|s| s.id == space).cloned() else { return };
+                let Some(found) = self.browser.read(cx).tabs.spaces.iter().find(|s| s.id == space).cloned() else { return };
                 let (title, detail, primary) = if found.own_signins {
                     (
                         format!("Share sign-ins in \"{}\" again?", found.name),
@@ -354,11 +354,11 @@ impl Harness {
                 );
             }
             SpaceAction::Delete => {
-                let space_tabs = self.browser.tabs.person_ids_in(space, None).len();
+                let space_tabs = self.browser.read(cx).tabs.person_ids_in(space, None).len();
                 if space_tabs == 0 {
                     self.delete_space_now(space, window, cx);
                 } else {
-                    let name = self.browser.tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
+                    let name = self.browser.read(cx).tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
                     self.set_dialog(
                         cx,
                         crate::overlays::Dialog {
@@ -379,12 +379,12 @@ impl Harness {
     /// Delete a space now (confirmed, or empty): close the pages it held and
     /// show the space that becomes current. The last space never goes.
     pub(crate) fn delete_space_now(&mut self, space: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let was_current = self.browser.tabs.current_space == space;
-        if let Some(held) = self.browser.tabs.delete_space(space) {
+        let was_current = self.browser.read(cx).tabs.current_space == space;
+        if let Some(held) = self.browser.update(cx, |browser, _| browser.tabs.delete_space(space)) {
             for id in held {
                 self.close_tab(HOME_KEY, id, window, cx);
             }
-            self.browser.schedule_tabs_write();
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
             if was_current {
                 self.ensure_browse_tab(window, cx);
             }
@@ -393,7 +393,7 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
     /// The person's tab ids in the current space, Today and folders alike,
     /// pinned ones excluded unless `pinned`.
     pub(super) fn space_person_tabs(&self, pinned: bool) -> Vec<TabId> {

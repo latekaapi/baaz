@@ -21,7 +21,7 @@ use gpui::{prelude::*, Bounds, Context, Entity, Pixels, Window};
 
 use super::tabs::{Owner, TabId};
 use crate::app::Harness;
-use super::BrowseState;
+use super::BrowserView;
 
 /// Whether a Peek stands open: the CEF key router reads it from its
 /// callback (no Harness there) to claim Esc and ⌘↩ for the Peek.
@@ -121,10 +121,10 @@ pub(crate) fn split_rects(centre: Bounds<Pixels>, ratio: f32) -> (Bounds<Pixels>
 impl Harness {
     /// A page that belongs to no tab (Peek): the engine the tabs use.
     fn loose_page(&mut self, url: &str, opener: TabId, window: &Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
-        let fake = self.browser.fake || cfg!(test);
+        let fake = self.browser.read(cx).fake || cfg!(test);
         let _ = window;
         #[cfg_attr(not(feature = "cef"), allow(unused_variables))]
-        let profile = self.browser.tab_profile(opener);
+        let profile = self.browser.read(cx).tab_profile(opener);
         cx.new(|cx| {
             if !fake {
                 #[cfg(feature = "cef")]
@@ -143,8 +143,8 @@ impl Harness {
     /// as a background tab, as before.
     pub(crate) fn drain_link_gestures(&mut self, window: &Window, cx: &mut Context<Self>) {
         let openers: Vec<(TabId, Entity<WebviewState>)> =
-            self.browser.states.iter().map(|(id, state)| (*id, state.clone())).collect();
-        let peek_page = self.browser.peek.as_ref().map(|peek| (peek.opener, peek.state.clone()));
+            self.browser.read(cx).states.iter().map(|(id, state)| (*id, state.clone())).collect();
+        let peek_page = self.browser.read(cx).peek.as_ref().map(|peek| (peek.opener, peek.state.clone()));
         let mut gestures: Vec<(TabId, String, LinkGesture)> = Vec::new();
         for (id, state) in openers {
             for (url, gesture) in state.update(cx, |state, _| state.take_link_gestures()) {
@@ -158,15 +158,15 @@ impl Harness {
             }
         }
         for (opener, url, gesture) in gestures {
-            let person = matches!(self.browser.tabs.get(opener).map(|tab| &tab.owner), Some(Owner::Person));
+            let person = matches!(self.browser.read(cx).tabs.get(opener).map(|tab| &tab.owner), Some(Owner::Person));
             let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
             crate::baaz_log!("browse: {gesture:?} {url} from tab {}", opener.0);
             match gesture {
                 LinkGesture::Peek if person && in_browse => self.open_peek(opener, &url, window, cx),
                 LinkGesture::Split if person && in_browse => self.open_split(opener, &url, cx),
                 _ => {
-                    if super::chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, false).is_some() {
-                        self.browser.schedule_tabs_write();
+                    if self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, opener, &url, false)).is_some() {
+                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     }
                 }
             }
@@ -176,67 +176,67 @@ impl Harness {
 
     /// Peek `url` over the centre (a second ⇧-click navigates the open Peek).
     pub(crate) fn open_peek(&mut self, opener: TabId, url: &str, window: &Window, cx: &mut Context<Self>) {
-        if let Some(peek) = self.browser.peek.as_mut() {
-            peek.url = url.to_owned();
-            peek.state.update(cx, |state, _| state.navigate(url));
+        if let Some(peek) = self.browser.update(cx, |browser, _| {
+            browser.peek.as_mut().map(|peek| {
+                peek.url = url.to_owned();
+                peek.state.clone()
+            })
+        }) {
+            peek.update(cx, |state, _| state.navigate(url));
             cx.notify();
             return;
         }
         let state = self.loose_page(url, opener, window, cx);
         state.update(cx, |state, _| state.set_corner_radius(12.0));
-        self.browser.peek = Some(Peek { url: url.to_owned(), state, opener });
+        self.browser.update(cx, |browser, cx| browser.adopt_peek(Peek { url: url.to_owned(), state, opener }, cx));
         PEEK_OPEN.store(true, Ordering::Relaxed);
-        self.browser.peek_focus_pending = true;
+        self.browser.update(cx, |browser, _| browser.peek_focus_pending = true);
         cx.notify();
     }
 
-    /// Close the Peek (Esc, ×, a click on the page beneath).
-    pub(crate) fn close_peek(&mut self, cx: &mut Context<Self>) {
-        if let Some(peek) = self.browser.peek.take() {
-            // Its page may hold the keyboard: hand it back before it goes.
-            peek.state.update(cx, |state, _| state.release_keyboard());
-            PEEK_OPEN.store(false, Ordering::Relaxed);
-            cx.notify();
-        }
-    }
 
     /// ⌘↩: the Peek becomes a real tab after its opener, with the same page.
     pub(crate) fn peek_to_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(peek) = self.browser.peek.take() else { return };
+        let Some(peek) = self.browser.update(cx, |browser, _| {
+            browser.peek_watch = None;
+            browser.peek.take()
+        }) else {
+            return;
+        };
         PEEK_OPEN.store(false, Ordering::Relaxed);
         let url = peek.state.read(cx).url().to_string();
         let url = if url.is_empty() { peek.url.clone() } else { url };
-        if let Some(id) = super::chrome::place_popup_tab(&mut self.browser.tabs, peek.opener, &url, true) {
+        if let Some(id) = self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, peek.opener, &url, true)) {
             peek.state.update(cx, |state, _| state.set_corner_radius(0.0));
-            self.browser.states.insert(id, peek.state);
-            self.browser.schedule_tabs_write();
+            self.browser.update(cx, |browser, cx| browser.adopt_page(id, peek.state, cx));
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
         cx.notify();
     }
 
     /// ⌥-click: `url` opens as a tab beside `opener`, side by side with it.
     pub(crate) fn open_split(&mut self, opener: TabId, url: &str, cx: &mut Context<Self>) {
-        let Some(right) = super::chrome::place_popup_tab(&mut self.browser.tabs, opener, url, false) else { return };
-        self.browser.split = Some(SplitPair { left: opener, right });
-        self.browser.split_ratio = 0.5;
-        self.browser.schedule_tabs_write();
+        let Some(right) = self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, opener, url, false)) else { return };
+        self.browser.update(cx, |browser, _| browser.split = Some(SplitPair { left: opener, right }));
+        self.browser.update(cx, |browser, _| browser.split_ratio = 0.5);
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
     }
 
     /// A half's ×: leave Split, keep both tabs. Closing the shown half
     /// shows the other.
     pub(crate) fn close_split_half(&mut self, half: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pair) = self.browser.split.take() else { return };
+        let Some(pair) = self.browser.update(cx, |browser, _| browser.split.take()) else { return };
         // Either half may hold the keyboard; the one that leaves the centre
         // hides with it, and keys sent to a hidden page go nowhere (found
         // live 11 Nov). Hand it back to the window first.
         for id in [pair.left, pair.right] {
-            if let Some(state) = self.browser.states.get(&id).cloned() {
+            if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
                 state.update(cx, |state, _| state.release_keyboard());
             }
         }
         window.focus(&self.focus_root, cx);
-        if self.browser.browse_centre_shown(cx) == Some(half) {
+        if self.browser.read(cx).browse_centre_shown(cx) == Some(half) {
             if let Some(other) = pair.partner(half) {
                 self.select_browse_sidebar_tab(other, window, cx);
             }
@@ -244,34 +244,26 @@ impl Harness {
         cx.notify();
     }
 
-    /// The Split partner shown beside the centre tab, when the centre tab is
-    /// a half of the open Split and both tabs still exist.
-    pub(crate) fn split_partner(&self, cx: &gpui::App) -> Option<TabId> {
-        let pair = self.browser.split?;
-        let shown = self.browser.browse_centre_shown(cx)?;
-        let other = pair.partner(shown)?;
-        self.browser.tabs.get(other).is_some().then_some(other)
-    }
 
     /// `peek:<url>` / `split:<url>`: the ⇧/⌥-click on the shown tab's link,
     /// without a page to click (captures). A URL that is not a web page,
     /// or no tab shown in the Browse centre, is an `Err`. Free.
     pub(crate) fn step_link_gesture(&mut self, rest: &str, gesture: LinkGesture, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let url = rest.trim();
         if !super::history::recordable(url) {
             return Err(format!("`{url}` is not a web page to open"));
         }
-        let opener = self.browser.browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
+        let opener = self.browser.read(cx).browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
         match gesture {
             LinkGesture::Peek => self.open_peek(opener, url, window, cx),
             LinkGesture::Split => {
                 // `open_split` gives up without a word when the tab model
                 // refuses the new half; a fresh half is a new split pair.
-                let before = self.browser.split.map(|pair| (pair.left, pair.right));
+                let before = self.browser.read(cx).split.map(|pair| (pair.left, pair.right));
                 self.open_split(opener, url, cx);
-                let after = self.browser.split.map(|pair| (pair.left, pair.right));
+                let after = self.browser.read(cx).split.map(|pair| (pair.left, pair.right));
                 if after.is_none() || after == before {
                     return Err("the Split's second half could not be placed".into());
                 }
@@ -281,7 +273,27 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
+    /// The Split partner shown beside the centre tab, when the centre tab is
+    /// a half of the open Split and both tabs still exist.
+    pub(crate) fn split_partner(&self, cx: &gpui::App) -> Option<TabId> {
+        let pair = self.split?;
+        let shown = self.browse_centre_shown(cx)?;
+        let other = pair.partner(shown)?;
+        self.tabs.get(other).is_some().then_some(other)
+    }
+    /// Close the Peek (Esc, ×, a click on the page beneath).
+    pub(crate) fn close_peek(&mut self, cx: &mut Context<Self>) {
+        self.peek_watch = None;
+        if let Some(peek) = self.peek.take() {
+            // Its page may hold the keyboard: hand it back before it goes.
+            peek.state.update(cx, |state, _| state.release_keyboard());
+            PEEK_OPEN.store(false, Ordering::Relaxed);
+            cx.notify();
+        }
+    }
+
+
 
     /// Whether the open Split is still valid; a closed half ends it.
     pub(crate) fn prune_split(&mut self) {

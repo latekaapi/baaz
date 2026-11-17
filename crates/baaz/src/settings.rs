@@ -1640,7 +1640,7 @@ impl SettingsPage {
     /// Browser (B2a-H6): tabs, search, downloads, the Chromium row — and
     /// the Default-browser row below, which B2a-H7 owns. The
     /// Default-browser row renders the cached `https` handler only — the
-    /// frame hook owns the LaunchServices lookup — and Make default
+    /// Browse view owns the LaunchServices lookup — and Make default
     /// claims `http` and `https` for Baaz (macOS shows its own
     /// confirmation and applies it asynchronously, so the row waits until
     /// the next re-read). The button is the only place that ever changes
@@ -2267,10 +2267,11 @@ impl Harness {
     pub(crate) fn open_chromium_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_settings(cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded();
-        let space = self.browser.browse_space();
+        self.ensure_tabs_loaded(cx);
+        let space = self.browser.read(cx).browse_space();
         let existing = self
             .browser
+            .read(cx)
             .tabs
             .person_tabs(space.as_deref())
             .iter()
@@ -2401,9 +2402,9 @@ impl Harness {
                     .collect();
             }
             "browser" => {
-                facts.default_browser = self.default_browser_handler().map(str::to_owned);
-                facts.default_browser_pending = self.browser.default_browser_confirm_pending;
-                let data = self.browser.data.read(cx);
+                facts.default_browser = self.default_browser_handler(cx).map(str::to_owned);
+                facts.default_browser_pending = self.browser.read(cx).default_browser_confirm_pending;
+                let data = self.browser.read(cx).data.read(cx);
                 facts.history_pages = data.history_len();
                 facts.excluded_sites = data.excluded().to_vec();
             }
@@ -2483,7 +2484,7 @@ impl Harness {
             SettingsEvent::ClearHistory => self.ask_clear_history(cx),
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
-                self.browser.data.update(cx, |data, cx| data.include(site, cx));
+                self.browser.read(cx).data.clone().update(cx, |data, cx| data.include(site, cx));
                 cx.notify();
             }
             SettingsEvent::MakeDefaultBrowser => {
@@ -2493,9 +2494,7 @@ impl Harness {
                 // macOS confirms asynchronously: wait for the re-read
                 // (~1 s) and the next focus-regain instead of showing a
                 // stale handler.
-                self.browser.default_browser_confirm_pending = true;
-                self.browser.default_browser_recheck_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
-                cx.notify();
+                self.browser.update(cx, |browser, cx| browser.await_default_browser(cx));
             }
             SettingsEvent::OpenChromiumSettings => self.open_chromium_settings(window, cx),
         }

@@ -1,20 +1,56 @@
-//! Browse mode's state in one struct (task 4.5, audit R4 step one): what
-//! was ~45 loose fields on `Harness` beside the old `BrowserRegistry`, now
-//! owned as `Harness::browser`. The second step promotes it to an entity.
+//! Browse mode as its own entity (task 4.5, audit R4): [`BrowserView`]
+//! owns every webview and the tab model, the Field and find inputs, the
+//! Browse sidebar's menus and drags, the overlay windows over the native
+//! page, the agent window, the `browser.db` service ([`super::data`]) and the
+//! one owner of what covers the native page ([`super::occlusion`]).
+//!
+//! The view follows its pages itself: [`BrowserView::adopt_page`] observes
+//! each live `WebviewState`, and a page's change runs the page reconcile
+//! ([`BrowserView::reconcile_pages`] in `sync.rs`: tab URLs and titles,
+//! favicons, history, back/forward, popups, downloads, permissions, the
+//! debounced tabs write) with no frame drawn. What only the root can do —
+//! a session's stored URL, a screenshot for the composer, the agent tools'
+//! registry, the done task folders — goes out as a [`BrowserEvent`] the root
+//! maps (`Harness::on_browser_event`). It never reaches back into `Harness`.
+//!
+//! As a [`Region`](crate::region::Region) it draws the Browse centre's
+//! loading line, the part of the centre that only the view reads; the rest of
+//! the centre (the page, the new-tab page, the strips and popovers) is still
+//! composed by the root's `render_browse_centre`, whose handlers act on
+//! session state as well.
 
 use std::collections::{HashMap, HashSet};
 
 use aui_webview::WebviewState;
-use gpui::{AppContext as _, Bounds, Entity, Pixels};
+use aui_tokens::{scale, ActiveAui};
+use gpui::{div, prelude::*, px, AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render, SharedString, Subscription, Window};
 
 use super::{chrome, history, peek_split, BackForward, TabId, Tabs};
 use super::favicons;
+use super::occlusion::NativeOcclusion;
 
-/// Browse mode's state, owned by [`Harness`](crate::app::Harness) as one
-/// field (task 4.5): every webview and the tab model, the Field and find
-/// inputs, the Browse sidebar's menus and drags, the overlay windows over the
-/// native page, and the `browser.db` service.
-pub(crate) struct BrowseState {
+/// What the view asks of the root (see the module doc).
+#[derive(Clone, Debug)]
+pub(crate) enum BrowserEvent {
+    /// The live pages moved (a navigation, a title, a popup, a screenshot,
+    /// an answer): the root runs its half of the reconcile
+    /// (`Harness::reconcile_browser_root`). `session_urls` are the session
+    /// owners' active tabs at their live URLs, for the stored
+    /// `browser_url` each session restores from.
+    PagesChanged { session_urls: Vec<(String, String)> },
+    /// The discard sweep's timer came due: the root drops long-hidden pages
+    /// (it knows which tab the pane shows, and the agent tools' registry).
+    DiscardDue,
+    /// The next done task folder came due: the root sweeps them (it knows
+    /// which sessions still work).
+    DoneTasksDue,
+}
+
+impl EventEmitter<BrowserEvent> for BrowserView {}
+
+/// Browse mode's state and the entity that owns it (see the module doc).
+/// One field on [`Harness`](crate::app::Harness).
+pub(crate) struct BrowserView {
     /// One live state per open tab, keyed by tab. Hidden on switch, never
     /// destroyed — except by discard, which drops the state and keeps the
     /// tab's URL for a rebuild on show.
@@ -36,22 +72,13 @@ pub(crate) struct BrowseState {
     /// The tab the agent tools act on per session key, so discard never
     /// drops the agent's active tab and switches re-register it.
     pub agent_tabs: HashMap<String, TabId>,
-    /// The strip tab holding a middle press: set on middle mouse down,
-    /// compared on middle mouse up (only the same tab closes), cleared on
-    /// every middle up. Never rendered — pure press/release pairing.
-    /// The Browse centre page's rect, stored by `sync_browser` every
-    /// frame: the mouse-down hand-back measures against this same rect
-    /// (see `browse_centre_page_rect`), never a second computation.
-    /// `None` outside Browse and before the first sync.
+    /// The Browse centre page's rect, stored by the frame's occlusion
+    /// ([`Self::occlude`]): the mouse-down hand-back measures against this
+    /// same rect (see `browse_centre_page_rect`), never a second
+    /// computation. `None` outside Browse and before the first frame.
     pub centre_page_rect: Option<Bounds<Pixels>>,
-    /// The loading line's rect while a page loads (v3): cut through the
-    /// page as a hole so the line shows along the page column's top edge.
-    pub progress_hole: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    /// The page the v3 holes were last cut through, so they are taken back
-    /// when it stops being the centre.
-    pub holes_on: Option<gpui::WeakEntity<WebviewState>>,
     /// One back/forward stack per tab (B2a-H4): the header toolbar tracks
-    /// the URLs the sync reports, since the library exposes no back,
+    /// the URLs the page reconcile reports, since the library exposes no back,
     /// forward or reload calls to drive.
     pub histories: HashMap<TabId, BackForward>,
     /// Every tab's find strip (B2a-H5): per tab, so switching hides the
@@ -87,7 +114,7 @@ pub(crate) struct BrowseState {
     /// ([`tabs::now_ms`]): the popover's "6 s left" estimates read this.
     /// Stamped on first sight, pruned when the download ends.
     pub download_started: HashMap<(TabId, u32), u64>,
-    /// The centre tab the last sync saw: a switch dismisses the chrome
+    /// The centre tab the last frame's occlusion saw: a switch dismisses the chrome
     /// popovers (they point at the old tab's state) but never the find
     /// strip, which is per tab and restores on return.
     pub last_centre_shown: Option<TabId>,
@@ -134,7 +161,8 @@ pub(crate) struct BrowseState {
     /// when each task folder went done.
     pub(crate) task_seen_working: std::collections::HashSet<String>,
     pub(crate) task_done_at: std::collections::HashMap<String, u64>,
-    /// Wakes the window when the next done task folder is due to close.
+    /// Wakes the done task folders' sweep when the next is due to close
+    /// ([`BrowserEvent::DoneTasksDue`]).
     pub(crate) task_done_timer: Option<gpui::Task<()>>,
     /// How many webviews the open actions built (B7fix2): the spy the
     /// render-must-not-construct test reads. Incremented wherever a
@@ -195,7 +223,7 @@ pub(crate) struct BrowseState {
     /// seats at, reported the way `overflow_bounds` is. Never persists.
     pub(crate) back_bounds: Option<Bounds<Pixels>>,
     /// Whether the Browse centre's page held the keyboard on the last
-    /// `sync_browser` (B2a-H4 7b): the rising edge ends address editing,
+    /// frame's occlusion ([`Self::occlude`], B2a-H4 7b): the rising edge ends address editing,
     /// since a click into a Chromium page moves no gpui focus and the input
     /// never blurs. Never persists.
     pub(crate) browse_last_holds: bool,
@@ -239,18 +267,19 @@ pub(crate) struct BrowseState {
     /// The cached `https` default handler (B2a-H7b): `None` until the
     /// first read, then the lookup result (`None` inside when the lookup
     /// fails, e.g. off macOS). The Settings page renders this cache
-    /// only — never a live LaunchServices lookup — and [`Self::on_frame`]
-    /// refreshes it on focus-regain, when the Make-default re-read comes
-    /// due, and on the first frame. Never persists.
+    /// only — never a live LaunchServices lookup — and
+    /// [`Self::refresh_default_browser_cache`] refreshes it at launch, on
+    /// focus-regain (the root's window-activation observer) and when the
+    /// Make-default re-read comes due. Never persists.
     pub(crate) default_browser_cache: Option<Option<String>>,
     /// A Make-default click is waiting for macOS to confirm: the row
     /// shows "Waiting for macOS to confirm…" until the next re-read.
     /// Never persists.
     pub(crate) default_browser_confirm_pending: bool,
-    /// When the post-Make-default re-read comes due (macOS confirms
-    /// asynchronously — about a second after the click — plus again on
-    /// the next focus-regain). Never persists.
-    pub(crate) default_browser_recheck_at: Option<std::time::Instant>,
+    /// The post-Make-default re-read (macOS confirms asynchronously —
+    /// about a second after the click — plus again on the next
+    /// focus-regain): a timer the view owns. Never persists.
+    pub(crate) default_browser_recheck: Option<gpui::Task<()>>,
     /// The tab row a drag hovers over: the 2 px accent line's slot while
     /// a tab drag is in flight. Transient (cleared on drop), never keyed.
     pub(crate) browse_drop_target: Option<crate::browser::TabId>,
@@ -292,12 +321,43 @@ pub(crate) struct BrowseState {
     /// a new session and a project or space change. Part of the sidebar key
     /// (and read by the centre every frame).
     pub(crate) browse_session_tab: Option<crate::browser::TabId>,
+    /// The agent window over the page (task 4.5): the ⌘J line, the ⌘E card,
+    /// its float and handoff picker, and the browser chats' pages and
+    /// handoffs ([`crate::app::agent_window::AgentWindowState`]).
+    pub(crate) agent_window: crate::app::agent_window::AgentWindowState,
+    /// The one owner of what covers the native pages, which shows, and the
+    /// holes cut through the centre's ([`NativeOcclusion`]).
+    pub(crate) occlusion: NativeOcclusion,
+    /// One observation per live page ([`Self::adopt_page`]): a page's change
+    /// runs the page reconcile. Pruned with the pages.
+    pub(super) page_watch: HashMap<TabId, Subscription>,
+    /// The open Peek's page, observed like a tab's ([`Self::adopt_peek`]):
+    /// a link gesture inside it drains on its change.
+    pub(super) peek_watch: Option<Subscription>,
+    /// The `browser.db` service's observation: a landing redraws the view.
+    _data_watch: Subscription,
+    /// The page reconcile's wake-ups (dwell, ad-box second pass, answers
+    /// still out on a hidden page), owned here so they die with the view.
+    pub(super) reconcile_timer: Option<(std::time::Instant, gpui::Task<()>)>,
+    /// A reconcile is queued for the next turn ([`Self::adopt_page`]).
+    pub(super) reconcile_queued: bool,
+    /// The discard sweep's timer: hidden pages idle past the timeout are
+    /// dropped though no page changes ([`BrowserEvent::DiscardDue`]).
+    pub(super) discard_timer: Option<gpui::Task<()>>,
+    /// The region's focus handle (the region contract); the centre's own
+    /// inputs keep theirs.
+    focus: FocusHandle,
 }
 
-impl BrowseState {
+impl BrowserView {
     /// Empty: no tab and no webview exists until the Browser kind first
     /// shows. Tabs load lazily on first use (see `ensure_tabs_loaded`).
-    pub(crate) fn new(fake: bool, cx: &mut gpui::App) -> Self {
+    pub(crate) fn new(fake: bool, cx: &mut gpui::Context<Self>) -> Self {
+        let data = cx.new(super::data::BrowserData::new);
+        // A `browser.db` landing (hits, history length, bookmarks) changes
+        // what the Field, the ★ and the sidebar draw: redraw the view, never
+        // the root (task 4.5b).
+        let data_watch = cx.observe(&data, |_, _, cx| cx.notify());
         Self {
             states: HashMap::new(),
             favicons: favicons::Favicons::default(),
@@ -308,8 +368,6 @@ impl BrowseState {
             tabs_loaded: false,
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
-            progress_hole: Default::default(),
-            holes_on: None,
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
@@ -323,7 +381,7 @@ impl BrowseState {
             download_started: HashMap::new(),
             last_centre_shown: None,
             find_resync: None,
-            data: cx.new(super::data::BrowserData::new),
+            data,
             recorder: history::Recorder::default(),
             text_reads: HashMap::new(),
             next_text_read: 1 << 62,
@@ -368,7 +426,7 @@ impl BrowseState {
             pending_external_urls: Vec::new(),
             default_browser_cache: None,
             default_browser_confirm_pending: false,
-            default_browser_recheck_at: None,
+            default_browser_recheck: None,
             browse_drop_target: None,
             browse_drop_at_end: false,
             tab_menu: None,
@@ -383,6 +441,94 @@ impl BrowseState {
             page_float_pending: None,
             tab_menu_bounds: None,
             browse_session_tab: None,
+            agent_window: crate::app::agent_window::AgentWindowState::default(),
+            occlusion: NativeOcclusion::default(),
+            page_watch: HashMap::new(),
+            peek_watch: None,
+            _data_watch: data_watch,
+            reconcile_timer: None,
+            reconcile_queued: false,
+            discard_timer: None,
+            focus: cx.focus_handle(),
         }
+    }
+}
+
+impl BrowserView {
+    /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
+    /// the foreground filling a border-12 % track in proportion to the
+    /// engine's progress. Flat (docs/83 §3): the line runs the page column's
+    /// top edge, end to end (the page has no corners), inside the page's
+    /// rect — it is cut through the page as a hole while it shows
+    /// ([`Self::cut_holes`]), since the native page covers anything gpui
+    /// draws under it.
+    fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.occlusion.progress_hole.set(None);
+        let state = self.browse_centre_shown(cx).and_then(|id| self.states.get(&id))?;
+        let (loading, progress) = {
+            let page = state.read(cx);
+            (page.loading(), page.progress())
+        };
+        if !loading {
+            return None;
+        }
+        use aui::util::ElementExt as _;
+        let hole = self.occlusion.progress_hole.clone();
+        let p = cx.aui().colors;
+        let line = px(scale::SP_1);
+        let fill = progress.clamp(0.0, 1.0);
+        Some(
+            div()
+                .id("page-progress")
+                .role(gpui::Role::ProgressIndicator)
+                .aria_label("Loading page")
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(line)
+                .overflow_hidden()
+                .bg(p.line)
+                .flex()
+                .flex_row()
+                .child(div().h_full().bg(p.fg).flex_grow(fill))
+                .child(div().h_full().flex_grow(1.0 - fill))
+                .on_prepaint(move |bounds, _, _| hole.set(Some(bounds)))
+                .into_any_element(),
+        )
+    }
+}
+
+impl Focusable for BrowserView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl crate::region::Region for BrowserView {
+    /// The Browse centre's landmark name.
+    fn title(&self, _cx: &App) -> SharedString {
+        "Browse".into()
+    }
+
+    /// Browse's header row is the root's bar (the tab's crumb, the mode
+    /// switch): the view adds nothing there yet.
+    fn actions(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+
+    /// The view draws over its own centre page — a chrome popover or the
+    /// crashed page — as the last frame's occlusion answer said.
+    fn covers_page(&self, _cx: &App) -> bool {
+        self.occlusion.shown().centre_covered_by_view
+    }
+}
+
+impl Render for BrowserView {
+    /// The part of the Browse centre the view draws itself: the loading
+    /// line over the page column's top edge. Nothing (an empty, absolute
+    /// box) while no page loads.
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_page_progress(cx).unwrap_or_else(|| div().absolute().into_any_element())
     }
 }

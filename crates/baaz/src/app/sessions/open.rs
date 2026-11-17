@@ -105,7 +105,7 @@ impl Harness {
         // A new session (possibly in another project) drops the session tab
         // the Browse centre held and leaves the address field, even when the
         // mode never changed and `set_mode` early-returned.
-        self.browser.browse_session_tab = None;
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
         self.leave_browse_address(window, cx);
         // A `new` while a provider switch is pending is the person doing
         // something else: the switch is cancelled (its open lands stale
@@ -124,7 +124,7 @@ impl Harness {
         // claimed it for its replacement (see [`OpenState::admit_new`]).
         if !self.open_state.admit_new() {
             crate::baaz_log!("new: a session is already opening; keeping it");
-            self.browser.drop_pending_ask();
+            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
         }
         if switch_cancelled {
@@ -187,7 +187,7 @@ impl Harness {
                     // The Ask rides only this reused draft: key it before
                     // the view lands, so `activate` takes it here — and
                     // only here.
-                    self.browser.key_pending_ask(&draft_id);
+                    self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
                     if self.draft_serves(&draft_id, wanted, cx) && self.open_draft(&draft_id, window, cx)
                     {
                         return;
@@ -253,7 +253,7 @@ impl Harness {
         // flight owns the next session unless a provider switch claimed it.
         if !self.open_state.admit_new() {
             crate::baaz_log!("new: a session is already opening; keeping it");
-            self.browser.drop_pending_ask();
+            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
         }
         self.new_session_in_root_open(root, window, cx, None);
@@ -367,12 +367,12 @@ impl Harness {
     fn open_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.current_project_id() else {
             crate::baaz_log!("new: no current project; starting nothing");
-            self.browser.drop_pending_ask();
+            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
         };
         if self.projects.find(&id).is_none() {
             crate::baaz_log!("new: no current project; starting nothing");
-            self.browser.drop_pending_ask();
+            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
         }
         let moving = self.open_state.pending_draft.take();
@@ -397,7 +397,7 @@ impl Harness {
         view.update(cx, |view, vc| view.set_muse_starting(starting, vc));
         // The Ask's session is this draft: key the draft to it before the
         // view lands, so `activate` takes it here — and only here.
-        self.browser.key_pending_ask(&draft_id);
+        self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
         self.activate(view, false, window, cx);
         // No row exists for a draft, so the empty state and the later
         // `turn/started` row read the project straight from the store.
@@ -1069,11 +1069,11 @@ impl Harness {
         // draft that already holds text keeps it, with the question
         // appended on a new line.
         let ask = self
-            .browser.pending_ask_draft
+            .browser.read(cx).pending_ask_draft
             .clone()
             .filter(|ask| ask.target.as_deref() == Some(session_id.as_str()));
         if let Some(ask) = ask {
-            self.browser.pending_ask_draft = None;
+            self.browser.update(cx, |browser, _| browser.pending_ask_draft = None);
             let existing = view.read(cx).draft_text(cx);
             let next = crate::browser::toolbar::ask_draft_text(&existing, &ask.query);
             view.update(cx, |view, cx| view.set_draft(next, window, cx));

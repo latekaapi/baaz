@@ -7,11 +7,11 @@ use super::*;
 impl Harness {
 
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.browser.downloads_open || self.browser.extensions_open || self.browser.more_open;
-        self.browser.downloads_open = false;
-        self.browser.extensions_open = false;
-        self.browser.more_open = false;
-        self.browser.downloads_rendered = false;
+        let open = self.browser.read(cx).downloads_open || self.browser.read(cx).extensions_open || self.browser.read(cx).more_open;
+        self.browser.update(cx, |browser, _| browser.downloads_open = false);
+        self.browser.update(cx, |browser, _| browser.extensions_open = false);
+        self.browser.update(cx, |browser, _| browser.more_open = false);
+        self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         if open {
             cx.notify();
         }
@@ -27,7 +27,7 @@ impl Harness {
             .map(|state| state.read(cx).url().to_string())
             .filter(|url| !url.is_empty())
             .or_else(|| {
-                self.browser.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+                self.browser.read(cx).browse_centre_shown(cx).and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()))
             })
             .unwrap_or_default();
         if !url.is_empty() {
@@ -79,14 +79,14 @@ impl Harness {
     /// switch can never misattribute it.
     pub(crate) fn capture_browse_screenshot(&mut self, cx: &mut Context<Self>) {
         self.dismiss_browse_popovers(cx);
-        let shown = self.browser.browse_centre_shown(cx);
+        let shown = self.browser.read(cx).browse_centre_shown(cx);
         if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _cx| state.capture());
             match state.read(cx).screenshot().map(<[u8]>::to_vec) {
                 Some(bytes) => self.attach_browser_screenshot(bytes, cx),
                 None => {
                     if let Some(id) = shown {
-                        self.browser.shot_pending.insert(screenshot_tab_key(id));
+                        self.browser.update(cx, |browser, _| browser.shot_pending.insert(screenshot_tab_key(id)));
                     }
                 }
             }
@@ -121,9 +121,9 @@ impl Harness {
     /// Reload the shown tab at its own URL (the crashed page's Reload):
     /// the navigation clears the crash, whatever the tab's owner.
     pub(crate) fn reload_browse_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
-        let url = self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let url = self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
         if url.is_empty() {
             return;
         }
@@ -146,12 +146,12 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.leave_browse_address(window, cx);
-        self.ensure_tabs_loaded();
-        let title = self.browser.tabs.get(id).map(|tab| tab.title.clone()).unwrap_or_default();
-        if self.browser.tabs.set_url_title(id, url, &title) {
-            self.browser.schedule_tabs_write();
+        self.ensure_tabs_loaded(cx);
+        let title = self.browser.read(cx).tabs.get(id).map(|tab| tab.title.clone()).unwrap_or_default();
+        if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, &title)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
-        match self.browser.states.get(&id).cloned() {
+        match self.browser.read(cx).states.get(&id).cloned() {
             Some(state) => {
                 if state.read(cx).url().as_ref() != url {
                     state.update(cx, |state, _cx| state.navigate(url));
@@ -166,11 +166,11 @@ impl Harness {
 
     /// Step the shown tab back within its Baaz-tracked history.
     pub(crate) fn browse_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else {
             return;
         };
-        let url = self.browser.histories.entry(id).or_default().go_back();
+        let url = self.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().go_back());
         if let Some(url) = url {
             self.navigate_browse_tab(id, &url, window, cx);
         }
@@ -178,11 +178,11 @@ impl Harness {
 
     /// Step the shown tab forward within its Baaz-tracked history.
     pub(crate) fn browse_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else {
             return;
         };
-        let url = self.browser.histories.entry(id).or_default().go_forward();
+        let url = self.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().go_forward());
         if let Some(url) = url {
             self.navigate_browse_tab(id, &url, window, cx);
         }
@@ -193,8 +193,8 @@ impl Harness {
     /// Browser › Your data lists it, with a way back.
     pub(crate) fn forget_shown_site(&mut self, cx: &mut Context<Self>) {
         let url = self
-            .browser.browse_centre_shown(cx)
-            .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+            .browser.read(cx).browse_centre_shown(cx)
+            .and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()))
             .unwrap_or_default();
         let site = history::host_of(&url);
         if !history::recordable(&url) || site.is_empty() {
@@ -202,7 +202,7 @@ impl Harness {
             cx.notify();
             return;
         }
-        self.browser.data.update(cx, |data, cx| data.exclude(&site, cx));
+        self.browser.read(cx).data.clone().update(cx, |data, cx| data.exclude(&site, cx));
         self.overlays.update(cx, |o, _| {
             o.toast(format!("{site} won’t be remembered"), "Its history is gone. Undo in Settings › Browser.")
         });
@@ -212,14 +212,14 @@ impl Harness {
     /// "Allow ads on this site": flips the shown site's exception; a toast
     /// says which way, and the page reloads so it takes effect.
     pub(crate) fn toggle_ads_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.browser.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone())).unwrap_or_default();
+        let url = self.browser.read(cx).browse_centre_shown(cx).and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone())).unwrap_or_default();
         let site = history::host_of(&url);
         if !history::recordable(&url) || site.is_empty() {
             return;
         }
         let allowed = crate::layout::Layout::update(cx, |layout| layout.adblock.toggle(&site));
         adblock::apply(&crate::layout::Layout::get(cx).adblock);
-        if let Some(id) = self.browser.browse_centre_shown(cx) {
+        if let Some(id) = self.browser.read(cx).browse_centre_shown(cx) {
             self.reload_browse_tab(id, window, cx);
         }
         let (title, body) = if allowed {
@@ -233,7 +233,7 @@ impl Harness {
 
     /// Clear history: asks first, since it cannot be undone.
     pub(crate) fn ask_clear_history(&mut self, cx: &mut Context<Self>) {
-        let pages = self.browser.data.read(cx).history_len();
+        let pages = self.browser.read(cx).data.read(cx).history_len();
         self.set_dialog(
             cx,
             crate::overlays::Dialog {
@@ -252,7 +252,7 @@ impl Harness {
 
     /// Clear history now (confirmed).
     pub(crate) fn clear_history_now(&mut self, cx: &mut Context<Self>) {
-        self.browser.data.update(cx, |data, cx| data.clear_history(cx));
+        self.browser.read(cx).data.clone().update(cx, |data, cx| data.clear_history(cx));
         self.overlays.update(cx, |o, _| o.toast("History cleared", ""));
         cx.notify();
     }

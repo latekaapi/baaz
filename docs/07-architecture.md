@@ -122,14 +122,15 @@ Production `Render` impls: `Harness` (`app.rs`), `SessionView`
 (`session/render.rs`), `SidebarPane` (`sidebar_view.rs`), the region
 entities `RightPane` (`right_pane.rs`), `TerminalDock`
 (`terminal/dock.rs`), `SkillsPage` (`skills_page.rs`), `SettingsPage`
-(`settings.rs`) and `ConnectScreen` (`connect.rs`), the setup sheet's
+(`settings.rs`), `ConnectScreen` (`connect.rs`) and `BrowserView`
+(`browser/view.rs`), the setup sheet's
 `SetupHost` (`setup.rs`), `OverlayView` (`overlay.rs`) and `FeedbackTip`
 (`feedback/ui.rs`); `BenchRoot` is bench-only. All paths in this section are under `crates/baaz/src/`.
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 120 fields. Its methods are spread over 61
-`impl Harness` blocks in 52 files (`app/*.rs`, `sidebar_view.rs`, the
+`Harness` (`app.rs`) has 118 fields. Its methods are spread over 62
+`impl Harness` blocks in 53 files (`app/*.rs`, `sidebar_view.rs`, the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
@@ -140,14 +141,19 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
 | sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal/rename fields, `sidebar_wheel` |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
-| browser and Browse mode | `browser`: one `BrowseState` (`browser/state.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`) and `data`, the `browser.db` service; `agent_window`: one `AgentWindowState` (`app/agent_window.rs`) for the agent line and card (`line_ui`, `card_ui`), the card's float (`card_float`) and handoff picker |
+| browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card, the card's float and handoff picker) |
 | settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, `chrome_import`, several `TextareaState` query fields |
 | terminal | `terminal_dock`: a region entity (`terminal/dock.rs`, task 4.4) that owns the tab host, its focus, the resize drag and the bridge providers; `terminal_service`, the agent's terminal and browser tools socket |
 | focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
 
 `Harness::render` is not cached. It first runs `on_frame` (window title,
 overlay windows, provider status, boot session, scripted steps) and later
-`sync_browser` (`browser/sync.rs`), then composes the shell. The right pane
+asks the one occlusion owner what covers the native pages
+(`Harness::occlude_pages`, `browser/occlusion.rs`: decides and applies, in
+memory), then composes the shell. The browser's page reconcile (tabs,
+history, popups, downloads, permissions, the tabs write) does not run from
+render: `BrowserView` observes each page and runs it on the page's change
+(`browser/sync.rs`, `tests/browser_render_ratchet.rs`). The right pane
 is a region entity ([`region.rs`](../crates/baaz/src/region.rs)): the root
 pushes it this frame's facts and composes its view, and the pane reconciles
 its own reads in its own render. The terminal dock, the Skills page, the
@@ -193,11 +199,11 @@ running or starting, a pending approval or question) is never evicted.
 | `Overlays` | `overlays.rs` | state only: the dialog, the open menu, the palette, toasts, the `@`-picker walks. Rendered by `Harness` and by the composer |
 | `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content) |
 | `SettingsPage` | `settings.rs`, `settings_providers.rs` | the Settings page as a region entity: its route (`SettingsPageState`), search and focus, the Shortcuts rows and recording, its menus and folds; the root pushes `SettingsFacts` and handles `SettingsEvent`s |
-| `BrowserData` | `browser/data.rs` | `browser.db` (task 4.5): the in-memory front (bookmarks, folders, excluded sites, history length, the Field's last history search) the UI reads, and the one worker task on the background executor that owns the connection; writes update the front at once and persist in order, landings notify; observed by `Harness` |
+| `BrowserData` | `browser/data.rs` | `browser.db` (task 4.5): the in-memory front (bookmarks, folders, excluded sites, history length, the Field's last history search) the UI reads, and the one worker task on the background executor that owns the connection; writes update the front at once and persist in order, landings notify; quit drains the queue, bounded (`drain_at_quit`); observed by `BrowserView` |
 | `ProviderStatusModel` | `provider_model.rs` | the window's provider facts: statuses (following the status cache), sign-out banners, busy cards, the Codex sign-in flow; observed by `ConnectScreen`, `SetupHost` and `SettingsPage` |
 | `ConnectScreen`, `SetupHost` | `connect.rs`, `setup.rs` | the first-run connect screen (a region entity: whether it stands, its footer menu) and the setup sheet (the open sheet, its terminals and focus) |
 | `SkillsPage` | `skills_page.rs` | the Skills page as a region entity: catalog, filter, selection, dialogs, its fields and CLI calls |
-| browser | `browser/` | `BrowseState` (`state.rs`: one `WebviewState` per tab, CEF or WKWebView, a fake backend for captures; the Browse fields), its `impl Harness` seams (`tabs_actions.rs`, `pages.rs`, `sync.rs`, `omnibox.rs`, `find.rs`, `permissions.rs`, `downloads.rs`, `page_actions.rs`, `keys.rs`, `steps.rs`, `agent_tabs.rs`; `mod.rs` holds no `impl Harness`), tabs, `BrowserData` (`data.rs`: history and bookmarks in `browser.db`, run by one worker on the background executor behind an in-memory front; nothing else names SQLite, `tests/browser_data_ratchet.rs`), adblock, favicons, the agent tools in `browser/automation/` |
+| browser | `browser/` | `BrowserView` (`view.rs`: a region entity; one `WebviewState` per tab, CEF or WKWebView, a fake backend for captures; the Browse fields; it observes its pages, runs the page reconcile in `sync.rs` and emits `BrowserEvent`s the root maps; it draws the centre's loading line), `NativeOcclusion` (`occlusion.rs`: what covers the native page, which page shows, the holes, cover settling), the `impl Harness` seams (`tabs_actions.rs`, `pages.rs`, `sync.rs`, `occlusion.rs`, `omnibox.rs`, `find.rs`, `permissions.rs`, `downloads.rs`, `page_actions.rs`, `keys.rs`, `steps.rs`, `agent_tabs.rs`; `mod.rs` holds no `impl Harness`), tabs, `BrowserData` (`data.rs`: history and bookmarks in `browser.db`, run by one worker on the background executor behind an in-memory front; nothing else names SQLite, `tests/browser_data_ratchet.rs`), adblock, favicons, the agent tools in `browser/automation/` |
 | terminal | `terminal/` | `TerminalDock` (the dock region entity), `TerminalHost` (an entity the dock holds: tabs by project root over `aui_terminal` ptys) and `TerminalService` (the socket, on `Harness`) |
 
 Every action a browser agent takes passes `browser::automation::policy::decide`
@@ -306,10 +312,11 @@ These are true of the code today.
 - **`Harness` is still the owner of nearly everything.** 241 fields and 52
   `impl` blocks. New features have added fields and files to it rather than
   their own entities.
-- **Render is part of the event loop.** `on_frame` and `sync_browser` run
-  inside `Harness::render` and reconcile overlay windows, provider status,
-  webviews and tab persistence. Few things are observed, so a change is
-  noticed when a frame happens, and the root is not cached.
+- **Render is part of the event loop.** `on_frame` runs inside
+  `Harness::render` and reconciles overlay windows, provider status and
+  the sidebar key. Few things are observed, so a change is noticed when a
+  frame happens, and the root is not cached. (The browser's page reconcile
+  left render in task 4.5b; its occlusion is still decided per frame.)
 - **`SidebarKey` is maintained by hand.** A field the sidebar reads but the
   key does not compare leaves the pane stale.
 - **The app is not fully behind the seam.** About 730 references to a

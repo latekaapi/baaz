@@ -1508,8 +1508,8 @@ impl crate::app::Harness {
         // tab, so it is only the fallback.
         let url = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             let from_tab = self
-                .browser.browse_centre_shown(cx)
-                .and_then(|id| self.browser.tabs.get(id))
+                .browser.read(cx).browse_centre_shown(cx)
+                .and_then(|id| self.browser.read(cx).tabs.get(id))
                 .map(|tab| tab.url.clone())
                 .filter(|url| !url.is_empty() && url != "about:blank");
             from_tab.or_else(|| self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()))

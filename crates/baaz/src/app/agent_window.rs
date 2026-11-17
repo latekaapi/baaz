@@ -48,8 +48,8 @@ pub(crate) enum CardUi {
 
 /// The agent window's own state (task 4.5): what the line and the card show,
 /// the card's float window and handoff picker, and what each browser chat
-/// used and was handed off to. One field on [`Harness`]; the Browse page it
-/// floats over is [`crate::browser::BrowseState`].
+/// used and was handed off to. One field of the Browse view it floats over
+/// ([`crate::browser::BrowserView::agent_window`], task 4.5b).
 pub(crate) struct AgentWindowState {
     /// The ⌘J line's own state (R3), when no agent drives the tab on screen.
     pub(crate) line_ui: LineUi,
@@ -317,14 +317,14 @@ fn step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::S
 impl Harness {
     /// ⌘J: open the line on the page on screen, or close it.
     pub(crate) fn toggle_agent_line(&mut self, cx: &mut Context<Self>) {
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.browse_centre_shown(cx).is_none() {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.read(cx).browse_centre_shown(cx).is_none() {
             return;
         }
-        self.agent_window.line_ui = if self.agent_window.line_ui == LineUi::Closed { LineUi::Ask } else { LineUi::Closed };
-        self.agent_window.line_wants_keys = self.agent_window.line_ui == LineUi::Ask;
+        self.browser.update(cx, |browser, _| browser.agent_window.line_ui = if browser.agent_window.line_ui == LineUi::Closed { LineUi::Ask } else { LineUi::Closed });
+        self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = browser.agent_window.line_ui == LineUi::Ask);
         // "This page" stands again each time the line opens.
-        if self.agent_window.line_ui == LineUi::Ask {
-            self.agent_window.line_page_chip = true;
+        if self.browser.read(cx).agent_window.line_ui == LineUi::Ask {
+            self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = true);
         }
         cx.notify();
     }
@@ -334,18 +334,18 @@ impl Harness {
     /// the approval answer with their own buttons).
     pub(crate) fn escape_agent_window(&mut self, kind: crate::overlay::OverlayKind, cx: &mut Context<Self>) {
         if kind == crate::overlay::OverlayKind::AgentCard {
-            if self.agent_window.handoff_picker_open {
-                self.agent_window.handoff_picker_open = false;
-            } else if self.agent_window.card_ui == CardUi::Card {
-                self.agent_window.card_ui = CardUi::Closed;
+            if self.browser.read(cx).agent_window.handoff_picker_open {
+                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+            } else if self.browser.read(cx).agent_window.card_ui == CardUi::Card {
+                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
             }
         } else {
-            match self.agent_window.line_ui {
+            match self.browser.read(cx).agent_window.line_ui {
                 LineUi::Answer { .. } => {
-                    self.agent_window.line_ui = LineUi::Ask;
-                    self.agent_window.line_wants_keys = true;
+                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
+                    self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = true);
                 }
-                LineUi::Ask | LineUi::Drafted { .. } => self.agent_window.line_ui = LineUi::Closed,
+                LineUi::Ask | LineUi::Drafted { .. } => self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed),
                 _ => {}
             }
         }
@@ -357,10 +357,10 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        self.agent_window.card_ui = if self.agent_window.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed };
+        self.browser.update(cx, |browser, _| browser.agent_window.card_ui = if browser.agent_window.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed });
         // The card carries the answer on: the line does not show it twice.
-        if self.agent_window.card_ui != CardUi::Closed && matches!(self.agent_window.line_ui, LineUi::Answer { .. }) {
-            self.agent_window.line_ui = LineUi::Closed;
+        if self.browser.read(cx).agent_window.card_ui != CardUi::Closed && matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
+            self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
         }
         cx.notify();
     }
@@ -370,16 +370,16 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        self.agent_window.card_ui = if self.agent_window.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column };
-        if matches!(self.agent_window.line_ui, LineUi::Answer { .. }) {
-            self.agent_window.line_ui = LineUi::Closed;
+        self.browser.update(cx, |browser, _| browser.agent_window.card_ui = if browser.agent_window.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column });
+        if matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
+            self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
         }
         cx.notify();
     }
 
     /// The tab on screen in Browse, as the chat's prompt names it.
     fn page_on_screen(&self, cx: &gpui::App) -> Option<(u64, String, String)> {
-        let id = self.browser.browse_centre_shown(cx)?;
+        let id = self.browser.read(cx).browse_centre_shown(cx)?;
         let state = self.browse_centre_state(cx)?;
         let page = state.read(cx);
         Some((id.0, page.title().to_string(), page.url().to_string()))
@@ -394,7 +394,7 @@ impl Harness {
         if ask.is_empty() {
             return;
         }
-        let page = if self.agent_window.line_page_chip { self.page_on_screen(cx) } else { None };
+        let page = if self.browser.read(cx).agent_window.line_page_chip { self.page_on_screen(cx) } else { None };
         let prompt = page_prompt(ask, page.as_ref().map(|(tab, title, url)| (*tab, title.as_str(), url.as_str())));
         // The open chat continues while it is idle and still on the
         // Assistant's provider; after a change in Settings the next ask
@@ -415,30 +415,33 @@ impl Harness {
             None => self.start_browser_chat(prompt, window, cx),
         };
         let Some(session) = session else {
-            self.agent_window.line_notice = Some("Connect a provider in Settings › Providers to ask about pages.".into());
+            self.browser.update(cx, |browser, _| browser.agent_window.line_notice = Some("Connect a provider in Settings › Providers to ask about pages.".into()));
             cx.notify();
             return;
         };
         if let Some((_, title, url)) = page.as_ref() {
-            let pages = self.agent_window.browser_chat_pages.entry(session.clone()).or_default();
-            if !pages.iter().any(|(_, u)| u == url) {
-                pages.push((title.clone(), url.clone()));
-            }
+            self.browser.update(cx, |browser, _| {
+                let pages = browser.agent_window.browser_chat_pages.entry(session.clone()).or_default();
+                if !pages.iter().any(|(_, u)| u == url) {
+                    pages.push((title.clone(), url.clone()));
+                }
+            });
         }
         if let (Some((tab, _, _)), Some(state)) = (page.as_ref(), self.browse_centre_state(cx)) {
             let read_only = crate::layout::Layout::get(cx).agents.your_tabs == crate::browser::agents::YourTabs::ReadOnly;
             self.terminal_service.grant_tab(&session, *tab, state, read_only);
         }
-        if let Some(input) = self.agent_window.agent_line_input.clone() {
+        if let Some(input) = self.browser.read(cx).agent_window.agent_line_input.clone() {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.agent_window.line_notice = None;
-        self.agent_window.line_ui = match (draft, page) {
+        self.browser.update(cx, |browser, _| browser.agent_window.line_notice = None);
+        let line_ui = match (draft, page) {
             (true, Some((tab, _, _))) => LineUi::Drafting { session, tab },
             _ if inline => LineUi::Answer { question: ask.to_owned(), session },
-            _ => self.agent_window.line_ui.clone(),
+            _ => self.browser.read(cx).agent_window.line_ui.clone(),
         };
-        self.agent_window.line_wants_keys = false;
+        self.browser.update(cx, |browser, _| browser.agent_window.line_ui = line_ui);
+        self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = false);
         cx.notify();
     }
 
@@ -454,11 +457,11 @@ impl Harness {
             .read(cx)
             .pending_external_approvals()
             .into_iter()
-            .filter(|(id, headline)| headline.contains("mcp__baaz__browser_") && !self.agent_window.auto_accepted.contains(id))
+            .filter(|(id, headline)| headline.contains("mcp__baaz__browser_") && !self.browser.read(cx).agent_window.auto_accepted.contains(id))
             .map(|(id, _)| id)
             .collect();
         for id in due {
-            self.agent_window.auto_accepted.insert(id.clone());
+            self.browser.update(cx, |browser, _| browser.agent_window.auto_accepted.insert(id.clone()));
             view.update(cx, |view, cx| view.answer_external(&id, true, cx));
         }
     }
@@ -478,18 +481,18 @@ impl Harness {
                 view.pending_external_approvals().iter().any(|(_, h)| !h.contains("mcp__baaz__browser_")) || (view.pending_external_approvals().is_empty() && view.pending_approval_line().is_some()),
             )
         };
-        match self.agent_window.line_ui.clone() {
+        match self.browser.read(cx).agent_window.line_ui.clone() {
             // Past a few steps, or waiting on the person's OK, the ask moves
             // to the card, where the steps and the question show.
             LineUi::Answer { session, .. } if session == id && (steps > INLINE_MAX_STEPS || asks) => {
-                self.agent_window.line_ui = LineUi::Closed;
-                if self.agent_window.card_ui == CardUi::Closed {
-                    self.agent_window.card_ui = CardUi::Card;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
+                if self.browser.read(cx).agent_window.card_ui == CardUi::Closed {
+                    self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card);
                 }
                 cx.notify();
             }
             LineUi::Drafting { session, tab } if session == id && !busy => {
-                self.agent_window.line_ui = LineUi::Drafted { session, tab };
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafted { session, tab });
                 cx.notify();
             }
             _ => {}
@@ -499,8 +502,8 @@ impl Harness {
     /// The line's own state (not the driving bar), for the float to draw.
     pub(crate) fn own_line_state(&self, cx: &gpui::App) -> Option<aui::browse::agent_window::LineState> {
         use aui::browse::agent_window::LineState;
-        let chips = if self.agent_window.line_page_chip { vec![page_chip()] } else { Vec::new() };
-        match &self.agent_window.line_ui {
+        let chips = if self.browser.read(cx).agent_window.line_page_chip { vec![page_chip()] } else { Vec::new() };
+        match &self.browser.read(cx).agent_window.line_ui {
             LineUi::Closed => None,
             LineUi::Ask => Some(LineState::Ask {
                 text: "Ask about this page".into(),
@@ -539,7 +542,7 @@ impl Harness {
                 }
             }
             LineIntent::ChipRemove(_) => {
-                self.agent_window.line_page_chip = false;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = false);
                 cx.notify();
             }
             LineIntent::Copy => {
@@ -551,35 +554,35 @@ impl Harness {
                 }
             }
             LineIntent::Dismiss => {
-                self.agent_window.line_ui = LineUi::Ask;
-                self.agent_window.line_wants_keys = true;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
+                self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = true);
                 cx.notify();
             }
             LineIntent::Expand => {
-                self.agent_window.card_ui = CardUi::Card;
-                if matches!(self.agent_window.line_ui, LineUi::Answer { .. }) {
-                    self.agent_window.line_ui = LineUi::Closed;
+                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card);
+                if matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
+                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
                 }
                 cx.notify();
             }
             LineIntent::Undo => {
-                if let LineUi::Drafted { tab, .. } = self.agent_window.line_ui.clone() {
-                    if let Some(state) = self.browser.states.get(&crate::browser::tabs::TabId(tab)).cloned() {
+                if let LineUi::Drafted { tab, .. } = self.browser.read(cx).agent_window.line_ui.clone() {
+                    if let Some(state) = self.browser.read(cx).states.get(&crate::browser::tabs::TabId(tab)).cloned() {
                         state.update(cx, |state, _| state.eval_with_result(u64::MAX - tab, UNDO_DRAFT_JS));
                     }
                 }
-                self.agent_window.line_ui = LineUi::Closed;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
                 cx.notify();
             }
             LineIntent::Done => {
-                self.agent_window.line_ui = LineUi::Closed;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
                 cx.notify();
             }
             LineIntent::Stop => {
                 if let Some(view) = self.registry.browser_chat().cloned() {
                     view.update(cx, |view, cx| view.interrupt(cx));
                 }
-                self.agent_window.line_ui = LineUi::Ask;
+                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
                 cx.notify();
             }
             LineIntent::Plus => {}
@@ -609,22 +612,22 @@ impl Harness {
                     }),
                     None => self.ask_browser_chat(&text, false, false, window, cx),
                 }
-                if let Some(input) = self.agent_window.agent_card_input.clone() {
+                if let Some(input) = self.browser.read(cx).agent_window.agent_card_input.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
             }
-            CardIntent::Dock => self.agent_window.card_ui = CardUi::Column,
-            CardIntent::Undock => self.agent_window.card_ui = CardUi::Card,
+            CardIntent::Dock => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Column),
+            CardIntent::Undock => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card),
             CardIntent::Close => {
-                self.agent_window.card_ui = CardUi::Closed;
-                self.agent_window.handoff_picker_open = false;
+                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
+                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
             }
-            CardIntent::ChipRemove(_) => self.agent_window.line_page_chip = false,
+            CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = false),
             CardIntent::Model => self.open_settings_page("browser", cx),
             CardIntent::Handoff => {
-                self.agent_window.handoff_picker_open = !self.agent_window.handoff_picker_open;
-                self.agent_window.handoff_selected = 0;
-                if let Some(query) = self.agent_window.handoff_query.clone() {
+                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = !browser.agent_window.handoff_picker_open);
+                self.browser.update(cx, |browser, _| browser.agent_window.handoff_selected = 0);
+                if let Some(query) = self.browser.read(cx).agent_window.handoff_query.clone() {
                     query.update(cx, |query, cx| query.set_value("", window, cx));
                 }
             }
@@ -667,7 +670,7 @@ impl Harness {
             return Err(format!("unknown fixture `{kind}`; known fixtures are answer, steps, draft"));
         }
         let id = format!("browser-fixture-{}", if kind.is_empty() { "answer" } else { kind });
-        crate::baaz_log!("browser-chat-fixture: {id} (page {:?})", self.browser.browse_centre_shown(cx));
+        crate::baaz_log!("browser-chat-fixture: {id} (page {:?})", self.browser.read(cx).browse_centre_shown(cx));
         let page = self.page_on_screen(cx);
         let ask = match kind {
             "steps" => "Compare the refund windows on these three shops and save the policy pages as PDFs to ~/Documents/refunds",
@@ -728,17 +731,17 @@ impl Harness {
             meta.browser_chat = true;
         }, cx);
         if let Some((_, title, url)) = page.as_ref() {
-            self.agent_window.browser_chat_pages.insert(id.clone(), vec![(title.clone(), url.clone())]);
+            self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert(id.clone(), vec![(title.clone(), url.clone())]));
         }
         self.set_browser_chat(view, cx);
         match kind {
-            "steps" => self.agent_window.card_ui = CardUi::Card,
+            "steps" => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card),
             "draft" => {
                 if let Some((tab, _, _)) = page {
-                    self.agent_window.line_ui = LineUi::Drafted { session: id, tab };
+                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafted { session: id, tab });
                 }
             }
-            _ => self.agent_window.line_ui = LineUi::Answer { question: ask.to_owned(), session: id },
+            _ => self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Answer { question: ask.to_owned(), session: id }),
         }
         cx.notify();
         Ok(())
@@ -781,10 +784,18 @@ pub(crate) fn done_sessions_due(
 impl Harness {
     /// Close the tabs of task folders done for [`DONE_CLOSES_AFTER_MS`]
     /// (docs/27 §4.3). A tab the person dragged into their own list is
-    /// theirs and stays; the tab on screen stays until they leave it.
-    pub(crate) fn close_done_task_tabs(&mut self, shown: Option<crate::browser::tabs::TabId>, window: &Window, cx: &mut Context<Self>) {
+    /// theirs and stays; the tab on screen stays until they leave it. Runs
+    /// on the Browse view's page reconcile, on every session event (which
+    /// is where a session starts and stops working), and on the view's own
+    /// timer when the next folder comes due ([`BrowserEvent::DoneTasksDue`](crate::browser::BrowserEvent)).
+    pub(crate) fn close_done_task_tabs(&mut self, cx: &mut Context<Self>) {
+        if !self.browser.read(cx).tabs_loaded {
+            return;
+        }
+        let shown = self.browser.read(cx).occlusion.shown().on_screen();
         let sessions: Vec<(String, bool)> = self
             .browser
+            .read(cx)
             .tabs
             .session_tabs(None)
             .iter()
@@ -798,30 +809,34 @@ impl Harness {
         let now = crate::browser::tabs::now_ms();
         // `BAAZ_DONE_CLOSE_SECS` shortens the wait for a live check.
         let after = std::env::var("BAAZ_DONE_CLOSE_SECS").ok().and_then(|v| v.parse::<u64>().ok()).map(|s| s * 1000).unwrap_or(DONE_CLOSES_AFTER_MS);
-        let due = done_sessions_due(&sessions, now, after, &mut self.browser.task_seen_working, &mut self.browser.task_done_at);
-        // An idle window draws no frames, so the sweep would never run again:
-        // wake it when the next done folder comes due.
-        let next = self.browser.task_done_at.values().map(|since| (since + after).saturating_sub(now)).min();
-        if let Some(wait) = next.filter(|_| self.browser.task_done_timer.is_none()) {
-            self.browser.task_done_timer = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(std::time::Duration::from_millis(wait + 50)).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.browser.task_done_timer = None;
-                    cx.notify();
-                });
-            }));
+        let due = self.browser.update(cx, |browser, _| done_sessions_due(&sessions, now, after, &mut browser.task_seen_working, &mut browser.task_done_at));
+        // Nothing reports a folder coming due: the view wakes the sweep
+        // when the next one does.
+        let next = self.browser.read(cx).task_done_at.values().map(|since| (since + after).saturating_sub(now)).min();
+        if let Some(wait) = next {
+            self.browser.update(cx, |browser, cx| browser.arm_done_tasks(wait, cx));
         }
+        let mut closing = Vec::new();
         for session in due {
             let owner = crate::browser::Owner::Session(session.clone());
-            let ids: Vec<_> = self.browser.tabs.tabs_of(&owner).iter().map(|tab| tab.id).filter(|id| Some(*id) != shown).collect();
+            let ids: Vec<_> = self.browser.read(cx).tabs.tabs_of(&owner).iter().map(|tab| tab.id).filter(|id| Some(*id) != shown).collect();
             if ids.is_empty() {
                 continue;
             }
             crate::baaz_log!("done task folder closes {} tab(s) session={session}", ids.len());
-            self.browser.task_done_at.remove(&session);
-            self.browser.task_seen_working.remove(&session);
-            // The sweep runs inside the frame's sync: close on the next turn.
-            cx.defer_in(window, move |this, window, cx| this.close_tabs(ids, window, cx));
+            self.browser.update(cx, |browser, _| browser.task_done_at.remove(&session));
+            self.browser.update(cx, |browser, _| browser.task_seen_working.remove(&session));
+            closing.extend(ids);
+        }
+        // Closing builds the next tab's page, which needs the window: close
+        // on the next turn, through the window this root draws in.
+        if let (false, Some(handle)) = (closing.is_empty(), self.main_window) {
+            cx.spawn(async move |this, cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.close_tabs(closing, window, cx));
+                });
+            })
+            .detach();
         }
     }
 }
@@ -831,14 +846,14 @@ impl Harness {
     /// a live page the tools can drive (R3). Its later tabs come through
     /// `browser_tabs`. Nothing when it already has one.
     pub(crate) fn open_browser_chat_tab(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let owner = crate::browser::Owner::Session(session.to_owned());
-        let tab = match self.browser.tabs.tabs_of(&owner).first().map(|tab| tab.id) {
+        let tab = match self.browser.read(cx).tabs.tabs_of(&owner).first().map(|tab| tab.id) {
             Some(tab) => tab,
             None => {
-                let space = self.browser.browse_space();
-                let tab = self.browser.tabs.open(space, owner, crate::browser::tabs::BLANK, None);
-                self.browser.schedule_tabs_write();
+                let space = self.browser.read(cx).browse_space();
+                let tab = self.browser.update(cx, |bv, _| bv.tabs.open(space, owner, crate::browser::tabs::BLANK, None));
+                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 tab
             }
         };

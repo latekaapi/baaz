@@ -1,16 +1,18 @@
 //! Links opened from other apps (B2a-H7): macOS delivers them through
 //! `App::on_open_urls`, whose callback fires with no window of its own,
 //! so it only enqueues into the process-wide queue below and kicks a
-//! foreground drain ([`kick_external_drain`]). The shell also drains
-//! that queue on every frame ([`Harness::poll_external_urls`]) into
+//! foreground drain ([`kick_external_drain`]) into
 //! [`Harness::ingest_external_urls`] — the same path the scripted
 //! `open-url:<url>` step drives, so the probe exercises what a Mail
-//! click would trigger.
+//! click would trigger. URLs that arrive before the shell window exists
+//! drain once it opens (`note_shell_app` kicks); URLs parked behind the
+//! connect screen open when it finishes ([`Harness::drain_external_soon`]).
+//! Nothing here runs per frame (task 4.5b).
 //!
 //! Every URL lands as a new **person tab** in the current project, the
 //! window switches to Browse mode, and the app and window come to the
 //! front. Before sign-in (the login screen still up) URLs wait in
-//! [`BrowseState::pending_external_urls`](crate::browser::BrowseState) and open once
+//! [`BrowserView::pending_external_urls`](crate::browser::BrowserView) and open once
 //! the shell is up. Several URLs open several tabs, in order, the last
 //! one active. Baaz's own scheme and anything non-web are ignored with
 //! a log line. Nothing here ever changes the system default browser.
@@ -123,13 +125,18 @@ std::thread_local! {
 /// drain on the foreground executor. Called once the shell window opens.
 pub(crate) fn note_shell_app(app: AsyncApp) {
     DRAIN_APP.with(|slot| *slot.borrow_mut() = Some(app));
+    // URLs that arrived before the window existed wait in the queue: drain
+    // them now that there is a shell to open them in.
+    if external_queue_len() > 0 {
+        kick_external_drain();
+    }
 }
 
 /// Schedule a drain on the foreground executor, straight from the
 /// `on_open_urls` callback: a hidden or minimised window paints no
-/// frames, so the frame hook alone would leave the tab unopened until
-/// the window comes back. A no-op until the first shell window opens
-/// (the frame hook covers URLs that arrive before that).
+/// frames, so a drain that waited for one would leave the tab unopened
+/// until the window comes back. A no-op until the first shell window
+/// opens ([`note_shell_app`] drains what arrived before that).
 pub(crate) fn kick_external_drain() {
     let app = DRAIN_APP.with(|slot| slot.borrow().clone());
     let Some(app) = app else { return };
@@ -167,7 +174,7 @@ impl Harness {
     /// One batch of outside URLs into the shell: web URLs become person
     /// tabs in arrival order (the last ends active); the own scheme and
     /// anything non-web are ignored with a log line. Before sign-in the
-    /// web URLs wait in [`BrowseState::pending_external_urls`](crate::browser::BrowseState::pending_external_urls) and open once
+    /// web URLs wait in [`BrowserView::pending_external_urls`](crate::browser::BrowserView::pending_external_urls) and open once
     /// the shell is up ([`Self::flush_pending_external_urls`]).
     pub(crate) fn ingest_external_urls(
         &mut self,
@@ -194,7 +201,7 @@ impl Harness {
         // Parked only while the shell is not on screen; a signed-out Muse
         // no longer holds every link from other apps (docs/50 P1).
         if !self.shell_up(cx) {
-            self.browser.pending_external_urls.extend(web);
+            self.browser.update(cx, |browser, _| browser.pending_external_urls.extend(web));
             cx.notify();
             return;
         }
@@ -224,22 +231,21 @@ impl Harness {
     /// until the shell is up — while the login stands open the queue
     /// stays parked.
     pub(crate) fn flush_pending_external_urls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let queued = take_flushable_queue(self.shell_up(cx), &mut self.browser.pending_external_urls);
+        let shell_up = self.shell_up(cx);
+        let queued = self.browser.update(cx, |browser, _| take_flushable_queue(shell_up, &mut browser.pending_external_urls));
         if !queued.is_empty() {
             self.open_external_tabs(&queued, window, cx);
         }
     }
 
     /// Drain the process-wide open-URL queue into the shell, then open
-    /// whatever waited for sign-in: the frame's rejoin for the
-    /// `on_open_urls` callback, which fires with no window of its own.
-    /// Off the frame through a task, never inside render. The pending
-    /// queue flushes on any signed-in frame even when the process queue
-    /// is empty — otherwise URLs parked at the login screen would wait
-    /// for another click that never comes.
-    pub(crate) fn poll_external_urls(&mut self, cx: &mut Context<Self>) {
+    /// whatever waited behind the connect screen, on the next turn with the
+    /// window at hand: the connect screen's Finish calls this, so URLs
+    /// parked during a first run open as the shell comes up. Never per
+    /// frame (task 4.5b).
+    pub(crate) fn drain_external_soon(&mut self, cx: &mut Context<Self>) {
         let signed_in = self.shell_up(cx);
-        if external_queue_len() == 0 && (!signed_in || self.browser.pending_external_urls.is_empty()) {
+        if external_queue_len() == 0 && (!signed_in || self.browser.read(cx).pending_external_urls.is_empty()) {
             return;
         }
         let urls = drain_external_queue();
@@ -251,10 +257,11 @@ impl Harness {
     }
 
     /// One synchronous drain with the window at hand: ingest the process
-    /// queue's batch, then open whatever waited for sign-in. The frame
-    /// hook reaches it through a task ([`Self::poll_external_urls`]);
-    /// the foreground kick from the `on_open_urls` callback calls it
-    /// directly, so a hidden window still opens the tab promptly.
+    /// queue's batch, then open whatever waited for sign-in. The connect
+    /// screen's Finish reaches it through a task
+    /// ([`Self::drain_external_soon`]); the foreground kick from the
+    /// `on_open_urls` callback calls it directly, so a hidden window still
+    /// opens the tab promptly.
     pub(crate) fn drain_external_now(
         &mut self,
         urls: Vec<String>,
@@ -434,8 +441,8 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "an outside link switches to Browse");
-            let space = h.browser.browse_space();
-            let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
+            let space = h.browser.read(cx).browse_space();
+            let tabs = h.browser.read(cx).tabs.ordered_tabs(&Owner::Person, space.as_deref());
             // Entering Browse arms its own blank tab first; the outside
             // URLs open behind it, one tab per URL in arrival order.
             let got: Vec<&str> =
@@ -445,22 +452,22 @@ mod tests {
                 vec!["https://first.example/", "https://second.example/", "https://last.example/"],
                 "one tab per URL, in arrival order"
             );
-            let active = h.browser.tabs.active_of(&Owner::Person, space.as_deref());
+            let active = h.browser.read(cx).tabs.active_of(&Owner::Person, space.as_deref());
             let last = tabs.last().map(|tab| tab.id);
             assert_eq!(active, last, "the last URL ends active");
-            assert!(h.browser.pending_external_urls.is_empty(), "nothing queues once signed in");
+            assert!(h.browser.read(cx).pending_external_urls.is_empty(), "nothing queues once signed in");
         });
         restore_state(state);
     }
 
     /// B2a-H7b over a live shell: URLs arriving while the first-run
-    /// connect screen owns the window wait, then the frame hook opens them
-    /// in order once the shell is up — through
-    /// [`Harness::poll_external_urls`], never a direct flush call, so the
-    /// test pins the path a real first run takes. (It was the capture-only
-    /// login screen until docs/82 0.16 deleted it.)
+    /// connect screen owns the window wait, then open in order once the
+    /// shell is up — through the connect screen's own Finish
+    /// ([`Harness::finish_connect`]), never a direct flush call and never a
+    /// frame (task 4.5b), so the test pins the path a real first run takes.
+    /// (It was the capture-only login screen until docs/82 0.16 deleted it.)
     #[gpui::test]
-    fn urls_before_sign_in_flush_through_poll(cx: &mut gpui::TestAppContext) {
+    fn urls_before_the_shell_open_when_the_connect_screen_finishes(cx: &mut gpui::TestAppContext) {
         use crate::browser::Owner;
         let state = hermetic_state("external-queued");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -481,37 +488,34 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(
-                h.browser.pending_external_urls,
+                h.browser.read(cx).pending_external_urls,
                 vec!["https://queued-one.example/".to_owned(), "https://queued-two.example/".to_owned()],
                 "pre-shell URLs wait"
             );
-            let space = h.browser.browse_space();
+            let space = h.browser.read(cx).browse_space();
             assert!(
-                h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref()).is_empty(),
+                h.browser.read(cx).tabs.ordered_tabs(&Owner::Person, space.as_deref()).is_empty(),
                 "nothing opens before the shell is up"
             );
         });
-        // Continue past the connect screen, then frames: no direct flush.
+        // Continue past the connect screen: no direct flush, no frame.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.connect_screen.update(cx, |screen, _| screen.dismiss());
+                h.finish_connect(cx);
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
             })
         });
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| h.poll_external_urls(cx));
-        });
         vc.run_until_parked();
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.browser.pending_external_urls.is_empty(), "the frame hook drains the queue");
-            let space = h.browser.browse_space();
-            let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
+            assert!(h.browser.read(cx).pending_external_urls.is_empty(), "the connect screen's Finish drains the queue");
+            let space = h.browser.read(cx).browse_space();
+            let tabs = h.browser.read(cx).tabs.ordered_tabs(&Owner::Person, space.as_deref());
             let got: Vec<&str> =
                 tabs.iter().map(|tab| tab.url.as_str()).filter(|url| *url != "about:blank").collect();
             assert_eq!(got, vec!["https://queued-one.example/", "https://queued-two.example/"]);
-            let active = h.browser.tabs.active_of(&Owner::Person, space.as_deref());
+            let active = h.browser.read(cx).tabs.active_of(&Owner::Person, space.as_deref());
             assert_eq!(active, tabs.last().map(|tab| tab.id), "the last queued URL ends active");
         });
         restore_state(state);

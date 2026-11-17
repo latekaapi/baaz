@@ -66,7 +66,7 @@ pub(crate) fn key_window_desc() -> String {
 /// What an overlay window shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
-    /// Browse's open right-click menu (`BrowseState::browse_menu`).
+    /// Browse's open right-click menu (`BrowserView::browse_menu`).
     BrowseMenu,
     /// The Field (⌘L, a click on the address line): the address input and
     /// its rows, anchored on the sidebar's address line, over the live page.
@@ -300,7 +300,7 @@ impl Render for OverlayView {
         // the panel on every render, as the modal's query field is.
         // The bookmark popover's keyboard: its name input.
         if kind == OverlayKind::Bookmark {
-            let input = self.baaz.read_with(cx, |baaz, _| baaz.browser.bookmark_edit.as_ref().map(|e| e.name.clone())).ok().flatten();
+            let input = self.baaz.read_with(cx, |baaz, _| baaz.browser.read(cx).bookmark_edit.as_ref().map(|e| e.name.clone())).ok().flatten();
             if let Some(input) = input {
                 let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
                 if !handle.is_focused(window) {
@@ -309,7 +309,7 @@ impl Render for OverlayView {
             }
         }
         if kind == OverlayKind::Field {
-            let input = self.baaz.read_with(cx, |baaz, _| baaz.browser.browse_address.clone()).ok().flatten();
+            let input = self.baaz.read_with(cx, |baaz, _| baaz.browser.read(cx).browse_address.clone()).ok().flatten();
             if let Some(input) = input {
                 let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
                 trace(format_args!("field input focused={}", handle.is_focused(window)));
@@ -391,7 +391,7 @@ impl Harness {
             let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(width, height))));
         }
-        if self.browser.bookmark_edit.is_some() && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
+        if self.browser.read(cx).bookmark_edit.is_some() && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
             let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
@@ -399,7 +399,7 @@ impl Harness {
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(460.0)) + pad;
             return Some((OverlayKind::Bookmark, Bounds::new(origin, gpui::size(gpui::px(bookmark::BOOKMARK_W) + pad * 2.0, height))));
         }
-        if self.browser.site_info_open && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
+        if self.browser.read(cx).site_info_open && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             // Under the address line, inside a clear rect like the Field's.
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
@@ -408,9 +408,9 @@ impl Harness {
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(scale::SP_7 * 15.0)) + pad;
             return Some((OverlayKind::SiteInfo, Bounds::new(origin, gpui::size(gpui::px(SITE_INFO_WIDTH) + pad * 2.0, height))));
         }
-        if self.browser.downloads_overlay_wanted(cx) {
+        if self.browser.read(cx).downloads_overlay_wanted(cx) {
             // Under the button, inside a clear rect like the Field's.
-            let anchor = self.browser.downloads_anchor?;
+            let anchor = self.browser.read(cx).downloads_anchor?;
             let pad = gpui::px(SHADOW_PAD);
             // R4: the buttons sit in the footer, so the popover opens above
             // (its content sits at the window's bottom edge); a button high
@@ -428,9 +428,9 @@ impl Harness {
             let size = gpui::size(width + pad * 2.0, room + pad * 2.0);
             return Some((OverlayKind::Downloads, Bounds::new(origin, size)));
         }
-        let menu = self.browser.browse_menu.as_ref()?;
-        let space = self.browser.browse_space().unwrap_or_default();
-        let folders = self.browser.tabs.folders_in(&space).len();
+        let menu = self.browser.read(cx).browse_menu.as_ref()?;
+        let space = self.browser.read(cx).browse_space().unwrap_or_default();
+        let folders = self.browser.read(cx).tabs.folders_in(&space).len();
         let size = browse_menu_size(menu, folders, cx);
         // The menu sits at the pointer; its window reaches the shadow
         // margin past it on every side ([`OverlayView`] pads the content).
@@ -454,29 +454,33 @@ impl Harness {
     pub(crate) fn sync_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.main_window.get_or_insert_with(|| window.window_handle());
         let wanted = self.wanted_overlay(window, cx);
-        let current = self.browser.overlay.as_ref().map(|o| (o.kind, o.bounds)).or(self.browser.overlay_pending);
+        let current = self.browser.read(cx).overlay.as_ref().map(|o| (o.kind, o.bounds)).or(self.browser.read(cx).overlay_pending);
         if wanted == current {
             // The content reads Harness state: repaint the panel only when what
             // it shows changed (a blind refresh per main frame looped — the
             // panel's render dirtied the main window again). Its own hover and
             // typing repaint it through the entities it reads.
             let print = self.overlay_print(cx);
-            if let Some(overlay) = self.browser.overlay.as_mut().filter(|o| o.print != print) {
-                overlay.print = print;
-                let handle = overlay.handle;
+            let stale = self.browser.update(cx, |browser, _| {
+                browser.overlay.as_mut().filter(|o| o.print != print).map(|overlay| {
+                    overlay.print = print;
+                    overlay.handle
+                })
+            });
+            if let Some(handle) = stale {
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
                 });
             }
             return;
         }
-        if let Some(old) = self.browser.overlay.take() {
+        if let Some(old) = self.browser.update(cx, |browser, _| browser.overlay.take()) {
             let handle = old.handle;
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
         }
-        self.browser.overlay_pending = wanted;
+        self.browser.update(cx, |browser, _| browser.overlay_pending = wanted);
         trace(format_args!("want {wanted:?} (had {current:?})"));
         let Some((kind, bounds)) = wanted else {
             return;
@@ -486,7 +490,7 @@ impl Harness {
         // Opened from a task, at app level: never inside this update (the
         // overlay's first draw reads Harness) and never inside render.
         let baaz = cx.entity().downgrade();
-        let address = if kind == OverlayKind::Field { self.browser.browse_address.clone() } else { None };
+        let address = if kind == OverlayKind::Field { self.browser.read(cx).browse_address.clone() } else { None };
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 let options = WindowOptions {
@@ -535,10 +539,10 @@ impl Harness {
             let _ = this.update(cx, |this, cx| {
                 // Still wanted? Keep it; otherwise it goes straight away.
                 match opened {
-                    Ok(handle) if this.browser.overlay_pending == Some((kind, bounds)) => {
-                        this.browser.overlay_pending = None;
+                    Ok(handle) if this.browser.read(cx).overlay_pending == Some((kind, bounds)) => {
+                        this.browser.update(cx, |browser, _| browser.overlay_pending = None);
                         let print = this.overlay_print(cx);
-                        this.browser.overlay = Some(Overlay { handle: handle.into(), kind, bounds, print });
+                        this.browser.update(cx, |browser, _| browser.overlay = Some(Overlay { handle: handle.into(), kind, bounds, print }));
                     }
                     Ok(handle) => {
                         let handle: AnyWindowHandle = handle.into();
@@ -546,7 +550,7 @@ impl Harness {
                             let _ = handle.update(cx, |_, window, _| window.remove_window());
                         });
                     }
-                    Err(_) => this.browser.overlay_pending = None,
+                    Err(_) => this.browser.update(cx, |browser, _| browser.overlay_pending = None),
                 }
                 cx.notify();
             });
@@ -569,7 +573,7 @@ impl Harness {
         if pills == 0 {
             return None;
         }
-        let sheet = self.browser.centre_page_rect?;
+        let sheet = self.browser.read(cx).centre_page_rect?;
         let pad = gpui::px(SHADOW_PAD);
         let pill = aui::feedback::PILL_H;
         let height = gpui::px(pill * pills as f32 + 8.0 * (pills as f32 - 1.0)) + pad * 2.0;
@@ -590,25 +594,29 @@ impl Harness {
             // of it would silence the capture layer at a stale spot.
             self.feedback.slot_bounds = None;
         }
-        let current = self.browser.corner.as_ref().map(|o| o.bounds).or(self.browser.corner_pending);
+        let current = self.browser.read(cx).corner.as_ref().map(|o| o.bounds).or(self.browser.read(cx).corner_pending);
         if wanted == current {
             let print = self.corner_print(cx);
-            if let Some(corner) = self.browser.corner.as_mut().filter(|o| o.print != print) {
-                corner.print = print;
-                let handle = corner.handle;
+            let stale = self.browser.update(cx, |browser, _| {
+                browser.corner.as_mut().filter(|o| o.print != print).map(|corner| {
+                    corner.print = print;
+                    corner.handle
+                })
+            });
+            if let Some(handle) = stale {
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
                 });
             }
             return;
         }
-        if let Some(old) = self.browser.corner.take() {
+        if let Some(old) = self.browser.update(cx, |browser, _| browser.corner.take()) {
             let handle = old.handle;
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
         }
-        self.browser.corner_pending = wanted;
+        self.browser.update(cx, |browser, _| browser.corner_pending = wanted);
         trace(format_args!("corner want {wanted:?} (had {current:?})"));
         let Some(bounds) = wanted else {
             return;
@@ -636,10 +644,10 @@ impl Harness {
             trace(format_args!("opened Corner: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
                 match opened {
-                    Ok(handle) if this.browser.corner_pending == Some(bounds) => {
-                        this.browser.corner_pending = None;
+                    Ok(handle) if this.browser.read(cx).corner_pending == Some(bounds) => {
+                        this.browser.update(cx, |browser, _| browser.corner_pending = None);
                         let print = this.corner_print(cx);
-                        this.browser.corner = Some(Overlay { handle: handle.into(), kind: OverlayKind::Corner, bounds, print });
+                        this.browser.update(cx, |browser, _| browser.corner = Some(Overlay { handle: handle.into(), kind: OverlayKind::Corner, bounds, print }));
                     }
                     Ok(handle) => {
                         let handle: AnyWindowHandle = handle.into();
@@ -647,7 +655,7 @@ impl Harness {
                             let _ = handle.update(cx, |_, window, _| window.remove_window());
                         });
                     }
-                    Err(_) => this.browser.corner_pending = None,
+                    Err(_) => this.browser.update(cx, |browser, _| browser.corner_pending = None),
                 }
                 cx.notify();
             });
@@ -665,7 +673,7 @@ impl Harness {
             return None;
         }
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            return self.wanted_agent_line(self.browser.centre_page_rect?, window, cx);
+            return self.wanted_agent_line(self.browser.read(cx).centre_page_rect?, window, cx);
         }
         let pane = self.right_pane.read(cx);
         if !crate::layout::Layout::get(cx).right_open || pane.strip_moving {
@@ -708,8 +716,8 @@ impl Harness {
     /// whichever session is waiting on the person.
     pub(crate) fn line_session(&self, cx: &App) -> Option<String> {
         let shown = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            self.browser.browse_centre_shown(cx)
-                .and_then(|id| self.browser.tabs.get(id))
+            self.browser.read(cx).browse_centre_shown(cx)
+                .and_then(|id| self.browser.read(cx).tabs.get(id))
                 .and_then(|tab| match &tab.owner {
                     crate::browser::tabs::Owner::Session(session) => Some(session.clone()),
                     crate::browser::tabs::Owner::Person => None,
@@ -779,14 +787,14 @@ impl Harness {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         session.hash(&mut h);
         format!("{state:?}").hash(&mut h);
-        self.agent_window.line_wants_keys.hash(&mut h);
+        self.browser.read(cx).agent_window.line_wants_keys.hash(&mut h);
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
     }
 
     /// The top of the line's float in screen space, without its shadow pad,
     /// while it shows (or is opening).
-    pub(crate) fn page_float_top(&self) -> Option<Pixels> {
-        let bounds = self.browser.page_float.as_ref().map(|o| o.bounds).or(self.browser.page_float_pending)?;
+    pub(crate) fn page_float_top(&self, cx: &gpui::App) -> Option<Pixels> {
+        let bounds = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds).or(self.browser.read(cx).page_float_pending)?;
         Some(bounds.top() + gpui::px(SHADOW_PAD))
     }
 
@@ -842,8 +850,8 @@ impl Harness {
         self.settle_agent_line(cx);
         // The line's input lives here, so the float that opens for the ask
         // row can take the keyboard on its first frame.
-        if self.agent_window.agent_line_input.is_none() {
-            self.agent_window.agent_line_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx)));
+        if self.browser.read(cx).agent_window.agent_line_input.is_none() {
+            self.browser.update(cx, |browser, cx| browser.agent_window.agent_line_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))));
         }
         self.sync_line_float(window, cx);
         // The card seats itself above the line's window, so it follows it.
@@ -853,12 +861,16 @@ impl Harness {
     /// The line's (and the right pane's page) float window.
     fn sync_line_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.wanted_page_float(window, cx);
-        let current = self.browser.page_float.as_ref().map(|o| o.bounds).or(self.browser.page_float_pending);
+        let current = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds).or(self.browser.read(cx).page_float_pending);
         if wanted.map(|w| w.0) == current {
-            if let (Some((_, print)), Some(float)) = (wanted, self.browser.page_float.as_mut()) {
-                if float.print != print {
-                    float.print = print;
-                    let handle = float.handle;
+            if let Some((_, print)) = wanted {
+                let stale = self.browser.update(cx, |browser, _| {
+                    browser.page_float.as_mut().filter(|float| float.print != print).map(|float| {
+                        float.print = print;
+                        float.handle
+                    })
+                });
+                if let Some(handle) = stale {
                     cx.defer(move |cx| {
                         let _ = handle.update(cx, |_, window, _| window.refresh());
                     });
@@ -866,13 +878,13 @@ impl Harness {
             }
             return;
         }
-        if let Some(old) = self.browser.page_float.take() {
+        if let Some(old) = self.browser.update(cx, |browser, _| browser.page_float.take()) {
             let handle = old.handle;
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
         }
-        self.browser.page_float_pending = wanted.map(|w| w.0);
+        self.browser.update(cx, |browser, _| browser.page_float_pending = wanted.map(|w| w.0));
         let Some((bounds, print)) = wanted else {
             return;
         };
@@ -881,8 +893,8 @@ impl Harness {
         let baaz = cx.entity().downgrade();
         // The ask row types: its float takes the keyboard (R3). Every other
         // state leaves it with the page.
-        let keys = self.agent_window.line_wants_keys && crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
-        let input = keys.then(|| self.agent_window.agent_line_input.clone()).flatten();
+        let keys = self.browser.read(cx).agent_window.line_wants_keys && crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
+        let input = keys.then(|| self.browser.read(cx).agent_window.agent_line_input.clone()).flatten();
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 let options = WindowOptions {
@@ -909,9 +921,9 @@ impl Harness {
             });
             let _ = this.update(cx, |this, cx| {
                 match opened {
-                    Ok(handle) if this.browser.page_float_pending == Some(bounds) => {
-                        this.browser.page_float_pending = None;
-                        this.browser.page_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::PageFloat, bounds, print });
+                    Ok(handle) if this.browser.read(cx).page_float_pending == Some(bounds) => {
+                        this.browser.update(cx, |browser, _| browser.page_float_pending = None);
+                        this.browser.update(cx, |browser, _| browser.page_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::PageFloat, bounds, print }));
                     }
                     Ok(handle) => {
                         let handle: AnyWindowHandle = handle.into();
@@ -919,7 +931,7 @@ impl Harness {
                             let _ = handle.update(cx, |_, window, _| window.remove_window());
                         });
                     }
-                    Err(_) => this.browser.page_float_pending = None,
+                    Err(_) => this.browser.update(cx, |browser, _| browser.page_float_pending = None),
                 }
                 cx.notify();
             });
@@ -1000,7 +1012,7 @@ impl Harness {
     /// service, which owns the waiting tool.
     fn render_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (state, session) = self.line_view(cx)?;
-        let input = self.agent_window.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone();
+        let input = self.browser.update(cx, |browser, cx| browser.agent_window.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone());
         let baaz = cx.weak_entity();
         let inner = f32::from(window.bounds().size.width) - SHADOW_PAD * 2.0;
         let line = aui::browse::agent_window::agent_line("page-float-line", &state, &input).compact(Self::line_compact(inner)).on_intent(move |intent, _, cx| {
@@ -1022,7 +1034,7 @@ impl Harness {
                     (Some(session), LineIntent::Allow | LineIntent::Done) => this.terminal_service.answer_person(&session, true),
                     (Some(session), LineIntent::Deny) => this.terminal_service.answer_person(&session, false),
                     (Some(_), LineIntent::Expand) => {
-                        this.agent_window.card_ui = crate::app::agent_window::CardUi::Card;
+                        this.browser.update(cx, |browser, _| browser.agent_window.card_ui = crate::app::agent_window::CardUi::Card);
                     }
                     (Some(_), _) => {}
                     // The line's own states run on the main window.
@@ -1058,16 +1070,16 @@ impl Harness {
     fn overlay_print(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", self.browser.browse_menu).hash(&mut hasher);
-        self.browser.tabs.generation.hash(&mut hasher);
-        self.browser.site_info_open.hash(&mut hasher);
-        if let Some(edit) = self.browser.bookmark_edit.as_ref() {
+        format!("{:?}", self.browser.read(cx).browse_menu).hash(&mut hasher);
+        self.browser.read(cx).tabs.generation.hash(&mut hasher);
+        self.browser.read(cx).site_info_open.hash(&mut hasher);
+        if let Some(edit) = self.browser.read(cx).bookmark_edit.as_ref() {
             (edit.id, edit.folder, edit.folders_open).hash(&mut hasher);
         }
-        self.browser.browse_centre_shown(cx).hash(&mut hasher);
-        if self.browser.browse_address.is_some() {
-            self.browser.browse_address_text(cx).hash(&mut hasher);
-            self.browser.browse_omnibox_selected.hash(&mut hasher);
+        self.browser.read(cx).browse_centre_shown(cx).hash(&mut hasher);
+        if self.browser.read(cx).browse_address.is_some() {
+            self.browser.read(cx).browse_address_text(cx).hash(&mut hasher);
+            self.browser.read(cx).browse_omnibox_selected.hash(&mut hasher);
         }
         // The hosted modal: which palette and row, what is typed, how many
         // rows the query found (results land later than the keystroke), and
@@ -1121,7 +1133,7 @@ impl Harness {
         crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
             && crate::layout::Layout::get(cx).sidebar_open
             && !self.settings_open(cx)
-            && self.browser.browse_address.is_some()
+            && self.browser.read(cx).browse_address.is_some()
             && !(self.browse_centre_state(cx).is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
                 && self.browse_centre_tab_blank(cx))
     }
@@ -1145,13 +1157,13 @@ impl Harness {
             OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.hosting_overlay = true;
-                let list = if self.browser.extensions_open {
+                let list = if self.browser.read(cx).extensions_open {
                     self.render_browse_extensions(window, cx)
                 } else {
                     self.render_browse_downloads(window, cx)
                 };
                 self.hosting_overlay = false;
-                let above = self.browser.downloads_anchor.is_some_and(|a| a.top() > window.bounds().size.height / 2.0);
+                let above = self.browser.read(cx).downloads_anchor.is_some_and(|a| a.top() > window.bounds().size.height / 2.0);
                 let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
                     this.dismiss_browse_popovers(cx);
                 });
@@ -1218,7 +1230,7 @@ impl Harness {
         use aui::browse::field::{field, FieldIntent, FieldModel, FieldRow, FieldRowKind};
         let p = cx.aui().colors;
         let omni = self.browse_suggestions(cx);
-        let selected = self.browser.browse_omnibox_selected.min(omni.len().saturating_sub(1));
+        let selected = self.browser.read(cx).browse_omnibox_selected.min(omni.len().saturating_sub(1));
         let rows: Vec<FieldRow> = omni
             .iter()
             .enumerate()
@@ -1242,7 +1254,7 @@ impl Harness {
         // Search) lead, as the prototype draws them; activation still maps
         // each row back to Baaz's own index.
         let order = field_display_order(&rows);
-        let query = self.browser.browse_address_text(cx);
+        let query = self.browser.read(cx).browse_address_text(cx);
         let mut model = FieldModel::new(query, order.iter().map(|&i| rows[i].clone()).collect());
         model.selected = order.iter().position(|&i| i == selected).unwrap_or(0);
         let walk = order.clone();
@@ -1250,13 +1262,13 @@ impl Harness {
             "up" | "down" => {
                 // Walk the rows as drawn, not in Baaz's ranking order.
                 let step: isize = if event.keystroke.key == "up" { -1 } else { 1 };
-                let at = walk.iter().position(|&i| i == this.browser.browse_omnibox_selected).unwrap_or(0) as isize;
+                let at = walk.iter().position(|&i| i == this.browser.read(cx).browse_omnibox_selected).unwrap_or(0) as isize;
                 let next = (at + step).clamp(0, walk.len().saturating_sub(1) as isize) as usize;
                 if let Some(&index) = walk.get(next) {
-                    this.browser.browse_omnibox_selected = index;
+                    this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
                     // Enter opens the highlighted row once the arrows moved
                     // it (`commit_browse_address`), not the typed text.
-                    this.browser.browse_omnibox_moved = true;
+                    this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
                     cx.notify();
                 }
             }
@@ -1264,16 +1276,16 @@ impl Harness {
             "escape" => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             _ => {}
         });
-        let input = self.browser.browse_address.clone().map(|input| {
+        let input = self.browser.read(cx).browse_address.clone().map(|input| {
             aui::a11y_text::a11y_text_input("field-input", "Search or type a URL", &input, cx).flex_1().min_w(gpui::px(0.0)).text_color(p.ink).into_any_element()
         });
         let baaz = cx.entity().downgrade();
         let hover = baaz.clone();
         let index_of = move |row: &FieldRow| rows.iter().position(|r| r == row);
-        let scoped = self.browser.field_scope.is_some();
-        if scoped != self.browser.placeholder_scoped {
-            self.browser.placeholder_scoped = scoped;
-            if let Some(input) = self.browser.browse_address.clone() {
+        let scoped = self.browser.read(cx).field_scope.is_some();
+        if scoped != self.browser.read(cx).placeholder_scoped {
+            self.browser.update(cx, |browser, _| browser.placeholder_scoped = scoped);
+            if let Some(input) = self.browser.read(cx).browse_address.clone() {
                 let text = if scoped { "Search bookmarks" } else { crate::browser::FIELD_PLACEHOLDER };
                 input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
             }
@@ -1284,8 +1296,8 @@ impl Harness {
             .on_hover(move |shown, _, cx| {
                 let Some(&index) = order.get(shown) else { return };
                 let _ = hover.update(cx, |this, cx| {
-                    if this.browser.browse_omnibox_selected != index {
-                        this.browser.browse_omnibox_selected = index;
+                    if this.browser.read(cx).browse_omnibox_selected != index {
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
                         cx.notify();
                     }
                 });
@@ -1300,8 +1312,8 @@ impl Harness {
                     FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
                     FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
                     FieldIntent::Unscope => {
-                        this.browser.field_scope = None;
-                        this.browser.browse_omnibox_selected = 0;
+                        this.browser.update(cx, |browser, _| browser.field_scope = None);
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
                         cx.notify();
                     }
                     FieldIntent::SearchExact(_) => {}
@@ -1322,8 +1334,8 @@ impl Harness {
                     // (The input binds ⌫ as an action, which runs before any
                     // key listener, so this captures the action itself.)
                     .capture_action(cx.listener(|this: &mut Self, _: &gpui_kit::base::input::Backspace, _, cx| {
-                        if this.browser.field_scope.is_some()
-                            && this.browser.browse_address_text(cx).is_empty()
+                        if this.browser.read(cx).field_scope.is_some()
+                            && this.browser.read(cx).browse_address_text(cx).is_empty()
                             && this.field_scope_up(cx)
                         {
                             cx.stop_propagation();
@@ -1454,7 +1466,7 @@ impl Harness {
             }
         }
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            this.browser.site_info_open = false;
+            this.browser.update(cx, |browser, _| browser.site_info_open = false);
             cx.notify();
         });
         div()
@@ -1513,7 +1525,7 @@ impl Harness {
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {
-                self.browser.site_info_open = false;
+                self.browser.update(cx, |browser, _| browser.site_info_open = false);
                 cx.notify();
             }
             OverlayKind::Bookmark => self.close_bookmark_popover(cx),

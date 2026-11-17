@@ -662,7 +662,7 @@ pub(crate) fn relative_ago(ms: u64) -> String {
 /// One tab's Baaz-tracked back/forward stacks (B2a-H4): the library owns the
 /// real history and exposes no back/forward/​reload calls (its engine
 /// stepping is private to the pane), so the header toolbar tracks the URLs
-/// the sync reports and navigates within them. An outside navigation (a
+/// the page reconcile reports and navigates within them. An outside navigation (a
 /// link, the pane's own controls before Browse hid them) lands through
 /// [`Self::note_navigated`], which clears the forward stack exactly like a
 /// fresh navigation does.
@@ -672,10 +672,10 @@ pub(crate) struct BackForward {
     future: Vec<String>,
     current: Option<String>,
     /// The URL the page still shows after [`Self::go_back`] stepped the
-    /// stacks ahead of it: the per-frame sync reports the old URL until
+    /// stacks ahead of it: the page reconcile reports the old URL until
     /// the navigation lands, and that stale echo must not undo the step.
     /// Consumed once — a genuine later navigation to the same URL heals
-    /// on the next frame, since the sync re-reports it.
+    /// on the next reconcile, since it re-reports it.
     stale: Option<String>,
 }
 
@@ -684,7 +684,7 @@ const HISTORY_CAP: usize = 50;
 impl BackForward {
     /// Record the tab showing `url`: a new URL pushes the old current back
     /// and clears the forward stack; the same URL (or an empty one) is a
-    /// no-op, so one sync per frame never grows the stacks. The one stale
+    /// no-op, so a reconcile per page change never grows the stacks. The one stale
     /// echo after a [`Self::go_back`]/[`Self::go_forward`] step is ignored,
     /// so the step is never undone by the page reporting late.
     pub(crate) fn note_navigated(&mut self, url: &str) {

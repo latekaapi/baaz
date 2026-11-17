@@ -11,25 +11,25 @@ impl Harness {
     /// The sidebar's downloads button (D4): opens the downloads popover
     /// under it, or closes it.
     pub(crate) fn toggle_browse_downloads(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
-        let open = !self.browser.downloads_open;
+        let open = !self.browser.read(cx).downloads_open;
         self.dismiss_browse_popovers(cx);
-        self.browser.downloads_open = open;
-        self.browser.downloads_anchor = anchor;
+        self.browser.update(cx, |browser, _| browser.downloads_open = open);
+        self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
         cx.notify();
     }
 
     /// The footer's extensions button (R4): its popover above it.
     pub(crate) fn toggle_browse_extensions(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
-        let open = !self.browser.extensions_open;
+        let open = !self.browser.read(cx).extensions_open;
         self.dismiss_browse_popovers(cx);
-        self.browser.extensions_open = open;
-        self.browser.downloads_anchor = anchor;
+        self.browser.update(cx, |browser, _| browser.extensions_open = open);
+        self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
         cx.notify();
     }
 
     /// Cancel the download `id` on its owning tab's page.
     pub(crate) fn cancel_browse_download(&mut self, tab: TabId, id: u32, cx: &mut Context<Self>) {
-        if let Some(state) = self.browser.states.get(&tab).cloned() {
+        if let Some(state) = self.browser.read(cx).states.get(&tab).cloned() {
             state.update(cx, |state, _| state.cancel_download(id));
         }
         cx.notify();
@@ -38,7 +38,7 @@ impl Harness {
     /// Retry a failed download (its "Try again"): re-navigate the owning
     /// tab to the download's URL, exactly as re-clicking the link would.
     pub(crate) fn retry_browse_download(&mut self, tab: TabId, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.tabs.get(tab).is_none() {
+        if self.browser.read(cx).tabs.get(tab).is_none() {
             return;
         }
         let state = self.ensure_tab_page(HOME_KEY, tab, window, cx);
@@ -58,7 +58,7 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
 
     /// Open the downloads folder ("All downloads", `~/Downloads`, resolved
     /// from `$HOME` with no `dirs` dependency). With no `$HOME` there is

@@ -136,8 +136,8 @@ fn browse_centre_has_its_own_visibility_and_bounds() {
         "the centre page has its own rect"
     );
     assert!(
-        browser.contains("let centre_shown = self.browser.browse_centre_shown(cx);"),
-        "sync resolves the centre tab every frame"
+        browser.contains("let centre_shown = self.browse_centre_shown(cx);"),
+        "the occlusion resolves the centre tab every frame"
     );
     assert!(
         browser.contains("self.apply_page_visibility(shown, frame_live, centre_shown, centre_live, cx);"),

@@ -135,13 +135,13 @@ fn toolbar_roles_and_labels() {
 }
 
 /// The covering rule includes the omnibox: the visibility struct carries
-/// the input, the per-frame sync feeds it from the open dropdown, and the
+/// the input, the root's cover report feeds it from the open dropdown, and the
 /// unit tests pin both halves obscured.
 #[test]
 fn omnibox_covering_is_pinned_in_source() {
     let browser = browser_source();
     assert!(browser.contains("omnibox_open: bool"), "visibility carries the omnibox input");
-    assert!(browser.contains("omnibox_open: self.browse_omnibox_open(cx)"), "the sync feeds the input");
+    assert!(browser.contains("omnibox_open: self.browse_omnibox_open(cx)"), "the cover report feeds the input");
     assert!(
         browser.contains("fn open_omnibox_obscures_pane_and_centre()"),
         "a unit test pins the omnibox covering both halves"
@@ -258,9 +258,9 @@ fn ask_draft_lands_on_arrival_never_sent() {
     assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
     let open = source("app/sessions/open.rs");
     let new = fn_body(&open, "new_session_in");
-    assert!(new.contains("self.browser.drop_pending_ask()"), "an early return drops the draft");
+    assert!(new.contains("browser.drop_pending_ask()"), "an early return drops the draft");
     assert!(
-        open.contains("self.browser.key_pending_ask("),
+        open.contains("browser.key_pending_ask("),
         "every open path keys the draft to its session"
     );
     let activate = fn_body(&open, "activate");

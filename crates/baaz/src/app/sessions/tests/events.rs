@@ -779,17 +779,17 @@ fn a_renamed_browser_chat_keeps_its_line(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.agent_window.line_ui = LineUi::Answer { question: "q".into(), session: "req-1".into() };
-            harness.agent_window.browser_chat_pages.insert("req-1".into(), vec![("Page".into(), "https://a.test".into())]);
+            harness.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Answer { question: "q".into(), session: "req-1".into() });
+            harness.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert("req-1".into(), vec![("Page".into(), "https://a.test".into())]));
             harness.reveal_unknown = Some(("req-1".into(), 3));
             harness.rekey_session("req-1", "thread-9", cx);
-            assert_eq!(harness.agent_window.line_ui, LineUi::Answer { question: "q".into(), session: "thread-9".into() });
-            assert!(harness.agent_window.browser_chat_pages.contains_key("thread-9"));
-            assert!(!harness.agent_window.browser_chat_pages.contains_key("req-1"));
+            assert_eq!(harness.browser.read(cx).agent_window.line_ui, LineUi::Answer { question: "q".into(), session: "thread-9".into() });
+            assert!(harness.browser.read(cx).agent_window.browser_chat_pages.contains_key("thread-9"));
+            assert!(!harness.browser.read(cx).agent_window.browser_chat_pages.contains_key("req-1"));
             assert_eq!(harness.reveal_unknown, Some(("thread-9".into(), 3)));
-            harness.agent_window.line_ui = LineUi::Drafting { session: "thread-9".into(), tab: 4 };
+            harness.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafting { session: "thread-9".into(), tab: 4 });
             harness.rekey_session("thread-9", "thread-10", cx);
-            assert_eq!(harness.agent_window.line_ui, LineUi::Drafting { session: "thread-10".into(), tab: 4 });
+            assert_eq!(harness.browser.read(cx).agent_window.line_ui, LineUi::Drafting { session: "thread-10".into(), tab: 4 });
         });
     });
     lane_restore(state);

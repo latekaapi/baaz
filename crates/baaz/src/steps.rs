@@ -390,7 +390,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         verb: "split-ratio",
         run: |this, rest, _, cx| {
             let ratio = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a number"))?;
-            this.browser.split_ratio = crate::browser::peek_split::clamp_split(ratio);
+            this.browser.update(cx, |bv, _| bv.split_ratio = crate::browser::peek_split::clamp_split(ratio));
             cx.notify();
             Ok(())
         },
@@ -468,9 +468,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         Ok(())
     } },
     WindowVerb { verb: "site-info", run: |this, _, _, cx| {
-        this.browser.site_info_open = this.browse_centre_state(cx).is_some();
+        let open = this.browse_centre_state(cx).is_some();
+        this.browser.update(cx, |browser, _| browser.site_info_open = open);
         cx.notify();
-        if this.browser.site_info_open { Ok(()) } else { Err("no page is open".into()) }
+        if this.browser.read(cx).site_info_open { Ok(()) } else { Err("no page is open".into()) }
     } },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
@@ -489,7 +490,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
     WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
-    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.agent_window.handoff_picker_open = true; cx.notify(); Ok(()) } },
+    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = true); cx.notify(); Ok(()) } },
     // Chromium's theme-change notification on every page window, as macOS
     // sends on an appearance or display change: the page ground must stay
     // white through it (owner 9 Nov: dark margins on Hacker News). Free.

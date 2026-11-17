@@ -498,7 +498,7 @@ pub fn set_menus(cx: &mut App) {
                                 .map(|harness| {
                                     harness.update(cx, |this, cx| {
                                         this.flush_stores();
-                                        this.browser.flush_tabs_save();
+                                        this.browser.update(cx, |browser, cx| browser.flush_at_quit(cx));
                                         crate::layout::Layout::save(cx);
                                     })
                                 })
@@ -800,21 +800,15 @@ pub struct Harness {
     /// Whether the window's traffic lights are hidden now (closed sidebar,
     /// no peek), so the native call runs only on a change.
     pub(crate) lights_hidden: bool,
-    /// Browse mode and the browser pane, in one owner (task 4.5): the tab
-    /// model and one live `WebviewState` per tab, the Field (omnibox) and
-    /// find inputs, the Browse sidebar's menus and drags, the overlay
-    /// windows over the native page, and `browser.db` behind its service
-    /// ([`crate::browser::BrowseState`]).
-    pub(crate) browser: crate::browser::BrowseState,
-    /// The agent window over a Browse page (task 4.5): the ⌘J line, the ⌘E
-    /// card, its float and handoff picker, and the browser chats' pages
-    /// and handoffs ([`agent_window::AgentWindowState`]).
-    pub(crate) agent_window: agent_window::AgentWindowState,
-    /// Whether the window held focus on the last frame (B2a-H7): the
-    /// false→true edge re-reads the default-browser cache, so the
-    /// Settings page shows a switch made in System Settings without a
-    /// restart. Never persists.
-    pub(crate) was_window_active: bool,
+    /// Browse mode and the browser pane, one region entity (task 4.5): the
+    /// tab model and one live `WebviewState` per tab (each observed: the
+    /// page reconcile runs on its changes), the Field (omnibox) and find
+    /// inputs, the Browse sidebar's menus and drags, the overlay windows
+    /// over the native page, the agent window, `browser.db` behind its
+    /// service and the one owner of what covers the native page
+    /// ([`crate::browser::BrowserView`]). It asks the root through
+    /// [`crate::browser::BrowserEvent`]s (`Harness::on_browser_event`).
+    pub(crate) browser: Entity<crate::browser::BrowserView>,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1263,9 +1257,7 @@ impl Harness {
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
             resize: ResizeDrag::restored(restored),
             right_pane,
-            browser: crate::browser::BrowseState::new(browser_fake, cx),
-            agent_window: agent_window::AgentWindowState::default(),
-            was_window_active: false,
+            browser: cx.new(|cx| crate::browser::BrowserView::new(browser_fake, cx)),
             peek_pinned: false,
             lights_hidden: false,
             sidebar_scroll_sweep: None,
@@ -1496,10 +1488,20 @@ impl Harness {
         this.field_subscriptions.push(cx.subscribe_in(&connect, window, Self::on_connect_event));
         let model = this.provider_model.clone();
         this.field_subscriptions.push(cx.subscribe(&model, Self::on_provider_model_event));
-        // `browser.db` answers land on its service (task 4.5): the Field's
-        // history rows, the ★ after the first load, Settings › Your data.
-        let data = this.browser.data.clone();
-        this.field_subscriptions.push(cx.observe(&data, |_, _, cx| cx.notify()));
+        // The Browse view's asks (task 4.5b): its pages changed (the root's
+        // half of the reconcile), the discard sweep, the done task folders.
+        // `browser.db` landings redraw the view itself, never the root.
+        let browser = this.browser.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&browser, window, Self::on_browser_event));
+        // The default-browser cache (B2a-H7b): render reads the cache only,
+        // so the LaunchServices lookup runs at launch and on every regained
+        // focus (a switch made in System Settings shows without a restart).
+        this.field_subscriptions.push(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            if window.is_window_active() {
+                this.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
+            }
+        }));
+        this.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
@@ -2240,7 +2242,7 @@ impl Harness {
         // The switch leaves the address field (its dropdown belongs to
         // Browse's centre) and resets the page-holds edge.
         // `leave_browse_address` skips its refocus off Browse.
-        self.browser.browse_last_holds = false;
+        self.browser.update(cx, |browser, _| browser.browse_last_holds = false);
         self.leave_browse_address(window, cx);
         // A menu belongs to the mode it opened in; left open it would hide a page.
         self.overlays.update(cx, |overlays, _| overlays.menu = None);
@@ -2342,10 +2344,10 @@ impl Harness {
     /// person's own open — a click, the palette, a shortcut — earns it, and
     /// only landing open on Browser. Restores never arm it, so a restored
     /// Browser pane leaves the keyboard where activation put it.
-    fn arm_browser_url_focus(&mut self, cx: &App) {
+    fn arm_browser_url_focus(&mut self, cx: &mut App) {
         let layout = layout::Layout::get(cx);
         if layout.right_open && layout::right_kind(layout) == layout::RightKind::Browser {
-            self.browser.browser_url_focus_armed = true;
+            self.browser.update(cx, |browser, _| browser.browser_url_focus_armed = true);
         }
     }
 
@@ -2433,7 +2435,7 @@ impl Harness {
         if !crate::layout::Layout::get(cx).right_open || layout::right_kind(crate::layout::Layout::get(cx)) != layout::RightKind::Browser {
             return;
         }
-        if self.browser.fake || cfg!(test) {
+        if self.browser.read(cx).fake || cfg!(test) {
             return;
         }
         if self.existing_browser(cx).is_some() {
@@ -2734,7 +2736,7 @@ impl Harness {
     /// input's own PressEnter (⌘↵ rides the input context's
     /// `secondary-enter` binding, so it never also fires the commit).
     fn browse_address_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(input) = self.browser.browse_address.clone() else {
+        let Some(input) = self.browser.read(cx).browse_address.clone() else {
             return div().into_any_element();
         };
         let keys = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
@@ -2828,15 +2830,15 @@ impl Harness {
     /// Shift+Enter steps back.
     fn render_browse_find(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::find_count_text;
-        let shown = self.browser.browse_centre_shown(cx);
-        let (query, match_case) = match self.browser.find_strips.visible(shown) {
+        let shown = self.browser.read(cx).browse_centre_shown(cx);
+        let (query, match_case) = match self.browser.read(cx).find_strips.visible(shown) {
             Some((_, strip)) => (strip.query.clone(), strip.match_case),
             None => return None,
         };
         if self.browse_centre_state(cx).is_some_and(|state| state.read(cx).crashed().is_some()) {
             return None;
         }
-        let input = self.browser.browse_find.clone()?;
+        let input = self.browser.read(cx).browse_find.clone()?;
         let p = cx.aui().colors;
         let count = self
             .browse_centre_state(cx)
@@ -2941,7 +2943,7 @@ impl Harness {
     /// tab holds an unanswered ask — a site glyph, the host in bold, the
     /// ask, then Block (ghost), Allow once (secondary) and Allow while
     /// visiting (primary). Trusted (origin, kind) grants never reach it
-    /// (the sync auto-answers), and a page dismissal drops it with no
+    /// (the page reconcile auto-answers), and a page dismissal drops it with no
     /// state here.
     fn render_browse_permission(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{permission_sentence, permission_want};
@@ -3048,11 +3050,11 @@ impl Harness {
     /// downloads for `~/Downloads`.
     pub(crate) fn render_browse_downloads(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{download_line, download_owner_label};
-        if !self.browser.downloads_open {
+        if !self.browser.read(cx).downloads_open {
             return None;
         }
         let p = cx.aui().colors;
-        let downloads = self.browser.browse_downloads(cx);
+        let downloads = self.browser.read(cx).browse_downloads(cx);
         let now = crate::browser::tabs::now_ms();
         let mut menu = self.browse_popover("browse-downloads", "Downloads", cx);
         if downloads.is_empty() {
@@ -3075,7 +3077,7 @@ impl Harness {
         for (tab, owner, download) in &downloads {
             let tab = *tab;
             let id = download.id;
-            let started = self.browser.download_started.get(&(tab, id)).copied().unwrap_or(now);
+            let started = self.browser.read(cx).download_started.get(&(tab, id)).copied().unwrap_or(now);
             let elapsed = now.saturating_sub(started) / 1000;
             let line = download_line(download, elapsed);
             let credit = match owner {
@@ -3164,7 +3166,7 @@ impl Harness {
             "All downloads",
             None,
             |_, _, _| {
-                crate::browser::BrowseState::open_downloads_folder();
+                crate::browser::BrowserView::open_downloads_folder();
             },
             cx,
         );
@@ -3174,7 +3176,7 @@ impl Harness {
         if self.hosting_overlay {
             return Some(menu.relative().top_0().right_0().into_any_element());
         }
-        if let Some(anchor) = self.browser.downloads_anchor {
+        if let Some(anchor) = self.browser.read(cx).downloads_anchor {
             let at = gpui::point(anchor.left(), anchor.bottom() + px(scale::SP_2));
             return Some(gpui::deferred(gpui::anchored().position(at).child(menu.relative().top_0().right_0())).with_priority(2).into_any_element());
         }
@@ -3185,7 +3187,7 @@ impl Harness {
     /// list, so a fixed message — Manage opens chrome://extensions, the
     /// Store opens the Chrome Web Store, each in a new tab.
     pub(crate) fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.browser.extensions_open {
+        if !self.browser.read(cx).extensions_open {
             return None;
         }
         let p = cx.aui().colors;
@@ -3224,7 +3226,7 @@ impl Harness {
     /// reachable here since it hides the library's nav row. No
     /// Print/History/Bookmarks: none of those exist yet.
     fn render_browse_more(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.browser.more_open {
+        if !self.browser.read(cx).more_open {
             return None;
         }
         let state = self.browse_centre_state(cx)?;
@@ -3419,42 +3421,6 @@ impl Harness {
         };
         if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.set_hover_zones(zones));
-        }
-    }
-
-    /// Hands the shell's chrome over the centre (the sidebar peek) to the
-    /// Browse page as holes, so they show over the native page
-    /// and take the clicks there; none outside Browse.
-    pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
-        // R4: the Split's × on the shown half rides with the centre's holes.
-        let mut rects = rects;
-        if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
-            if let Some(hole) = self.peek_split_holes(cx) {
-                rects.push(hole);
-            }
-        }
-        let holes: Vec<[f32; 5]> = if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
-            rects
-                .iter()
-                .chain(self.browser.progress_hole.get().map(|b| (b, Pixels::ZERO)).iter())
-                .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Holes belong to the page shown now: a page that stopped being the
-        // centre (another tab, Sessions, Settings) gets its own back whole.
-        let current = self.browse_centre_state(cx);
-        if let Some(previous) = self.browser.holes_on.take() {
-            if current.as_ref().map(|c| c.entity_id()) != Some(previous.entity_id()) {
-                if let Some(previous) = previous.upgrade() {
-                    previous.update(cx, |state, _| state.set_holes(Vec::new()));
-                }
-            }
-        }
-        if let Some(state) = current {
-            state.update(cx, |state, _| state.set_holes(holes));
-            self.browser.holes_on = Some(state.downgrade());
         }
     }
 
@@ -3814,11 +3780,11 @@ impl Harness {
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // R4: a click into the Split's other half shows it; a fresh Peek
         // takes the keyboard (so Esc and ⌘↩ reach it).
-        if let Some(id) = self.browser.split_focus.take() {
+        if let Some(id) = self.browser.update(cx, |browser, _| browser.split_focus.take()) {
             self.select_browse_sidebar_tab(id, window, cx);
         }
-        if std::mem::take(&mut self.browser.peek_focus_pending) {
-            if let Some(peek) = self.browser.peek.as_ref() {
+        if self.browser.update(cx, |browser, _| std::mem::take(&mut browser.peek_focus_pending)) {
+            if let Some(peek) = self.browser.read(cx).peek.as_ref() {
                 let state = peek.state.clone();
                 let focus = state.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
@@ -3900,9 +3866,9 @@ impl Harness {
             .then(|| self.render_field_in_window(window, cx))
             .flatten();
         // The sidebar's downloads popover draws in the overlay window, over the live page.
-        let downloads = (!self.browser.downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
+        let downloads = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
         // The footer's extensions popover draws in the overlay window too.
-        let extensions = (!self.browser.downloads_overlay_wanted(cx)).then(|| self.render_browse_extensions(window, cx)).flatten();
+        let extensions = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_extensions(window, cx)).flatten();
         let more = self.render_browse_more(window, cx);
         // A click outside the popovers dismisses them, like the tab menu:
         // the catcher is a sibling below the popovers in the same relative
@@ -3926,7 +3892,7 @@ impl Harness {
                 d.on_key_down(cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
                     let k = &event.keystroke;
                     if k.key == "escape" && !k.modifiers.platform {
-                        this.close_peek(cx);
+                        this.browser.update(cx, |browser, cx| browser.close_peek(cx));
                         cx.stop_propagation();
                     } else if k.key == "enter" && k.modifiers.platform {
                         this.peek_to_tab(cx);
@@ -3952,57 +3918,15 @@ impl Harness {
         // The docked agent column (R3) takes a strip on the column's right:
         // the page narrows beside it (its own window covers the strip), and
         // `browse_centre_page_rect` agrees.
-        let column = if self.agent_window.card_ui == agent_window::CardUi::Column { agent_window::COLUMN_W + 6.0 } else { 0.0 };
+        let column = if self.browser.read(cx).agent_window.card_ui == agent_window::CardUi::Column { agent_window::COLUMN_W + 6.0 } else { 0.0 };
         div()
             .size_full()
             .relative()
             .pr(px(column))
             .child(centre)
-            .children(self.render_page_progress(cx))
+            // The loading line is the Browse view's own (task 4.5b).
+            .child(self.browser.clone())
             .into_any_element()
-    }
-
-    /// The page's loading line (owner 2026-10-11; canvas BrowseFixes): 2 px,
-    /// the foreground filling a border-12 % track in proportion to the
-    /// engine's progress, along the card's top edge between its corner radii.
-    /// Flat (docs/83 §3): the line runs the page column's top edge, end to
-    /// end (the page has no corners), inside the page's rect — it is cut through the page as a hole
-    /// while it shows (`set_browse_holes`), since the native page covers
-    /// anything gpui draws under it.
-    fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.browser.progress_hole.set(None);
-        let state = self.browse_centre_state(cx)?;
-        let (loading, progress) = {
-            let page = state.read(cx);
-            (page.loading(), page.progress())
-        };
-        if !loading {
-            return None;
-        }
-        use aui::util::ElementExt as _;
-        let hole = self.browser.progress_hole.clone();
-        let p = cx.aui().colors;
-        let line = px(scale::SP_1);
-        let fill = progress.clamp(0.0, 1.0);
-        Some(
-            div()
-                .id("page-progress")
-                .role(gpui::Role::ProgressIndicator)
-                .aria_label("Loading page")
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(line)
-                .overflow_hidden()
-                .bg(p.line)
-                .flex()
-                .flex_row()
-                .child(div().h_full().bg(p.fg).flex_grow(fill))
-                .child(div().h_full().flex_grow(1.0 - fill))
-                .on_prepaint(move |bounds, _, _| hole.set(Some(bounds)))
-                .into_any_element(),
-        )
     }
 
     /// Start the new tab's ground bake once per launch (off the main
@@ -4010,16 +3934,16 @@ impl Harness {
     /// clock skip the desktop picture and bake the mesh, so they never
     /// depend on the machine's wallpaper.
     fn ensure_newtab_ground(&mut self, cx: &mut Context<Self>) {
-        if self.browser.newtab_ground_asked {
+        if self.browser.read(cx).newtab_ground_asked {
             return;
         }
-        self.browser.newtab_ground_asked = true;
+        self.browser.update(cx, |browser, _| browser.newtab_ground_asked = true);
         let source = if crate::clock::deterministic() { None } else { crate::newtab_ground::current_source() };
         let bake = cx.background_executor().spawn(async move { crate::newtab_ground::bake(source) });
         cx.spawn(async move |this, cx| {
             let baked = bake.await;
             let _ = this.update(cx, |this, cx| {
-                this.browser.newtab_ground = baked;
+                this.browser.update(cx, |browser, _| browser.newtab_ground = baked);
                 cx.notify();
             });
         })
@@ -4043,7 +3967,7 @@ impl Harness {
     fn render_browse_newtab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let editing = self.browser.browse_address.is_some();
+        let editing = self.browser.read(cx).browse_address.is_some();
         let field_w = px(NEWTAB_FIELD_W);
         let lit = |on: bool| icon(IconName::Search).size(metrics.icon).color(if on { p.fg } else { p.fg_muted }).lit(on);
         let shell = |editing: bool| {
@@ -4085,7 +4009,7 @@ impl Harness {
         if let Some(list) = dropdown {
             column = column.child(list);
         }
-        let pickup = if typing { Vec::new() } else { self.browse_pickup_full() };
+        let pickup = if typing { Vec::new() } else { self.browse_pickup_full(cx) };
         if !pickup.is_empty() {
             let mut rows = v_flex()
                 .id("browse-pickup-list")
@@ -4103,7 +4027,7 @@ impl Harness {
                         .text_color(p.fg_muted)
                         .child("Pick up where you left off"),
                 );
-            let hover = self.browser.browse_pickup_hover;
+            let hover = self.browser.read(cx).browse_pickup_hover;
             let report = cx.entity().downgrade();
             // Pick-up rows press on mouse-down (pointer timing: the press
             // must land before the address input's blur drops the field)
@@ -4117,8 +4041,8 @@ impl Harness {
                 .gap(Pixels::ZERO)
                 .on_highlight(move |index, _, cx| {
                     let _ = report.update(cx, |this, cx| {
-                        if this.browser.browse_pickup_hover != index {
-                            this.browser.browse_pickup_hover = index;
+                        if this.browser.read(cx).browse_pickup_hover != index {
+                            this.browser.update(cx, |browser, _| browser.browse_pickup_hover = index);
                             cx.notify();
                         }
                     });
@@ -4128,11 +4052,11 @@ impl Harness {
                 // A tab row's favicon when it has one (open or recently
                 // closed), else its letter tile; a session row its glyph.
                 let favicon = match &target {
-                    crate::browser::PickupTarget::Tab(id) => self.browser.tabs.get(*id).and_then(|tab| tab.favicon.clone()),
-                    crate::browser::PickupTarget::Closed(id) => self.browser.tabs.closed.iter().find(|tab| tab.id == *id).and_then(|tab| tab.favicon.clone()),
+                    crate::browser::PickupTarget::Tab(id) => self.browser.read(cx).tabs.get(*id).and_then(|tab| tab.favicon.clone()),
+                    crate::browser::PickupTarget::Closed(id) => self.browser.read(cx).tabs.closed.iter().find(|tab| tab.id == *id).and_then(|tab| tab.favicon.clone()),
                     crate::browser::PickupTarget::Session(_) => None,
                 }
-                .and_then(|url| self.browser.favicons.file(&url).cloned());
+                .and_then(|url| self.browser.read(cx).favicons.file(&url).cloned());
                 let lead: AnyElement = match (&target, favicon) {
                     (crate::browser::PickupTarget::Session(_), _) => icon(IconName::List).size(metrics.icon).color(p.fg_muted).into_any_element(),
                     (_, Some(path)) => gpui::img(path).size(metrics.icon).into_any_element(),
@@ -4198,7 +4122,7 @@ impl Harness {
             column = column.child(panel);
         }
         // The new tab is the page column, square like a page (docs/83 §3).
-        let ground = self.browser.newtab_ground.clone().map(|path| {
+        let ground = self.browser.read(cx).newtab_ground.clone().map(|path| {
             gpui::img(path).absolute().top_0().left_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element()
         });
         div()
@@ -4260,7 +4184,7 @@ impl Harness {
     ) -> gpui::Stateful<gpui::Div> {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let selected = self.browser.browse_omnibox_selected.min(rows.len().saturating_sub(1));
+        let selected = self.browser.read(cx).browse_omnibox_selected.min(rows.len().saturating_sub(1));
         // FF's dropdown chrome (`dropdown.tsx`): the popup surface, a 4 px
         // inset, 36 px rows on the item radius lit by the hover overlay,
         // Caption group labels — the same rows the Field overlay draws.
@@ -4297,8 +4221,8 @@ impl Harness {
             .on_highlight(move |index, _, cx| {
                 if let Some(index) = index {
                     let _ = report.update(cx, |this, cx| {
-                        if this.browser.browse_omnibox_selected != index {
-                            this.browser.browse_omnibox_selected = index;
+                        if this.browser.read(cx).browse_omnibox_selected != index {
+                            this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
                             cx.notify();
                         }
                     });
@@ -4503,12 +4427,12 @@ impl Harness {
                         |this: &mut Self, _: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
                             // Z7a: an external drag covers the browser pane —
                             // the native view hides while it lasts.
-                            this.browser.drop_cover = true;
+                            this.browser.update(cx, |browser, _| browser.drop_cover = true);
                             this.with_session(cx, |view, cx| view.note_drag_over(cx));
                         },
                     ))
                     .on_drop(cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
-                        this.browser.drop_cover = false;
+                        this.browser.update(cx, |browser, _| browser.drop_cover = false);
                         this.with_session(cx, |view, cx| view.drop_external(paths, cx));
                     }))
                     .into_any_element()
@@ -5107,9 +5031,9 @@ impl Harness {
         // Deferred, not built here: `on_frame` runs inside render, and the
         // point is that no frame constructs a webview. Waits for an active
         // session so it warms that session's browser, not a home one.
-        if !self.browser.browser_idle_warmed && self.shell_up(cx) && self.active.is_some() {
-            self.browser.browser_idle_warmed = true;
-            if !self.browser.fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
+        if !self.browser.read(cx).browser_idle_warmed && self.shell_up(cx) && self.active.is_some() {
+            self.browser.update(cx, |browser, _| browser.browser_idle_warmed = true);
+            if !self.browser.read(cx).fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
                 self.defer_browser_prewarm(cx);
             }
         }
@@ -5117,25 +5041,6 @@ impl Harness {
         // edge-triggered inside, so steady active frames do no work of
         // their own and probes run at most every 15s per provider.
         crate::provider_status::note_window_active(window.is_window_active());
-        // Links from other apps (B2a-H7): drain the `on_open_urls` queue
-        // into person tabs (or park them until sign-in), off the frame
-        // through a task.
-        self.poll_external_urls(cx);
-        // The default-browser cache (B2a-H7b): render reads the cache
-        // only, so the LaunchServices lookup lives here — on regained
-        // focus (a switch made in System Settings shows without a
-        // restart), when the post-Make-default re-read comes due (macOS
-        // confirms asynchronously), and on the first frame so the row
-        // never renders an empty cache.
-        let window_active = window.is_window_active();
-        let recheck_due = self
-            .browser.default_browser_recheck_at
-            .is_some_and(|at| std::time::Instant::now() >= at);
-        if (window_active && !self.was_window_active) || recheck_due || self.browser.default_browser_cache.is_none()
-        {
-            self.refresh_default_browser_cache();
-        }
-        self.was_window_active = window_active;
         // The window's title is the session's, so a person with three baaz
         // windows open can tell them apart in Mission Control. It is built
         // only when the list or the open session changed: the scan and the
@@ -5240,13 +5145,6 @@ impl Harness {
         // it, and a quiet window may take no frame for seconds (a page load's
         // `loading` key painted only after the load had ended): ask for the
         // next one so the re-armed pane draws now.
-        // New tabs from ⌘-click, middle-click and the page menu's "Open Link
-        // in New Tab" join the model before the sidebar re-arms, so their
-        // rows draw in this frame (see `drain_browse_popups`).
-        if self.drain_browse_popups(cx) {
-            self.sidebar_pane.update(cx, |_, cx| cx.notify());
-            aui_motion::request_frame(window);
-        }
         if self.sync_sidebar_pane(cx) {
             aui_motion::request_frame(window);
         }
@@ -5414,7 +5312,7 @@ impl Render for Harness {
             // for the peek so it shows over the page.
             let browse = crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !settings_open;
             let chrome = if let Some(chrome) = settings_chrome {
-                self.set_browse_holes(Vec::new(), cx);
+                self.browser.update(cx, |browser, cx| browser.cut_holes(Vec::new(), cx));
                 chrome
             } else {
                 self.render_bar_chrome(window, cx)
@@ -5451,7 +5349,7 @@ impl Render for Harness {
                             this.lights_hidden = hidden;
                             crate::native_lights::set_traffic_lights_hidden(window, hidden, cx);
                         }
-                        this.set_browse_holes(rects, cx);
+                        this.browser.update(cx, |browser, cx| browser.cut_holes(rects, cx));
                     });
                 })
                 .right(right)
@@ -5605,17 +5503,18 @@ impl Render for Harness {
         let row_detail = self.render_row_detail(cx);
         let project_menu = self.render_project_menu(cx);
         let files_menu = self.right_pane.update(cx, |pane, cx| pane.render_files_menu(cx));
-        // Z7a, the native-overlay rule: persist real navigations, resolve
-        // pending screenshot attaches, and hide every native webview this
-        // frame covers (the page is composited above gpui, so gpui cannot
-        // draw over it — the host takes the view out instead).
-        self.sync_browser(window, cx);
+        // Z7a, the native-overlay rule: hide every native webview this frame
+        // covers (the page is composited above gpui, so gpui cannot draw
+        // over it — the host takes the view out instead), through the one
+        // occlusion owner. The pages' own reconcile (navigations, history,
+        // screenshots, the tabs write) runs from their changes, not here.
+        self.occlude_pages(window, cx);
         // A cover waits for the covered page's picture: until it stands in,
         // the live page is still above gpui, so the cover would show only
         // where it misses the page (the scrim dimmed the sidebar first).
         // Held covers stay mounted — the palette keeps the keyboard — and
         // paint transparent; the frames keep coming until the page settles.
-        let hold_covers = self.browser.browser_cover_settling(cx);
+        let hold_covers = self.browser.read(cx).browser_cover_settling(cx);
         if hold_covers {
             aui_motion::request_frame(window);
         }
@@ -5924,14 +5823,14 @@ impl Render for Harness {
                 // the guards are the belt).
                 // R4: Esc / ⌘↩ for an open Peek; passed on when there is none.
                 .on_action(cx.listener(|this, _: &ClosePeek, _, cx| {
-                    if this.browser.peek.is_some() {
-                        this.close_peek(cx);
+                    if this.browser.read(cx).peek.is_some() {
+                        this.browser.update(cx, |browser, cx| browser.close_peek(cx));
                     } else {
                         cx.propagate();
                     }
                 }))
                 .on_action(cx.listener(|this, _: &PeekToTab, _, cx| {
-                    if this.browser.peek.is_some() {
+                    if this.browser.read(cx).peek.is_some() {
                         this.peek_to_tab(cx);
                     } else {
                         cx.propagate();
@@ -6426,7 +6325,7 @@ mod tests {
         });
         draw_shell(&mut *vc, &baaz);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).states.is_empty()),
             "boot draws no webview"
         );
         // A session switch with no Browser state: the activate tail —
@@ -6440,7 +6339,7 @@ mod tests {
         });
         draw_shell(&mut *vc, &baaz);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).states.is_empty()),
             "a switch with no Browser state creates no webview"
         );
         restore_state(state);
@@ -6462,9 +6361,9 @@ mod tests {
                 // Load the saved tabs first, as the app does before any tab
                 // exists: `close_tab` loads them on first use otherwise,
                 // replacing the tab opened here.
-                h.ensure_tabs_loaded();
-                let space = h.browser.browse_space();
-                let id = h.browser.tabs.open(space, crate::browser::tabs::Owner::Person, "about:blank", None);
+                h.ensure_tabs_loaded(cx);
+                let space = h.browser.read(cx).browse_space();
+                let id = h.browser.update(cx, |bv, _| bv.tabs.open(space, crate::browser::tabs::Owner::Person, "about:blank", None));
                 let page = h.ensure_tab_page("home", id, window, cx);
                 (id, page.downgrade())
             })
@@ -6513,7 +6412,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let url_focus = vc.update(|_, cx| {
             baaz.read(cx)
-                .browser.session_page("s-1")
+                .browser.read(cx).session_page("s-1")
                 .expect("restore onto Browser creates the webview")
                 .read(cx)
                 .focus_handle()
@@ -6558,7 +6457,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let url_focus = vc.update(|_, cx| {
             baaz.read(cx)
-                .browser.session_page("s-1")
+                .browser.read(cx).session_page("s-1")
                 .expect("opening Browser creates the webview")
                 .read(cx)
                 .focus_handle()
@@ -6786,6 +6685,85 @@ mod tests {
         restore_state(state);
     }
 
+    /// A page the test drives from outside, the way a link moves a real
+    /// one: what it reports is pushed into `events` and drained by the
+    /// page's own poll. Nothing in Baaz asks it to navigate.
+    struct LinkPage {
+        events: std::rc::Rc<std::cell::RefCell<Vec<aui_webview::WebEvent>>>,
+    }
+
+    impl aui_webview::WebBackend for LinkPage {
+        fn navigate(&mut self, _url: &str) {}
+        fn back(&mut self) {}
+        fn forward(&mut self) {}
+        fn reload(&mut self) {}
+        fn eval(&mut self, _js: &str) {}
+        fn set_annotate(&mut self, _on: bool) {}
+        fn poll_events(&mut self) -> Vec<aui_webview::WebEvent> {
+            std::mem::take(&mut *self.events.borrow_mut())
+        }
+    }
+
+    /// Task 4.5b: the Browse view follows its pages itself. A person tab's
+    /// page moves on its own (a link: nothing in Baaz asks), and with no
+    /// window frame drawn — the root never renders in this window, and the
+    /// frame's occlusion never ran — the tab takes the page's URL and
+    /// title, the back/forward stack follows, and the visit reaches
+    /// history. The view is notified (it redraws); the root is not.
+    #[gpui::test]
+    fn a_page_change_reaches_the_tabs_and_history_with_no_frame(cx: &mut gpui::TestAppContext) {
+        use aui_webview::WebEvent;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let state = hermetic_state("browser-view-reconcile");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
+            .expect("the tab opens");
+        vc.run_until_parked();
+        let browser = vc.update(|_, cx| baaz.read(cx).browser.clone());
+        let id = vc.update(|_, cx| browser.read(cx).browse_centre_shown(cx).expect("the new tab is the centre's"));
+        assert_eq!(
+            vc.update(|_, cx| browser.read(cx).data.read(cx).history_len()),
+            1,
+            "a page built at its URL reaches history on adoption"
+        );
+        // The tab's page, driven from outside from here on.
+        let events: Rc<RefCell<Vec<WebEvent>>> = Rc::default();
+        vc.update(|_, cx| {
+            let page = cx.new(|cx| aui_webview::WebviewState::new(Box::new(LinkPage { events: events.clone() }), cx));
+            browser.update(cx, |browser, cx| browser.adopt_page(id, page, cx));
+        });
+        vc.run_until_parked();
+        let (view_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let _watch = vc.update(|_, cx| {
+            let (v, r) = (view_notes.clone(), root_notes.clone());
+            (cx.observe(&browser, move |_, _| v.set(v.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+        });
+        events.borrow_mut().extend([
+            WebEvent::Url("https://b.example/next".to_owned()),
+            WebEvent::Title("Next".to_owned()),
+        ]);
+        vc.executor().advance_clock(std::time::Duration::from_millis(200));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = browser.read(cx);
+            let tab = view.tabs.get(id).expect("the tab stays");
+            assert_eq!((tab.url.as_str(), tab.title.as_str()), ("https://b.example/next", "Next"), "the tab follows its page");
+            assert!(view.histories.get(&id).is_some_and(|stack| stack.can_back()), "back/forward followed the navigation");
+            assert_eq!(view.data.read(cx).history_len(), 2, "the visit reached history");
+            assert!(view.centre_page_rect.is_none(), "no frame drew: the occlusion never ran");
+            assert_eq!(view.occlusion.shown(), crate::browser::PageShow::default(), "nor decided anything");
+        });
+        assert!(view_notes.get() > 0, "the page change redraws the view");
+        assert_eq!(root_notes.get(), 0, "the root is not notified for the view's own state");
+        restore_state(state);
+    }
+
     /// B11b: opening the palette — and cancelling it — keeps the Settings
     /// page exactly where it was.
     #[gpui::test]
@@ -6930,7 +6908,7 @@ mod tests {
         // any frame — never as a render side effect.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.session_has_page("s-1")),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).session_has_page("s-1")),
             "opening on Browser prepares the webview off the render path"
         );
         assert_eq!(
@@ -7038,19 +7016,19 @@ mod tests {
         // The open action builds, with no frame drawn yet.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).browser.browser_builds),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).browser_builds),
             1,
             "the open action constructs the webview before any frame"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.session_has_page("s-1")),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).session_has_page("s-1")),
             "the webview exists before render runs"
         );
         // Frames reuse: render never constructs.
         draw_shell(&mut *vc, &baaz);
         draw_shell(&mut *vc, &baaz);
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).browser.browser_builds),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).browser_builds),
             1,
             "render must reuse the webview, never construct one"
         );
@@ -7059,7 +7037,7 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
         draw_shell(&mut *vc, &baaz);
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).browser.browser_builds),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).browser_builds),
             1,
             "one session never earns a second webview"
         );
@@ -7107,7 +7085,7 @@ mod tests {
             let active_id = active.read(cx).session_id.clone();
             assert_ne!(active_id, "s-1", "the Ask starts a new session, never reuses the open one");
             assert_eq!(active.read(cx).draft_text(cx), "what is this page?");
-            assert!(h.browser.pending_ask_draft.is_none(), "the landed draft is taken");
+            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the landed draft is taken");
             assert_eq!(unrelated.read(cx).draft_text(cx), "", "the unrelated session keeps no draft");
             active_id
         });
@@ -7119,7 +7097,7 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("a second question", window, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.browser.pending_ask_draft.is_none(), "the refused Ask leaves nothing armed");
+            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the refused Ask leaves nothing armed");
             let active = h.active.clone().expect("the session is still open");
             assert_eq!(active.read(cx).session_id, landed, "no session opened");
             assert_eq!(
@@ -7158,10 +7136,12 @@ mod tests {
             })
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.browser.pending_ask_draft = Some(crate::app::PendingAsk {
-                    target: Some("s-2".to_owned()),
-                    query: "keyed question".to_owned(),
+            baaz.update(cx, |h, cx| {
+                h.browser.update(cx, |browser, _| {
+                    browser.pending_ask_draft = Some(crate::app::PendingAsk {
+                        target: Some("s-2".to_owned()),
+                        query: "keyed question".to_owned(),
+                    })
                 });
             });
         });
@@ -7171,7 +7151,7 @@ mod tests {
             let h = baaz.read(cx);
             assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated landing takes no draft");
             assert!(
-                h.browser.pending_ask_draft.as_ref().is_some_and(|ask| ask.query == "keyed question"),
+                h.browser.read(cx).pending_ask_draft.as_ref().is_some_and(|ask| ask.query == "keyed question"),
                 "the draft stays armed for its session"
             );
         });
@@ -7180,7 +7160,7 @@ mod tests {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(view_b.read(cx).draft_text(cx), "keyed question");
-            assert!(h.browser.pending_ask_draft.is_none(), "the landed draft is taken");
+            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the landed draft is taken");
             assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated draft stays empty");
         });
         restore_state(state);
@@ -7216,13 +7196,15 @@ mod tests {
         // History behind it: the menu draws.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                let id = h.browser.browse_centre_shown(cx).expect("a tab shows");
-                h.browser.histories.entry(id).or_default().note_navigated("https://a.example/");
-                h.browser.histories.entry(id).or_default().note_navigated("https://b.example/");
-                h.browser.back_bounds = Some(gpui::Bounds::new(
-                    gpui::point(gpui::px(0.0), gpui::px(0.0)),
-                    gpui::size(gpui::px(10.0), gpui::px(10.0)),
-                ));
+                let id = h.browser.read(cx).browse_centre_shown(cx).expect("a tab shows");
+                h.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().note_navigated("https://a.example/"));
+                h.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().note_navigated("https://b.example/"));
+                h.browser.update(cx, |browser, _| {
+                    browser.back_bounds = Some(gpui::Bounds::new(
+                        gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                        gpui::size(gpui::px(10.0), gpui::px(10.0)),
+                    ))
+                });
                 let _ = window;
                 assert!(
                     h.render_back_history_menu(cx).is_some(),
@@ -7246,10 +7228,10 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         let page = vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.ensure_tabs_loaded();
-                let space = h.browser.browse_space();
-                let id = h.browser.tabs.open(space, crate::browser::Owner::Person, "https://example.com/", None);
-                h.browser.tabs.activate(id);
+                h.ensure_tabs_loaded(cx);
+                let space = h.browser.read(cx).browse_space();
+                let id = h.browser.update(cx, |bv, _| bv.tabs.open(space, crate::browser::Owner::Person, "https://example.com/", None));
+                h.browser.update(cx, |browser, _| browser.tabs.activate(id));
                 h.browse_centre_page(window, cx).expect("the shown tab has a page")
             })
         });
@@ -7276,22 +7258,12 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         // Two person tabs whose URLs match different queries.
         let (alpha, beta) = vc.update(|_, cx| {
-            baaz.update(cx, |h, _cx| {
-                h.ensure_tabs_loaded();
-                let space = h.browser.browse_space();
-                let alpha = h.browser.tabs.open(
-                    space.clone(),
-                    crate::browser::Owner::Person,
-                    "https://alpha.example/1",
-                    None,
-                );
-                let beta = h.browser.tabs.open(
-                    space,
-                    crate::browser::Owner::Person,
-                    "https://beta.example/2",
-                    None,
-                );
-                h.browser.schedule_tabs_write();
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.browser.read(cx).browse_space();
+                let alpha = h.browser.update(cx, |browser, _| browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://alpha.example/1", None));
+                let beta = h.browser.update(cx, |browser, _| browser.tabs.open(space, crate::browser::Owner::Person, "https://beta.example/2", None));
+                h.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 (alpha, beta)
             })
         });
@@ -7308,13 +7280,13 @@ mod tests {
         // still opens the completed tab, not the row now sitting there.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                let input = h.browser.browse_address.clone().expect("the field is open");
+                let input = h.browser.read(cx).browse_address.clone().expect("the field is open");
                 input.update(cx, |input, cx| input.set_value("beta", window, cx));
                 h.commit_browse_address(window, cx);
             })
         });
         vc.update(|_, cx| {
-            let shown = baaz.read(cx).browser.browse_centre_shown(cx).expect("a tab shows");
+            let shown = baaz.read(cx).browser.read(cx).browse_centre_shown(cx).expect("a tab shows");
             assert_eq!(shown, alpha, "Enter opens the completed row, not the re-ranked index");
             assert_ne!(shown, beta, "the row now at that index does not open");
         });
@@ -7323,16 +7295,16 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.focus_browse_address_with("zzz-no-match-xyz", window, cx);
-                h.browser.browse_omnibox_selected = 99;
-                h.browser.browse_omnibox_moved = true;
-                h.browser.browse_completed = None;
+                h.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 99);
+                h.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
+                h.browser.update(cx, |browser, _| browser.browse_completed = None);
                 h.commit_browse_address(window, cx);
             })
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let id = h.browser.browse_centre_shown(cx).expect("a tab shows");
-            let url = h.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+            let id = h.browser.read(cx).browse_centre_shown(cx).expect("a tab shows");
+            let url = h.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert!(
                 url.starts_with(crate::browser::toolbar::SearchEngine::Google.url_prefix()),
                 "a clamped Enter searches instead of missing: {url}"
@@ -7410,8 +7382,8 @@ mod tests {
             let h = baaz.read(cx);
             assert_eq!(crate::layout::Layout::get(cx).mode, Mode::Browse, "the fixture lands in Browse");
             assert!(!crate::layout::Layout::get(cx).right_open, "Browse's pane stands closed");
-            let shown = h.browser.browse_centre_shown(cx).expect("the carried tab shows");
-            assert_eq!(h.browser.browse_session_tab, Some(shown));
+            let shown = h.browser.read(cx).browse_centre_shown(cx).expect("the carried tab shows");
+            assert_eq!(h.browser.read(cx).browse_session_tab, Some(shown));
             shown
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Sessions, window, cx)));
@@ -7419,18 +7391,18 @@ mod tests {
             let h = baaz.read(cx);
             assert!(crate::layout::Layout::get(cx).right_open, "the Sessions pane comes back open");
             assert_eq!(crate::layout::Layout::get(cx).right_kind, Some(RightKind::Files), "on its kind");
-            assert_eq!(h.browser.browse_centre_shown(cx), None, "Sessions shows no centre page");
+            assert_eq!(h.browser.read(cx).browse_centre_shown(cx), None, "Sessions shows no centre page");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Browse, window, cx)));
         vc.update(|_, cx| {
-            assert_eq!(baaz.read(cx).browser.browse_centre_shown(cx), Some(carried), "the shown tab survives the trip");
+            assert_eq!(baaz.read(cx).browser.read(cx).browse_centre_shown(cx), Some(carried), "the shown tab survives the trip");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
             .expect("the tab opens");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.browser.browse_session_tab, None);
-            let shown = h.browser.browse_centre_shown(cx).expect("the new tab shows");
+            assert_eq!(h.browser.read(cx).browse_session_tab, None);
+            let shown = h.browser.read(cx).browse_centre_shown(cx).expect("the new tab shows");
             assert_ne!(shown, carried, "the person's new tab takes the centre");
         });
         restore_state(state);
@@ -7529,13 +7501,13 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let (open_page, width) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.browser.centre_page_rect.expect("the sync stores the rect"), h.resize.width)
+            (h.browser.read(cx).centre_page_rect.expect("the occlusion stores the rect"), h.resize.width)
         });
         assert_eq!(open_page.origin, gpui::point(gpui::px(width), gpui::px(0.0)), "open: flush with the sidebar column");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
         draw_shell(&mut *vc, &baaz);
         let closed_page =
-            vc.update(|_, cx| baaz.read(cx).browser.centre_page_rect.expect("the sync stores the rect"));
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).centre_page_rect.expect("the occlusion stores the rect"));
         assert_eq!(closed_page.origin, gpui::point(gpui::px(0.0), gpui::px(0.0)), "closed: the window's corner");
         assert_eq!(
             closed_page.size.width - open_page.size.width,
@@ -7918,16 +7890,17 @@ mod tests {
             let harness = baaz.read(cx);
             assert!(!harness.settings_open(cx), "the row leaves Settings");
             assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "the row lands in Browse");
-            let id = harness.browser.browse_centre_shown(cx).expect("a tab shows");
-            let url = harness.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+            let id = harness.browser.read(cx).browse_centre_shown(cx).expect("a tab shows");
+            let url = harness.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert_eq!(url, "chrome://settings", "the new tab loads Chromium's settings");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_chromium_settings(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let space = harness.browser.browse_space();
+            let space = harness.browser.read(cx).browse_space();
             let settings_tabs: Vec<crate::browser::TabId> = harness
                 .browser
+                .read(cx)
                 .tabs
                 .person_tabs(space.as_deref())
                 .iter()
@@ -7936,7 +7909,7 @@ mod tests {
                 .collect();
             assert_eq!(settings_tabs.len(), 1, "reopening selects the existing tab instead of opening another");
             assert_eq!(
-                harness.browser.browse_centre_shown(cx),
+                harness.browser.read(cx).browse_centre_shown(cx),
                 Some(settings_tabs[0]),
                 "the existing tab shows"
             );
@@ -7964,7 +7937,7 @@ mod tests {
                 h.focus_browse_address_with("https://example.com", window, cx);
                 // The page held the keyboard: a restore would hand focus
                 // back to it — blur must not.
-                h.browser.browse_address_page_focus = true;
+                h.browser.update(cx, |browser, _| browser.browse_address_page_focus = true);
             })
         });
         // A blur only ends the edit while the window is key (a blur from
@@ -7975,7 +7948,7 @@ mod tests {
         // focusable delivers — through the real subscription arm.
         let held = vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                let input = h.browser.browse_address.clone().expect("the field is open");
+                let input = h.browser.read(cx).browse_address.clone().expect("the field is open");
                 let held = window.focused(cx);
                 input.update(cx, |_, cx| cx.emit(gpui_kit::base::input::InputEvent::Blur));
                 held
@@ -7984,7 +7957,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|window, cx| {
             let h = baaz.read(cx);
-            assert!(h.browser.browse_address.is_none(), "blur ends the edit");
+            assert!(h.browser.read(cx).browse_address.is_none(), "blur ends the edit");
             assert_eq!(
                 window.focused(cx),
                 held,
@@ -8007,22 +7980,12 @@ mod tests {
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         let (first, second) = vc.update(|_, cx| {
-            baaz.update(cx, |h, _cx| {
-                h.ensure_tabs_loaded();
-                let space = h.browser.browse_space();
-                let first = h.browser.tabs.open(
-                    space.clone(),
-                    crate::browser::Owner::Person,
-                    "https://first.example/",
-                    None,
-                );
-                let second = h.browser.tabs.open(
-                    space,
-                    crate::browser::Owner::Person,
-                    "https://second.example/",
-                    None,
-                );
-                h.browser.schedule_tabs_write();
+            baaz.update(cx, |h, cx| {
+                h.ensure_tabs_loaded(cx);
+                let space = h.browser.read(cx).browse_space();
+                let first = h.browser.update(cx, |browser, _| browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://first.example/", None));
+                let second = h.browser.update(cx, |browser, _| browser.tabs.open(space, crate::browser::Owner::Person, "https://second.example/", None));
+                h.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 (first, second)
             })
         });
@@ -8032,14 +7995,14 @@ mod tests {
                 h.focus_browse_address_with("https://first.example/", window, cx);
                 // The old page held the keyboard: leaving restores to a
                 // page — which must be the newly shown one.
-                h.browser.browse_address_page_focus = true;
+                h.browser.update(cx, |browser, _| browser.browse_address_page_focus = true);
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.select_browse_sidebar_tab(second, window, cx)));
         vc.update(|window, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.browser.browse_centre_shown(cx), Some(second), "the selection moved");
-            assert!(h.browser.browse_address.is_none(), "selecting leaves the address");
+            assert_eq!(h.browser.read(cx).browse_centre_shown(cx), Some(second), "the selection moved");
+            assert!(h.browser.read(cx).browse_address.is_none(), "selecting leaves the address");
             let new_page = h.browse_centre_state(cx).expect("the new page exists");
             assert_eq!(
                 window.focused(cx),
@@ -8668,10 +8631,10 @@ mod tests {
                 "the link opens the pane on Browser"
             );
             let url =
-                harness.browser.session_page("s-1").map(|state| state.read(cx).url().to_string());
+                harness.browser.read(cx).session_page("s-1").map(|state| state.read(cx).url().to_string());
             assert_eq!(url.as_deref(), Some("https://example.com/page"), "the fake page navigates");
             assert!(
-                !harness.browser.browser_url_focus_armed,
+                !harness.browser.read(cx).browser_url_focus_armed,
                 "a link never earns URL-field focus"
             );
         });
@@ -8841,8 +8804,8 @@ mod tests {
         let page_shows = |vc: &mut gpui::VisualTestContext, url: &str| {
             vc.update(|_, cx| {
                 let harness = baaz.read(cx);
-                harness.browser.browser_pending_url.as_deref() == Some(url)
-                    || harness.browser.states.values().any(|state| state.read(cx).url().as_ref() == url)
+                harness.browser.read(cx).browser_pending_url.as_deref() == Some(url)
+                    || harness.browser.read(cx).states.values().any(|state| state.read(cx).url().as_ref() == url)
             })
         };
         let abs = root.join("site/kitchen sink.html");

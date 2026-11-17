@@ -94,7 +94,7 @@ fn browser_pane_renders_the_session_webview() {
 #[test]
 fn fake_backend_only_behind_the_boot_flag() {
     let browser = browser_source();
-    assert!(browser.contains("self.browser.fake || cfg!(test)"), "fake is flag- or test-gated");
+    assert!(browser.contains("self.browser.read(cx).fake || cfg!(test)"), "fake is flag- or test-gated");
     assert!(browser.contains("WryBackend::new_at"), "production path builds WKWebView");
     assert!(browser.contains("set_obscured"), "the host hides the native view under overlays");
     assert!(browser.contains("browser_visible"), "visibility runs through the pure predicate");
@@ -106,7 +106,7 @@ fn fake_backend_only_behind_the_boot_flag() {
 #[test]
 fn per_session_state_and_verbs_are_wired() {
     let browser = browser_source();
-    let state = source("browser/state.rs");
+    let state = source("browser/view.rs");
     assert!(state.contains("states: HashMap<TabId"), "live pages are keyed by tab");
     assert!(browser.contains("register_tab_page"), "agent tools follow the active tab");
     let tabs = source("browser/tabs.rs");

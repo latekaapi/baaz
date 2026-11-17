@@ -15,8 +15,8 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
         let Some(state) = self.browse_centre_page(window, cx) else { return };
         if state.read(cx).crashed().is_some() {
             return;
@@ -25,11 +25,11 @@ impl Harness {
             return;
         }
         state.update(cx, |state, _| state.release_keyboard());
-        let (query, match_case, research) = {
-            let strip = self.browser.find_strips.for_tab(id);
+        let (query, match_case, research) = self.browser.update(cx, |browser, _| {
+            let strip = browser.find_strips.for_tab(id);
             let research = strip.open();
             (strip.query.clone(), strip.match_case, research)
-        };
+        });
         self.focus_browse_find_input(&query, window, cx);
         if research {
             state.update(cx, |state, _| state.find(&query, true, match_case));
@@ -42,11 +42,11 @@ impl Harness {
     /// shared input lives while any tab's strip stands open, so closing
     /// one tab's strip never strands the others'.
     pub(crate) fn close_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
-        let stop = self.browser.find_strips.for_tab(id).close();
-        if !self.browser.find_strips.any_open() {
-            self.browser.browse_find = None;
-            self.browser.browse_find_sub = None;
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let stop = self.browser.update(cx, |browser, _| browser.find_strips.for_tab(id).close());
+        if !self.browser.read(cx).find_strips.any_open() {
+            self.browser.update(cx, |browser, _| browser.browse_find = None);
+            self.browser.update(cx, |browser, _| browser.browse_find_sub = None);
         }
         if stop {
             if let Some(state) = self.browse_centre_state(cx) {
@@ -64,13 +64,13 @@ impl Harness {
     /// left tab's highlight, point the shared input at the shown tab's
     /// query and search it again so its count and highlight come back.
     pub(crate) fn apply_find_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((left, shown)) = self.browser.find_resync.take() else { return };
+        let Some((left, shown)) = self.browser.update(cx, |browser, _| browser.find_resync.take()) else { return };
         if let Some(left) = left {
-            self.browser.stop_find_on_tab(left, cx);
+            self.browser.update(cx, |browser, cx| browser.stop_find_on_tab(left, cx));
         }
         if let Some(shown) = shown {
             self.sync_find_input_to_tab(shown, window, cx);
-            if self.browser.find_strips.visible(Some(shown)).is_some() {
+            if self.browser.read(cx).find_strips.visible(Some(shown)).is_some() {
                 self.step_browse_find(true, cx);
             }
         }
@@ -79,12 +79,12 @@ impl Harness {
     /// Point the shared find input at the tab's kept query (a tab switch):
     /// the value is set here, on the event — never during render.
     pub(super) fn sync_find_input_to_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let (open, query) = match self.browser.find_strips.visible(Some(id)) {
+        let (open, query) = match self.browser.read(cx).find_strips.visible(Some(id)) {
             Some((_, strip)) => (true, strip.query.clone()),
             None => return,
         };
         if open {
-            if let Some(input) = self.browser.browse_find.clone() {
+            if let Some(input) = self.browser.read(cx).browse_find.clone() {
                 input.update(cx, |input, cx| {
                     input.set_value(query, window, cx);
                 });
@@ -94,8 +94,8 @@ impl Harness {
 
     /// Flip "Match case" and re-search the kept query.
     pub(crate) fn toggle_browse_find_case(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
-        let research = self.browser.find_strips.for_tab(id).toggle_case();
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let research = self.browser.update(cx, |browser, _| browser.find_strips.for_tab(id).toggle_case());
         if research {
             self.step_browse_find(true, cx);
         }
@@ -109,7 +109,7 @@ impl Harness {
     /// Done, Esc or a tab switch, never by clicking the page.
     pub(super) fn focus_browse_find_input(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let text = text.to_owned();
-        match self.browser.browse_find.clone() {
+        match self.browser.read(cx).browse_find.clone() {
             Some(input) => {
                 input.update(cx, |input, cx| {
                     input.set_value(text, window, cx);
@@ -130,8 +130,8 @@ impl Harness {
                     InputEvent::Change => this.find_input_changed(cx),
                     InputEvent::Blur | InputEvent::Focus => {}
                 });
-                self.browser.browse_find = Some(input);
-                self.browser.browse_find_sub = Some(sub);
+                self.browser.update(cx, |browser, _| browser.browse_find = Some(input));
+                self.browser.update(cx, |browser, _| browser.browse_find_sub = Some(sub));
             }
         }
         cx.notify();
@@ -142,18 +142,18 @@ impl Harness {
     /// The debounce is per tab: the timer fires only for the tab that
     /// armed it, so a switch never searches a stale query on the new tab.
     pub(super) fn find_input_changed(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
-        let typed = self.browser.browse_find.as_ref().map(|input| input.read(cx).value().to_string());
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let typed = self.browser.read(cx).browse_find.as_ref().map(|input| input.read(cx).value().to_string());
         let Some(typed) = typed else { return };
-        if !self.browser.find_strips.for_tab(id).set_query(&typed) {
+        if !self.browser.update(cx, |browser, _| browser.find_strips.for_tab(id).set_query(&typed)) {
             return;
         }
-        let generation = self.browser.find_strips.arm(id);
+        let generation = self.browser.update(cx, |browser, _| browser.find_strips.arm(id));
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(chrome::FIND_DEBOUNCE_MS)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.find_strips.armed_current(id, generation)
-                    && this.browser.browse_centre_shown(cx) == Some(id)
+                if this.browser.read(cx).find_strips.armed_current(id, generation)
+                    && this.browser.read(cx).browse_centre_shown(cx) == Some(id)
                 {
                     this.step_browse_find(true, cx);
                 }
@@ -163,7 +163,7 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
 
     pub(super) fn stop_find_on_tab(&mut self, id: TabId, cx: &mut gpui::App) {
         let open = self.find_strips.for_tab(id).open;

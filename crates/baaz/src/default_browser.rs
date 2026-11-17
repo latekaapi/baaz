@@ -1,9 +1,11 @@
 //! The default-browser setting (B2a-H7): Settings → Browser → Default
 //! browser.
 //!
-//! The frame hook reads the handler through
-//! `LSCopyDefaultHandlerForURLScheme` into the cache on [`Harness`](crate::app::Harness)
-//! (focus-regain, the post-Make-default re-read, the first frame); the
+//! The Browse view reads the handler through
+//! `LSCopyDefaultHandlerForURLScheme` into its cache
+//! ([`BrowserView::refresh_default_browser_cache`](crate::browser::BrowserView::refresh_default_browser_cache):
+//! at launch, on focus-regain through the root's window-activation
+//! observer, and on the post-Make-default re-read timer — never a frame); the
 //! row renders that cache only, and sets the handler through
 //! `LSSetDefaultHandlerForURLScheme` — both through framework links, no
 //! new crates. The pure pieces (which name a handler id wears, the
@@ -179,19 +181,39 @@ pub(crate) fn default_handler_for_https() -> Option<String> {
 
 impl crate::app::Harness {
     /// The cached `https` handler for the Settings row: `None` until
-    /// the first frame's read, or when the lookup fails. Render reads
+    /// the launch read, or when the lookup fails. Render reads
     /// this only — never a live LaunchServices lookup.
-    pub(crate) fn default_browser_handler(&self) -> Option<&str> {
-        self.browser.default_browser_cache.as_ref().and_then(|inner| inner.as_deref())
+    pub(crate) fn default_browser_handler<'a>(&self, cx: &'a gpui::App) -> Option<&'a str> {
+        self.browser.read(cx).default_browser_cache.as_ref().and_then(|inner| inner.as_deref())
     }
 
+}
+
+impl crate::browser::BrowserView {
     /// Re-read the `https` handler into the cache and retire the
     /// Make-default wait with its re-read. Read-only — never changes the
-    /// default.
-    pub(crate) fn refresh_default_browser_cache(&mut self) {
-        self.browser.default_browser_cache = Some(default_handler_for_https());
-        self.browser.default_browser_confirm_pending = false;
-        self.browser.default_browser_recheck_at = None;
+    /// default. Redraws the view only when the row would read differently.
+    pub(crate) fn refresh_default_browser_cache(&mut self, cx: &mut gpui::Context<Self>) {
+        let read = Some(default_handler_for_https());
+        let changed = self.default_browser_cache != read || self.default_browser_confirm_pending;
+        self.default_browser_cache = read;
+        self.default_browser_confirm_pending = false;
+        self.default_browser_recheck = None;
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A Make-default click: the row waits for macOS to confirm, and the
+    /// handler is read again about a second later (macOS confirms
+    /// asynchronously) and on the next focus-regain.
+    pub(crate) fn await_default_browser(&mut self, cx: &mut gpui::Context<Self>) {
+        self.default_browser_confirm_pending = true;
+        self.default_browser_recheck = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+            let _ = this.update(cx, |this, cx| this.refresh_default_browser_cache(cx));
+        }));
+        cx.notify();
     }
 }
 

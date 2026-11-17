@@ -34,16 +34,22 @@ fn browser_source() -> String {
 
 /// A pending tabs write lands synchronously in BOTH quit paths — the menu's
 /// `QuitApp` and the `on_app_quit` hook for Dock/signal quits — next to the
-/// layout/sessions flushes.
+/// layout/sessions flushes, and `browser.db`'s queued writes drain there
+/// too, bounded (task 4.5b).
 #[test]
 fn quit_flushes_a_pending_tabs_write_in_both_quit_paths() {
     for name in ["app.rs", "main.rs"] {
         let body = source(name);
         assert!(
-            body.contains("this.browser.flush_tabs_save()"),
+            body.contains("browser.flush_at_quit(cx)"),
             "{name} flushes tabs at quit next to the sessions flush"
         );
     }
+    let browser = browser_source();
+    let start = browser.find("fn flush_at_quit(").expect("the quit flush exists");
+    let quit = &browser[start..start + browser[start..].find("\n    }\n").expect("it ends")];
+    assert!(quit.contains("self.flush_tabs_save();"), "the quit flush writes the tabs now");
+    assert!(quit.contains("drain_at_quit(super::data::BrowserData::QUIT_DRAIN)"), "and drains browser.db, bounded");
 }
 
 /// The debounced write leaves the UI thread through the tabs store's one
@@ -124,7 +130,7 @@ fn a_visible_page_never_dirties_tabs_json() {
     let body = browser_source();
     assert!(
         !body.contains("mark_shown(id, tabs::now_ms()) {"),
-        "the per-frame sync schedules no write for a merely visible page"
+        "the frame's occlusion schedules no write for a merely visible page"
     );
 }
 

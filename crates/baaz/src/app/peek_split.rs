@@ -4,7 +4,7 @@
 
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
-use gpui::{div, prelude::*, px, relative, AnyElement, Context, Pixels, SharedString, Window};
+use gpui::{div, prelude::*, px, relative, AnyElement, Context, SharedString, Window};
 use gpui_kit::base::{h_flex, v_flex};
 
 use super::Harness;
@@ -40,7 +40,7 @@ impl Harness {
     /// `page` (the shown tab's pane) and its partner side by side, the
     /// original left tab always on the left. `Err(page)` when there is none.
     pub(crate) fn render_split(&mut self, page: AnyElement, window: &mut Window, cx: &mut Context<Self>) -> Result<AnyElement, AnyElement> {
-        let (Some(pair), Some(shown), Some(partner)) = (self.browser.split, self.browser.browse_centre_shown(cx), self.split_partner(cx)) else {
+        let (Some(pair), Some(shown), Some(partner)) = (self.browser.read(cx).split, self.browser.read(cx).browse_centre_shown(cx), self.browser.read(cx).split_partner(cx)) else {
             return Err(page);
         };
         let state = self.ensure_tab_page(crate::browser::HOME_KEY, partner, window, cx);
@@ -83,8 +83,8 @@ impl Harness {
         let ground = cx.aui().colors.surface_1;
         // The left half takes its dragged share; the right the rest. Before
         // the centre has been measured, an even split.
-        let ratio = peek_split::clamp_split(self.browser.split_ratio);
-        let centre = self.browser.centre_page_rect;
+        let ratio = peek_split::clamp_split(self.browser.read(cx).split_ratio);
+        let centre = self.browser.read(cx).centre_page_rect;
         let left = div()
             .h_full()
             .flex_none()
@@ -99,18 +99,18 @@ impl Harness {
         // the pages. The capture layer keeps it once the pointer outruns
         // the strip.
         let drag = |x: f32, this: &mut Self, cx: &mut Context<Self>| {
-            if let Some(centre) = this.browser.centre_page_rect {
-                this.browser.split_ratio = peek_split::split_ratio_at(centre, x);
+            if let Some(centre) = this.browser.read(cx).centre_page_rect {
+                this.browser.update(cx, |browser, _| browser.split_ratio = peek_split::split_ratio_at(centre, x));
                 cx.notify();
             }
         };
         let start = cx.listener(|this: &mut Self, _: &f32, _, cx| {
-            this.browser.split_dragging = true;
+            this.browser.update(cx, |browser, _| browser.split_dragging = true);
             cx.notify();
         });
         let moved = cx.listener(move |this: &mut Self, x: &f32, _, cx| drag(*x, this, cx));
         let end = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.browser.split_dragging = false;
+            this.browser.update(cx, |browser, _| browser.split_dragging = false);
             cx.notify();
         });
         let moved_strip = std::rc::Rc::new(moved);
@@ -133,7 +133,7 @@ impl Harness {
             .relative()
             .size_full()
             .child(h_flex().size_full().bg(ground).child(left).child(divider).child(right));
-        if self.browser.split_dragging {
+        if self.browser.read(cx).split_dragging {
             row = row.child(
                 aui::shell::drag_capture_overlay("browse-split-capture")
                     .on_drag(move |x, w, cx| moved_layer(&x, w, cx))
@@ -146,7 +146,7 @@ impl Harness {
     /// The Peek layer over the centre: the scrim (a click closes), the card
     /// with the live page, its × and the caption under it.
     pub(crate) fn render_peek(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let peek = self.browser.peek.as_ref()?;
+        let peek = self.browser.read(cx).peek.as_ref()?;
         let p = cx.aui().colors;
         let state = peek.state.clone();
         let url = state.read(cx).url().to_string();
@@ -154,8 +154,8 @@ impl Harness {
         let host = crate::browser::history::host_of(&url);
         let caption: SharedString = format!("{host}  ·  ⌘↩ open as a tab  ·  esc closes").into();
         aui::data::record_ax_label(&caption);
-        let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_peek(cx));
-        let scrim_close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_peek(cx));
+        let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.browser.update(cx, |browser, cx| browser.close_peek(cx)));
+        let scrim_close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.browser.update(cx, |browser, cx| browser.close_peek(cx)));
         let to_tab = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.peek_to_tab(cx));
         let pane = aui_webview::webview_pane("browse-peek-page", &state).without_nav().into_any_element();
         let left = relative((1.0 - PEEK_W) / 2.0);
@@ -249,32 +249,4 @@ impl Harness {
         )
     }
 
-    /// The × holes for this frame (window coordinates, radius): the Peek's
-    /// on its own page, and each Split half's on its page. The centre page's
-    /// hole is returned for `set_browse_holes` to merge with its own.
-    pub(crate) fn peek_split_holes(&mut self, cx: &mut Context<Self>) -> Option<(gpui::Bounds<Pixels>, Pixels)> {
-        let centre = self.browser.centre_page_rect?;
-        let r = px(CLOSE / 2.0);
-        if let Some(peek) = self.browser.peek.as_ref() {
-            let card = peek_split::peek_rect(centre);
-            let hole = [peek_split::close_rect(card)].map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), CLOSE, CLOSE, CLOSE / 2.0]);
-            peek.state.update(cx, |state, _| state.set_holes(hole.to_vec()));
-        }
-        let pair = self.browser.split?;
-        let shown = self.browser.browse_centre_shown(cx)?;
-        let partner = self.split_partner(cx)?;
-        let (left, right) = peek_split::split_rects(centre, self.browser.split_ratio);
-        let close = |half: gpui::Bounds<Pixels>| {
-            gpui::Bounds::new(
-                gpui::point(half.origin.x + half.size.width - px(CLOSE + CLOSE_INSET), half.origin.y + px(CLOSE_INSET)),
-                gpui::size(px(CLOSE), px(CLOSE)),
-            )
-        };
-        let (shown_rect, partner_rect) = if shown == pair.left { (close(left), close(right)) } else { (close(right), close(left)) };
-        if let Some(state) = self.browser.states.get(&partner).cloned() {
-            let b = partner_rect;
-            state.update(cx, |state, _| state.set_holes(vec![[f32::from(b.origin.x), f32::from(b.origin.y), CLOSE, CLOSE, CLOSE / 2.0]]));
-        }
-        Some((shown_rect, r))
-    }
 }

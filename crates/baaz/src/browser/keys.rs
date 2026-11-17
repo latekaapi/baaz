@@ -20,14 +20,14 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         // In Browse the keyboard sits with the centre page, whose rect
-        // is the stored centre rect — the very rect the sync placed —
-        // never the pane's and never a second computation. Before the
-        // first sync the live computation stands in.
+        // is the stored centre rect — the very rect the frame's occlusion
+        // placed — never the pane's and never a second computation. Before
+        // the first frame the live computation stands in.
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             let Some(state) = self.browse_centre_state(cx) else {
                 return;
             };
-            let page = match self.browser.centre_page_rect {
+            let page = match self.browser.read(cx).centre_page_rect {
                 Some(page) => page,
                 None => {
                     let content = window_content_bounds(window);
@@ -83,9 +83,9 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         // R4: Esc closes the Peek and ⌘↩ makes it a tab, from inside it.
-        if self.browser.peek.is_some() {
+        if self.browser.read(cx).peek.is_some() {
             match keystroke {
-                "escape" => return self.close_peek(cx),
+                "escape" => return self.browser.update(cx, |browser, cx| browser.close_peek(cx)),
                 "cmd-enter" => return self.peek_to_tab(cx),
                 _ => {}
             }

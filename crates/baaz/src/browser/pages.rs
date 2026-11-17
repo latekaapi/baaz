@@ -20,15 +20,16 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WebviewState> {
-        self.ensure_tabs_loaded();
-        let owner = self.browser.tab_owner_for_key(key);
-        let id = self.ensure_owner_tab(&owner);
-        if let Some(state) = self.browser.states.get(&id).cloned() {
-            self.register_tab_page(key, id, &state);
+        self.ensure_tabs_loaded(cx);
+        let owner = self.browser.read(cx).tab_owner_for_key(key);
+        let id = self.ensure_owner_tab(&owner, cx);
+        if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
+            self.register_tab_page(key, id, &state, cx);
             return state;
         }
         let url = self
             .browser
+            .read(cx)
             .tabs
             .get(id)
             .map(|tab| tab.url.clone())
@@ -37,9 +38,9 @@ impl Harness {
         let fresh_blank = initial == BLANK;
         // Explicit boot flag, never environment sniffed in render: captures
         // and tests run the scripted page, the app runs WKWebView.
-        self.browser.browser_builds += 1;
-        let fake = self.browser.fake || cfg!(test);
-        let profile = self.browser.tab_profile(id);
+        self.browser.update(cx, |browser, _| browser.browser_builds += 1);
+        let fake = self.browser.read(cx).fake || cfg!(test);
+        let profile = self.browser.read(cx).tab_profile(id);
         let state = cx.new(|cx| {
             if fake {
                 let mut backend = FakeWebBackend::new();
@@ -82,11 +83,11 @@ impl Harness {
             let focus = state.read(cx).focus_handle().clone();
             window.focus(&focus, cx);
         }
-        self.browser.states.insert(id, state.clone());
+        self.browser.update(cx, |browser, cx| browser.adopt_page(id, state.clone(), cx));
         // The agent's `browser_*` tools act on this same state through the
         // socket service, keyed by session id: always the session's active
         // tab's page.
-        self.register_tab_page(key, id, &state);
+        self.register_tab_page(key, id, &state, cx);
         state
     }
 
@@ -95,38 +96,18 @@ impl Harness {
     /// uses this: the page's last snapshot stays on screen while the column
     /// slides out instead of the "Opening the page" placeholder (B7).
     pub(crate) fn existing_browser(&self, cx: &gpui::App) -> Option<Entity<WebviewState>> {
-        if !self.browser.tabs_loaded {
+        if !self.browser.read(cx).tabs_loaded {
             return None;
         }
         let owner = self.shown_tab_owner(cx);
-        let space = self.browser.owner_space(&owner);
+        let space = self.browser.read(cx).owner_space(&owner);
         self.browser
+            .read(cx)
             .tabs
             .active_of(&owner, space.as_deref())
-            .and_then(|id| self.browser.states.get(&id).cloned())
+            .and_then(|id| self.browser.read(cx).states.get(&id).cloned())
     }
 
-    /// Start a fetch for every tab favicon not yet asked for this launch
-    /// ([`favicons`]); each landing repaints the sidebar through the
-    /// favicon generation in its key.
-    pub(super) fn fetch_favicons(&mut self, cx: &mut Context<Self>) {
-        let wanted: Vec<String> = self.browser.tabs.tabs.iter().filter_map(|tab| tab.favicon.clone()).collect();
-        for url in wanted {
-            if !self.browser.favicons.needs_fetch(&url) {
-                continue;
-            }
-            let fetch_url = url.clone();
-            let task = cx.background_executor().spawn(async move { favicons::fetch(&fetch_url) });
-            cx.spawn(async move |this, cx| {
-                let path = task.await;
-                let _ = this.update(cx, |this, cx| {
-                    this.browser.favicons.landed(url, path);
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-    }
 
     /// Prepare the shown tab's webview ahead of the pane animating
     /// (B7): `toggle_right`/`show_right` call this when they land open on
@@ -146,23 +127,24 @@ impl Harness {
         {
             return;
         }
-        if !(self.browser.fake || cfg!(test)) {
+        if !(self.browser.read(cx).fake || cfg!(test)) {
             return;
         }
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
-        let id = self.ensure_owner_tab(&owner);
-        if self.browser.states.contains_key(&id) {
+        let id = self.ensure_owner_tab(&owner, cx);
+        if self.browser.read(cx).states.contains_key(&id) {
             return;
         }
         let url = self
             .browser
+            .read(cx)
             .tabs
             .get(id)
             .map(|tab| tab.url.clone())
             .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
-        self.browser.browser_builds += 1;
+        self.browser.update(cx, |browser, _| browser.browser_builds += 1);
         let state = cx.new(|cx| {
             let mut backend = FakeWebBackend::new();
             if backend.url().as_ref() != initial {
@@ -170,9 +152,9 @@ impl Harness {
             }
             WebviewState::new(Box::new(backend), cx)
         });
-        self.browser.states.insert(id, state.clone());
+        self.browser.update(cx, |browser, cx| browser.adopt_page(id, state.clone(), cx));
         let key = self.browser_key(cx);
-        self.register_tab_page(&key, id, &state);
+        self.register_tab_page(&key, id, &state, cx);
     }
 
     /// Build the real webview outside `render` (B7fix2): the open action's
@@ -194,13 +176,14 @@ impl Harness {
             return;
         }
         let key = self.browser_key(cx);
-        let owner = self.browser.tab_owner_for_key(&key);
-        let exists = self.browser.tabs_loaded
+        let owner = self.browser.read(cx).tab_owner_for_key(&key);
+        let exists = self.browser.read(cx).tabs_loaded
             && self
                 .browser
+                .read(cx)
                 .tabs
-                .active_of(&owner, self.browser.owner_space(&owner).as_deref())
-                .is_some_and(|id| self.browser.states.contains_key(&id));
+                .active_of(&owner, self.browser.read(cx).owner_space(&owner).as_deref())
+                .is_some_and(|id| self.browser.read(cx).states.contains_key(&id));
         if exists {
             return;
         }
@@ -224,28 +207,28 @@ impl Harness {
         self.open_right_on(RightKind::Browser, cx);
         // A person's own open earns URL-field focus; a link never does —
         // undo the arm `open_right_on` owes the person.
-        self.browser.browser_url_focus_armed = false;
-        if self.browser.fake || cfg!(test) {
-            self.ensure_tabs_loaded();
+        self.browser.update(cx, |browser, _| browser.browser_url_focus_armed = false);
+        if self.browser.read(cx).fake || cfg!(test) {
+            self.ensure_tabs_loaded(cx);
             let owner = self.shown_tab_owner(cx);
-            let id = self.ensure_owner_tab(&owner);
-            let state = self.browser.states.get(&id).cloned().or_else(|| {
+            let id = self.ensure_owner_tab(&owner, cx);
+            let state = self.browser.read(cx).states.get(&id).cloned().or_else(|| {
                 self.prewarm_browser_if_needed(cx);
-                self.browser.states.get(&id).cloned()
+                self.browser.read(cx).states.get(&id).cloned()
             });
             if let Some(state) = state {
                 if state.read(cx).url().as_ref() != url.as_str() {
                     let title = state.read(cx).title().to_string();
                     state.update(cx, |state, _cx| state.navigate(&url));
-                    if self.browser.tabs.set_url_title(id, &url, &title) {
-                        self.browser.schedule_tabs_write();
+                    if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, &url, &title)) {
+                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     }
                 }
             } else {
-                self.browser.browser_pending_url = Some(url);
+                self.browser.update(cx, |browser, _| browser.browser_pending_url = Some(url));
             }
         } else {
-            self.browser.browser_pending_url = Some(url);
+            self.browser.update(cx, |browser, _| browser.browser_pending_url = Some(url));
         }
         cx.notify();
     }
@@ -255,7 +238,7 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WebviewState> {
-        let focus = std::mem::take(&mut self.browser.browser_url_focus_armed);
+        let focus = self.browser.update(cx, |browser, _| std::mem::take(&mut browser.browser_url_focus_armed));
         let key = self.browser_key(cx);
         // B7fix: the toggle prewarms the webview before the frame, so the
         // creation-time focus inside `browser_for` no longer fires on a
@@ -263,13 +246,14 @@ impl Harness {
         // focus on the prewarmed blank page here instead. Restores never arm
         // it, so they still leave the composer's keyboard alone, and an
         // armed open onto a navigated page still does not steal focus.
-        let owner = self.browser.tab_owner_for_key(&key);
-        let existed = self.browser.tabs_loaded
+        let owner = self.browser.read(cx).tab_owner_for_key(&key);
+        let existed = self.browser.read(cx).tabs_loaded
             && self
                 .browser
+                .read(cx)
                 .tabs
-                .active_of(&owner, self.browser.owner_space(&owner).as_deref())
-                .is_some_and(|id| self.browser.states.contains_key(&id));
+                .active_of(&owner, self.browser.read(cx).owner_space(&owner).as_deref())
+                .is_some_and(|id| self.browser.read(cx).states.contains_key(&id));
         let state = self.browser_for(&key, focus, window, cx);
         if focus && existed && state.read(cx).url() == BLANK {
             let focus_handle = state.read(cx).focus_handle().clone();
@@ -278,7 +262,7 @@ impl Harness {
         // A link's pending URL lands here on the next render (B9): the
         // event had no window, so the navigation waited for one. Consumed
         // once — later frames reuse the navigated page.
-        if let Some(url) = self.browser.browser_pending_url.take() {
+        if let Some(url) = self.browser.update(cx, |browser, _| browser.browser_pending_url.take()) {
             if state.read(cx).url().as_ref() != url.as_str() {
                 state.update(cx, |state, _cx| state.navigate(&url));
             }
@@ -295,24 +279,25 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WebviewState> {
-        if let Some(state) = self.browser.states.get(&id).cloned() {
-            self.register_tab_page(key, id, &state);
+        if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
+            self.register_tab_page(key, id, &state, cx);
             return state;
         }
         let url = self
             .browser
+            .read(cx)
             .tabs
             .get(id)
             .map(|tab| tab.url.clone())
             .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
-        self.browser.browser_builds += 1;
-        let fake = self.browser.fake || cfg!(test);
+        self.browser.update(cx, |browser, _| browser.browser_builds += 1);
+        let fake = self.browser.read(cx).fake || cfg!(test);
         // The `--steps` capture seam: queued scripts land on the fresh
         // scripted backend before it is boxed, then drain through the real
         // poll path. Production never queues, so this takes nothing.
-        let scripts = std::mem::take(&mut self.browser.fake_scripts);
-        let profile = self.browser.tab_profile(id);
+        let scripts = self.browser.update(cx, |browser, _| std::mem::take(&mut browser.fake_scripts));
+        let profile = self.browser.read(cx).tab_profile(id);
         let state = cx.new(|cx| {
             if fake {
                 let mut backend = FakeWebBackend::new();
@@ -352,8 +337,8 @@ impl Harness {
                 }
             }
         });
-        self.browser.states.insert(id, state.clone());
-        self.register_tab_page(key, id, &state);
+        self.browser.update(cx, |browser, cx| browser.adopt_page(id, state.clone(), cx));
+        self.register_tab_page(key, id, &state, cx);
         state
     }
 
@@ -412,7 +397,7 @@ impl Harness {
                 match state.read(cx).screenshot().map(<[u8]>::to_vec) {
                     Some(bytes) => self.attach_browser_screenshot(bytes, cx),
                     None => {
-                        self.browser.shot_pending.insert(key);
+                        self.browser.update(cx, |browser, _| browser.shot_pending.insert(key));
                     }
                 }
             }
@@ -467,35 +452,71 @@ impl Harness {
         }
     }
 
-    /// Drain popups and "open in new tab" requests each frame for every
-    /// live tab: each becomes a new tab right after its opener, with the
+
+    /// Rebuild the shown tab's page, consuming queued fake-backend scripts
+    /// (the `--steps` capture seam; production never queues). Answers
+    /// whether a page was rebuilt.
+    pub(super) fn rebuild_shown_browse_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return false };
+        self.browser.update(cx, |browser, _| browser.states.remove(&id));
+        self.terminal_service.unregister_tab_page(id.0);
+        self.ensure_tab_page(HOME_KEY, id, window, cx);
+        true
+    }
+}
+
+impl BrowserView {
+    /// Start a fetch for every tab favicon not yet asked for this launch
+    /// ([`favicons`]); each landing repaints the sidebar through the
+    /// favicon generation in its key.
+    pub(super) fn fetch_favicons(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<String> = self.tabs.tabs.iter().filter_map(|tab| tab.favicon.clone()).collect();
+        for url in wanted {
+            if !self.favicons.needs_fetch(&url) {
+                continue;
+            }
+            let fetch_url = url.clone();
+            let task = cx.background_executor().spawn(async move { favicons::fetch(&fetch_url) });
+            cx.spawn(async move |this, cx| {
+                let path = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.favicons.landed(url, path);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+    /// Drain popups and "open in new tab" requests for every live tab, on
+    /// the page reconcile (a page reports its popup as a change): each becomes a new tab right after its opener, with the
     /// opener's owner and space, wrapping the given backend for popups — a
     /// fresh tab at that URL for open requests. Only the shown tab's
     /// popups may take the centre: a foreground ask from a background
     /// opener lands in the background instead.
     ///
-    /// Answers whether any tab was placed. The render calls this BEFORE it
-    /// re-arms the cached sidebar (`sync_sidebar_pane`): drained after it,
-    /// a new tab's row waited for the next frame, and a quiet window takes
-    /// none until the next input — ⌘-click and the menu's "Open Link in New
-    /// Tab" showed nothing until the person clicked again (owner, 9 Nov).
-    pub(crate) fn drain_browse_popups(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.browser.tabs_loaded {
+    /// Answers whether any tab was placed. Each placement redraws the view,
+    /// so the cached sidebar re-arms on the next frame with the new row: a
+    /// popup drained only by the frame waited for the next input —
+    /// ⌘-click and the menu's "Open Link in New Tab" showed nothing until
+    /// the person clicked again (owner, 9 Nov).
+    pub(super) fn drain_browse_popups(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.tabs_loaded {
             return false;
         }
         let mut placed_any = false;
-        let shown = self.browser.browse_centre_shown(cx);
-        let openers: Vec<TabId> = self.browser.states.keys().copied().collect();
+        let shown = self.browse_centre_shown(cx);
+        let openers: Vec<TabId> = self.states.keys().copied().collect();
         for opener in openers {
-            let Some(state) = self.browser.states.get(&opener).cloned() else { continue };
+            let Some(state) = self.states.get(&opener).cloned() else { continue };
             let popups = state.update(cx, |state, _| state.take_popup_backends());
             for (url, foreground, backend) in popups {
                 let foreground = chrome::popup_foreground(foreground, opener, shown);
-                let Some(id) = chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground) else { continue };
+                let Some(id) = chrome::place_popup_tab(&mut self.tabs, opener, &url, foreground) else { continue };
                 let page = cx.new(|cx| WebviewState::new(backend, cx));
-                self.browser.states.insert(id, page);
-                self.browser.find_strips.remove(id);
-                self.browser.schedule_tabs_write();
+                self.adopt_page(id, page, cx);
+                self.find_strips.remove(id);
+                self.schedule_tabs_write();
                 placed_any = true;
                 cx.notify();
             }
@@ -503,15 +524,15 @@ impl Harness {
             for (url, foreground) in opens {
                 let asked = foreground;
                 let foreground = chrome::popup_foreground(foreground, opener, shown);
-                let before = self.browser.tabs.get(opener).and_then(|tab| self.browser.tabs.active_of(&tab.owner, tab.space.as_deref()));
-                let placed = chrome::place_popup_tab(&mut self.browser.tabs, opener, &url, foreground);
-                let after = self.browser.tabs.get(opener).and_then(|tab| self.browser.tabs.active_of(&tab.owner, tab.space.as_deref()));
+                let before = self.tabs.get(opener).and_then(|tab| self.tabs.active_of(&tab.owner, tab.space.as_deref()));
+                let placed = chrome::place_popup_tab(&mut self.tabs, opener, &url, foreground);
+                let after = self.tabs.get(opener).and_then(|tab| self.tabs.active_of(&tab.owner, tab.space.as_deref()));
                 crate::baaz_log!(
                     "browse: open request {url} from tab {} (asked foreground={asked}, shown={:?}) → tab {:?}, active {:?} → {:?}",
                     opener.0, shown.map(|id| id.0), placed.map(|id| id.0), before.map(|id| id.0), after.map(|id| id.0)
                 );
                 if placed.is_some() {
-                    self.browser.schedule_tabs_write();
+                    self.schedule_tabs_write();
                     placed_any = true;
                     cx.notify();
                 }
@@ -520,20 +541,6 @@ impl Harness {
         placed_any
     }
 
-    /// Rebuild the shown tab's page, consuming queued fake-backend scripts
-    /// (the `--steps` capture seam; production never queues). Answers
-    /// whether a page was rebuilt.
-    pub(super) fn rebuild_shown_browse_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return false };
-        self.browser.states.remove(&id);
-        self.terminal_service.unregister_tab_page(id.0);
-        self.ensure_tab_page(HOME_KEY, id, window, cx);
-        true
-    }
-}
-
-impl BrowseState {
 
     /// Whether this session key has a live page: its active tab's state
     /// exists. The existing pane tests pin boot and switch on this.

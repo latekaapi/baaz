@@ -17,35 +17,35 @@ impl Harness {
     /// Whose tabs the pane shows: the active session's, or the person's
     /// with no session open.
     pub(crate) fn shown_tab_owner(&self, cx: &gpui::App) -> Owner {
-        self.browser.tab_owner_for_key(&self.browser_key(cx))
+        self.browser.read(cx).tab_owner_for_key(&self.browser_key(cx))
     }
 
     /// Load the tab model on first use and migrate older restores: every
     /// session with a stored `browser_url` and no tabs yet gets one
     /// session tab with that URL. Persists when either step changed the
     /// model.
-    pub(crate) fn ensure_tabs_loaded(&mut self) {
-        if self.browser.tabs_loaded {
+    pub(crate) fn ensure_tabs_loaded(&mut self, cx: &mut gpui::App) {
+        if self.browser.read(cx).tabs_loaded {
             return;
         }
-        self.browser.tabs_loaded = true;
-        self.browser.tabs = tabs::load();
-        let mut changed = self.browser.tabs.migrate_from_overrides(&self.overrides);
+        self.browser.update(cx, |browser, _| browser.tabs_loaded = true);
+        self.browser.update(cx, |browser, _| browser.tabs = tabs::load());
+        let mut changed = self.browser.update(cx, |browser, _| browser.tabs.migrate_from_overrides(&self.overrides));
         // Spaces are the browser's own (docs/27 v2): an older file's
         // per-project person tabs become Personal's folders, once.
         let projects = &self.projects;
-        changed |= self.browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()));
+        self.browser.update(cx, |browser, _| changed |= browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone())));
         if changed {
-            self.browser.schedule_tabs_write();
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
     }
 
     /// The owner's active tab, opening its first when it has none: a
     /// session restores its last URL, everyone starts blank. The strip
     /// shows only when the owner has at least one tab.
-    pub(super) fn ensure_owner_tab(&mut self, owner: &Owner) -> TabId {
-        let space = self.browser.owner_space(owner);
-        if let Some(id) = self.browser.tabs.active_of(owner, space.as_deref()) {
+    pub(super) fn ensure_owner_tab(&mut self, owner: &Owner, cx: &mut gpui::App) -> TabId {
+        let space = self.browser.read(cx).owner_space(owner);
+        if let Some(id) = self.browser.read(cx).tabs.active_of(owner, space.as_deref()) {
             return id;
         }
         let stored = match owner {
@@ -56,22 +56,19 @@ impl Harness {
                 .and_then(|right| right.browser_url),
             Owner::Person => None,
         };
-        let space = self.browser.browse_space();
-        let id = self
-            .browser
-            .tabs
-            .open(space, owner.clone(), initial_url(stored.as_deref()), None);
-        self.browser.schedule_tabs_write();
+        let space = self.browser.read(cx).browse_space();
+        let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), initial_url(stored.as_deref()), None));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         id
     }
 
     /// Point the agent `browser_*` tools at `state`: the session key's
     /// active tab's page. Called on every resolve and every tab switch, so
     /// registration always follows the active tab.
-    pub(super) fn register_tab_page(&mut self, key: &str, id: TabId, state: &Entity<WebviewState>) {
+    pub(super) fn register_tab_page(&mut self, key: &str, id: TabId, state: &Entity<WebviewState>, cx: &mut gpui::App) {
         self.terminal_service.register_browser(key, state.clone());
         self.terminal_service.register_tab_page(key, id.0, state.clone());
-        self.browser.agent_tabs.insert(key.to_owned(), id);
+        self.browser.update(cx, |browser, _| browser.agent_tabs.insert(key.to_owned(), id));
     }
 
     /// Entering Browse ensures the project has a person tab to show
@@ -79,9 +76,9 @@ impl Harness {
     /// focused. A project that already has tabs is untouched — and in
     /// particular never steals focus.
     pub(crate) fn ensure_browse_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let space = self.browser.browse_space();
-        if self.browser.tabs.active_of(&Owner::Person, space.as_deref()).is_none() {
+        self.ensure_tabs_loaded(cx);
+        let space = self.browser.read(cx).browse_space();
+        if self.browser.read(cx).tabs.active_of(&Owner::Person, space.as_deref()).is_none() {
             self.new_browse_sidebar_tab(window, cx);
         }
     }
@@ -91,19 +88,19 @@ impl Harness {
     /// entering-Browse ensure share this one path. Clears any held session
     /// tab: ⌘T lands on the person's new tab.
     pub(crate) fn new_browse_sidebar_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let space = self.browser.browse_space();
-        let after = self.browser.tabs.active_of(&Owner::Person, space.as_deref());
+        self.ensure_tabs_loaded(cx);
+        let space = self.browser.read(cx).browse_space();
+        let after = self.browser.read(cx).tabs.active_of(&Owner::Person, space.as_deref());
         // Next to the current tab, and in its folder when it sits in one
         // (owner 2026-10-11): a new tab opened from a folder used to land
         // at the end of Today instead.
-        let folder = after.and_then(|after| self.browser.tabs.get(after)).filter(|tab| !tab.pinned).and_then(|tab| tab.folder.clone());
-        let id = self.browser.tabs.open(space, Owner::Person, BLANK, after);
+        let folder = after.and_then(|after| self.browser.read(cx).tabs.get(after)).filter(|tab| !tab.pinned).and_then(|tab| tab.folder.clone());
+        let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, Owner::Person, BLANK, after));
         if let Some(folder) = folder {
-            self.browser.tabs.set_folder(id, Some(&folder));
+            self.browser.update(cx, |browser, _| browser.tabs.set_folder(id, Some(&folder)));
         }
-        self.browser.browse_session_tab = None;
-        self.browser.schedule_tabs_write();
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         // ⌘T lands on the new-tab page with the field focused (B2a-H4):
         // the Harness-owned address input, empty for a blank tab.
@@ -124,26 +121,26 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_tabs_loaded();
-        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.read(cx).tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
         }
         // The tab being left drops its find highlight (its strip keeps the
         // query), and the shared input points at the arriving tab — both
         // on the event, never during render.
-        if let Some(leaving) = self.browser.browse_centre_shown(cx) {
+        if let Some(leaving) = self.browser.read(cx).browse_centre_shown(cx) {
             if leaving != id {
-                self.browser.stop_find_on_tab(leaving, cx);
+                self.browser.update(cx, |browser, cx| browser.stop_find_on_tab(leaving, cx));
             }
         }
-        if self.browser.tabs.activate(id) {
-            self.browser.schedule_tabs_write();
+        if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
-        self.browser.browse_session_tab = None;
-        self.browser.tab_menu = None;
-        self.browser.tab_menu_bounds = None;
-        self.browser.browse_drop_target = None;
-        self.browser.browse_drop_at_end = false;
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, _| browser.tab_menu = None);
+        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
+        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
+        self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         self.sync_find_input_to_tab(id, window, cx);
         self.leave_browse_address(window, cx);
@@ -156,8 +153,8 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return None;
         }
-        self.ensure_tabs_loaded();
-        Some(self.browser.browse_space())
+        self.ensure_tabs_loaded(cx);
+        Some(self.browser.read(cx).browse_space())
     }
 
     /// ⌘W in Browse: while a session tab shows, stop showing it —
@@ -169,12 +166,12 @@ impl Harness {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
-        if self.browser.browse_session_tab.take().is_some() {
+        if self.browser.update(cx, |browser, _| browser.browse_session_tab.take().is_some()) {
             cx.notify();
             return;
         }
         let owner = Owner::Person;
-        let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
+        let Some(id) = self.browser.read(cx).tabs.active_of(&owner, space.as_deref()) else {
             return;
         };
         // ⌘W on the space's last tab closes the window, as a browser does
@@ -182,7 +179,7 @@ impl Harness {
         // list for ⌘⇧T; a blank one does not), a fresh blank tab stands
         // ready for the window's return, and the window hides the way
         // ⌘W in Sessions does.
-        let last = self.browser.tabs.person_tabs(space.as_deref()).len() <= 1;
+        let last = self.browser.read(cx).tabs.person_tabs(space.as_deref()).len() <= 1;
         self.close_tab(HOME_KEY, id, window, cx);
         if last {
             window.dispatch_action(Box::new(crate::app::CloseWindow), cx);
@@ -196,15 +193,15 @@ impl Harness {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
-        let Some(id) = self.browser.tabs.reopen_last() else {
+        let Some(id) = self.browser.update(cx, |browser, _| browser.tabs.reopen_last()) else {
             return;
         };
-        self.browser.schedule_tabs_write();
-        let ours = self.browser.tabs.get(id).is_some_and(|tab| {
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        let ours = self.browser.read(cx).tabs.get(id).is_some_and(|tab| {
             tab.owner == Owner::Person && tab.space.as_deref() == space.as_deref()
         });
         if ours {
-            self.browser.browse_session_tab = None;
+            self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
             self.ensure_tab_page(HOME_KEY, id, window, cx);
         }
         cx.notify();
@@ -224,7 +221,7 @@ impl Harness {
             return;
         };
         let owner = Owner::Person;
-        let Some(id) = self.browser.tabs.nth_tab(&owner, space.as_deref(), n, last) else {
+        let Some(id) = self.browser.read(cx).tabs.nth_tab(&owner, space.as_deref(), n, last) else {
             return;
         };
         self.select_browse_sidebar_tab(id, window, cx);
@@ -238,11 +235,11 @@ impl Harness {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
-        if self.browser.browse_session_tab.is_some() {
+        if self.browser.read(cx).browse_session_tab.is_some() {
             return;
         }
-        if self.browser.tabs.move_active_by(&Owner::Person, space.as_deref(), delta) {
-            self.browser.schedule_tabs_write();
+        if self.browser.update(cx, |browser, _| browser.tabs.move_active_by(&Owner::Person, space.as_deref(), delta)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
         let _ = window;
         cx.notify();
@@ -253,14 +250,14 @@ impl Harness {
     /// project's last tab opens a fresh blank one (see
     /// [`Self::close_tab`]). A closed or session-owned `id` is a no-op.
     pub(crate) fn close_person_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        if self.browser.tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.read(cx).tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
         }
-        self.browser.tab_menu = None;
-        self.browser.tab_menu_bounds = None;
-        self.browser.browse_drop_target = None;
-        self.browser.browse_drop_at_end = false;
+        self.browser.update(cx, |browser, _| browser.tab_menu = None);
+        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
+        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
+        self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
         self.close_tab(HOME_KEY, id, window, cx);
     }
 
@@ -268,12 +265,12 @@ impl Harness {
     /// and the `tab-pin:<n>` step. A closed or session-owned `id` is a
     /// no-op. Answers the new pinned state.
     pub(crate) fn toggle_pin_browse_tab(&mut self, id: TabId, cx: &mut Context<Self>) -> Option<bool> {
-        self.ensure_tabs_loaded();
-        let pinned = !self.browser.tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
-        self.browser.tabs.set_pinned(id, pinned).then_some(pinned)?;
-        self.browser.tab_menu = None;
-        self.browser.tab_menu_bounds = None;
-        self.browser.schedule_tabs_write();
+        self.ensure_tabs_loaded(cx);
+        let pinned = !self.browser.read(cx).tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
+        self.browser.update(cx, |browser, _| browser.tabs.set_pinned(id, pinned)).then_some(pinned)?;
+        self.browser.update(cx, |browser, _| browser.tab_menu = None);
+        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
         Some(pinned)
     }
@@ -285,33 +282,33 @@ impl Harness {
     /// no live page the ensure rebuilds it anyway. A closed or
     /// session-owned `id` is a no-op.
     pub(crate) fn reload_browse_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(tab) = self.browser.tabs.get(id).cloned() else {
+        self.ensure_tabs_loaded(cx);
+        let Some(tab) = self.browser.read(cx).tabs.get(id).cloned() else {
             return;
         };
         if tab.owner != Owner::Person {
             return;
         }
-        if self.browser.tabs.activate(id) {
-            self.browser.schedule_tabs_write();
+        if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
-        self.browser.browse_session_tab = None;
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
         let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
         let url = tab.url.clone();
         if !url.is_empty() {
             state.update(cx, |state, _cx| state.navigate(&url));
         }
-        self.browser.tab_menu = None;
-        self.browser.tab_menu_bounds = None;
-        self.browser.browse_drop_target = None;
+        self.browser.update(cx, |browser, _| browser.tab_menu = None);
+        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
+        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
         cx.notify();
     }
 
     /// Close the open tab menu, if any: Escape and click-outside share
     /// this one path. Answers whether one stood open.
     pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.browser.tab_menu.take().is_some() {
-            self.browser.tab_menu_bounds = None;
+        if self.browser.update(cx, |browser, _| browser.tab_menu.take().is_some()) {
+            self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
             cx.notify();
             true
         } else {
@@ -324,19 +321,19 @@ impl Harness {
     /// page — ownership never moves. A closed or person-owned `id` is a
     /// no-op.
     pub(crate) fn select_session_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        if self.browser.tabs.get(id).is_none_or(|tab| !matches!(tab.owner, Owner::Session(_))) {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.read(cx).tabs.get(id).is_none_or(|tab| !matches!(tab.owner, Owner::Session(_))) {
             return;
         }
-        if let Some(leaving) = self.browser.browse_centre_shown(cx) {
+        if let Some(leaving) = self.browser.read(cx).browse_centre_shown(cx) {
             if leaving != id {
-                self.browser.stop_find_on_tab(leaving, cx);
+                self.browser.update(cx, |browser, cx| browser.stop_find_on_tab(leaving, cx));
             }
         }
-        if self.browser.tabs.activate(id) {
-            self.browser.schedule_tabs_write();
+        if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
-        self.browser.browse_session_tab = Some(id);
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(id));
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         cx.notify();
     }
@@ -346,8 +343,8 @@ impl Harness {
     /// [`Self::select_session_tab`] / [`Self::close_tab`] under their
     /// session's key. An unknown `id` is a no-op.
     pub(crate) fn browse_sidebar_tab(&mut self, id: TabId, close: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
-        let Some(owner) = self.browser.tabs.get(id).map(|tab| tab.owner.clone()) else {
+        self.ensure_tabs_loaded(cx);
+        let Some(owner) = self.browser.read(cx).tabs.get(id).map(|tab| tab.owner.clone()) else {
             return;
         };
         match (owner, close) {
@@ -355,8 +352,8 @@ impl Harness {
             (Owner::Person, true) => self.close_person_tab(id, window, cx),
             (Owner::Session(_), false) => self.select_session_tab(id, window, cx),
             (Owner::Session(session), true) => {
-                if self.browser.browse_session_tab == Some(id) {
-                    self.browser.browse_session_tab = None;
+                if self.browser.read(cx).browse_session_tab == Some(id) {
+                    self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
                 }
                 self.close_tab(&session, id, window, cx);
                 cx.notify();
@@ -375,12 +372,12 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_tabs_loaded();
-        if self.browser.tabs.get(id).is_none() {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.read(cx).tabs.get(id).is_none() {
             return;
         }
-        if self.browser.tabs.activate(id) {
-            self.browser.schedule_tabs_write();
+        if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
+            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
         self.ensure_tab_page(key, id, window, cx);
         cx.notify();
@@ -401,8 +398,8 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_tabs_loaded();
-        let Some(tab) = self.browser.tabs.get(id).cloned() else {
+        self.ensure_tabs_loaded(cx);
+        let Some(tab) = self.browser.read(cx).tabs.get(id).cloned() else {
             return;
         };
         // The tab's OWN owner+space: [`Tabs::close`] keys the active
@@ -411,18 +408,19 @@ impl Harness {
         // a different project is current).
         let was_active = self
             .browser
+            .read(cx)
             .tabs
             .active_of(&tab.owner, tab.space.as_deref())
             == Some(id);
-        let next = self.browser.tabs.close(id);
-        self.browser.states.remove(&id);
+        let next = self.browser.update(cx, |browser, _| browser.tabs.close(id));
+        self.browser.update(cx, |browser, _| browser.states.remove(&id));
         // The agent tools' registry holds every tab's page (R2's `tab`
         // argument, R3's grants). Left there, a tab the person closed (⌘W,
         // ✕) kept its page alive: the page parks its native view only when
         // dropped, so the closed page stayed on screen over the next tab and
         // read as a frozen window (owner, 9 Nov). Whoever closes, it goes.
         self.terminal_service.unregister_tab_page(id.0);
-        self.browser.schedule_tabs_write();
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         // B2a-H2b: closing the current project's last person tab while
         // in Browse opens a fresh blank one — entering Browse and this
         // close are the two events that create tabs, never render. Other
@@ -430,8 +428,8 @@ impl Harness {
         // there is honest, and the centre is not showing.
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
             && tab.owner == Owner::Person
-            && tab.space == self.browser.browse_space()
-            && self.browser.tabs.person_tabs(tab.space.as_deref()).is_empty()
+            && tab.space == self.browser.read(cx).browse_space()
+            && self.browser.read(cx).tabs.person_tabs(tab.space.as_deref()).is_empty()
         {
             self.new_browse_sidebar_tab(window, cx);
             return;
@@ -445,11 +443,11 @@ impl Harness {
                 self.ensure_tab_page(key, next, window, cx);
             }
             None => {
-                self.browser.agent_tabs.remove(key);
+                self.browser.update(cx, |browser, _| browser.agent_tabs.remove(key));
                 self.terminal_service.unregister_browser(key);
                 if let Owner::Session(session) = tab.owner {
                     if session != key {
-                        self.browser.agent_tabs.remove(&session);
+                        self.browser.update(cx, |browser, _| browser.agent_tabs.remove(&session));
                         self.terminal_service.unregister_browser(&session);
                     }
                     self.clear_session_browser_url(&session, cx);
@@ -488,17 +486,17 @@ impl Harness {
     /// `WebviewState` moves — no reload, the state stays keyed by tab id and
     /// the centre renders it through `browse_centre_page`.
     pub(crate) fn carry_session_tab_to_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
         if !matches!(owner, Owner::Session(_)) {
             return;
         }
-        let space = self.browser.owner_space(&owner);
-        let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) else {
+        let space = self.browser.read(cx).owner_space(&owner);
+        let Some(id) = self.browser.read(cx).tabs.active_of(&owner, space.as_deref()) else {
             return;
         };
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.browse_session_tab = Some(id);
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(id));
         cx.notify();
     }
 
@@ -517,22 +515,23 @@ impl Harness {
     /// and rebuilds in the other profile when shown (a page cannot move
     /// between profiles). The own profile's data stays on disk.
     pub(crate) fn toggle_space_signins(&mut self, space: &str, cx: &mut Context<Self>) {
-        let Some(found) = self.browser.tabs.spaces.iter_mut().find(|s| s.id == space) else { return };
-        found.own_signins = !found.own_signins;
-        let own = found.own_signins;
-        let name = found.name.clone();
-        let in_space: Vec<TabId> = self.browser.tabs.tabs.iter().filter(|t| t.space.as_deref() == Some(space)).map(|t| t.id).collect();
-        self.close_peek(cx);
-        if self.browser.split.is_some_and(|p| in_space.contains(&p.left) || in_space.contains(&p.right)) {
-            self.browser.split = None;
+        let Some((own, name)) = self.browser.update(cx, |browser, _| {
+            let found = browser.tabs.spaces.iter_mut().find(|s| s.id == space)?;
+            found.own_signins = !found.own_signins;
+            Some((found.own_signins, found.name.clone()))
+        }) else { return };
+        let in_space: Vec<TabId> = self.browser.read(cx).tabs.tabs.iter().filter(|t| t.space.as_deref() == Some(space)).map(|t| t.id).collect();
+        self.browser.update(cx, |browser, cx| browser.close_peek(cx));
+        if self.browser.read(cx).split.is_some_and(|p| in_space.contains(&p.left) || in_space.contains(&p.right)) {
+            self.browser.update(cx, |browser, _| browser.split = None);
         }
         for id in &in_space {
-            if self.browser.states.remove(id).is_some() {
+            if self.browser.update(cx, |browser, _| browser.states.remove(id).is_some()) {
                 self.terminal_service.unregister_tab_page(id.0);
             }
         }
-        self.browser.agent_tabs.retain(|_, id| !in_space.contains(id));
-        self.browser.schedule_tabs_write();
+        self.browser.update(cx, |browser, _| browser.agent_tabs.retain(|_, id| !in_space.contains(id)));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         crate::baaz_log!("browse: space {space} sign-ins → {}", if own { "its own" } else { "shared" });
         self.overlays.update(cx, |o, _| {
             o.toast(
@@ -552,14 +551,14 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_tabs_loaded();
-        if self.browser.tabs.reopen(id).is_some() {
+        self.ensure_tabs_loaded(cx);
+        if self.browser.update(cx, |browser, _| browser.tabs.reopen(id).is_some()) {
             self.select_browse_sidebar_tab(id, window, cx);
         }
     }
 }
 
-impl BrowseState {
+impl BrowserView {
 
     /// The space an owner's active tab lives in: the current space for the
     /// person, nothing for a session (its tabs show in every space).
@@ -608,6 +607,14 @@ impl BrowseState {
             return;
         }
         tabs::write(&self.tabs);
+    }
+
+    /// Both quit paths: the tabs land synchronously ([`Self::flush_tabs_save`])
+    /// and `browser.db`'s queued writes drain, bounded by
+    /// [`BrowserData::QUIT_DRAIN`](super::data::BrowserData::QUIT_DRAIN).
+    pub(crate) fn flush_at_quit(&mut self, cx: &gpui::App) {
+        self.flush_tabs_save();
+        self.data.read(cx).drain_at_quit(super::data::BrowserData::QUIT_DRAIN);
     }
 
     /// The Chromium profile folder a tab's page lives in: its space's own

@@ -1019,9 +1019,9 @@ fn main() {
                                             // tab; close it while Chromium still
                                             // runs (a quit with a Peek open
                                             // SIGSEGV'd in shutdown, 11 Nov).
-                                            this.close_peek(cx);
+                                            this.browser.update(cx, |browser, cx| browser.close_peek(cx));
                                             this.flush_stores();
-                                            this.browser.flush_tabs_save();
+                                            this.browser.update(cx, |browser, cx| browser.flush_at_quit(cx));
                                             crate::layout::Layout::save(cx);
                                         })
                                     })

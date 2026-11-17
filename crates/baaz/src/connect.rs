@@ -972,6 +972,8 @@ impl Harness {
             self.new_provider = id.as_str().to_owned();
             crate::providers::write_last_provider(id);
         }
+        // Links from other apps that waited behind the screen open now.
+        self.drain_external_soon(cx);
     }
 
     /// Reopen the connect screen over the shell (Settings → Providers →

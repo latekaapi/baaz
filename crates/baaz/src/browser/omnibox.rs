@@ -20,13 +20,14 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
             let url = self
-                .browser.browse_centre_shown(cx)
+                .browser.read(cx).browse_centre_shown(cx)
                 .and_then(|id| {
                     self.browser
+                        .read(cx)
                         .states
                         .get(&id)
                         .map(|state| state.read(cx).url().to_string())
-                        .or_else(|| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+                        .or_else(|| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()))
                 })
                 .unwrap_or_default();
             let prefill = if url.is_empty() || url == BLANK { "" } else { url.as_str() };
@@ -56,7 +57,7 @@ impl Harness {
     /// Whether the Browse omnibox suggestion list stands open (B2a-H4):
     /// Browse shows the centre page and the field actually ranks rows —
     /// merely editing with no rows obscures nothing. The covering input
-    /// in `sync_browser`: the list drops down over the page.
+    /// in `Harness::page_covers`: the list drops down over the page.
     pub(crate) fn browse_omnibox_open(&self, cx: &gpui::App) -> bool {
         crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse && !self.browse_suggestions(cx).is_empty()
     }
@@ -73,12 +74,12 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.browser.browse_omnibox_selected = 0;
-        self.browser.browse_omnibox_moved = false;
-        self.browser.browse_completed = None;
-        self.browser.browse_completed_text = None;
-        self.browser.browse_address_page_focus =
-            self.browse_centre_state(cx).is_some_and(|state| state.read(cx).holds_keyboard());
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
+        self.browser.update(cx, |browser, _| browser.browse_completed = None);
+        self.browser.update(cx, |browser, _| browser.browse_completed_text = None);
+        let page_focus = self.browse_centre_state(cx).is_some_and(|state| state.read(cx).holds_keyboard());
+        self.browser.update(cx, |browser, _| browser.browse_address_page_focus = page_focus);
         // The page lets go of the keyboard as the field opens, as find does: a
         // page left key would take the keystrokes back the moment the Field's
         // panel closes.
@@ -89,7 +90,7 @@ impl Harness {
             eprintln!("overlay: address focus asked; {}", crate::overlay::key_window_desc());
         }
         let text = text.to_owned();
-        match self.browser.browse_address.clone() {
+        match self.browser.read(cx).browse_address.clone() {
             Some(input) => {
                 input.update(cx, |input, cx| {
                     input.set_value(text, window, cx);
@@ -120,17 +121,17 @@ impl Harness {
                     // hidden Chromium window is key for a moment when it is
                     // created — found live) or another app: the edit stays.
                     // A real click into a visible page ends it through the
-                    // page-took-the-keyboard rule in `sync_browser`.
+                    // page-took-the-keyboard rule in `BrowserView::occlude`.
                     InputEvent::Blur => {
                         if window.is_window_active() {
-                            this.drop_browse_address(cx);
+                            this.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
                         }
                     }
                     InputEvent::Focus => {
-                        this.browser.browse_omnibox_selected = 0;
-                        this.browser.browse_omnibox_moved = false;
-                        this.browser.browse_completed = None;
-                        this.browser.browse_completed_text = None;
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
+                        this.browser.update(cx, |browser, _| browser.browse_completed = None);
+                        this.browser.update(cx, |browser, _| browser.browse_completed_text = None);
                         cx.notify();
                     }
                     InputEvent::Change => {
@@ -138,40 +139,23 @@ impl Harness {
                         // survives only its own write: once the text differs
                         // from what Tab wrote, the person is typing something
                         // else and Enter must open that, not the old row.
-                        let typed = this.browser.browse_address.as_ref().map(|input| input.read(cx).value().to_string());
-                        if this.browser.browse_completed_text.is_some() && this.browser.browse_completed_text != typed {
-                            this.browser.browse_completed = None;
-                            this.browser.browse_completed_text = None;
+                        let typed = this.browser.read(cx).browse_address.as_ref().map(|input| input.read(cx).value().to_string());
+                        if this.browser.read(cx).browse_completed_text.is_some() && this.browser.read(cx).browse_completed_text != typed {
+                            this.browser.update(cx, |browser, _| browser.browse_completed = None);
+                            this.browser.update(cx, |browser, _| browser.browse_completed_text = None);
                         }
-                        this.browser.browse_omnibox_selected = 0;
-                        this.browser.browse_omnibox_moved = false;
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
+                        this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
                         cx.notify();
                     }
                 });
-                self.browser.browse_address = Some(input);
-                self.browser.browse_address_sub = Some(sub);
+                self.browser.update(cx, |browser, _| browser.browse_address = Some(input));
+                self.browser.update(cx, |browser, _| browser.browse_address_sub = Some(sub));
             }
         }
         cx.notify();
     }
 
-    /// Drop the address input without navigating: the resting view falls
-    /// back to the page URL on the next frame. The window-free core of
-    /// [`Self::leave_browse_address`], for the project-adoption paths that
-    /// own no window.
-    pub(crate) fn drop_browse_address(&mut self, cx: &mut Context<Self>) {
-        self.browser.field_scope = None;
-        self.browser.placeholder_scoped = false;
-        if self.browser.browse_address.is_some() {
-            self.browser.browse_address = None;
-            self.browser.browse_address_sub = None;
-            self.browser.browse_omnibox_selected = 0;
-            self.browser.browse_omnibox_moved = false;
-            self.browser.browse_completed = None;
-            self.browser.browse_completed_text = None;
-            cx.notify();
-        }
-    }
 
     /// Leave the address field without navigating: the resting view falls
     /// back to the page URL on the next frame. Runs on Escape, on Enter
@@ -181,14 +165,14 @@ impl Harness {
     /// before the edit, else to the root — never a destroyed handle (the
     /// page counts only while its state still exists).
     pub(crate) fn leave_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.browse_address.is_none() {
+        if self.browser.read(cx).browse_address.is_none() {
             return;
         }
-        self.drop_browse_address(cx);
+        self.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        if self.browser.browse_address_page_focus {
+        if self.browser.read(cx).browse_address_page_focus {
             if let Some(state) = self.browse_centre_state(cx) {
                 let focus = state.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
@@ -207,23 +191,23 @@ impl Harness {
         // A Tab completion remembers its ROW: Enter opens that row even
         // after the ranking moved under it — never an index into the
         // re-ranked list.
-        if let Some(target) = self.browser.browse_completed.clone() {
+        if let Some(target) = self.browser.read(cx).browse_completed.clone() {
             return self.activate_omnibox_target(target, window, cx);
         }
         // In the Bookmarks scope ↩ always opens the highlighted row (a
         // folder or a bookmark): the typed text only filters there.
-        if self.browser.browse_omnibox_moved || self.browser.field_scope.is_some() {
+        if self.browser.read(cx).browse_omnibox_moved || self.browser.read(cx).field_scope.is_some() {
             let rows = self.browse_suggestions(cx);
             if rows.is_empty() {
                 return;
             }
-            let index = self.browser.browse_omnibox_selected.min(rows.len().saturating_sub(1));
+            let index = self.browser.read(cx).browse_omnibox_selected.min(rows.len().saturating_sub(1));
             return self.activate_omnibox_row(index, window, cx);
         }
-        let typed = self.browser.browse_address_text(cx);
+        let typed = self.browser.read(cx).browse_address_text(cx);
         self.leave_browse_address(window, cx);
-        self.ensure_tabs_loaded();
-        let Some(id) = self.browser.browse_centre_shown(cx) else {
+        self.ensure_tabs_loaded(cx);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else {
             return;
         };
         match toolbar::classify_address_input_with(&typed, crate::layout::Layout::get(cx).search_engine) {
@@ -241,7 +225,7 @@ impl Harness {
     /// Ask the agent about `query` (the omnibox's Ask row, ⌘↵): a new
     /// session in this project with the text as its first prompt draft —
     /// never sent, never navigated. The draft rides
-    /// [`BrowseState::pending_ask_draft`],
+    /// [`BrowserView::pending_ask_draft`],
     /// keyed by the session id `new_session_in` creates (or the draft id
     /// it reuses) — and lands when that session's view lands (see
     /// `activate`), never on whatever `self.active` happens to be right
@@ -253,7 +237,7 @@ impl Harness {
             return;
         }
         self.leave_browse_address(window, cx);
-        self.browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query });
+        self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query }));
         self.new_session(window, cx);
         cx.notify();
     }
@@ -263,7 +247,7 @@ impl Harness {
     /// [`Self::focus_browse_address_with`]), so the plain-enter commit
     /// never also fires.
     pub(crate) fn ask_from_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.browser.browse_address_text(cx);
+        let query = self.browser.read(cx).browse_address_text(cx);
         self.browse_ask(&query, window, cx);
     }
 
@@ -272,16 +256,17 @@ impl Harness {
     /// history from `browser.db` (R4). Sessions
     /// stay inside this project and out of the hidden list.
     pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
-        let query = self.browser.browse_address_text(cx);
-        if let Some(folder) = self.browser.field_scope {
-            return self.browser.data.read(cx).bookmark_scope_rows(&query, folder);
+        let query = self.browser.read(cx).browse_address_text(cx);
+        if let Some(folder) = self.browser.read(cx).field_scope {
+            return self.browser.read(cx).data.read(cx).bookmark_scope_rows(&query, folder);
         }
-        if query.trim().is_empty() || !self.browser.tabs_loaded {
+        if query.trim().is_empty() || !self.browser.read(cx).tabs_loaded {
             return Vec::new();
         }
-        let space = self.browser.browse_space();
+        let space = self.browser.read(cx).browse_space();
         let mut tabs: Vec<(TabId, String, String, u64)> = self
             .browser
+            .read(cx)
             .tabs
             .person_tabs(space.as_deref())
             .iter()
@@ -295,7 +280,7 @@ impl Harness {
                 )
             })
             .collect();
-        for (_, group) in self.browser.tabs.session_tabs(space.as_deref()) {
+        for (_, group) in self.browser.read(cx).tabs.session_tabs(space.as_deref()) {
             for tab in group {
                 let label = tabs::tab_label(&tab.title, &tab.url);
                 tabs.push((
@@ -315,7 +300,7 @@ impl Harness {
             .collect();
         let commands: Vec<(String, String)> =
             FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
-        let data = self.browser.data.read(cx);
+        let data = self.browser.read(cx).data.read(cx);
         let history = data.history_hits(&query);
         let marks = data.bookmark_hits(&query);
         toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, &marks, crate::layout::Layout::get(cx).search_engine)
@@ -324,14 +309,15 @@ impl Harness {
     /// ⌫ on an empty query in the scoped view: up one folder, or out of
     /// the scope at the top. Returns whether it did anything.
     pub(crate) fn field_scope_up(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(folder) = self.browser.field_scope else { return false };
-        self.browser.field_scope = match folder {
+        let Some(folder) = self.browser.read(cx).field_scope else { return false };
+        let scope = match folder {
             Some(id) => {
-                Some(self.browser.data.read(cx).folder_parent(id))
+                Some(self.browser.read(cx).data.read(cx).folder_parent(id))
             }
             None => None,
         };
-        self.browser.browse_omnibox_selected = 0;
+        self.browser.update(cx, |browser, _| browser.field_scope = scope);
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
         cx.notify();
         true
     }
@@ -346,11 +332,11 @@ impl Harness {
             return;
         }
         let len = rows.len() as isize;
-        let next = (self.browser.browse_omnibox_selected as isize + delta).rem_euclid(len);
-        self.browser.browse_omnibox_selected = next as usize;
-        self.browser.browse_omnibox_moved = true;
-        self.browser.browse_completed = None;
-        self.browser.browse_completed_text = None;
+        let next = (self.browser.read(cx).browse_omnibox_selected as isize + delta).rem_euclid(len);
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = next as usize);
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
+        self.browser.update(cx, |browser, _| browser.browse_completed = None);
+        self.browser.update(cx, |browser, _| browser.browse_completed_text = None);
         cx.notify();
     }
 
@@ -365,13 +351,13 @@ impl Harness {
         if rows.is_empty() {
             return;
         }
-        let index = self.browser.browse_omnibox_selected.min(rows.len() - 1);
+        let index = self.browser.read(cx).browse_omnibox_selected.min(rows.len() - 1);
         let row = rows[index].clone();
         let Some(text) = row.suggestion.complete.clone() else {
             return;
         };
-        if let Some(input) = self.browser.browse_address.clone() {
-            self.browser.browse_completed_text = Some(text.clone());
+        if let Some(input) = self.browser.read(cx).browse_address.clone() {
+            self.browser.update(cx, |browser, _| browser.browse_completed_text = Some(text.clone()));
             input.update(cx, |input, cx| {
                 input.set_value(text, window, cx);
                 input.select_all(window, cx);
@@ -381,9 +367,9 @@ impl Harness {
         // The input's own Change arm resets the highlight (keeping the
         // completion, which survives the re-rank); the completed row keeps
         // the highlight too, and its identity owns Enter.
-        self.browser.browse_omnibox_selected = index;
-        self.browser.browse_omnibox_moved = true;
-        self.browser.browse_completed = Some(row.target.clone());
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
+        self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
+        self.browser.update(cx, |browser, _| browser.browse_completed = Some(row.target.clone()));
         cx.notify();
     }
 
@@ -423,23 +409,23 @@ impl Harness {
                     Some(FieldAction::AdsHere) => self.toggle_ads_here(window, cx),
                     Some(FieldAction::Bookmarks) => {
                         // Back into the Field, scoped (the leave above closed it).
-                        self.browser.field_scope = Some(None);
+                        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
                         self.focus_browse_address_with("", window, cx);
-                        self.browser.field_scope = Some(None);
+                        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
                     }
                     None => {}
                 }
             }
             OmniTarget::Folder(id) => {
-                self.browser.field_scope = Some(Some(id));
-                self.browser.browse_omnibox_selected = 0;
-                if let Some(input) = self.browser.browse_address.clone() {
+                self.browser.update(cx, |browser, _| browser.field_scope = Some(Some(id)));
+                self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
+                if let Some(input) = self.browser.read(cx).browse_address.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 cx.notify();
             }
             OmniTarget::Tab(id) => {
-                let owner = self.browser.tabs.get(id).map(|tab| tab.owner.clone());
+                let owner = self.browser.read(cx).tabs.get(id).map(|tab| tab.owner.clone());
                 match owner {
                     Some(Owner::Person) => self.select_browse_sidebar_tab(id, window, cx),
                     Some(Owner::Session(session)) => {
@@ -465,8 +451,8 @@ impl Harness {
             }
             OmniTarget::History(url) | OmniTarget::Search(url) => {
                 self.leave_browse_address(window, cx);
-                self.ensure_tabs_loaded();
-                if let Some(id) = self.browser.browse_centre_shown(cx) {
+                self.ensure_tabs_loaded(cx);
+                if let Some(id) = self.browser.read(cx).browse_centre_shown(cx) {
                     self.navigate_browse_tab(id, &url, window, cx);
                 }
             }
@@ -477,11 +463,12 @@ impl Harness {
     /// project's open tabs (blank ones excluded — the current empty tab is
     /// not somewhere to pick up), then its recent sessions, then recently
     /// closed tabs — capped at 5.
-    pub(crate) fn browse_pickup_full(&self) -> Vec<(toolbar::PickupRow, PickupTarget)> {
-        let space = self.browser.browse_space();
+    pub(crate) fn browse_pickup_full(&self, cx: &gpui::App) -> Vec<(toolbar::PickupRow, PickupTarget)> {
+        let space = self.browser.read(cx).browse_space();
         let project_name = self.current_project().map(|project| project.name.clone()).unwrap_or_default();
-        let tab_items: Vec<(TabId, String, String)> = if self.browser.tabs_loaded {
+        let tab_items: Vec<(TabId, String, String)> = if self.browser.read(cx).tabs_loaded {
             self.browser
+                .read(cx)
                 .tabs
                 .person_tabs(space.as_deref())
                 .iter()
@@ -508,6 +495,7 @@ impl Harness {
         let now = tabs::now_ms();
         let closed_items: Vec<(TabId, String, String)> = self
             .browser
+            .read(cx)
             .tabs
             .closed
             .iter()
@@ -547,7 +535,26 @@ impl Harness {
     }
 }
 
-impl BrowseState {
+impl BrowserView {
+    /// Drop the address input without navigating: the resting view falls
+    /// back to the page URL on the next frame. The window-free core of
+    /// [`Self::leave_browse_address`], for the project-adoption paths that
+    /// own no window.
+    pub(crate) fn drop_browse_address(&mut self, cx: &mut Context<Self>) {
+        self.field_scope = None;
+        self.placeholder_scoped = false;
+        if self.browse_address.is_some() {
+            self.browse_address = None;
+            self.browse_address_sub = None;
+            self.browse_omnibox_selected = 0;
+            self.browse_omnibox_moved = false;
+            self.browse_completed = None;
+            self.browse_completed_text = None;
+            cx.notify();
+        }
+    }
+
+
 
     /// The address field's current text, or empty at rest.
     pub(crate) fn browse_address_text(&self, cx: &gpui::App) -> String {

@@ -15,15 +15,15 @@ impl Harness {
             return Err("no URL given".into());
         }
         let key = self.browser_key(cx);
-        let owner = self.browser.tab_owner_for_key(&key);
+        let owner = self.browser.read(cx).tab_owner_for_key(&key);
         let state = self.browser_for(&key, false, window, cx);
         if state.read(cx).url().as_ref() != url {
             let title = state.read(cx).title().to_string();
             state.update(cx, |state, _cx| state.navigate(url));
-            let space = self.browser.owner_space(&owner);
-            if let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) {
-                if self.browser.tabs.set_url_title(id, url, &title) {
-                    self.browser.schedule_tabs_write();
+            let space = self.browser.read(cx).owner_space(&owner);
+            if let Some(id) = self.browser.read(cx).tabs.active_of(&owner, space.as_deref()) {
+                if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, &title)) {
+                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                 }
             }
         }
@@ -46,7 +46,7 @@ impl Harness {
         if url != BLANK {
             self.leave_browse_address(window, cx);
         }
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         // B2a-H2b: in Browse a new tab is always the person's, even with
         // a session open behind the mode — the session's tabs belong to
         // Sessions.
@@ -55,28 +55,28 @@ impl Harness {
         } else {
             self.shown_tab_owner(cx)
         };
-        let space = self.browser.browse_space();
-        let after = self.browser.tabs.active_of(&owner, space.as_deref());
+        let space = self.browser.read(cx).browse_space();
+        let after = self.browser.read(cx).tabs.active_of(&owner, space.as_deref());
         // D6 (owner 2026-10-17): a session has one page — a new page for a
         // session navigates the one it has instead of opening a second.
         if let (Owner::Session(_), Some(id)) = (&owner, after) {
             if url != BLANK {
-                if let Some(state) = self.browser.states.get(&id).cloned() {
+                if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
                     state.update(cx, |state, _| state.navigate(url));
-                    if self.browser.tabs.set_url_title(id, url, url) {
-                        self.browser.schedule_tabs_write();
+                    if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, url)) {
+                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     }
                     cx.notify();
                     return Ok(());
                 }
             }
         }
-        let id = self.browser.tabs.open(space, owner.clone(), url, after);
-        self.browser.schedule_tabs_write();
+        let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), url, after));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         // In Browse the person's new tab is what the centre shows next, over
         // any session tab it held.
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            self.browser.browse_session_tab = None;
+            self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
         }
         let key = match &owner {
             Owner::Person => HOME_KEY.to_owned(),
@@ -121,7 +121,7 @@ impl Harness {
     /// person tab of the current project (1-based, on-screen order).
     /// An unparseable or out-of-range `n` is an `Err`. Free.
     pub(crate) fn step_tab_pin(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.browse_tab_at(rest).ok_or_else(|| format!("no person tab `{rest}`"))?;
+        let id = self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?;
         self.toggle_pin_browse_tab(id, cx);
         Ok(())
     }
@@ -130,8 +130,8 @@ impl Harness {
     /// (1-based, on-screen order). An unparseable or out-of-range `n` is
     /// an `Err`. Free.
     pub(crate) fn step_tab_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.browse_tab_at(rest).ok_or_else(|| format!("no person tab `{rest}`"))?;
-        let (pinned, in_folder) = self.browser.tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
+        let id = self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?;
+        let (pinned, in_folder) = self.browser.read(cx).tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
         // A right-click lands mid-sidebar at a fixed height: the menu
         // seats at the pointer, so the capture shows it over the page.
         let menu = aui::screens::sidebar::BrowseMenu {
@@ -151,16 +151,17 @@ impl Harness {
         if name.is_empty() {
             return Err("no folder name given".into());
         }
-        self.ensure_tabs_loaded();
-        let space = self.browser.browse_space().unwrap_or_default();
+        self.ensure_tabs_loaded(cx);
+        let space = self.browser.read(cx).browse_space().unwrap_or_default();
         let tab = self
             .browser
+            .read(cx)
             .tabs
             .active_of(&Owner::Person, Some(&space))
             .ok_or("no active person tab to put in the folder")?;
-        let id = self.browser.tabs.add_folder(&space, name);
-        let moved = self.browser.tabs.set_folder(tab, Some(&id));
-        self.browser.schedule_tabs_write();
+        let id = self.browser.update(cx, |browser, _| browser.tabs.add_folder(&space, name));
+        let moved = self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(&id)));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
         if moved { Ok(()) } else { Err("the active tab did not move into the new folder".into()) }
     }
@@ -169,9 +170,9 @@ impl Harness {
     /// A blank name is the by-hand default, "Space N" — still a new space,
     /// so it succeeds.
     pub(crate) fn step_space_new(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.ensure_tabs_loaded();
-        self.browser.tabs.add_space(rest.trim());
-        self.browser.schedule_tabs_write();
+        self.ensure_tabs_loaded(cx);
+        self.browser.update(cx, |browser, _| browser.tabs.add_space(rest.trim()));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
         Ok(())
     }
@@ -179,28 +180,29 @@ impl Harness {
     /// Resolve `rest` to the current project's n-th person tab (1-based,
     /// on-screen order): what `tab-pin:` and `tab-menu:` index into.
     /// `None` for an unparseable or out-of-range `n`.
-    pub(super) fn browse_tab_at(&mut self, rest: &str) -> Option<TabId> {
-        self.ensure_tabs_loaded();
+    pub(super) fn browse_tab_at(&mut self, rest: &str, cx: &mut gpui::App) -> Option<TabId> {
+        self.ensure_tabs_loaded(cx);
         let n: usize = rest.trim().parse().ok()?;
         if n == 0 {
             return None;
         }
-        let space = self.browser.browse_space();
-        self.browser.tabs.person_tabs(space.as_deref()).get(n - 1).map(|tab| tab.id)
+        let space = self.browser.read(cx).browse_space();
+        self.browser.read(cx).tabs.person_tabs(space.as_deref()).get(n - 1).map(|tab| tab.id)
     }
 
     /// Resolve `rest` to the shown strip's n-th tab (1-based): the session
     /// key plus the tab id. `None` for an unparseable or out-of-range `n`.
     pub(super) fn strip_tab_at(&mut self, rest: &str, cx: &mut Context<Self>) -> Option<(String, TabId)> {
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let n: usize = rest.trim().parse().ok()?;
         if n == 0 {
             return None;
         }
         let owner = self.shown_tab_owner(cx);
-        let space = self.browser.owner_space(&owner);
+        let space = self.browser.read(cx).owner_space(&owner);
         let id = self
             .browser
+            .read(cx)
             .tabs
             .ordered_tabs(&owner, space.as_deref())
             .get(n - 1)
@@ -213,11 +215,11 @@ impl Harness {
     /// spared). The live-check hook. Nothing hidden to drop is still
     /// done (every hidden page is gone), so it always succeeds. Free.
     pub(crate) fn step_tab_discard_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
-        let space = self.browser.owner_space(&owner);
-        let shown = self.browser.tabs.active_of(&owner, space.as_deref());
-        let centre = self.browser.browse_centre_shown(cx);
+        let space = self.browser.read(cx).owner_space(&owner);
+        let shown = self.browser.read(cx).tabs.active_of(&owner, space.as_deref());
+        let centre = self.browser.read(cx).browse_centre_shown(cx);
         self.discard_hidden_tabs(true, shown, centre, cx);
         cx.notify();
         Ok(())
@@ -226,13 +228,15 @@ impl Harness {
     /// Step the find to the next (`forward`) or previous match: Enter, the
     /// ↑/↓ buttons. A no-op with no open strip or no query.
     pub(crate) fn step_browse_find(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.browse_centre_shown(cx) else { return };
-        let (query, match_case) = {
-            let strip = self.browser.find_strips.for_tab(id);
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let Some((query, match_case)) = self.browser.update(cx, |browser, _| {
+            let strip = browser.find_strips.for_tab(id);
             if !strip.open || strip.query.is_empty() {
-                return;
+                return None;
             }
-            (strip.query.clone(), strip.match_case)
+            Some((strip.query.clone(), strip.match_case))
+        }) else {
+            return;
         };
         if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.find(&query, forward, match_case));
@@ -255,10 +259,10 @@ impl Harness {
         let when = tabs::now_ms().saturating_sub(days * 86_400_000);
         // What `record_visit` refuses, refused here (the write itself runs
         // in the `BrowserData` worker; a failed write is logged there).
-        if !history::recordable(&url) || self.browser.data.read(cx).is_excluded(&url) {
+        if !history::recordable(&url) || self.browser.read(cx).data.read(cx).is_excluded(&url) {
             return Err(format!("`{url}` could not be recorded as a visit"));
         }
-        self.browser.data.update(cx, |data, _| {
+        self.browser.read(cx).data.clone().update(cx, |data, _| {
             data.record_visit(&url, &title, when);
             if !words.is_empty() {
                 data.set_text(&url, &title, &words);
@@ -280,7 +284,7 @@ impl Harness {
         if !history::recordable(&url) {
             return Err(format!("`{url}` cannot be bookmarked"));
         }
-        self.browser.data.update(cx, |data, cx| {
+        self.browser.read(cx).data.clone().update(cx, |data, cx| {
             let folder = if folder_name.is_empty() {
                 bookmarks::BAR
             } else {
@@ -300,12 +304,12 @@ impl Harness {
     /// Free.
     pub(crate) fn step_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
         self.focus_browse_address_with("", window, cx);
-        self.browser.field_scope = Some(None);
+        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
         cx.notify();
         Ok(())
     }
@@ -315,7 +319,7 @@ impl Harness {
     /// on the typed text. No page in the centre is an `Err`. Free.
     pub(crate) fn step_omnibox(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
@@ -334,12 +338,12 @@ impl Harness {
         if query.is_empty() {
             return Err("no query given".into());
         }
-        self.browser.fake_scripts.push(chrome::FakePageScript::Find { query: query.to_owned(), active: 3, total: 12 });
+        self.browser.update(cx, |browser, _| browser.fake_scripts.push(chrome::FakePageScript::Find { query: query.to_owned(), active: 3, total: 12 }));
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
         }
         self.open_browse_find(window, cx);
-        let input = self.browser.browse_find.clone().ok_or("the find strip did not open")?;
+        let input = self.browser.read(cx).browse_find.clone().ok_or("the find strip did not open")?;
         let query = query.to_owned();
         input.update(cx, |input, cx| input.set_value(query, window, cx));
         self.find_input_changed(cx);
@@ -352,10 +356,12 @@ impl Harness {
     pub(crate) fn step_permission(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let kinds = chrome::parse_permission_kinds(rest).ok_or_else(|| format!("`{rest}` names an unknown permission"))?;
-        self.browser.fake_scripts.push(chrome::FakePageScript::Permission {
-            id: 7,
-            origin: "https://example.com".to_owned(),
-            kinds,
+        self.browser.update(cx, |browser, _| {
+            browser.fake_scripts.push(chrome::FakePageScript::Permission {
+                id: 7,
+                origin: "https://example.com".to_owned(),
+                kinds,
+            })
         });
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
@@ -377,7 +383,7 @@ impl Harness {
             return Err("no file name given".into());
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        self.browser.fake_scripts.push(chrome::FakePageScript::Download(aui_webview::DownloadState {
+        let script = chrome::FakePageScript::Download(aui_webview::DownloadState {
             id: 3,
             url: format!("https://cdn.example/{name}"),
             file_name: name.to_owned(),
@@ -385,14 +391,15 @@ impl Harness {
             received: if done { 10_485_760 } else { 4_400_000 },
             total: Some(10_485_760),
             state: if done { aui_webview::DownloadStatus::Complete } else { aui_webview::DownloadStatus::Downloading },
-        }));
+        });
+        self.browser.update(cx, |browser, _| browser.fake_scripts.push(script));
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
         }
-        self.browser.downloads_open = true;
-        self.browser.downloads_rendered = false;
-        self.browser.extensions_open = false;
-        self.browser.more_open = false;
+        self.browser.update(cx, |browser, _| browser.downloads_open = true);
+        self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
+        self.browser.update(cx, |browser, _| browser.extensions_open = false);
+        self.browser.update(cx, |browser, _| browser.more_open = false);
         cx.notify();
         Ok(())
     }
@@ -404,7 +411,7 @@ impl Harness {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let reason = rest.trim();
         let reason = if reason.is_empty() { "the page crashed (-1)" } else { reason };
-        self.browser.fake_scripts.push(chrome::FakePageScript::Crashed(reason.to_owned()));
+        self.browser.update(cx, |browser, _| browser.fake_scripts.push(chrome::FakePageScript::Crashed(reason.to_owned())));
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
         }
@@ -419,9 +426,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.browser.more_open = true;
-        self.browser.downloads_open = false;
-        self.browser.extensions_open = false;
+        self.browser.update(cx, |browser, _| browser.more_open = true);
+        self.browser.update(cx, |browser, _| browser.downloads_open = false);
+        self.browser.update(cx, |browser, _| browser.extensions_open = false);
         cx.notify();
         Ok(())
     }
@@ -433,9 +440,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.browser.extensions_open = true;
-        self.browser.downloads_open = false;
-        self.browser.more_open = false;
+        self.browser.update(cx, |browser, _| browser.extensions_open = true);
+        self.browser.update(cx, |browser, _| browser.downloads_open = false);
+        self.browser.update(cx, |browser, _| browser.more_open = false);
         cx.notify();
         Ok(())
     }
@@ -448,24 +455,24 @@ impl Harness {
         let name = rest.trim();
         let name = if name.is_empty() { "Fix ledger chart" } else { name };
         let id = format!("fixture-{}", name.to_lowercase().replace(' ', "-"));
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         if !self.sessions.iter().any(|entry| entry.id == id) {
             let now = chrono::Local::now();
-            let space = self.browser.browse_space();
+            let space = self.browser.read(cx).browse_space();
             let workspace =
                 self.current_project().map(|project| project.root.to_string_lossy().into_owned());
             self.sessions.push(crate::sidebar::local_started_row(&id, name.to_owned(), space.clone(), workspace, now));
             self.invalidate_list();
         }
-        let space = self.browser.browse_space();
-        let tab_id = self.browser.tabs.open(space, Owner::Session(id.clone()), "https://example.com", None);
-        self.browser.schedule_tabs_write();
+        let space = self.browser.read(cx).browse_space();
+        let tab_id = self.browser.update(cx, |browser, _| browser.tabs.open(space, Owner::Session(id.clone()), "https://example.com", None));
+        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         // The agent's tools can reach it, so a live check needs no provider.
         let root = self.current_project().map(|project| project.root.clone()).unwrap_or_else(std::env::temp_dir);
         self.terminal_service.register_session(&id, root);
         self.ensure_tab_page(&id, tab_id, window, cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.browse_session_tab = Some(tab_id);
+        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(tab_id));
         cx.notify();
         Ok(())
     }

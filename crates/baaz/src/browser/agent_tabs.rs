@@ -9,16 +9,17 @@ impl Harness {
     /// work without moving anything the person sees.
     pub(crate) fn agent_tabs_call(&mut self, call: crate::terminal::service::TabsCall, cx: &mut Context<Self>) {
         use serde_json::{json, Value};
-        self.ensure_tabs_loaded();
+        self.ensure_tabs_loaded(cx);
         let session = call.session.clone();
         let owner = Owner::Session(session.clone());
         let tab_id = call.params.get("tab").and_then(Value::as_u64).map(TabId);
-        let mine = |this: &Self, id: TabId| this.browser.tabs.get(id).is_some_and(|tab| tab.owner == owner);
+        let mine = |this: &Self, id: TabId| this.browser.read(cx).tabs.get(id).is_some_and(|tab| tab.owner == owner);
         let outcome: Result<Value, String> = match call.params.get("op").and_then(Value::as_str).unwrap_or("list") {
             "list" => {
-                let current = self.browser.tabs.active_of(&owner, None);
+                let current = self.browser.read(cx).tabs.active_of(&owner, None);
                 let tabs: Vec<Value> = self
                     .browser
+                    .read(cx)
                     .tabs
                     .tabs
                     .iter()
@@ -32,20 +33,20 @@ impl Harness {
                 if !crate::terminal::service::browser_url_allowed(&url) {
                     Err(format!("refused URL: {url} (tabs open http, https, file, or about:blank)"))
                 } else if let Some(main) = self.main_window {
-                    let space = self.browser.browse_space();
-                    let id = self.browser.tabs.open(space, owner.clone(), &url, None);
-                    self.browser.schedule_tabs_write();
+                    let space = self.browser.read(cx).browse_space();
+                    let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), &url, None));
+                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     let this = cx.entity();
                     let key = session.clone();
                     cx.defer(move |cx| {
                         let _ = main.update(cx, move |_, window, cx| {
                             this.update(cx, |this, cx| {
-                                let current = this.browser.agent_tabs.get(&key).copied();
+                                let current = this.browser.read(cx).agent_tabs.get(&key).copied();
                                 this.ensure_tab_page(&key, id, window, cx);
                                 // A background tab: the session's current page stays
                                 // what it was.
-                                if let Some(state) = current.and_then(|tab| this.browser.states.get(&tab).cloned()) {
-                                    this.register_tab_page(&key, current.unwrap_or(id), &state);
+                                if let Some(state) = current.and_then(|tab| this.browser.read(cx).states.get(&tab).cloned()) {
+                                    this.register_tab_page(&key, current.unwrap_or(id), &state, cx);
                                 }
                                 cx.notify();
                             });
@@ -74,11 +75,11 @@ impl Harness {
             },
             "activate" => match tab_id.filter(|id| mine(self, *id)) {
                 Some(id) => {
-                    self.browser.tabs.activate(id);
-                    if let Some(state) = self.browser.states.get(&id).cloned() {
-                        self.register_tab_page(&session, id, &state);
+                    self.browser.update(cx, |browser, _| browser.tabs.activate(id));
+                    if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
+                        self.register_tab_page(&session, id, &state, cx);
                     }
-                    self.browser.schedule_tabs_write();
+                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     cx.notify();
                     Ok(json!({"current": id.0}))
                 }
@@ -87,9 +88,9 @@ impl Harness {
             "name" => match tab_id.filter(|id| mine(self, *id)) {
                 Some(id) => {
                     let name = call.params.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
-                    let url = self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
-                    self.browser.tabs.set_url_title(id, &url, &name);
-                    self.browser.schedule_tabs_write();
+                    let url = self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
+                    self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, &url, &name));
+                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
                     cx.notify();
                     Ok(json!({"named": id.0}))
                 }

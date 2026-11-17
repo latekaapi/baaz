@@ -4,11 +4,12 @@
 //! [`WebBackend`](aui_webview::WebBackend) and what the pane knows about it.
 //! This module owns the tab registry — one live state per open tab, created
 //! lazily the first time the Browser kind shows that tab — inside
-//! [`BrowseState`] (`state.rs`), Browse mode's one owner on `Harness`. Its
-//! window-side actions live by seam in the sibling files (`tabs_actions`,
-//! `pages`, `sync`, `omnibox`, `find`, `permissions`, `downloads`,
-//! `page_actions`, `keys`, `steps`, `agent_tabs`; task 4.5), and
-//! `browser.db` behind the [`data::BrowserData`] service. The tab model
+//! [`BrowserView`] (`view.rs`), Browse mode's entity, held by `Harness` as
+//! one handle. Its window-side actions live by seam in the sibling files
+//! (`tabs_actions`, `pages`, `sync`, `omnibox`, `find`, `permissions`,
+//! `downloads`, `page_actions`, `keys`, `steps`, `agent_tabs`; task 4.5),
+//! what covers the native page in `occlusion`, and `browser.db` behind the
+//! [`data::BrowserData`] service. The tab model
 //! itself ([`tabs`]) is pure: tabs belong to a space and to an
 //! owner (the person, or one session). Switching tabs hides the old tab's
 //! webview; a tab hidden long enough is discarded (its state dropped, its
@@ -21,7 +22,7 @@
 //! gpui window) in the normal app, [`FakeWebBackend`](aui_webview::FakeWebBackend)
 //! when running a `--screenshot` capture or tests — a native view never
 //! appears in a gpui screenshot, and captures must be deterministic. The
-//! choice rides on [`BrowseState::fake`], an explicit flag set at boot, never
+//! choice rides on [`BrowserView::fake`], an explicit flag set at boot, never
 //! on environment sniffed in render.
 //!
 //! # The native-overlay rule
@@ -29,9 +30,11 @@
 //! The native view is composited ABOVE the gpui scene, so anything gpui draws
 //! over the page is invisible. The host therefore calls
 //! [`set_obscured`](aui_webview::WebviewState::set_obscured) with `true`
-//! while any overlay covers the pane. [`browser_visible`] is the one pure
-//! predicate behind that: the native view is visible only when the pane is
-//! open on the Browser kind for the active session with nothing over it.
+//! while any overlay covers the pane. One owner decides it
+//! ([`occlusion::NativeOcclusion`]), and `occlusion::browser_visible` is the
+//! one pure predicate behind it: the native view is visible only when the
+//! pane is open on the Browser kind for the active session with nothing over
+//! it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -44,7 +47,6 @@ use gpui_kit::base::input::{InputEvent, InputState};
 
 use crate::app::Harness;
 use crate::layout::RightKind;
-use crate::overlays::MenuKind;
 
 pub(crate) mod adblock;
 pub(crate) mod agents;
@@ -58,7 +60,8 @@ pub(crate) mod peek_split;
 pub(crate) mod automation;
 pub mod clone_sweep;
 mod sidebar_actions;
-mod state;
+mod view;
+mod occlusion;
 pub(crate) mod data;
 mod agent_tabs;
 mod downloads;
@@ -74,7 +77,11 @@ mod tabs_actions;
 pub(crate) mod tabs;
 pub(crate) mod toolbar;
 
-pub(crate) use state::BrowseState;
+pub(crate) use view::{BrowserEvent, BrowserView};
+#[cfg(test)]
+pub(crate) use occlusion::PageShow;
+#[cfg(test)]
+use occlusion::{browser_visible, centre_visibility, BrowserVisibility};
 pub(crate) use tabs::{Owner, TabId, Tabs};
 pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
 
@@ -94,99 +101,6 @@ fn screenshot_tab_id(key: &str) -> Option<TabId> {
 }
 /// What a webview opens on when its session never navigated anywhere.
 const BLANK: &str = "about:blank";
-
-/// Everything that decides whether one session's native view may show.
-///
-/// All fields are positive facts about the frame; [`browser_visible`] ANDs
-/// the good ones and NANDs the covering ones. One struct so the call site in
-/// `render` names every input and the truth table below covers every input.
-/// Every cover is something gpui draws in the main window, under the page:
-/// what an overlay window draws (Browse's modals, right-click menus, the
-/// Field, toasts) sits above the live page and is no input here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BrowserVisibility {
-    /// The right pane stands open.
-    pub pane_open: bool,
-    /// The pane shows the Browser kind.
-    pub kind_browser: bool,
-    /// The frame shows Browse mode's centre page instead of the pane's:
-    /// the current project's person-tab page, which needs no open pane
-    /// and no Browser kind. Sessions mode always leaves this false, so
-    /// its visibility reads exactly as before.
-    pub centre_browse: bool,
-    /// This webview's session is the active one.
-    pub session_active: bool,
-    /// The Settings page stands open.
-    pub settings_open: bool,
-    /// The ⌘K palette (any list) stands open in the main window: Sessions
-    /// only, Browse hosts it in an overlay window.
-    pub palette_open: bool,
-    /// A menu on the shared overlay stack stands open: composer/chip pickers,
-    /// caret popovers, overflow, view options, project menus.
-    pub menu_open: bool,
-    /// The composer's view-local `+` menu stands open. Plain view state,
-    /// never the shared overlay stack, so it gets its own input. The pane's
-    /// only: Browse draws no composer.
-    pub plus_open: bool,
-    /// A modal dialog stands open in the main window: Sessions only, like
-    /// the palette.
-    pub dialog_open: bool,
-    /// The file-drop overlay covers the session's column. The pane's only:
-    /// Browse mounts no drop target.
-    pub drop_cover: bool,
-    /// The feedback capture layer covers the window: true only while
-    /// feedback is Active. Paused leaves the app usable, so pages stay
-    /// live; obscured pages paint their screenshot stand-in under it.
-    pub feedback_cover: bool,
-    /// The Browse omnibox suggestion list stands open in the main window:
-    /// the Field's rows draw there when it has no overlay window (the
-    /// sidebar closed). The page shows its screenshot stand-in under them.
-    pub omnibox_open: bool,
-    /// A Browse chrome popover (downloads, extensions, ⋯) stands open. They
-    /// draw in the main window, over the page, so the page shows its
-    /// stand-in, like the omnibox above.
-    pub chrome_popover_open: bool,
-    /// The Baaz-drawn crashed page covers the page rect. The library
-    /// reports no load-error event — only `Crashed` — so the error page
-    /// renders from that state alone, and the native view hides under it.
-    pub page_error_open: bool,
-}
-
-/// Whether `inputs`' native view may show: the pane open on the Browser
-/// kind for the active session — or, in Browse, the centre page — with
-/// no overlay over it and a live window. The covering rules are the
-/// same for both: the palette, menus, dialogs and settings obscure the
-/// centre page exactly as they obscure the pane's.
-pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
-    (inputs.pane_open && inputs.kind_browser || inputs.centre_browse)
-        && inputs.session_active
-        && !inputs.settings_open
-        && !inputs.palette_open
-        && !inputs.menu_open
-        && !inputs.plus_open
-        && !inputs.dialog_open
-        && !inputs.drop_cover
-        && !inputs.feedback_cover
-        && !inputs.omnibox_open
-        && !inputs.chrome_popover_open
-        && !inputs.page_error_open
-}
-
-/// `base` as the Browse centre page reads it: its tab and liveness, its own
-/// chrome popovers, and neither the composer's `+` menu nor the file-drop
-/// overlay, which Browse never draws. Either flag can stand stale from
-/// Sessions (a drag that left the window, a switch with the menu open), and
-/// a stale cover would freeze the page under nothing.
-fn centre_visibility(base: BrowserVisibility, shown: bool, live: bool, chrome_popover_open: bool) -> BrowserVisibility {
-    BrowserVisibility {
-        centre_browse: shown,
-        session_active: live,
-        chrome_popover_open,
-        plus_open: false,
-        drop_cover: false,
-        ..base
-    }
-}
 
 /// The shell header's height in pixels (docs/83 §2.5: the bar, 44 incl.
 /// its line): the centre's content and the right pane's page hang under it.
@@ -1186,7 +1100,7 @@ mod tests {
         vc.run_until_parked();
         let focused = vc.update(|window, cx| {
             let harness = baaz.read(cx);
-            harness.browser.browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            harness.browser.read(cx).browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
         });
         assert!(focused, "the new-tab field holds the keyboard after entering Browse");
         vc.update(|window, cx| {
@@ -1195,7 +1109,7 @@ mod tests {
         vc.run_until_parked();
         let focused = vc.update(|window, cx| {
             let harness = baaz.read(cx);
-            harness.browser.browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            harness.browser.read(cx).browse_address.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
         });
         assert!(focused, "the new-tab field holds the keyboard after ⌘T");
     }
@@ -1237,8 +1151,8 @@ mod tests {
         let count = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| {
                 let harness = baaz.read(cx);
-                let space = harness.browser.browse_space();
-                harness.browser.tabs.person_tabs(space.as_deref()).len()
+                let space = harness.browser.read(cx).browse_space();
+                harness.browser.read(cx).tabs.person_tabs(space.as_deref()).len()
             })
         };
         let before = count(vc);
@@ -1284,8 +1198,8 @@ mod tests {
         let count = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| {
                 let harness = baaz.read(cx);
-                let space = harness.browser.browse_space();
-                harness.browser.tabs.person_tabs(space.as_deref()).len()
+                let space = harness.browser.read(cx).browse_space();
+                harness.browser.read(cx).tabs.person_tabs(space.as_deref()).len()
             })
         };
         // Entering Browse made the blank tab; ⌘T made the real one. Close
@@ -1305,10 +1219,10 @@ mod tests {
         vc.simulate_keystrokes("cmd-w");
         vc.run_until_parked();
         assert_eq!(count(vc), 1, "⌘W on the last tab leaves one fresh blank tab");
-        let closed: Vec<String> = vc.update(|_, cx| baaz.read(cx).browser.tabs.closed.iter().map(|tab| tab.url.clone()).collect());
+        let closed: Vec<String> = vc.update(|_, cx| baaz.read(cx).browser.read(cx).tabs.closed.iter().map(|tab| tab.url.clone()).collect());
         assert_eq!(closed, vec!["https://www.wikipedia.org/".to_owned()], "the blank tabs never join the closed list");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.tabs.person_tabs(baaz.read(cx).browser.browse_space().as_deref()).iter().all(|tab| super::tabs::is_blank_url(&tab.url))),
+            vc.update(|_, cx| baaz.read(cx).browser.read(cx).tabs.person_tabs(baaz.read(cx).browser.read(cx).browse_space().as_deref()).iter().all(|tab| super::tabs::is_blank_url(&tab.url))),
             "the tab left behind is blank"
         );
     }
@@ -1404,14 +1318,14 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.ensure_tabs_loaded();
+                harness.ensure_tabs_loaded(cx);
                 let owner = super::Owner::Session("owner-probe".to_owned());
-                let tab = harness.browser.tabs.open(None, owner, "https://a.example/", None);
+                let tab = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner, "https://a.example/", None));
                 harness.browse_sidebar_tab(tab, false, window, cx);
-                assert_eq!(harness.browser.browse_session_tab, Some(tab), "a session tab selects into the centre");
+                assert_eq!(harness.browser.read(cx).browse_session_tab, Some(tab), "a session tab selects into the centre");
                 harness.browse_sidebar_tab(tab, true, window, cx);
-                assert!(harness.browser.tabs.get(tab).is_none(), "a session tab closes");
-                assert_eq!(harness.browser.browse_session_tab, None, "closing the shown session tab clears the centre");
+                assert!(harness.browser.read(cx).tabs.get(tab).is_none(), "a session tab closes");
+                assert_eq!(harness.browser.read(cx).browse_session_tab, None, "closing the shown session tab clears the centre");
             });
         });
     }
@@ -1433,36 +1347,27 @@ mod tests {
         // directly: no session view is open in this harness.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.ensure_tabs_loaded();
+                harness.ensure_tabs_loaded(cx);
                 let owner = super::Owner::Session("tab-probe".to_owned());
-                let first =
-                    harness
-                        .browser
-                        .tabs
-                        .open(None, owner.clone(), "https://a.example/", None);
-                let second = harness.browser.tabs.open(
-                    None,
-                    owner.clone(),
-                    "https://b.example/",
-                    Some(first),
-                );
+                let first = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://a.example/", None));
+                let second = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first)));
                 let page_first = harness.ensure_tab_page("tab-probe", first, window, cx);
                 let page_second = harness.ensure_tab_page("tab-probe", second, window, cx);
                 assert!(page_first != page_second, "each tab holds its own page");
                 assert_eq!(
-                    harness.browser.states.len(),
+                    harness.browser.read(cx).states.len(),
                     2,
                     "two tabs in one session are two live pages"
                 );
                 // The newest tab is active; the agent tools point at it.
-                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
+                assert_eq!(harness.browser.read(cx).tabs.active_of(&owner, None), Some(second));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-probe"),
                     Some(page_second.clone()),
                     "registration follows the active tab"
                 );
                 // Only the active tab's page is unobscured.
-                harness.apply_page_visibility(Some(second), true, None, false, cx);
+                harness.browser.update(cx, |browser, cx| browser.apply_page_visibility(Some(second), true, None, false, cx));
                 assert!(
                     !page_second.read(cx).obscured(),
                     "the active tab's page shows"
@@ -1474,25 +1379,25 @@ mod tests {
                 // Switching tabs re-registers the agent tools and swaps
                 // which page is live.
                 harness.select_tab("tab-probe", first, window, cx);
-                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(first));
+                assert_eq!(harness.browser.read(cx).tabs.active_of(&owner, None), Some(first));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-probe"),
                     Some(page_first.clone()),
                     "registration follows the switch"
                 );
-                harness.apply_page_visibility(Some(first), true, None, false, cx);
+                harness.browser.update(cx, |browser, cx| browser.apply_page_visibility(Some(first), true, None, false, cx));
                 assert!(!page_first.read(cx).obscured());
                 assert!(page_second.read(cx).obscured());
                 // Scoped discard drops only the hidden page: the tab keeps
                 // its URL, and showing it again rebuilds at that URL.
                 harness.discard_hidden_tabs(true, Some(first), None, cx);
                 assert_eq!(
-                    harness.browser.states.len(),
+                    harness.browser.read(cx).states.len(),
                     1,
                     "the hidden page is discarded, the shown page kept"
                 );
                 assert!(
-                    harness.browser.tabs.get(second).is_some(),
+                    harness.browser.read(cx).tabs.get(second).is_some(),
                     "the discarded tab survives with its URL"
                 );
                 let rebuilt = harness.ensure_tab_page("tab-probe", second, window, cx);
@@ -1503,7 +1408,7 @@ mod tests {
                 harness.select_tab("tab-probe", first, window, cx);
                 harness.step_tab_discard_now(window, cx).expect("tab-discard-now runs");
                 assert_eq!(
-                    harness.browser.states.len(),
+                    harness.browser.read(cx).states.len(),
                     1,
                     "tab-discard-now drops hidden pages, never the agent's tab"
                 );
@@ -1537,7 +1442,7 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.ensure_tabs_loaded();
+                harness.ensure_tabs_loaded(cx);
                 let owner = super::Owner::Session("tab-close".to_owned());
                 harness.overrides.insert(
                     "tab-close".to_owned(),
@@ -1549,25 +1454,16 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                let first =
-                    harness
-                        .browser
-                        .tabs
-                        .open(None, owner.clone(), "https://a.example/", None);
-                let second = harness.browser.tabs.open(
-                    None,
-                    owner.clone(),
-                    "https://b.example/",
-                    Some(first),
-                );
+                let first = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://a.example/", None));
+                let second = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first)));
                 let page_second = harness.ensure_tab_page("tab-close", second, window, cx);
-                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
+                assert_eq!(harness.browser.read(cx).tabs.active_of(&owner, None), Some(second));
                 // Closing the background tab: its page drops, and nothing
                 // else moves — no rebuild, no re-registration.
                 harness.close_tab("tab-close", first, window, cx);
-                assert!(!harness.browser.states.contains_key(&first));
-                assert_eq!(harness.browser.states.len(), 1);
-                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
+                assert!(!harness.browser.read(cx).states.contains_key(&first));
+                assert_eq!(harness.browser.read(cx).states.len(), 1);
+                assert_eq!(harness.browser.read(cx).tabs.active_of(&owner, None), Some(second));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-close"),
                     Some(page_second.clone()),
@@ -1576,7 +1472,7 @@ mod tests {
                 // Closing the active last tab: the agent tools lose the
                 // session's page and the stored URL is forgotten.
                 harness.close_tab("tab-close", second, window, cx);
-                assert!(harness.browser.states.is_empty());
+                assert!(harness.browser.read(cx).states.is_empty());
                 assert!(
                     harness
                         .terminal_service
@@ -1621,22 +1517,12 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.ensure_tabs_loaded();
+                harness.ensure_tabs_loaded(cx);
                 let owner = Owner::Person;
-                let first = harness.browser.tabs.open(
-                    Some("p1".into()),
-                    owner.clone(),
-                    "https://a.example/",
-                    None,
-                );
-                let second = harness.browser.tabs.open(
-                    Some("p1".into()),
-                    owner.clone(),
-                    "https://b.example/",
-                    Some(first),
-                );
+                let first = harness.browser.update(cx, |browser, _| browser.tabs.open(Some("p1".into()), owner.clone(), "https://a.example/", None));
+                let second = harness.browser.update(cx, |browser, _| browser.tabs.open(Some("p1".into()), owner.clone(), "https://b.example/", Some(first)));
                 assert_eq!(
-                    harness.browser.tabs.active_of(&owner, Some("p1")),
+                    harness.browser.read(cx).tabs.active_of(&owner, Some("p1")),
                     Some(second)
                 );
                 let page_first = harness.ensure_tab_page("home", first, window, cx);
@@ -1646,12 +1532,12 @@ mod tests {
                 harness.current_project = Some("p2".into());
                 harness.close_tab("home", second, window, cx);
                 assert_eq!(
-                    harness.browser.tabs.active_of(&owner, Some("p1")),
+                    harness.browser.read(cx).tabs.active_of(&owner, Some("p1")),
                     Some(first),
                     "the model neighbours within the tab's own space"
                 );
                 assert_eq!(
-                    harness.browser.agent_tabs.get("home"),
+                    harness.browser.read(cx).agent_tabs.get("home"),
                     Some(&first),
                     "the neighbour takes the agent registration even closed from another space"
                 );
